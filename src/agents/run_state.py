@@ -42,6 +42,7 @@ from ._run_state_agent_identity import (
     _build_agent_identity_keys_by_id,
     _build_agent_identity_map,
     _build_agent_map,
+    _get_ambiguous_agent_ids,
     _iter_agent_graph,
 )
 from ._tool_identity import (
@@ -106,7 +107,7 @@ from .logger import (
     log_model_and_tool_data_warning,
     logger,
 )
-from .run_context import RunContextWrapper
+from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
     digest_input_item,
@@ -190,7 +191,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.17"
+CURRENT_SCHEMA_VERSION = "1.18"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -228,6 +229,11 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.17": (
         "Persists Docker container labels and current-response generated-item ownership across "
         "resume flows, including pending resumed Session writes and terminal-unrecoverable runs."
+    ),
+    "1.18": (
+        "Binds restored local MCP calls to their configured server and original tool name, "
+        "preserves independent apply_patch approval scopes, and binds function-tool approval "
+        "decisions to their owning agent."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -1293,7 +1299,10 @@ class RunState(Generic[TContext, TAgent]):
         return None
 
     def approve(self, approval_item: ToolApprovalItem, always_approve: bool = False) -> None:
-        """Approve a tool call and rerun with this state to continue."""
+        """Approve a tool call and rerun with this state to continue.
+
+        For function tools, ``always_approve`` applies only to the approval item's agent.
+        """
         if self._context is None:
             raise UserError("Cannot approve tool: RunState has no context")
         nested_approval = self._find_nested_approval_state(approval_item)
@@ -1316,6 +1325,7 @@ class RunState(Generic[TContext, TAgent]):
     ) -> None:
         """Reject a tool call and rerun with this state to continue.
 
+        For function tools, ``always_reject`` applies only to the approval item's agent.
         When ``rejection_message`` is provided, that exact text is sent back to the model when the
         run resumes. Otherwise the run-level tool error formatter or the SDK default message is
         used.
@@ -1337,31 +1347,66 @@ class RunState(Generic[TContext, TAgent]):
             rejection_message=rejection_message,
         )
 
+    @staticmethod
+    def _serialize_approval_record(record: _ApprovalRecord) -> dict[str, Any]:
+        decision: dict[str, Any] = {
+            "approved": record.approved
+            if isinstance(record.approved, bool)
+            else list(record.approved),
+            "rejected": record.rejected
+            if isinstance(record.rejected, bool)
+            else list(record.rejected),
+        }
+        if record.rejection_messages:
+            decision["rejection_messages"] = dict(record.rejection_messages)
+        if record.sticky_rejection_message is not None:
+            decision["sticky_rejection_message"] = record.sticky_rejection_message
+        if record.sticky_scope is not None:
+            decision["sticky_scope"] = record.sticky_scope
+        return decision
+
     def _serialize_approvals(self) -> dict[str, dict[str, Any]]:
-        """Serialize approval records into a JSON-friendly mapping."""
+        """Serialize legacy and non-function approval records."""
         if self._context is None:
             return {}
-        approvals_dict: dict[str, dict[str, Any]] = {}
-        for tool_name, record in self._context._approvals.items():
-            if not isinstance(tool_name, str):
+        return {
+            key: self._serialize_approval_record(record)
+            for key, record in self._context._approvals.items()
+            if isinstance(key, str) and not isinstance(key, _FunctionToolApprovalKey)
+        }
+
+    def _serialize_function_tool_approvals(
+        self, agent_identity_keys_by_id: Mapping[int, str] | None
+    ) -> list[dict[str, Any]]:
+        """Serialize agent-owned decisions using the same identities as pending items."""
+        if self._context is None:
+            return []
+        serialized: list[dict[str, Any]] = []
+        ambiguous_owners = (
+            _get_ambiguous_agent_ids(cast(Agent[Any], self._starting_agent))
+            if self._starting_agent is not None
+            else set()
+        )
+        for key, record in self._context._approvals.items():
+            if not isinstance(key, _FunctionToolApprovalKey):
                 continue
-            approvals_dict[tool_name] = {
-                "approved": record.approved
-                if isinstance(record.approved, bool)
-                else list(record.approved),
-                "rejected": record.rejected
-                if isinstance(record.rejected, bool)
-                else list(record.rejected),
-            }
-            if record.rejection_messages:
-                approvals_dict[tool_name]["rejection_messages"] = dict(record.rejection_messages)
-            if record.sticky_rejection_message is not None:
-                approvals_dict[tool_name]["sticky_rejection_message"] = (
-                    record.sticky_rejection_message
-                )
-            if record.sticky_scope is not None:
-                approvals_dict[tool_name]["sticky_scope"] = record.sticky_scope
-        return approvals_dict
+            owner = key.agent
+            if (
+                agent_identity_keys_by_id is None
+                or id(owner) not in agent_identity_keys_by_id
+                or id(owner) in ambiguous_owners
+            ):
+                # Only uniquely identifiable owners in this graph can carry
+                # approval authority into a checkpoint.
+                continue
+            serialized.append(
+                {
+                    "agent": _serialize_agent_reference(owner, agent_identity_keys_by_id),
+                    "tool_key": key.tool_key,
+                    "decision": self._serialize_approval_record(record),
+                }
+            )
+        return serialized
 
     def _serialize_tool_invocations(self) -> dict[str, dict[str, Any]]:
         """Serialize the run-owned canonical tool invocation ledger."""
@@ -1406,20 +1451,7 @@ class RunState(Generic[TContext, TAgent]):
                     "tool_name": identity[1],
                     "request_id": identity[2],
                 }
-            decision: dict[str, Any] = {
-                "approved": record.approved
-                if isinstance(record.approved, bool)
-                else list(record.approved),
-                "rejected": record.rejected
-                if isinstance(record.rejected, bool)
-                else list(record.rejected),
-            }
-            if record.rejection_messages:
-                decision["rejection_messages"] = dict(record.rejection_messages)
-            if record.sticky_rejection_message is not None:
-                decision["sticky_rejection_message"] = record.sticky_rejection_message
-            if record.sticky_scope is not None:
-                decision["sticky_scope"] = record.sticky_scope
+            decision = self._serialize_approval_record(record)
             serialized.append({"identity": identity_data, "decision": decision})
         return serialized
 
@@ -1838,6 +1870,9 @@ class RunState(Generic[TContext, TAgent]):
             if self._starting_agent is not None
             else None
         )
+        function_tool_approvals = self._serialize_function_tool_approvals(agent_identity_keys_by_id)
+        if function_tool_approvals:
+            context_entry["function_tool_approvals"] = function_tool_approvals
         current_agent_entry = _serialize_agent_reference(
             cast(Agent[Any], self._current_agent),
             agent_identity_keys_by_id=agent_identity_keys_by_id,
@@ -1984,6 +2019,10 @@ class RunState(Generic[TContext, TAgent]):
             "tools_used": processed_response.tools_used,
             **action_groups,
             "interruptions": interruptions_data,
+            "mcp_tool_bindings": {
+                call_id: list(binding)
+                for call_id, binding in processed_response.mcp_tool_bindings.items()
+            },
         }
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
@@ -2202,6 +2241,20 @@ class RunState(Generic[TContext, TAgent]):
         This method is used to deserialize a run state from a string that was serialized using
         the `to_string()` method.
 
+        Only deserialize state from trusted storage or after the application verifies the
+        integrity and ownership of the complete snapshot. Serialized state includes tool
+        approvals and pending tool calls; this method does not authenticate that state.
+        Do not pass client-supplied state directly to this method. Keep the snapshot on the
+        server and apply authorized approval decisions to that server-owned state instead.
+        Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
+        Executing pending local MCP calls requires recipient bindings written by schema 1.18
+        or later.
+        Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Bindings detect changes in tool-list routing, not transport settings or credentials.
+        Start a new run to replace a pending MCP call with a local function or handoff.
+        Start a new run to execute an MCP call if an older snapshot lacks these bindings.
+
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
             state_string: The JSON string to deserialize.
@@ -2275,6 +2328,20 @@ class RunState(Generic[TContext, TAgent]):
 
         This method is used to deserialize a run state from a dict that was created using
         the `to_json()` method.
+
+        Only deserialize state from trusted storage or after the application verifies the
+        integrity and ownership of the complete snapshot. Serialized state includes tool
+        approvals and pending tool calls; this method does not authenticate that state.
+        Do not pass client-supplied state directly to this method. Keep the snapshot on the
+        server and apply authorized approval decisions to that server-owned state instead.
+        Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
+        Executing pending local MCP calls requires recipient bindings written by schema 1.18
+        or later.
+        Keep the application's MCP server configuration and ordering unchanged when resuming.
+        Bindings detect changes in tool-list routing, not transport settings or credentials.
+        Start a new run to replace a pending MCP call with a local function or handoff.
+        Start a new run to execute an MCP call if an older snapshot lacks these bindings.
 
         Args:
             initial_agent: The initial agent (used to build agent map for resolution).
@@ -2512,7 +2579,7 @@ def _ensure_json_compatible(value: Any) -> Any:
 
 
 def _serialize_output_value(value: Any) -> Any:
-    """Convert a tool output value, including containers of models, to plain data.
+    """Convert an output value, including containers of models, to plain data.
 
     ``_ensure_json_compatible`` stringifies anything ``json.dumps`` cannot handle, so
     Pydantic models and dataclasses nested in containers would otherwise degrade to
@@ -2851,6 +2918,16 @@ class _DeserializedFunctionAction:
     nested_agent_run_state_data: Mapping[str, Any] | None
 
 
+def _serialize_guardrail_payload(value: Any) -> Any:
+    """Preserve structured payloads without losing best-effort serialization."""
+    try:
+        value = _serialize_output_value(value)
+    except Exception:
+        # Retain the original payload for the existing JSON/string fallback.
+        pass
+    return _ensure_json_compatible(value)
+
+
 def _serialize_guardrail_results(
     results: Sequence[InputGuardrailResult | OutputGuardrailResult],
     *,
@@ -2866,11 +2943,11 @@ def _serialize_guardrail_results(
             },
             "output": {
                 "tripwireTriggered": result.output.tripwire_triggered,
-                "outputInfo": _ensure_json_compatible(result.output.output_info),
+                "outputInfo": _serialize_guardrail_payload(result.output.output_info),
             },
         }
         if isinstance(result, OutputGuardrailResult):
-            entry["agentOutput"] = _ensure_json_compatible(result.agent_output)
+            entry["agentOutput"] = _serialize_guardrail_payload(result.agent_output)
             entry["agent"] = _serialize_agent_reference(
                 result.agent,
                 agent_identity_keys_by_id=agent_identity_keys_by_id,
@@ -2896,7 +2973,7 @@ def _serialize_tool_guardrail_results(
             {
                 "guardrail": {"type": type_label, "name": guardrail_name},
                 "output": {
-                    "outputInfo": _ensure_json_compatible(result.output.output_info),
+                    "outputInfo": _serialize_guardrail_payload(result.output.output_info),
                     "behavior": result.output.behavior,
                 },
             }
@@ -2996,9 +3073,15 @@ async def _restore_pending_nested_agent_tool_runs(
         if not isinstance(tool_call, ResponseFunctionToolCall):
             continue
 
+        # A nested run serializes agent references relative to the agent tool's own agent,
+        # so that agent must also be the root when the references are resolved again.
+        nested_root_agent = function_action.action.function_tool._agent_instance
+        if not isinstance(nested_root_agent, Agent):
+            nested_root_agent = current_agent
+
         try:
             nested_state = await _build_run_state_from_json(
-                initial_agent=current_agent,
+                initial_agent=nested_root_agent,
                 state_json=dict(nested_state_data),
                 context_deserializer=context_deserializer,
                 strict_context=strict_context,
@@ -3397,6 +3480,13 @@ async def _deserialize_processed_response(
         if approval_item is not None:
             interruptions.append(approval_item)
 
+    saved_bindings = processed_response_data.get("mcp_tool_bindings", {})
+    mcp_tool_bindings = {
+        call_id: cast(tuple[str, str, int | None], tuple(binding))
+        for call_id, binding in saved_bindings.items()
+        if isinstance(binding, list)
+    }
+
     return ProcessedResponse(
         new_items=new_items,
         handoffs=handoffs,
@@ -3409,6 +3499,7 @@ async def _deserialize_processed_response(
         tools_used=processed_response_data.get("tools_used", []),
         mcp_approval_requests=mcp_approval_requests,
         interruptions=interruptions,
+        mcp_tool_bindings=mcp_tool_bindings,
     )
 
 
@@ -4086,6 +4177,42 @@ async def _build_run_state_from_json(
     )
     if (schema_major, schema_minor) >= (hosted_mcp_major, hosted_mcp_minor):
         context._rebuild_hosted_mcp_approvals(context_data.get("hosted_mcp_approvals", []))
+    function_tool_approvals = context_data.get("function_tool_approvals", [])
+    if function_tool_approvals and (schema_major, schema_minor) < (1, 18):
+        raise validation_error_factory(
+            "Agent-owned function approvals require RunState schema 1.18.", UserError
+        )
+    if not isinstance(function_tool_approvals, list):
+        raise validation_error_factory(
+            "RunState function_tool_approvals must be a list.", UserError
+        )
+    ambiguous_approval_owners = (
+        _get_ambiguous_agent_ids(initial_agent) if function_tool_approvals else set()
+    )
+    for entry in function_tool_approvals:
+        if (
+            not isinstance(entry, Mapping)
+            or not isinstance(entry.get("tool_key"), str)
+            or not isinstance(entry.get("decision"), Mapping)
+        ):
+            raise validation_error_factory(
+                "Invalid agent-owned function approval record.", UserError
+            )
+        owner = _resolve_agent_from_data(
+            entry.get("agent"),
+            agent_map,
+            agent_identity_map,
+            validation_error_factory=validation_error_factory,
+        )
+        if owner is None:
+            raise validation_error_factory(
+                "Function approval owner is absent from the restored graph.", UserError
+            )
+        # Traversal-derived suffixes cannot authorize indistinguishable owners.
+        if id(owner) in ambiguous_approval_owners:
+            continue
+        key = _FunctionToolApprovalKey(owner, entry["tool_key"])
+        context._approvals[key] = context._restore_approval_record(entry["decision"])
     if (schema_major, schema_minor) >= (1, 15):
         context._mark_restored_unbound_approval_call_ids()
     serialized_tool_input = context_data.get("tool_input")

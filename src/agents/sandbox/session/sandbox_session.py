@@ -667,6 +667,13 @@ class SandboxSession(BaseSandboxSession):
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         return await self._read(path, user=user)
 
+    async def read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        return await self._annotate(
+            op="read",
+            start_data={**_read_start_data(self, path), "max_bytes": max_bytes},
+            run=lambda: self._inner.read_bounded(path, max_bytes=max_bytes),
+        )
+
     @instrumented_op("write", data=_write_start_data)
     async def write(
         self,

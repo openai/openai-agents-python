@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from mcp.types import Prompt
 
 from agents import Agent, _debug
 from agents.exceptions import UserError
@@ -20,7 +21,7 @@ from agents.mcp.server import (
 )
 from agents.run_context import RunContextWrapper
 
-from .model_compat import ListPromptsResult, ListToolsResult
+from .model_compat import ListPromptsResult, ListToolsResult, Tool as MCPTool
 
 # Handle Python version compatibility for ExceptionGroups
 if sys.version_info < (3, 11):
@@ -479,6 +480,34 @@ async def test_paginated_list_cycle_does_not_retain_opaque_cursor(method_name: s
     _assert_text_hidden_from_server_traceback_locals(info.value, cursor)
     if method_name == "list_tools":
         assert server.cached_tools is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method_name", ["list_tools", "list_prompts"])
+async def test_page_limit_failure_does_not_retain_payload_or_cursor(method_name: str):
+    cursor = "SECRET_OPAQUE_CURSOR"
+    payload = "SECRET_LIST_ENTRY"
+    server = MCPServerStreamableHttp(params={"url": _CREDENTIALED_URL}, max_list_pages=1)
+    session = MagicMock()
+    if method_name == "list_tools":
+        page = ListToolsResult(tools=[MCPTool(name=payload, inputSchema={})], nextCursor=cursor)
+    else:
+        page = ListPromptsResult(prompts=[Prompt(name=payload)], nextCursor=cursor)
+    setattr(session, method_name, AsyncMock(return_value=page))
+    server.session = session
+
+    with pytest.raises(UserError, match="exceeded max_list_pages") as info:
+        await getattr(server, method_name)()
+
+    rendered = "".join(traceback.format_exception(info.value))
+    assert cursor not in rendered
+    assert payload not in rendered
+    assert _CREDENTIALED_URL not in rendered
+    assert info.value.__cause__ is None
+    assert info.value.__context__ is None
+    _assert_text_hidden_from_server_traceback_locals(info.value, cursor)
+    _assert_text_hidden_from_server_traceback_locals(info.value, payload)
+    assert server.cached_tools is None
 
 
 @pytest.mark.asyncio

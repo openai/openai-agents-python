@@ -18,12 +18,13 @@ from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.manifest import Manifest
 from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxClient,
+    UnixLocalSandboxSession,
     UnixLocalSandboxSessionState,
 )
 from agents.sandbox.session import SandboxSession
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 from agents.sandbox.session.sandbox_session_state import SandboxSessionState
-from agents.sandbox.snapshot import NoopSnapshot, SnapshotBase, SnapshotSpec
+from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot, SnapshotBase, SnapshotSpec
 from agents.sandbox.types import ExecResult, Permissions, User
 
 
@@ -74,6 +75,10 @@ class FilesystemTestSandboxSession(BaseSandboxSession):
             raise WorkspaceReadNotFoundError(path=path, cause=error) from error
         except OSError as error:
             raise WorkspaceArchiveReadError(path=path, cause=error) from error
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        with self.normalize_path(path).open("rb") as stream:
+            return stream.read(max_bytes)
 
     async def write(
         self,
@@ -210,3 +215,42 @@ class FilesystemTestSandboxClient(UnixLocalSandboxClient):
             FilesystemTestSandboxSession(state=unix_state),
             instrumentation=self._instrumentation,
         )
+
+
+def _build_unix_local_session(
+    tmp_path: Path,
+    *,
+    manifest: Manifest | None = None,
+    exposed_ports: tuple[int, ...] = (),
+) -> UnixLocalSandboxSession:
+    workspace = tmp_path / "workspace"
+    snapshot = LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path)
+    session_manifest = (
+        manifest.model_copy(update={"root": str(workspace)}, deep=True)
+        if manifest is not None
+        else Manifest(root=str(workspace))
+    )
+    state = UnixLocalSandboxSessionState(
+        manifest=session_manifest,
+        snapshot=snapshot,
+        exposed_ports=exposed_ports,
+    )
+    return UnixLocalSandboxSession.from_state(state)
+
+
+def _build_filesystem_test_session(
+    tmp_path: Path,
+    *,
+    manifest: Manifest | None = None,
+) -> FilesystemTestSandboxSession:
+    workspace = tmp_path / "workspace"
+    session_manifest = (
+        manifest.model_copy(update={"root": str(workspace)}, deep=True)
+        if manifest is not None
+        else Manifest(root=str(workspace))
+    )
+    state = UnixLocalSandboxSessionState(
+        manifest=session_manifest,
+        snapshot=LocalSnapshot(id=str(uuid.uuid4()), base_path=tmp_path),
+    )
+    return FilesystemTestSandboxSession(state=state)

@@ -1248,6 +1248,39 @@ class ModalSandboxSession(BaseSandboxSession):
                 return_exceptions=True,
             )
 
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        try:
+            workspace_path = await self._validate_path_access(path)
+            await self._ensure_sandbox()
+            assert self._sandbox is not None
+            # Each read starts a remote operation. Use Modal's 100 MiB per-read
+            # ceiling while respecting the caller's remaining byte budget.
+            stream = await self._sandbox.open.aio(sandbox_path_str(workspace_path), "rb")
+            completed = False
+            try:
+                result = bytearray()
+                while len(result) < max_bytes:
+                    chunk = await stream.read.aio(min(100 * 1024 * 1024, max_bytes - len(result)))
+                    if not chunk:
+                        break
+                    result.extend(chunk)
+                payload = bytes(result)
+                completed = True
+                return payload
+            finally:
+                try:
+                    await asyncio.wait_for(stream.close.aio(), timeout=5.0)
+                except Exception:
+                    # Preserve an active read failure or cancellation. A close failure
+                    # still fails a read that would otherwise have completed.
+                    if completed:
+                        raise
+        except (FileNotFoundError, SandboxError):
+            raise
+        except Exception as error:
+            retryable, _ = _modal_provider_retryability(error)
+            raise WorkspaceArchiveReadError(path=path, retryable=retryable) from None
+
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:
             await self._check_read_with_exec(path, user=user)

@@ -165,6 +165,13 @@ class Handoff(Generic[TContext, TAgent]):
     are free to modify the input history or new items as you see fit. The next agent receives the
     input history plus ``input_items`` when provided, otherwise it receives ``new_items``. Use
     ``input_items`` to filter model input while keeping ``new_items`` intact for session history.
+    The receiving agent's model receives the forwarded history. Use this filter to select content
+    that may be shared and remove or redact content that must not be shared.
+    Nested handoff history is not a redaction mechanism. ``nest_handoff_history`` builds history
+    from ``input_history``, ``pre_handoff_items``, and ``new_items``; it ignores ``input_items``.
+    Sanitize those three source fields before nesting, or sanitize the returned ``input_history``
+    before returning the nested result. The latter approach keeps the original ``new_items``
+    available for session history. Filtering only ``input_items`` does not sanitize nested history.
     IMPORTANT: in streaming mode, we will not stream anything as a result of this function. The
     items generated before will already have been streamed. Server-managed conversations
     (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) do not support

@@ -844,7 +844,7 @@ Generally speaking, information from the most recent prime award transaction is 
 
 ## Prime Recipient
 
-A company, organization, individual, or government entity (i.e., state, local, tribal, or foreign) that receives funding directly from the U.S. government. They receive this funding through an agreement called a prime award. For example, if the Dept. of Transporation is building a bridge, they can award Bridge Company A the contract to carry out the construction. Bridge Company A would be the prime recipient.
+A company, organization, individual, or government entity (i.e., state, local, tribal, or foreign) that receives funding directly from the U.S. government. They receive this funding through an agreement called a prime award. For example, if the Dept. of Transportation is building a bridge, they can award Bridge Company A the contract to carry out the construction. Bridge Company A would be the prime recipient.
 
 **Official definition:** A non-Federal entity that receives a Federal award directly from a Federal awarding agency to carry out an activity under a Federal program.
 
@@ -984,7 +984,7 @@ A sub-award is an agreement that a prime recipient makes with another entity to 
 
 ## Sub-Recipient
 
-A company, organization, individual, or government entity (i.e., state, local, tribal, or foreign) that receives funding from another recipient of federal funds (a prime recipient), rather than directly from the U.S. government. The sub-recipient may be a sub-contractor or a sub-grantee. For example,  the Dept. of Transporation awards Bridge Company A a bridge construction contract. Bridge Company A needs Bridge Company B to supply the steel, so  Bridge Company A awards Bridge Company B a sub-award.  Bridge Company B is the sub-contractor.  On the grants side, University A receives an R&D grant from the National Science Foundation.  University A needs University B to perform the initial step in the research, so University A awards University B a sub-award. University B is the sub-grantee.
+A company, organization, individual, or government entity (i.e., state, local, tribal, or foreign) that receives funding from another recipient of federal funds (a prime recipient), rather than directly from the U.S. government. The sub-recipient may be a sub-contractor or a sub-grantee. For example,  the Dept. of Transportation awards Bridge Company A a bridge construction contract. Bridge Company A needs Bridge Company B to supply the steel, so  Bridge Company A awards Bridge Company B a sub-award.  Bridge Company B is the sub-contractor.  On the grants side, University A receives an R&D grant from the National Science Foundation.  University A needs University B to perform the initial step in the research, so University A awards University B a sub-award. University B is the sub-grantee.
 
 **Official definition:** A non-Federal entity that receives a sub-award from a pass-through entity to carry out part of a federal program; but does not include an individual that is the beneficiary of such program. (grants.gov)
 

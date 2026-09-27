@@ -80,6 +80,7 @@ if sys.platform == "win32":
             "sandbox/test_session_sinks.py",
             "sandbox/test_snapshot.py",
             "sandbox/test_unix_local.py",
+            "sandbox/test_workspace_jsonl_sink.py",
         ]
     )
 

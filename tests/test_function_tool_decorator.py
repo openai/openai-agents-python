@@ -17,10 +17,23 @@ from inline_snapshot import snapshot
 from pydantic import BaseModel
 from typing_extensions import Self
 
-from agents import Agent, FunctionTool, UserError, function_tool
+from agents import Agent, FunctionTool, ImageGenerationTool, UserError, function_tool
 from agents.decorators import tool
 from agents.run_context import RunContextWrapper
 from agents.tool_context import ToolContext
+
+
+def test_image_generation_tool_parameter_schema() -> None:
+    @tool
+    def image_quality(image_tool: ImageGenerationTool) -> str:
+        return image_tool.tool_config["quality"]
+
+    schema = image_quality.params_json_schema
+    assert schema["required"] == ["image_tool"]
+    assert schema["$defs"]["ImageGenerationTool"]["required"] == ["tool_config"]
+    config_schema = schema["$defs"]["ImageGenerationToolConfig"]
+    assert config_schema["properties"]["type"]["const"] == "image_generation"
+    assert {"xhigh", "max"} <= set(config_schema["properties"]["quality"]["enum"])
 
 
 class DummyContext:

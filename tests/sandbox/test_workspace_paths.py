@@ -817,3 +817,16 @@ def test_host_path_grant_returns_validated_resolved_source(tmp_path: Path) -> No
     _symlink_or_skip(Path("/"), source_alias, target_is_directory=True)
 
     assert resolved_source == source.resolve()
+
+
+def test_recursive_remove_uses_posix_paths_for_windows_inputs() -> None:
+    policy = WorkspacePathPolicy(
+        root="/workspace",
+        extra_path_grants=(
+            SandboxPathGrant(path="/srv/data"),
+            SandboxPathGrant(path="/srv/data/protected", read_only=True),
+        ),
+    )
+    with pytest.raises(WorkspaceArchiveWriteError):
+        policy.validate_recursive_remove(PureWindowsPath("/srv/data"))
+    policy.validate_recursive_remove(PureWindowsPath("/srv/data/writable"))

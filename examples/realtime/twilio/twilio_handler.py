@@ -8,7 +8,8 @@ import time
 from datetime import datetime
 from typing import Any
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from agents.decorators import tool
 from agents.realtime import (
@@ -43,9 +44,14 @@ agent = RealtimeAgent(
 
 
 class TwilioHandler:
+    # Example policy: bound each received message before JSON/base64 parsing.
+    MAX_MESSAGE_BYTES = 64 * 1024
+
     def __init__(self, twilio_websocket: WebSocket):
         self.twilio_websocket = twilio_websocket
         self._message_loop_task: asyncio.Task[None] | None = None
+        self._realtime_session_task: asyncio.Task[None] | None = None
+        self._buffer_flush_task: asyncio.Task[None] | None = None
         self.session: RealtimeSession | None = None
         self.playback_tracker = RealtimePlaybackTracker()
 
@@ -122,8 +128,50 @@ class TwilioHandler:
 
     async def wait_until_done(self) -> None:
         """Wait until the session is done."""
-        assert self._message_loop_task is not None
-        await self._message_loop_task
+        tasks = self._background_tasks()
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+
+    def _background_tasks(self) -> list[asyncio.Task[None]]:
+        return [
+            task
+            for task in (
+                self._message_loop_task,
+                self._realtime_session_task,
+                self._buffer_flush_task,
+            )
+            if task is not None
+        ]
+
+    async def close(self) -> None:
+        """Release this call's tasks, session, and WebSocket, including partial startup."""
+        tasks = self._background_tasks()
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            if self.session is not None:
+                await self.session.close()
+        finally:
+            self._audio_buffer.clear()
+            self._startup_buffer.clear()
+            self._mark_data.clear()
+            if (
+                self.twilio_websocket.application_state != WebSocketState.DISCONNECTED
+                and self.twilio_websocket.client_state != WebSocketState.DISCONNECTED
+            ):
+                try:
+                    await self.twilio_websocket.close()
+                except WebSocketDisconnect:
+                    pass
+                except RuntimeError as exc:
+                    # Uvicorn may close its transport before receive() observes the disconnect.
+                    if str(exc) != (
+                        "Unexpected ASGI message 'websocket.close', after sending "
+                        "'websocket.close' or response already completed."
+                    ):
+                        raise
 
     async def _realtime_session_loop(self) -> None:
         """Listen for events from the realtime session."""
@@ -139,12 +187,20 @@ class TwilioHandler:
         try:
             while True:
                 message_text = await self.twilio_websocket.receive_text()
+                if len(message_text.encode("utf-8")) > self.MAX_MESSAGE_BYTES:
+                    await self.twilio_websocket.close(code=1009)
+                    return
                 message = json.loads(message_text)
+                if not isinstance(message, dict):
+                    await self.twilio_websocket.close(code=1008)
+                    return
                 await self._handle_twilio_message(message)
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse Twilio message as JSON: {e}")
-        except Exception as e:
-            print(f"Error in Twilio message loop: {e}")
+                if message.get("event") == "stop":
+                    return
+        except WebSocketDisconnect:
+            pass
+        except Exception:
+            print("Invalid or interrupted Twilio message stream")
 
     async def _handle_realtime_event(self, event: RealtimeSessionEvent) -> None:
         """Handle events from the realtime session."""

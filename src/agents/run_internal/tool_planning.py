@@ -10,6 +10,7 @@ from typing import Any, TypeVar, cast
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.responses.response_input_param import McpApprovalResponse
 
+from .._function_tool_arguments import FunctionToolApproval
 from .._tool_identity import (
     FunctionToolLookupKey,
     get_function_tool_lookup_key_for_call,
@@ -885,7 +886,7 @@ async def _select_function_tool_runs_for_resume(
     *,
     approval_items_by_call_id: Mapping[str, ToolApprovalItem],
     context_wrapper: RunContextWrapper[Any],
-    needs_approval_checker: Callable[[ToolRunFunction], Awaitable[bool]],
+    needs_approval_checker: Callable[[ToolRunFunction], Awaitable[FunctionToolApproval]],
     output_exists_checker: Callable[[ToolRunFunction], bool],
     record_rejection: Callable[
         [str | None, ResponseFunctionToolCall, FunctionTool], Awaitable[None]
@@ -912,8 +913,12 @@ async def _select_function_tool_runs_for_resume(
         )
 
         requires_approval = True
+        run._approval_evaluation = None
         if approval_status is None:
-            requires_approval = await needs_approval_checker(run)
+            evaluation = await needs_approval_checker(run)
+            evaluation.check_invocation(run.function_tool, run.tool_call.arguments)
+            run._approval_evaluation = evaluation
+            requires_approval = evaluation.outcome != "invoke"
             approval_status = context_wrapper.get_approval_status(
                 run.function_tool.name,
                 call_id,
@@ -924,6 +929,7 @@ async def _select_function_tool_runs_for_resume(
             )
 
         if approval_status is False:
+            run._approval_evaluation = None
             await record_rejection(call_id, run.tool_call, run.function_tool)
             continue
 
@@ -935,6 +941,7 @@ async def _select_function_tool_runs_for_resume(
             selected.append(run)
             continue
 
+        run._approval_evaluation = None
         pending_item = existing_pending if existing_pending is not None else current_item
         pending_interruption_adder(pending_item)
 
