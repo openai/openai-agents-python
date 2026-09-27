@@ -1932,6 +1932,7 @@ async def test_handoff_resume_after_cancelled_compaction_commits(
         assert await session.get_items() == compacted
         assert len(model.calls) == 1
         state = result.to_state()
+        assert state._pending_session_write is None
         if round_trip:
             state = await RunState.from_json(triage, json.loads(state.to_string()))
         resumed = await _run_session_resume(triage, state, session, retry_streamed)
@@ -1952,8 +1953,9 @@ async def test_handoff_resume_after_cancelled_compaction_commits(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("retry_streamed", [False, True], ids=["run", "streamed"])
 @pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("restore_failure", [None, "empty", "partial"])
 async def test_handoff_resume_retries_rolled_back_compaction(
-    retry_streamed: bool, round_trip: bool
+    retry_streamed: bool, round_trip: bool, restore_failure: str | None
 ) -> None:
     """A legacy Session rollback must retain compaction ownership without repeating the append."""
     compacted: list[TResponseInputItem] = [{"role": "assistant", "content": "compacted history"}]
@@ -1965,6 +1967,10 @@ async def test_handoff_resume_retries_rolled_back_compaction(
             if items == compacted and self.fail:
                 self.fail = False
                 raise RuntimeError("replacement failed before commit")
+            if not self.fail and restore_failure is not None:
+                if restore_failure == "partial":
+                    await super().add_items(items[:1])
+                raise RuntimeError("restoration failed")
             await super().add_items(items)
 
     backend = FailReplacementSession()
@@ -2019,11 +2025,22 @@ async def test_handoff_resume_retries_rolled_back_compaction(
         async for _ in failed.stream_events():
             pass
     restored_history = await session.get_items()
-    assert len(restored_history) == 2
     assert len(model.calls) == 1
     state = failed.to_state()
     if round_trip:
         state = await RunState.from_json(triage, json.loads(state.to_string()))
+    if restore_failure is not None:
+        assert len(restored_history) == (1 if restore_failure == "partial" else 0)
+        with pytest.raises(UserError, match="Cannot reconcile the pending Session write"):
+            await _run_session_resume(triage, state, session, retry_streamed)
+        assert state._pending_session_write is not None
+        assert state._pending_session_write["append_acknowledged"] is True
+        assert await session.get_items() == restored_history
+        assert len(model.calls) == 1
+        assert len(compact_calls) == 1
+        assert handoff_calls == ["handoff"]
+        return
+    assert len(restored_history) == 2
     resumed = await _run_session_resume(triage, state, session, retry_streamed)
     assert resumed.final_output == "done"
     assert compact_calls == [restored_history, restored_history]

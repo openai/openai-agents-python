@@ -942,7 +942,7 @@ async def resume_pending_session_write(
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
-            if not acknowledged and committed == unchanged:
+            if (acknowledged and not committed) or (not acknowledged and committed == unchanged):
                 raise UserError(
                     "Cannot reconcile the pending Session write: history changed or is "
                     "ambiguous. Repair the original Session before resuming; do not rerun "
@@ -973,15 +973,22 @@ async def resume_pending_session_write(
             )
         pending["append_acknowledged"] = True
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
-        # Compaction can replace history and then raise, invalidating the append fingerprint.
-        # Retain its inputs for retry, but never repeat an acknowledged append.
-        await _apply_post_write_compaction(
-            session,
-            response_id=pending.get("response_id"),
-            store=pending.get("store"),
-            has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
-            wrapper=wrapper,
-        )
+        # A confirmed atomic replacement settles this write even when the caller is
+        # cancelled before receiving its acknowledgement. All other failed replacements
+        # retain the checkpoint and must reconcile against the original appended history.
+        if wrapper is not None:
+            wrapper._session_compaction_completed = False  # type: ignore[attr-defined]
+        try:
+            await _apply_post_write_compaction(
+                session,
+                response_id=pending.get("response_id"),
+                store=pending.get("store"),
+                has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
+                wrapper=wrapper,
+            )
+        finally:
+            if wrapper is not None and getattr(wrapper, "_session_compaction_completed", False):
+                run_state._pending_session_write = None
         run_state._pending_session_write = None
     finally:
         run_state._session_write_in_progress = False
