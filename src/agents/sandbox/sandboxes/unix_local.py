@@ -1154,7 +1154,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     # tarfile records inodes before filtering. Clear even excluded entries so
                     # every retained hardlink has its own payload. Unlike dereference=True,
                     # this preserves symlinks instead of reading their targets on the host.
-                    tar.inodes.clear()  # type: ignore[attr-defined]  # Not exposed by typeshed.
+                    getattr(tar, "inodes").clear()  # noqa: B009 - Not exposed by typeshed.
                     if should_skip_tar_member(member.name, skip_rel_paths=skip, root_name=None):
                         return None
                     return member
