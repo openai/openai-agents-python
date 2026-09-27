@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.22.2",
-  "baseline_commit": "25af629b3c877ba3d0e95189141bb636b21167a5",
+  "baseline": "v0.22.3",
+  "baseline_commit": "1d17ca40b927452d5f27df662092f767fa9f05b7",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -18766,7 +18766,23 @@
             "type": "builtins.NoneType",
             "value": null
           },
+          "name": "lifecycle"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
           "name": "network_policy_id"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "name": "provisioning_tier"
         },
         {
           "default": {

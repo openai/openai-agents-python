@@ -1275,9 +1275,11 @@ async def test_agents_as_tools_subagent_cancellation_preserves_parent_final_outp
     assert tool_outputs[1]["call_id"] == "outer_observability"
     assert tool_outputs[1]["type"] == "function_call_output"
     assert tool_outputs[1]["output"].startswith(
-        "An error occurred while running the tool. Please try again. Error:"
+        "An error occurred while running the tool. Please try again."
     )
-    assert "cancel" in tool_outputs[1]["output"].lower()
+    assert tool_outputs[1]["output"] == (
+        "An error occurred while running the tool. Please try again."
+    )
 
 
 @pytest.mark.asyncio
@@ -1375,9 +1377,7 @@ async def test_agents_as_tools_streaming_subagent_cancellation_preserves_parent_
         },
         {
             "call_id": "inner_cancel",
-            "output": (
-                "An error occurred while running the tool. Please try again. Error: tool-cancelled"
-            ),
+            "output": ("An error occurred while running the tool. Please try again."),
             "type": "function_call_output",
         },
     ]

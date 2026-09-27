@@ -93,6 +93,10 @@ DEFAULT_AUTO_SKIP = {
     "examples/sandbox/tutorials/repo_code_review/main.py",
     "examples/sandbox/tutorials/vision_website_clone/main.py",
     "examples/tools/codex_same_thread.py",
+    # Host shell execution requires a person to review every command batch.
+    "examples/tools/local_shell_skill.py",
+    "examples/tools/shell.py",
+    "examples/tools/shell_human_in_the_loop.py",
     "examples/voice/static/main.py",
     "examples/voice/streamed/main.py",
 }
@@ -455,6 +459,8 @@ def detect_tags(path: Path, source: str) -> set[str]:
         re.search(r"\binput\s*\(", source)
         or "input_with_fallback(" in lower_source
         or "confirm_with_fallback(" in lower_source
+        or "on_shell_approval" in lower_source
+        or "prompt_shell_approval" in lower_source
     ):
         tags.add("interactive")
     if "prompt_toolkit" in lower_source or "questionary" in lower_source:
@@ -639,7 +645,6 @@ def run_examples(examples: Sequence[ExampleScript], args: argparse.Namespace) ->
         if auto_mode:
             env["EXAMPLES_INTERACTIVE_MODE"] = "auto"
             env["APPLY_PATCH_AUTO_APPROVE"] = "1"
-            env.setdefault("SHELL_AUTO_APPROVE", "1")
             env.setdefault("AUTO_APPROVE_MCP", "1")
 
         force_prompt_stream = (not auto_mode) and ("interactive" in example.tags)

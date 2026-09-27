@@ -95,7 +95,7 @@ def test_streaming_stt_websocket_headers_use_client_configuration() -> None:
     assert headers["OpenAI-Organization"] == "org-client"
     assert headers["OpenAI-Project"] == "proj-client"
     assert headers["X-Proxy-Token"] == "proxy-token"
-    assert headers["OpenAI-Log-Session"] == "1"
+    assert all(key.lower() != "openai-log-session" for key in headers)
 
 
 def test_streaming_stt_websocket_headers_skip_openai_omission_sentinels() -> None:
@@ -114,7 +114,7 @@ def test_streaming_stt_websocket_headers_skip_openai_omission_sentinels() -> Non
     assert headers["X-Proxy-Token"] == "proxy-token"
     assert "OpenAI-Organization" not in headers
     assert "OpenAI-Project" not in headers
-    assert headers["OpenAI-Log-Session"] == "1"
+    assert all(key.lower() != "openai-log-session" for key in headers)
 
 
 def test_streaming_stt_websocket_headers_omit_removes_inherited_header() -> None:
@@ -126,10 +126,10 @@ def test_streaming_stt_websocket_headers_omit_removes_inherited_header() -> None
     headers = _prepare_websocket_headers(client)
 
     assert all(key.lower() != "authorization" for key in headers)
-    assert headers["OpenAI-Log-Session"] == "1"
+    assert all(key.lower() != "openai-log-session" for key in headers)
 
 
-def test_streaming_stt_websocket_fixed_session_header_replaces_client_casing() -> None:
+def test_streaming_stt_websocket_session_header_preserves_client_configuration() -> None:
     client = _mock_client(
         auth_headers={},
         default_headers={"openai-log-session": "0"},
@@ -140,4 +140,4 @@ def test_streaming_stt_websocket_fixed_session_header_replaces_client_casing() -
     session_headers = {
         key: value for key, value in headers.items() if key.lower() == "openai-log-session"
     }
-    assert session_headers == {"OpenAI-Log-Session": "1"}
+    assert session_headers == {"openai-log-session": "0"}

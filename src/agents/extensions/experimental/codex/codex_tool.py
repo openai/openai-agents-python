@@ -1044,6 +1044,9 @@ async def _consume_events(
 ) -> tuple[str, Usage | None, str | None]:
     # Track spans keyed by item id for command execution events.
     active_spans: dict[str, Any] = {}
+    run_config = ctx.run_config
+    tracing_disabled = run_config is not None and run_config.tracing_disabled
+    include_sensitive_data = run_config is None or run_config.trace_include_sensitive_data
     final_response = ""
     usage: Usage | None = None
     resolved_thread_id = thread.id
@@ -1100,11 +1103,27 @@ async def _consume_events(
                     )
 
                 if isinstance(event, ItemStartedEvent):
-                    _handle_item_started(event.item, active_spans, span_data_max_chars)
+                    if not tracing_disabled:
+                        _handle_item_started(
+                            event.item,
+                            active_spans,
+                            span_data_max_chars,
+                            include_sensitive_data=include_sensitive_data,
+                        )
                 elif isinstance(event, ItemUpdatedEvent):
-                    _handle_item_updated(event.item, active_spans, span_data_max_chars)
+                    _handle_item_updated(
+                        event.item,
+                        active_spans,
+                        span_data_max_chars,
+                        include_sensitive_data=include_sensitive_data,
+                    )
                 elif isinstance(event, ItemCompletedEvent):
-                    _handle_item_completed(event.item, active_spans, span_data_max_chars)
+                    _handle_item_completed(
+                        event.item,
+                        active_spans,
+                        span_data_max_chars,
+                        include_sensitive_data=include_sensitive_data,
+                    )
                     if is_agent_message_item(event.item):
                         final_response = event.item.text
                 elif isinstance(event, TurnCompletedEvent):
@@ -1140,21 +1159,26 @@ async def _consume_events(
 
 
 def _handle_item_started(
-    item: ThreadItem, spans: dict[str, Any], span_data_max_chars: int | None
+    item: ThreadItem,
+    spans: dict[str, Any],
+    span_data_max_chars: int | None,
+    *,
+    include_sensitive_data: bool = True,
 ) -> None:
     item_id = getattr(item, "id", None)
     if not item_id:
         return
 
     if _is_command_execution_item(item):
-        output = item.aggregated_output
-        updates = {
-            "command": item.command,
+        updates: dict[str, Any] = {
             "status": item.status,
             "exit_code": item.exit_code,
         }
-        if output not in (None, ""):
-            updates["output"] = _truncate_span_value(output, span_data_max_chars)
+        if include_sensitive_data:
+            updates["command"] = item.command
+            output = item.aggregated_output
+            if output not in (None, ""):
+                updates["output"] = _truncate_span_value(output, span_data_max_chars)
         data = _merge_span_data(
             {},
             updates,
@@ -1170,7 +1194,11 @@ def _handle_item_started(
 
 
 def _handle_item_updated(
-    item: ThreadItem, spans: dict[str, Any], span_data_max_chars: int | None
+    item: ThreadItem,
+    spans: dict[str, Any],
+    span_data_max_chars: int | None,
+    *,
+    include_sensitive_data: bool = True,
 ) -> None:
     item_id = getattr(item, "id", None)
     if not item_id:
@@ -1180,11 +1208,17 @@ def _handle_item_updated(
         return
 
     if _is_command_execution_item(item):
-        _update_command_span(span, item, span_data_max_chars)
+        _update_command_span(
+            span, item, span_data_max_chars, include_sensitive_data=include_sensitive_data
+        )
 
 
 def _handle_item_completed(
-    item: ThreadItem, spans: dict[str, Any], span_data_max_chars: int | None
+    item: ThreadItem,
+    spans: dict[str, Any],
+    span_data_max_chars: int | None,
+    *,
+    include_sensitive_data: bool = True,
 ) -> None:
     item_id = getattr(item, "id", None)
     if not item_id:
@@ -1194,14 +1228,17 @@ def _handle_item_completed(
         return
 
     if _is_command_execution_item(item):
-        _update_command_span(span, item, span_data_max_chars)
+        _update_command_span(
+            span, item, span_data_max_chars, include_sensitive_data=include_sensitive_data
+        )
         if item.status == "failed":
             error_data: dict[str, Any] = {
                 "exit_code": item.exit_code,
             }
-            output = item.aggregated_output
-            if output not in (None, ""):
-                error_data["output"] = _truncate_span_value(output, span_data_max_chars)
+            if include_sensitive_data:
+                output = item.aggregated_output
+                if output not in (None, ""):
+                    error_data["output"] = _truncate_span_value(output, span_data_max_chars)
             span.set_error(
                 SpanError(
                     message="Codex command execution failed.",
@@ -1410,16 +1447,21 @@ def _apply_span_updates(
 
 
 def _update_command_span(
-    span: Any, item: CommandExecutionItem, span_data_max_chars: int | None
+    span: Any,
+    item: CommandExecutionItem,
+    span_data_max_chars: int | None,
+    *,
+    include_sensitive_data: bool = True,
 ) -> None:
     updates: dict[str, Any] = {
-        "command": item.command,
         "status": item.status,
         "exit_code": item.exit_code,
     }
-    output = item.aggregated_output
-    if output not in (None, ""):
-        updates["output"] = _truncate_span_value(output, span_data_max_chars)
+    if include_sensitive_data:
+        updates["command"] = item.command
+        output = item.aggregated_output
+        if output not in (None, ""):
+            updates["output"] = _truncate_span_value(output, span_data_max_chars)
     _apply_span_updates(
         span,
         updates,

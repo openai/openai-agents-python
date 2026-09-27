@@ -505,18 +505,16 @@ def build_interruption_result(
 
 
 def reject_unrecoverable_terminal_state(run_state: RunState | None) -> None:
-    """Fail closed when a previous run already produced a final output that cannot be reproduced.
+    """Fail closed when a previous run reached a boundary that cannot safely be resumed.
 
-    The marker is set once that output, its guardrails, and its terminal hooks have completed,
-    and is cleared only once the turn is fully persisted. In between, the run owns a result no
-    resume can settle, so resuming would repeat the model call and the lifecycle hooks for an
-    output the caller already received. Raised before any Session, sandbox, model, tool,
-    guardrail, or hook work so the rejection has no side effects of its own.
+    This includes failed terminal persistence and a speculative handoff rejected by an input
+    guardrail. Resuming would repeat completed work or bypass the failed input check. Reject
+    before any Session, sandbox, model, tool, guardrail, or hook work.
     """
     if run_state is not None and run_state._terminal_unrecoverable:
         raise UserError(
-            "This RunState already produced a final output whose Session write did not "
-            "complete, so it cannot be resumed. Start a new run instead."
+            "This RunState ended at an unrecoverable boundary and cannot be resumed. "
+            "Start a new run instead."
         )
 
 

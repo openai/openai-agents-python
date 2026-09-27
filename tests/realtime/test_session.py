@@ -23,6 +23,7 @@ from agents.realtime.events import (
     RealtimeAudioEnd,
     RealtimeAudioInterrupted,
     RealtimeError,
+    RealtimeHandoffEvent,
     RealtimeRawModelEvent,
     RealtimeToolEnd,
     RealtimeToolStart,
@@ -54,6 +55,7 @@ from agents.realtime.session import (
     RealtimeSession,
     _PendingToolOutputSendError,
 )
+from agents.realtime.testing import ScriptedRealtimeModel
 from agents.run_context import RunContextWrapper
 from agents.tool import FunctionTool, function_tool, tool_namespace
 from agents.tool_context import ToolContext
@@ -328,6 +330,36 @@ async def test_close_clears_response_bookkeeping_when_model_close_fails():
     assert session._active_output_response_id is None
     assert session._guardrail_tasks_by_response_id == {}
     assert session._responses_awaiting_guardrail_cleanup == set()
+
+
+@pytest.mark.asyncio
+async def test_agent_end_names_the_agent_whose_turn_ended_after_handoff():
+    agent_b = RealtimeAgent(name="b")
+    agent_a = RealtimeAgent(name="a", handoffs=[agent_b])
+    model = ScriptedRealtimeModel(strict=False)
+    session = RealtimeSession(model, agent_a, None, run_config={"async_tool_calls": False})
+    await session.enter()
+    try:
+        await model.emit(RealtimeModelTurnStartedEvent(response_id="response_1"))
+        await model.emit(
+            RealtimeModelToolCallEvent(name="transfer_to_b", call_id="call_1", arguments="{}")
+        )
+        await model.emit(RealtimeModelTurnEndedEvent(response_id="response_1"))
+
+        events: list[Any] = []
+        while not session._event_queue.empty():
+            events.append(session._event_queue.get_nowait())
+    finally:
+        await session.close()
+
+    starts = [event for event in events if isinstance(event, RealtimeAgentStartEvent)]
+    handoffs = [event for event in events if isinstance(event, RealtimeHandoffEvent)]
+    ends = [event for event in events if isinstance(event, RealtimeAgentEndEvent)]
+    assert [event.agent for event in starts] == [agent_a]
+    assert [(event.from_agent, event.to_agent) for event in handoffs] == [(agent_a, agent_b)]
+    # The turn that ended was produced by agent A; the handoff only changes who speaks next.
+    assert [event.agent for event in ends] == [agent_a]
+    assert session._current_agent is agent_b
 
 
 @pytest.mark.asyncio
@@ -680,10 +712,10 @@ def test_put_event_nowait_skips_events_during_cleanup(state_name: str):
 @pytest.mark.parametrize(
     ("exception", "expected_message"),
     [
-        (RuntimeError("tool failed"), "Tool call task failed: tool failed"),
+        (RuntimeError("tool failed"), "Tool call task failed"),
         (
             _PendingToolOutputSendError("call-1", RuntimeError("send failed")),
-            "Tool output send failed; cached output will be retried: send failed",
+            "Tool output send failed; cached output will be retried",
         ),
     ],
 )
@@ -1989,8 +2021,7 @@ class TestToolCallExecution:
         assert any(isinstance(event, RealtimeToolStart) for event in events)
 
         error_event = next(event for event in events if isinstance(event, RealtimeError))
-        assert "Tool call task failed" in error_event.error["message"]
-        assert "timed out" in error_event.error["message"]
+        assert error_event.error == {"message": "Tool call task failed"}
 
     @pytest.mark.asyncio
     async def test_function_tool_with_multiple_tools_available(self, mock_model, mock_agent):

@@ -90,6 +90,50 @@ __all__ = [
 _SESSION_LIMIT_UNSET = object()
 
 
+def prepare_compaction_model_input(
+    session: Session | None,
+    wrapper: RunContextWrapper[Any],
+    input_items: list[TResponseInputItem],
+) -> tuple[str, ...] | None:
+    """Snapshot the model input without retaining mutable or plaintext history."""
+    if session is None or not is_openai_responses_compaction_aware_session(session):
+        return None
+    # A failed request must not reuse evidence from an earlier model exchange.
+    wrapper._session_compaction_model_exchange = ((), None)  # type: ignore[attr-defined]
+    ignore_ids = _ignore_ids_for_matching(session)
+    return tuple(
+        digest
+        for item in input_items
+        if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
+    )
+
+
+def record_compaction_model_response(
+    session: Session | None,
+    wrapper: RunContextWrapper[Any],
+    input_digests: tuple[str, ...] | None,
+    response: ModelResponse,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> None:
+    """Authorize automatic compaction only from the latest successful model exchange."""
+    if input_digests is None or session is None:
+        return
+    response_items = apply_reasoning_item_id_policy(
+        response.to_input_items(), reasoning_item_id_policy
+    )
+    ignore_ids = _ignore_ids_for_matching(session)
+    response_digests = tuple(
+        digest
+        for item in response_items
+        if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
+    )
+    # Keep the resolved replay policy bound to the same successful exchange.
+    wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
+        input_digests + response_digests,
+        reasoning_item_id_policy,
+    )
+
+
 async def admit_pending_input(
     *,
     run_state: RunState[Any],
@@ -587,6 +631,71 @@ def update_run_state_after_resume(
     run_state._current_step = next_step  # type: ignore[assignment]
 
 
+async def _apply_post_write_compaction(
+    session: Session,
+    *,
+    response_id: str | None,
+    store: bool | None,
+    has_local_tool_outputs: bool,
+    wrapper: RunContextWrapper[Any] | None = None,
+) -> None:
+    """Evaluate deferred/forced Responses compaction for a settled session append.
+
+    Shared by the immediate-write path in ``save_result_to_session`` and the checkpoint
+    replay path in ``resume_pending_session_write``, so a batch that only settles later
+    (via a separate resume) still gets the same compaction decision it would have gotten
+    had the original append succeeded inline. ``wrapper`` is the caller's raw (pre-gating)
+    context wrapper; it is used as-is for ``run_compaction`` and re-gated here for
+    ``_defer_compaction``, mirroring the two call sites this helper replaces.
+    """
+    if not response_id or not is_openai_responses_compaction_aware_session(session):
+        return
+
+    if has_local_tool_outputs:
+        defer_compaction = getattr(session, "_defer_compaction", None)
+        if callable(defer_compaction):
+            await _call_session_method(
+                defer_compaction,
+                response_id,
+                store=store,
+                wrapper=_get_session_wrapper(session, wrapper),
+            )
+        logger.debug(
+            "skip: deferring compaction for response %s due to local tool outputs",
+            response_id,
+        )
+        return
+
+    deferred_response_id = None
+    get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
+    if callable(get_deferred):
+        deferred_response_id = get_deferred()
+    force_compaction = deferred_response_id is not None
+    if force_compaction:
+        logger.debug(
+            "compact: forcing for response %s after deferred %s",
+            response_id,
+            deferred_response_id,
+        )
+    compaction_args: OpenAIResponsesCompactionArgs = {
+        "response_id": response_id,
+        "force": force_compaction,
+    }
+    if store is not None:
+        compaction_args["store"] = store
+    if wrapper is not None:
+        wrapper._session_compaction_is_automatic = True  # type: ignore[attr-defined]
+    try:
+        await _call_session_method(
+            session.run_compaction,
+            compaction_args,
+            wrapper=wrapper,
+        )
+    finally:
+        if wrapper is not None:
+            wrapper._session_compaction_is_automatic = False  # type: ignore[attr-defined]
+
+
 async def save_result_to_session(
     session: Session | None,
     original_input: str | list[TResponseInputItem],
@@ -694,6 +803,10 @@ async def save_result_to_session(
             run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
         return saved_run_items_count
 
+    has_local_tool_outputs = any(
+        isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
+    )
+
     if resumed_write_state is not None:
         if resumed_write_state._pending_session_write is not None:
             raise UserError("Resolve the pending Session write before saving another batch")
@@ -704,7 +817,13 @@ async def save_result_to_session(
             "persisted_count": (
                 resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
             ),
+            "response_id": response_id,
+            "store": store,
+            "has_local_tool_outputs": has_local_tool_outputs,
         }
+        # resume_pending_session_write() applies post-write compaction itself once the
+        # checkpoint settles, whether that happens inline below or on a later, separate
+        # resume -- so it is not repeated after this call returns.
         await resume_pending_session_write(
             resumed_write_state,
             session,
@@ -716,45 +835,12 @@ async def save_result_to_session(
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
 
-    if response_id and is_openai_responses_compaction_aware_session(session):
-        has_local_tool_outputs = any(
-            isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
-        )
-        if has_local_tool_outputs:
-            defer_compaction = getattr(session, "_defer_compaction", None)
-            if callable(defer_compaction):
-                await _call_session_method(
-                    defer_compaction,
-                    response_id,
-                    store=store,
-                    wrapper=wrapper,
-                )
-            logger.debug(
-                "skip: deferring compaction for response %s due to local tool outputs",
-                response_id,
-            )
-            return saved_run_items_count
-
-        deferred_response_id = None
-        get_deferred = getattr(session, "_get_deferred_compaction_response_id", None)
-        if callable(get_deferred):
-            deferred_response_id = get_deferred()
-        force_compaction = deferred_response_id is not None
-        if force_compaction:
-            logger.debug(
-                "compact: forcing for response %s after deferred %s",
-                response_id,
-                deferred_response_id,
-            )
-        compaction_args: OpenAIResponsesCompactionArgs = {
-            "response_id": response_id,
-            "force": force_compaction,
-        }
-        if store is not None:
-            compaction_args["store"] = store
-        await _call_session_method(
-            session.run_compaction,
-            compaction_args,
+    if resumed_write_state is None:
+        await _apply_post_write_compaction(
+            session,
+            response_id=response_id,
+            store=store,
+            has_local_tool_outputs=has_local_tool_outputs,
             wrapper=compaction_wrapper,
         )
 
@@ -836,10 +922,10 @@ async def resume_pending_session_write(
             append = True
         else:
             expected = before + digests(pending["items"])
-            committed_generation: int | None = None
+            observed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
-                tail, committed_generation = await _call_session_method(
+                tail, observed_generation = await _call_session_method(
                     get_with_generation,
                     lambda: _session_get_items(session, limit=len(expected), wrapper=wrapper),
                 )
@@ -854,12 +940,26 @@ async def resume_pending_session_write(
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
             append = unchanged
-            if committed and committed_generation is not None and wrapper is not None:
-                wrapper._session_compaction_generation = committed_generation  # type: ignore[attr-defined]
+            # The original append can advance the wrapper generation even when it fails
+            # atomically. Reconciled unchanged history is also safe to append against;
+            # subsequent mutations still revoke ownership through the normal generation check.
+            if observed_generation is not None and wrapper is not None:
+                wrapper._session_compaction_generation = observed_generation  # type: ignore[attr-defined]
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
+        # Keep the checkpoint until compaction also settles: if _apply_post_write_compaction
+        # raises below, a later retry must still be able to redo just the compaction step
+        # instead of silently losing it. The append itself is retry-safe (the reconciliation
+        # above detects an already-committed batch and skips re-appending it).
+        await _apply_post_write_compaction(
+            session,
+            response_id=pending.get("response_id"),
+            store=pending.get("store"),
+            has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
+            wrapper=wrapper,
+        )
         run_state._pending_session_write = None
     finally:
         run_state._session_write_in_progress = False

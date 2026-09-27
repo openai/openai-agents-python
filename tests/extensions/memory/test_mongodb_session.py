@@ -346,6 +346,55 @@ def agent() -> Agent:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("session_id", [{"$ne": None}, ["other-session"], None, 42])
+async def test_constructor_rejects_non_string_session_id(session_id: Any) -> None:
+    client = FakeAsyncMongoClient()
+
+    with pytest.raises(TypeError, match="^session_id must be a string$"):
+        MongoDBSession(session_id, client=client)  # type: ignore[arg-type]
+
+    assert client._metadata_calls == []
+    assert not client._databases
+    assert not client._closed
+
+
+@pytest.mark.parametrize("session_id", [{"$ne": None}, ["other-session"], None, 42])
+async def test_from_uri_rejects_non_string_session_id_before_client_creation(
+    session_id: Any,
+) -> None:
+    client_kwargs = {"appname": "test-app"}
+    with patch("agents.extensions.memory.mongodb_session.AsyncMongoClient") as client_factory:
+        with pytest.raises(TypeError, match="^session_id must be a string$"):
+            MongoDBSession.from_uri(
+                session_id,
+                uri="mongodb://localhost:27017",
+                client_kwargs=client_kwargs,
+            )
+
+    client_factory.assert_not_called()
+    assert client_kwargs == {"appname": "test-app"}
+
+
+@pytest.mark.parametrize("session_id", ["", "$ne", '{"$ne": null}', "会話-123"])
+async def test_string_session_ids_remain_literal_and_isolated(session_id: str) -> None:
+    client = FakeAsyncMongoClient()
+    session = MongoDBSession(session_id, client=client)  # type: ignore[arg-type]
+    other = MongoDBSession("other-session", client=client)  # type: ignore[arg-type]
+    item: TResponseInputItem = {"role": "user", "content": "own history"}
+    other_item: TResponseInputItem = {"role": "user", "content": "other history"}
+
+    await other.add_items([other_item])
+    await session.add_items([item])
+    assert session.session_id == session_id
+    assert await session.get_items() == [item]
+    assert await session.pop_item() == item
+    assert await session.get_items() == []
+    await session.add_items([item])
+    await session.clear_session()
+    assert await session.get_items() == []
+    assert await other.get_items() == [other_item]
+
+
 async def test_add_and_get_items(session: MongoDBSession) -> None:
     """Items added to the session are retrievable in insertion order."""
     items: list[TResponseInputItem] = [

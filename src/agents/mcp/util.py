@@ -300,6 +300,7 @@ class MCPUtil:
                     agent,
                     failure_error_function=failure_error_function,
                     tool_name_overrides=tool_name_overrides,
+                    server_index=server_index,
                 )
                 server_tool_names = {tool.name for tool in function_tools}
                 duplicate_tool_names = sorted(server_tool_names & tool_names)
@@ -313,13 +314,14 @@ class MCPUtil:
 
             return tools
 
-        for server in servers:
+        for server_index, server in enumerate(servers):
             server_tools = await cls.get_function_tools(
                 server,
                 convert_schemas_to_strict,
                 run_context,
                 agent,
                 failure_error_function=failure_error_function,
+                server_index=server_index,
             )
             server_tool_names = {tool.name for tool in server_tools}
             duplicate_tool_names = sorted(server_tool_names & tool_names)
@@ -359,8 +361,9 @@ class MCPUtil:
         agent: AgentBase,
         failure_error_function: ToolErrorFunction | None = default_tool_error_function,
         tool_name_overrides: list[str] | None = None,
+        server_index: int = 0,
     ) -> list[Tool]:
-        return [
+        function_tools = [
             cls.to_function_tool(
                 tool,
                 server,
@@ -373,6 +376,11 @@ class MCPUtil:
             )
             for index, tool in enumerate(tools)
         ]
+        for function_tool in function_tools:
+            assert function_tool._mcp_tool_binding is not None
+            server_name, raw_tool_name, _ = function_tool._mcp_tool_binding
+            function_tool._mcp_tool_binding = (server_name, raw_tool_name, server_index)
+        return list(function_tools)
 
     @classmethod
     async def get_function_tools(
@@ -411,6 +419,7 @@ class MCPUtil:
             agent,
             failure_error_function=failure_error_function,
             tool_name_overrides=tool_name_overrides,
+            server_index=server_index,
         )
 
     @staticmethod
@@ -592,6 +601,7 @@ class MCPUtil:
                 mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
+        function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
         return function_tool
 
     @staticmethod

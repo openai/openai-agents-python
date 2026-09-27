@@ -977,6 +977,27 @@ async def test_e2b_mkdir_recreates_workspace_root_when_readiness_is_stale() -> N
 
 
 @pytest.mark.asyncio
+async def test_e2b_mkdir_probes_the_parent_with_a_posix_path() -> None:
+    """The parent probe must stay POSIX so `mkdir` works from a Windows host.
+
+    A Windows host resolves the sandbox path to a native one, so stringifying its parent sent
+    `test -d \\workspace` into the Linux sandbox. That probe always fails, and every `mkdir` without
+    `parents=True` then raised `ExecNonZeroError` even though the parent existed.
+    """
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+    await session.start()
+
+    await session.mkdir("sub/dir")
+
+    probe_commands = [
+        str(call["command"]) for call in sandbox.commands.calls if "test -d" in str(call["command"])
+    ]
+    assert "test -d /workspace/sub" in probe_commands
+    assert not any("\\" in command for command in probe_commands)
+
+
+@pytest.mark.asyncio
 async def test_e2b_start_installs_runtime_helpers() -> None:
     session, sandbox = _session(workspace_root_ready=False)
 
@@ -1607,10 +1628,7 @@ async def test_e2b_persist_workspace_excludes_runtime_skip_paths() -> None:
     archive = await session.persist_workspace()
 
     assert archive.read() == b"fake-tar-bytes"
-    expected_command = (
-        "tar --exclude=logs/events.jsonl --exclude=./logs/events.jsonl "
-        "-C /workspace -cf - . | base64 -w0"
-    )
+    expected_command = "tar --exclude=./logs/events.jsonl -C /workspace -cf - . | base64 -w0"
     assert sandbox.commands.calls == [
         {
             "command": expected_command,
@@ -1805,9 +1823,7 @@ async def test_e2b_persist_workspace_uses_nested_mount_targets_and_resolved_excl
         "/workspace/repo/sub",
     ]
     tar_command = str(sandbox.commands.calls[-1]["command"])
-    assert "--exclude=repo" in tar_command
     assert "--exclude=./repo" in tar_command
-    assert "--exclude=repo/sub" in tar_command
     assert "--exclude=./repo/sub" in tar_command
 
 

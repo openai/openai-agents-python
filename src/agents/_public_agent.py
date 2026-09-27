@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
-from .agent import Agent
+from typing import Any, TypeVar, cast
+
+from .agent import Agent, AgentBase
+
+TAgent = TypeVar("TAgent", bound=AgentBase[Any])
 
 _PUBLIC_AGENT_ATTR = "_agents_public_agent"
 
@@ -13,9 +17,9 @@ def set_public_agent(execution_agent: Agent, public_agent: Agent) -> Agent:
     return execution_agent
 
 
-def get_public_agent(agent: Agent) -> Agent:
+def get_public_agent(agent: TAgent) -> TAgent:
     """Return the user-visible agent identity for hooks, tool execution, and results."""
     public_agent = getattr(agent, _PUBLIC_AGENT_ATTR, None)
     if isinstance(public_agent, Agent):
-        return public_agent
+        return cast(TAgent, public_agent)
     return agent

@@ -1,9 +1,5 @@
 # Quickstart
 
-!!! warning "Beta feature"
-
-    Sandbox agents are in beta. Expect details of the API, defaults, and supported capabilities to change before general availability, and expect more advanced features over time.
-
 Modern agents work best when they can operate on real files in a filesystem. **Sandbox Agents** in the Agents SDK give the model a persistent workspace where it can search large document sets, edit files, run commands, generate artifacts, and pick work back up from saved sandbox state.
 
 The SDK gives you that execution harness without making you wire together file staging, filesystem tools, shell access, sandbox lifecycle, snapshots, and provider-specific glue yourself. You keep the normal `Agent` and `Runner` flow, then add a `Manifest` for the workspace, capabilities for sandbox-native tools, and `SandboxRunConfig` for where the work runs.
@@ -12,7 +8,7 @@ The SDK gives you that execution harness without making you wire together file s
 
 - Python 3.10 or higher
 - Basic familiarity with the OpenAI Agents SDK
-- A sandbox client. For local development, start with `UnixLocalSandboxClient`.
+- A sandbox client. For trusted local development, start with `UnixLocalSandboxClient`.
 
 ## Installation
 
@@ -31,6 +27,10 @@ pip install "openai-agents[docker]"
 ## Create a local sandbox agent
 
 This example stages a local repo under `repo/`, loads local skills lazily, and has the runner create a Unix-local sandbox session for the run.
+
+!!! warning "Local commands use host permissions"
+
+    On Linux, `UnixLocalSandboxClient` adds no OS-level confinement to commands. On macOS, it applies filesystem restrictions through `sandbox-exec`, but does not provide network isolation. Use this example for trusted local development or within an externally isolated environment. For untrusted commands, including commands influenced by untrusted inputs, choose an appropriately configured Docker or hosted sandbox, or provide external isolation. See [Unix-local execution limits](sandbox/clients.md#decision-guide).
 
 ```python
 import asyncio

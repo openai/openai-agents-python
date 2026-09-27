@@ -996,7 +996,6 @@ async def test_run_single_turn_streamed_marks_filtered_input_as_sent() -> None:
         run_config,
         should_run_agent_start_hooks=False,
         tool_use_tracker=tool_use_tracker,
-        all_tools=[],
         server_conversation_tracker=tracker,
     )
 
@@ -1016,7 +1015,6 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
         status="completed",
     )
     model.enqueue(get_exact_output_stream_step([mcp_call]))
-    agent = Agent(name="test", model=model)
     hosted_tool = HostedMCPTool(
         tool_config=cast(
             Any,
@@ -1027,6 +1025,7 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
             },
         )
     )
+    agent = Agent(name="test", model=model, tools=[hosted_tool])
     context_wrapper: RunContextWrapper[dict[str, Any]] = RunContextWrapper(context={})
     tool_use_tracker = AgentToolUseTracker()
 
@@ -1071,7 +1070,6 @@ async def test_run_single_turn_streamed_seeds_hosted_mcp_metadata_from_pre_step_
         run_config,
         should_run_agent_start_hooks=False,
         tool_use_tracker=tool_use_tracker,
-        all_tools=[hosted_tool],
     )
 
     assert model.calls[-1].input == [item_1]

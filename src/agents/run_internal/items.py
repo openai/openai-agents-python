@@ -390,7 +390,7 @@ def fingerprint_input_item(item: Any, *, ignore_ids_for_matching: bool = False) 
         return None
 
 
-def digest_input_item(item: Any) -> str | None:
+def digest_input_item(item: Any, *, ignore_ids_for_matching: bool = False) -> str | None:
     """Return a fixed-size digest of an input item for durable occurrence tracking."""
     coerced = _coerce_to_dict(item)
     if coerced is not None:
@@ -406,7 +406,7 @@ def digest_input_item(item: Any) -> str | None:
                 coerced.pop("status", None)
         item = coerced
 
-    fingerprint = fingerprint_input_item(item)
+    fingerprint = fingerprint_input_item(item, ignore_ids_for_matching=ignore_ids_for_matching)
     if fingerprint is None:
         return None
     return hashlib.sha256(fingerprint.encode("utf-8")).hexdigest()
@@ -713,13 +713,15 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
 
 
 def strip_internal_input_item_metadata(item: TResponseInputItem) -> TResponseInputItem:
-    """Remove SDK-only session metadata before sending items back to the model."""
+    """Remove session and output-only metadata before replaying items as input."""
     if not isinstance(item, dict):
         return item
 
     cleaned = dict(item)
     cleaned.pop(TOOL_CALL_SESSION_DESCRIPTION_KEY, None)
     cleaned.pop(TOOL_CALL_SESSION_TITLE_KEY, None)
+    # Compaction and persisted history can bypass RunItem's output-to-input conversion.
+    cleaned.pop("created_by", None)
     return cast(TResponseInputItem, cleaned)
 
 

@@ -419,6 +419,16 @@ class WorkspacePathPolicy:
 
         return self._normalized_root()
 
+    def validate_recursive_remove(self, path: str | PurePath) -> None:
+        """Reject removal of a tree containing an effective read-only extra grant."""
+
+        root = self.normalize_sandbox_path(path, for_write=True)
+        for grant in self._extra_path_grants:
+            grant_root = coerce_posix_path(grant.path)
+            if grant.read_only and self._is_under(grant_root, root):
+                # Reuse effective grant matching, including workspace and override precedence.
+                self.normalize_sandbox_path(grant_root, for_write=True)
+
     def root_is_existing_host_path(self) -> bool:
         """Return whether the configured root currently exists on the host filesystem."""
 

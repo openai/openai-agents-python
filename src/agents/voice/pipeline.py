@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .._config_coercion import coerce_dataclass_config
@@ -10,7 +12,8 @@ from ..logger import (
     log_model_and_tool_action_warning,
     logger,
 )
-from ..tracing import TraceCtxManager
+from ..tracing import TraceCtxManager, get_trace_provider
+from ..tracing.span_data import CustomSpanData
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
 from .pipeline_config import VoicePipelineConfig
@@ -93,19 +96,39 @@ class VoicePipeline:
             self.config.trace_include_sensitive_audio_data,
         )
 
+    @contextmanager
+    def _trace_context(self) -> Iterator[None]:
+        if self.config.tracing_disabled:
+            # Let the configured provider mask both inherited contexts in the producer task.
+            provider = get_trace_provider()
+            with (
+                provider.create_trace(
+                    name=self.config.workflow_name or "Voice Agent",
+                    group_id=self.config.group_id,
+                    metadata=self.config.trace_metadata,
+                    tracing=self.config.tracing,
+                    disabled=True,
+                ),
+                provider.create_span(CustomSpanData(name="Voice pipeline", data={}), disabled=True),
+            ):
+                yield
+            return
+        with TraceCtxManager(
+            workflow_name=self.config.workflow_name or "Voice Agent",
+            trace_id=None,
+            group_id=self.config.group_id,
+            metadata=self.config.trace_metadata,
+            tracing=self.config.tracing,
+            disabled=False,
+        ):
+            yield
+
     async def _run_single_turn(self, audio_input: AudioInput) -> StreamedAudioResult:
         output = StreamedAudioResult(self._get_tts_model(), self.config.tts_settings, self.config)
 
         async def stream_events():
             # Keep the trace scope active for the entire async processing lifecycle.
-            with TraceCtxManager(
-                workflow_name=self.config.workflow_name or "Voice Agent",
-                trace_id=None,  # Automatically generated
-                group_id=self.config.group_id,
-                metadata=self.config.trace_metadata,
-                tracing=self.config.tracing,
-                disabled=self.config.tracing_disabled,
-            ):
+            with self._trace_context():
                 try:
                     input_text = await self._process_audio_input(audio_input)
                     async for text_event in self.workflow.run(input_text):
@@ -128,14 +151,7 @@ class VoicePipeline:
 
         async def process_turns():
             # Keep the trace scope active for the full streamed session.
-            with TraceCtxManager(
-                workflow_name=self.config.workflow_name or "Voice Agent",
-                trace_id=None,
-                group_id=self.config.group_id,
-                metadata=self.config.trace_metadata,
-                tracing=self.config.tracing,
-                disabled=self.config.tracing_disabled,
-            ):
+            with self._trace_context():
                 transcription_session = None
                 try:
                     primary_exception: BaseException | None = None
