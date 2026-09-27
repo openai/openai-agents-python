@@ -256,10 +256,13 @@ with patch.object(RedisSession, 'from_url', side_effect=fail_construction):
         ],
     )
     script = run_examples.ExampleScript(run_examples.ROOT_DIR / run_examples.REDIS_SESSION_EXAMPLE)
-    assert run_examples.run_examples([script], run_examples.parse_args()) == 0
+    assert run_examples.run_examples([script], run_examples.parse_args()) == 1
 
     captured = capsys.readouterr()
     logs = "".join(path.read_text() for path in tmp_path.rglob("*.log"))
+    main_log = (tmp_path / "main.log").read_text()
+    assert "FAILED examples/memory/redis_session_example.py exit=1" in main_log
+    assert "PASSED" not in main_log
     for output in (captured.out + captured.err, logs):
         assert "[runner]" in output
         assert "Check the Redis configuration and connection." in output

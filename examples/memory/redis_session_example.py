@@ -171,9 +171,13 @@ async def demonstrate_advanced_features():
             print("Session with custom key prefix created successfully")
 
         await tenant_session.close()
+        return
     except Exception:
         # Do not include backend exception text in captured example output.
         print("Advanced Redis features failed. Check the Redis configuration and connection.")
+
+    # Exit outside the handler so the original exception is not retained as context.
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

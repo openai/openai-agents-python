@@ -69,7 +69,14 @@ async def test_demo_failures_do_not_render_connection_details(
     else:
         session.ping.return_value = False
 
-    await demo()
+    if demo is example.demonstrate_advanced_features and failure != "unreachable":
+        with pytest.raises(SystemExit) as exit_info:
+            await demo()
+        assert exit_info.value.code == 1
+        assert exit_info.value.__context__ is None
+        assert exit_info.value.__cause__ is None
+    else:
+        await demo()
 
     output = assert_safe_output(capsys, caplog)
     factory.assert_called_once()
@@ -84,6 +91,9 @@ async def test_invalid_query_configuration_is_reported_safely(monkeypatch, capsy
     # The real client parser includes invalid option values in its exception message.
     monkeypatch.setenv("REDIS_URL", "redis://localhost/0?socket_timeout=query-secret")
     await example.main()
-    await example.demonstrate_advanced_features()
+    with pytest.raises(SystemExit) as exit_info:
+        await example.demonstrate_advanced_features()
+    assert exit_info.value.code == 1
+    assert exit_info.value.__context__ is None
     output = assert_safe_output(capsys, caplog)
     assert output.count("Check the Redis configuration and connection.") == 2
