@@ -442,7 +442,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if resolved_mode == "previous_response_id":
             compact_kwargs["previous_response_id"] = self._response_id
         else:
-            compact_kwargs["input"] = session_items
+            # Manual compaction may reuse cached raw output from the preceding compaction.
+            compact_kwargs["input"] = normalize_input_items_for_api(session_items)
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 

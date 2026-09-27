@@ -713,13 +713,15 @@ def _dedupe_key(item: TResponseInputItem) -> str | None:
 
 
 def strip_internal_input_item_metadata(item: TResponseInputItem) -> TResponseInputItem:
-    """Remove SDK-only session metadata before sending items back to the model."""
+    """Remove session and output-only metadata before replaying items as input."""
     if not isinstance(item, dict):
         return item
 
     cleaned = dict(item)
     cleaned.pop(TOOL_CALL_SESSION_DESCRIPTION_KEY, None)
     cleaned.pop(TOOL_CALL_SESSION_TITLE_KEY, None)
+    # Compaction and persisted history can bypass RunItem's output-to-input conversion.
+    cleaned.pop("created_by", None)
     return cast(TResponseInputItem, cleaned)
 
 

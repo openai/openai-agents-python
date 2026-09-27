@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import threading
@@ -11,7 +12,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI
 from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -19,7 +22,7 @@ from openai.types.responses.response_usage import (
 )
 
 import agents._debug as _debug
-from agents import Agent, Runner
+from agents import Agent, OpenAIResponsesModel, RunConfig, Runner
 from agents.items import MessageOutputItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionSession,
@@ -45,8 +48,92 @@ from agents.run_internal.session_persistence import (
 )
 from agents.run_state import RunState
 from agents.testing import ModelStep, ScriptedModel
+from tests.model_test_helpers import get_response_obj
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("history_source", ["automatic", "manual", "stored"])
+async def test_compaction_replay_strips_created_by(history_source: str) -> None:
+    compacted_item = {
+        "id": "cmp_synthetic",
+        "type": "compaction",
+        "encrypted_content": "synthetic-encrypted-content",
+        "created_by": "server",
+    }
+    request_inputs: list[list[dict[str, Any]]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        request_inputs.append(json.loads(request.content)["input"])
+        if request.url.path.endswith("/compact"):
+            return httpx2.Response(
+                200,
+                json={
+                    "id": "cmp_response",
+                    "object": "response.compaction",
+                    "created_at": 1,
+                    "output": [compacted_item],
+                },
+            )
+        assert request.url.path.endswith("/responses")
+        return httpx2.Response(
+            200, content=get_response_obj([get_text_message("42")]).model_dump_json()
+        )
+
+    underlying = SQLiteSession("created-by-replay")
+    try:
+        async with AsyncOpenAI(
+            api_key="synthetic-key",
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+        ) as client:
+            session = OpenAIResponsesCompactionSession(
+                session_id="created-by-replay",
+                underlying_session=underlying,
+                client=client,
+                model="gpt-5",
+                compaction_mode="input",
+                should_trigger_compaction=lambda ctx: bool(ctx["compaction_candidate_items"]),
+            )
+            agent = Agent(name="test", model=OpenAIResponsesModel("gpt-5", openai_client=client))
+            config = RunConfig(tracing_disabled=True)
+            if history_source == "stored":
+                # History saved before the fix must also remain usable.
+                await underlying.add_items([cast(TResponseInputItem, compacted_item)])
+            elif history_source == "manual":
+                await session.add_items([{"role": "user", "content": "How many?"}])
+                await session.run_compaction({"force": True})
+            else:
+                await Runner.run(agent, "How many?", session=session, run_config=config)
+
+            stored_items = await underlying.get_items()
+            assert stored_items == [compacted_item]
+            if history_source == "manual":
+                # Repeated manual compaction reuses cached output without a history reload.
+                await session.add_items([{"role": "user", "content": "More context"}])
+                await session.run_compaction({"force": True})
+            result = await Runner.run(agent, "And urgent?", session=session, run_config=config)
+            assert result.final_output == "42"
+
+            # Inspect encoded inputs to both Responses and the next compact request.
+            replayed_items = [
+                item
+                for items in request_inputs
+                for item in items
+                if item.get("type") == "compaction"
+            ]
+            assert replayed_items == [
+                {
+                    "id": "cmp_synthetic",
+                    "type": "compaction",
+                    "encrypted_content": "synthetic-encrypted-content",
+                }
+            ] * (3 if history_source == "manual" else 2)
+            assert stored_items[0] == compacted_item
+            assert (await underlying.get_items())[0] == compacted_item
+    finally:
+        underlying.close()
 
 
 class TestIsOpenAIModelName:
