@@ -2253,7 +2253,10 @@ async def _invoke_function_tool_with_metadata(
         if tool_task.done() and not tool_task.cancelled():
             tool_exception = tool_task.exception()
             if tool_exception is None:
-                return _FunctionToolInvocationResult(tool_task.result())
+                return _FunctionToolInvocationResult(
+                    tool_task.result(),
+                    is_sdk_generated_error=_consume_function_tool_default_failure(context),
+                )
             raise tool_exception from None
 
         timeout_error = ToolTimeoutError(
