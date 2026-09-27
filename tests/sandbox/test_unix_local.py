@@ -845,6 +845,64 @@ class TestUnixLocalPersistWorkspaceRestorable:
             assert members["fine"].linkname == "secret"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mutation_order", ["before_absolute_link", "after_absolute_link"])
+    async def test_rebase_uses_archived_topology_when_workspace_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation_order: str
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "m-trigger").write_text("capture boundary", encoding="utf-8")
+        if mutation_order == "before_absolute_link":
+            (workspace / "dir").mkdir()
+            (workspace / "outside").write_text("inside", encoding="utf-8")
+            changed_path = workspace / "a-hop"
+            changed_path.symlink_to(".")
+            absolute_link = workspace / "z-link"
+            original_target = str(workspace / "a-hop" / ".." / "outside")
+            replacement_target = "dir"
+        else:
+            (workspace / "q").mkdir()
+            (workspace / "q" / "hop").symlink_to("..")
+            changed_path = workspace / "z-target"
+            changed_path.write_text("inside", encoding="utf-8")
+            absolute_link = workspace / "a-link"
+            original_target = str(changed_path)
+            replacement_target = "q/hop/../outside"
+        absolute_link.symlink_to(original_target)
+
+        original_addfile = tarfile.TarFile.addfile
+        mutated = False
+
+        def addfile_with_workspace_mutation(
+            archive: tarfile.TarFile,
+            member: tarfile.TarInfo,
+            fileobj: io.BufferedReader | None = None,
+        ) -> None:
+            nonlocal mutated
+            original_addfile(archive, member, fileobj)
+            # Change the live tree at a deterministic boundary in archive capture.
+            if member.name == "./m-trigger" and not mutated:
+                changed_path.unlink()
+                changed_path.symlink_to(replacement_target)
+                mutated = True
+
+        monkeypatch.setattr(tarfile.TarFile, "addfile", addfile_with_workspace_mutation)
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+        assert mutated
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as archive:
+            assert archive.getmember(f"./{absolute_link.name}").linkname == original_target
+
+        restored_root = tmp_path / "restored"
+        restored_root.mkdir()
+        sentinel = restored_root / "keep.txt"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        blob.seek(0)
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await _RecordingUnixLocalSession(restored_root).hydrate_workspace(blob)
+        assert sentinel.read_text(encoding="utf-8") == "unchanged"
+        assert list(restored_root.iterdir()) == [sentinel]
+
+    @pytest.mark.asyncio
     async def test_persisted_workspace_hydrates_into_a_new_root(self, tmp_path: Path) -> None:
         workspace = self._workspace(tmp_path)
         (workspace / "outside").unlink()  # Hydrate rejects external targets by design.
