@@ -109,6 +109,12 @@ _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
 
 logger = logging.getLogger(__name__)
 
+_INCOMPLETE_CREATE_MESSAGE = (
+    "File creation failed after claiming the destination. The file may contain incomplete "
+    "contents. Inspect the destination before using update_file or removing it to retry; "
+    "retrying Add File without inspection is unsafe."
+)
+
 
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
     return {"mount_path": str(mount_path)}
@@ -1064,7 +1070,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
-    async def write_new_file(
+    async def _write_new_file(
         self,
         path: Path,
         data: io.IOBase,
@@ -1084,6 +1090,13 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         try:
             self._files.write_new(target, payload.stream)
+        except _unix_local_file_ops._IncompleteCreateError as e:
+            raise WorkspaceArchiveWriteError(
+                path=target,
+                cause=e,
+                retryable=False,
+                message=_INCOMPLETE_CREATE_MESSAGE,
+            ) from e
         except FileExistsError:
             raise
         except OSError as e:
@@ -1109,6 +1122,12 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveWriteError(path=path, cause=e) from e
         if result.returncode == _unix_local_file_ops._EXISTING_TARGET_EXIT_CODE:
             raise FileExistsError(str(path))
+        if result.returncode == _unix_local_file_ops._INCOMPLETE_CREATE_EXIT_CODE:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                retryable=False,
+                message=_INCOMPLETE_CREATE_MESSAGE,
+            )
         if result.returncode:
             raise WorkspaceArchiveWriteError(
                 path=path,

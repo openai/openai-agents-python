@@ -579,12 +579,7 @@ async def test_scripted_sandbox_drives_black_box_sandbox_agent_workflow() -> Non
 
 @pytest.mark.asyncio
 async def test_scripted_sandbox_supports_apply_patch_create() -> None:
-    """An exclusive create has to stay scriptable with ordinary file steps.
-
-    The inherited default probes with `exec`, and a script that configures only file
-    steps hides `exec`, so without a scripted implementation a previously valid
-    mkdir-and-write script fails with AttributeError.
-    """
+    """Creation keeps the existing file steps without requiring a scripted exec call."""
     session = scripted_sandbox_session(
         [{"method": "mkdir", "result": None}, {"method": "write", "result": None}]
     )

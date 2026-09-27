@@ -56,7 +56,7 @@ class ApplyPatchSession(BaseSandboxSession):
         else:
             self.files[normalized] = bytes(payload)
 
-    async def write_new_file(
+    async def _write_new_file(
         self,
         path: Path,
         data: io.IOBase,

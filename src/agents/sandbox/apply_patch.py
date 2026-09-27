@@ -191,10 +191,9 @@ class WorkspaceEditor:
             handle.close()
 
     async def _write_new_text(self, destination: Path, text: str, *, display_path: str) -> None:
-        # Add File is documented as creating a new file, so the name is claimed
-        # exclusively by the backend rather than checked and then overwritten.
+        # Backends with a native no-clobber primitive can reject occupied names.
         try:
-            await self._session.write_new_file(
+            await self._session._write_new_file(
                 destination,
                 io.BytesIO(text.encode("utf-8")),
                 user=self._user,

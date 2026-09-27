@@ -685,7 +685,7 @@ class SandboxSession(BaseSandboxSession):
         await self._inner.write(path, data, user=user)
 
     @instrumented_op("write", data=_write_start_data)
-    async def write_new_file(
+    async def _write_new_file(
         self,
         path: Path,
         data: io.IOBase,
@@ -695,7 +695,7 @@ class SandboxSession(BaseSandboxSession):
         # Forwarded so a backend with a native exclusive-create primitive is actually
         # used. Without this the wrapper would fall back to the shared implementation and
         # bypass the inner session's override.
-        await self._inner.write_new_file(path, data, user=user)
+        await self._inner._write_new_file(path, data, user=user)
 
     @instrumented_op(
         "running",

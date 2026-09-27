@@ -27,6 +27,11 @@ _TRAVERSE_FLAGS = (
 
 
 _EXISTING_TARGET_EXIT_CODE = 13
+_INCOMPLETE_CREATE_EXIT_CODE = 14
+
+
+class _IncompleteCreateError(OSError):
+    """The destination was claimed, but writing its contents did not complete."""
 
 
 class _FileOps:
@@ -136,12 +141,18 @@ class _FileOps:
                 dir_fd=parent_fd,
             )
         try:
-            out = os.fdopen(fd, "wb")
-        except BaseException:
-            os.close(fd)
-            raise
-        with out:
-            shutil.copyfileobj(stream, out)
+            try:
+                out = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with out:
+                shutil.copyfileobj(stream, out)
+        except OSError as exc:
+            # Do not unlink the name: another workspace operation may have replaced it.
+            # Keep filesystem compatibility (no hard-link staging requirement) and let
+            # the caller inspect and recover the partial result explicitly.
+            raise _IncompleteCreateError("File creation did not complete") from exc
 
     def mkdir(self, path: Path, *, parents: bool) -> None:
         with self.parent(path, for_write=True, create_parents=parents) as (parent_fd, name):
@@ -240,6 +251,8 @@ def _main() -> None:
         except FileExistsError:
             # A distinct status keeps "already exists" separable from a real write failure.
             sys.exit(_EXISTING_TARGET_EXIT_CODE)
+        except _IncompleteCreateError:
+            sys.exit(_INCOMPLETE_CREATE_EXIT_CODE)
     elif operation == "ls":
         print(json.dumps(files.listing(path), ensure_ascii=True))
     else:
