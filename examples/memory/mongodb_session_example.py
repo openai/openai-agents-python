@@ -1,6 +1,11 @@
 """
 Example demonstrating MongoDB session memory with a shared AsyncMongoClient.
 
+The unauthenticated URI below is for local development with synthetic data on a
+trusted machine only. For shared or production use, configure authentication,
+TLS, and network access controls, and update MONGO_URI for that deployment.
+See https://hub.docker.com/_/mongo for authentication setup.
+
 In production you should create one AsyncMongoClient and pass it to all sessions
 so they share the same connection pool.
 """
@@ -30,7 +35,11 @@ async def main():
         await client.admin.command("ping")
     except Exception:
         print("MongoDB is not available on localhost:27017")
-        print("Start it with: docker run -d -p 27017:27017 mongo")
+        print("For local development only (no authentication; Docker Engine 28.0.0+):")
+        print("Start it with: docker run -d -p 127.0.0.1:27017:27017 mongo")
+        print(
+            "For shared or production use, configure authentication, TLS, and network access controls."
+        )
         return
 
     session_a = MongoDBSession("conversation_a", client=client, database=DATABASE)
