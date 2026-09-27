@@ -588,10 +588,13 @@ async def test_codex_exec_run_web_search_enabled_flags(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stderr_text", ["bad", "找不到命令"])
 async def test_codex_exec_run_raises_on_non_zero_exit(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, stderr_text: str
 ) -> None:
-    process = FakeProcess(stdout_lines=[], stderr_chunks=[b"bad"], returncode=2)
+    process = FakeProcess(
+        stdout_lines=[], stderr_chunks=[stderr_text.encode("utf-8")], returncode=2
+    )
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
         return process
@@ -601,9 +604,43 @@ async def test_codex_exec_run_raises_on_non_zero_exit(
     exec_client = exec_module.CodexExec(executable_path="/bin/codex")
     args = exec_module.CodexExecArgs(input="hello")
 
-    with pytest.raises(RuntimeError, match="exited with code 2"):
+    with pytest.raises(RuntimeError) as exc_info:
         async for _ in exec_client.run(args):
             pass
+
+    assert str(exc_info.value) == f"Codex exec exited with code 2: {stderr_text}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_codex_thread_preserves_exit_error_with_non_utf8_stderr(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool
+) -> None:
+    # Captured Windows CP950 diagnostic from the npm Codex shim in issue #5185.
+    stderr = (
+        b"'\"node\"' \xa4\xa3\xacO\xa4\xba\xb3\xa1\xa9\xce\xa5~\xb3\xa1\xa9R\xa5O"
+        b"\xa1B\xa5i\xb0\xf5\xa6\xe6\xaa\xba\xb5{\xa6\xa1\xa9\xce\xa7\xe5\xa6\xb8\xc0\xc9\xa1C\r\n"
+    )
+    process = FakeProcess(stdout_lines=[], stderr_chunks=[stderr], returncode=1)
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    thread = Codex(codex_path_override="/bin/codex").start_thread()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        if streamed:
+            result = await thread.run_streamed("hello")
+            async for _ in result.events:
+                pass
+        else:
+            await thread.run("hello")
+
+    message = str(exc_info.value)
+    assert message.startswith("Codex exec exited with code 1: '\"node\"' ")
+    assert "\ufffd" in message
+    assert message.endswith("\r\n")
 
 
 @pytest.mark.asyncio
