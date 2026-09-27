@@ -178,6 +178,7 @@ from .session_persistence import (
     admit_pending_input,
     commit_server_pending_input,
     defer_interrupted_session_write,
+    discard_held_current_response,
     extend_held_session_write,
     persist_session_items_for_guardrail_trip,
     prepare_compaction_model_input,
@@ -581,11 +582,9 @@ async def _finalize_streamed_final_output(
             owner_starts=owner_starts,
             blocked_message=blocked_message,
         )
-        # The redaction derives the sanitized response from the run-state boundary, so
-        # the raw held batch must not be fed into this save: it could resurrect
-        # preambles the redaction dropped. The declaration is discarded once the
-        # blocked outcome is decided.
-        take_held_session_write(streamed_result._state)
+        # Only this response is blocked. Preserve accepted earlier held history
+        # for the same recoverable append as the sanitized current response.
+        discard_held_current_response(streamed_result._state)
         if retained_items:
             try:
                 await save_items(retained_items, response_id, store_setting)

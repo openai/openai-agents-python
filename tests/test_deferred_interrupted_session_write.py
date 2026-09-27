@@ -312,13 +312,6 @@ class _ContextRequiringSession(SimpleListSession):
         await super().clear_session()
 
 
-class _LegacyGetItemsSession(SimpleListSession):
-    """A pre-limit Session whose ``get_items`` takes no arguments at all."""
-
-    async def get_items(self) -> list[TResponseInputItem]:  # type: ignore[override]
-        return await super().get_items()
-
-
 class _AppendRecordingSession(SimpleListSession):
     """Record each ``add_items`` batch to observe write ordering and granularity."""
 
@@ -655,23 +648,6 @@ async def test_settle_reaches_a_context_aware_session_through_the_wrapper(
 
     assert session.wrapperless_operations == 0
     assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("streamed", [False, True])
-async def test_a_session_without_optional_kwargs_survives_a_deferred_resume(
-    streamed: bool,
-) -> None:
-    session = _LegacyGetItemsSession()
-    agent = _make_deferring_agent()
-    state = await _parked_and_approved(agent, session, streamed=streamed)
-
-    resumed = await _run(agent, state, session, streamed=streamed)
-    assert resumed.final_output == "done"
-
-    items = await session.get_items()
-    assert _orphaned_outputs(items) == []
-    assert _parked_pair(items) == _EXPECTED_PAIR
 
 
 @pytest.mark.asyncio
@@ -1346,6 +1322,7 @@ async def test_zero_count_final_save_arms_recovery_even_when_deduplicated() -> N
     ]
 
     session.failure = "before"
+    state._pending_session_write = _held_write(held)
     with pytest.raises(RuntimeError, match="session append failed"):
         await save_final_turn_items_after_guardrails(
             session=session,
@@ -1354,7 +1331,6 @@ async def test_zero_count_final_save_arms_recovery_even_when_deduplicated() -> N
             input_guardrail_results=[],
             items=final_items,
             response_id=None,
-            held_write=_held_write(held),
         )
 
     # The append was registered before it ran, so the batch is recorded to reconcile.
@@ -1866,6 +1842,53 @@ async def test_handoff_filter_applies_to_sibling_completed_before_approval(strea
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
+async def test_detached_terminal_guardrail_failure_keeps_unsettled_checkpoint(
+    streamed: bool,
+) -> None:
+    from agents.exceptions import UserError
+
+    session = SimpleListSession()
+    agent = _make_terminal_tool_agent()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    agent.output_guardrails = [always_crashes]
+    with pytest.raises(RuntimeError, match="guardrail crashed"):
+        await _run(agent, state, None, streamed=streamed)
+
+    assert state._pending_session_write is not None
+    agent.output_guardrails = [always_fine]
+    # A terminal side effect without a completed save must fail closed on reload,
+    # rather than allowing a retry that forgets the executed tool.
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, state.to_json())
+    assert _parked_pair(await session.get_items()) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_later_tripwire_preserves_accepted_detached_history(streamed: bool) -> None:
+    agent = _make_two_park_agent()
+    agent.tool_use_behavior = StopAtTools(stop_at_tool_names=["write_other"])
+    session = SimpleListSession()
+    state = await _parked_and_approved(agent, session, streamed=streamed)
+    detached = await _run(agent, state, None, streamed=streamed)
+    state = await _serialized_round_trip(detached, agent)
+    state.approve(state.get_interruptions()[0])
+    agent.output_guardrails = [always_trips]
+
+    with pytest.raises(OutputGuardrailTripwireTriggered):
+        await _run(agent, state, session, streamed=streamed)
+
+    items = await session.get_items()
+    assert _call_ids(items) == ["call_A", "call_B"]
+    outputs = [item for item in items if item.get("type") == "function_call_output"]
+    assert [item.get("call_id") for item in outputs] == ["call_A", "call_B"]
+    assert outputs[0]["output"] == "wrote:a"
+    assert "other:b" not in json.dumps(items)
+    assert state._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
 async def test_detached_repark_terminal_settle_preserves_each_response_once(
     streamed: bool,
 ) -> None:
@@ -2172,6 +2195,7 @@ async def test_the_final_sweep_settle_defers_compaction_and_counts_what_it_wrote
         {"type": "function_call_output", "call_id": "call_PARKED", "output": "ok"},
     ]
 
+    state._pending_session_write = _held_write(held)
     count = await save_final_turn_items_after_guardrails(
         session=session,
         run_state=state,
@@ -2179,7 +2203,6 @@ async def test_the_final_sweep_settle_defers_compaction_and_counts_what_it_wrote
         input_guardrail_results=[],
         items=[MessageOutputItem(agent=agent, raw_item=assistant_message("done"))],
         response_id="resp_final",
-        held_write=_held_write(held),
     )
 
     assert [entry for entry in session.compactions if "deferred" in entry] == [

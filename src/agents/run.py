@@ -141,6 +141,7 @@ from .run_internal.session_persistence import (
     admit_pending_input,
     commit_server_pending_input,
     defer_interrupted_session_write,
+    discard_held_current_response,
     extend_held_session_write,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
@@ -1390,12 +1391,9 @@ class AgentRunner:
                                         blocked_message=blocked_message,
                                     )
                                     list.extend(session_items, retained_items)
-                                    # The redaction derives the sanitized response from the
-                                    # run-state boundary, so the raw held batch must not be
-                                    # fed into this save: it could resurrect preambles the
-                                    # redaction dropped. The declaration is discarded once
-                                    # the blocked outcome is decided.
-                                    take_held_session_write(run_state)
+                                    # Redaction owns only this response; accepted prior
+                                    # held turns still need to reach the Session.
+                                    discard_held_current_response(run_state)
                                     try:
                                         await save_final_turn_items_after_guardrails(
                                             session=session,
@@ -1439,7 +1437,6 @@ class AgentRunner:
                                                 _attempt_input_guardrail_results()
                                             ),
                                             items=final_turn_items,
-                                            held_write=take_held_session_write(run_state),
                                             response_id=turn_result.model_response.response_id,
                                             store=store_setting,
                                             wrapper=context_wrapper,
@@ -1467,11 +1464,12 @@ class AgentRunner:
                                     # Safe even when the guardrail rebuild above already
                                     # recovered the parked response: the save deduplicates
                                     # the combined batch.
-                                    held_write=take_held_session_write(run_state),
                                     response_id=turn_result.model_response.response_id,
                                     store=store_setting,
                                     wrapper=context_wrapper,
                                 )
+                                if session is None:
+                                    take_held_session_write(run_state)
                                 # The append and any post-append maintenance both succeeded,
                                 # so the turn is durable and the state is open again.
                                 if run_state is not None:

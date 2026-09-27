@@ -254,29 +254,6 @@ def commit_server_pending_input(
     return True
 
 
-def _session_method_accepts_limit(method: Any) -> bool:
-    """Return whether a ``get_items`` implementation can be passed ``limit``.
-
-    A structural ``Session`` written against a pre-``limit`` release may declare
-    ``get_items(self)`` alone; passing ``limit`` to it raises ``TypeError`` and turns
-    every internal tail read into a hard failure. When the signature cannot be
-    inspected, assume the released shape.
-    """
-    try:
-        parameters = inspect.signature(method).parameters.values()
-    except Exception:
-        return True
-    return any(
-        (
-            parameter.name == "limit"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        )
-        or parameter.kind is inspect.Parameter.VAR_KEYWORD
-        for parameter in parameters
-    )
-
-
 async def _session_get_items(
     session: Session,
     limit: int | None | object = _SESSION_LIMIT_UNSET,
@@ -290,12 +267,6 @@ async def _session_get_items(
     async def read_items() -> list[TResponseInputItem]:
         if limit is _SESSION_LIMIT_UNSET:
             result = await _call_session_method(session.get_items, wrapper=session_wrapper)
-        elif not _session_method_accepts_limit(session.get_items):
-            # Fall back to a full read and apply the released ``limit`` semantics
-            # locally: the latest ``limit`` items in chronological order.
-            result = await _call_session_method(session.get_items, wrapper=session_wrapper)
-            if isinstance(limit, int):
-                result = list(result)[-limit:] if limit > 0 else []
         else:
             result = await _call_session_method(
                 session.get_items, limit=limit, wrapper=session_wrapper
@@ -932,6 +903,8 @@ async def save_resumed_turn_items(
     batch separately would either trip the single-slot rule or advance the persisted
     count and slice the resolved items out of their own save.
     """
+    if session is None:
+        return persisted_count
     if claim_held:
         held_write = take_held_session_write(run_state)
     settling_held = held_write is not None
@@ -1321,6 +1294,21 @@ def extend_held_session_write(
         handoff_input_filtered=handoff_input_filtered,
         filtered_context_items=filtered_context_items,
     )
+
+
+def discard_held_current_response(run_state: RunState | None) -> None:
+    """Remove blocked current-response items while retaining accepted prior turns."""
+    if run_state is None:
+        return
+    pending = run_state._pending_session_write
+    if pending is None or not pending.get("held"):
+        return
+    start = _held_current_response_start(pending, run_state._current_turn)
+    if start == 0:
+        run_state._pending_session_write = None
+        return
+    pending["items"] = pending["items"][:start]
+    pending["current_response"] = {"turn": run_state._current_turn, "start": start}
 
 
 def take_held_session_write(run_state: RunState | None) -> _PendingSessionWrite | None:

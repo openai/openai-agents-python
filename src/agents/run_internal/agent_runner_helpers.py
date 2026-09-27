@@ -19,7 +19,7 @@ from ..models.openai_chatcompletions import OpenAIChatCompletionsModel
 from ..result import RunResult
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import RunContextWrapper, TContext
-from ..run_state import RunState, _PendingSessionWrite
+from ..run_state import RunState
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..tracing import Span
 from ..tracing.config import TracingConfig
@@ -48,6 +48,7 @@ from .session_persistence import (
     held_session_items_for_save,
     save_result_to_session,
     save_resumed_turn_items,
+    take_held_session_write,
 )
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
@@ -603,17 +604,19 @@ async def save_final_turn_items_after_guardrails(
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
-    held_write: _PendingSessionWrite | None = None,
 ) -> int:
     """Persist deferred final-turn items without skipping a partially persisted resumed turn.
 
-    ``held_write`` is a claimed held batch that must land ahead of the final items in
-    the same append. It is safe to pass even when the rebuilt final items already
-    contain the parked response: the save deduplicates the combined batch.
+    Claim held history only after persistence is enabled and input guardrails permit
+    the write. Detached failures retain their checkpoint until the owning terminal
+    exit decides whether completion succeeded.
     """
-    if not session_persistence_enabled or (not items and held_write is None):
+    if session is None or not session_persistence_enabled:
         return 0
     if input_guardrails_triggered(input_guardrail_results):
+        return 0
+    held_write = take_held_session_write(run_state)
+    if not items and held_write is None:
         return 0
     # Whether a held batch is being claimed at all, captured before any dedup empties
     # it: the recovery registration below must stay armed even when the guardrail
