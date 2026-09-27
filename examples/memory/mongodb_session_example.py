@@ -1,9 +1,10 @@
 """
 Example demonstrating MongoDB session memory with a shared AsyncMongoClient.
 
-The unauthenticated URI below is for local development with synthetic data on a
-trusted machine only. For shared or production use, configure authentication,
-TLS, and network access controls, and update MONGO_URI for that deployment.
+This example uses an unauthenticated local database with synthetic data on a
+trusted machine only. Shared or production applications must configure their own
+MongoDB client with authentication, TLS, network access controls, and credentials
+loaded from a secret-backed configuration source.
 See https://hub.docker.com/_/mongo for authentication setup.
 
 In production you should create one AsyncMongoClient and pass it to all sessions
@@ -18,7 +19,7 @@ from pymongo.asynchronous.mongo_client import AsyncMongoClient
 from agents import Agent, Runner
 from agents.extensions.memory import MongoDBSession
 
-MONGO_URI = "mongodb://localhost:27017"
+MONGO_URI = "mongodb://127.0.0.1:27017"
 DATABASE = "agents_example"
 
 
@@ -34,7 +35,7 @@ async def main():
     try:
         await client.admin.command("ping")
     except Exception:
-        print("MongoDB is not available on localhost:27017")
+        print("MongoDB is not available on 127.0.0.1:27017")
         print("For local development only (no authentication; Docker Engine 28.0.0+):")
         print("Start it with: docker run -d -p 127.0.0.1:27017:27017 mongo")
         print(
