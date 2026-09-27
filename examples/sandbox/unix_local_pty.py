@@ -3,6 +3,10 @@
 This example uses the Unix-local sandbox with the `Shell` capability. The task only asks
 for a stateful interaction, but the streamed output shows the actual shell tools the agent
 chooses, including the follow-up writes that keep the same process alive.
+
+Use this example for trusted local development or within externally provided isolation.
+Linux commands run without OS confinement added by this backend. macOS commands use
+sandbox-exec filesystem restrictions, which do not provide network isolation.
 """
 
 from __future__ import annotations

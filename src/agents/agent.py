@@ -4,7 +4,7 @@ import asyncio
 import contextvars
 import dataclasses
 import inspect
-from collections.abc import Awaitable, Callable, Iterator, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
@@ -72,6 +72,10 @@ if TYPE_CHECKING:
     from .run import RunConfig
     from .run_state import RunState
     from .stream_events import StreamEvent
+
+
+class _AgentToolStreamOverflow(UserError):
+    """The agent tool callback queue exceeded its configured backlog limit."""
 
 
 @dataclass
@@ -208,6 +212,14 @@ class AgentBase(Generic[TContext]):
     mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
     """Configuration for MCP servers."""
 
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name == "tools":
+            from .run_internal.agent_tool_configuration import assign_agent_tools
+
+            assign_agent_tools(self, value)
+        else:
+            object.__setattr__(self, name, value)
+
     async def _get_mcp_tool_reserved_names(
         self, run_context: RunContextWrapper[TContext]
     ) -> set[str]:
@@ -249,6 +261,8 @@ class AgentBase(Generic[TContext]):
 
     async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """Fetches the available tools from the MCP servers."""
+        from ._public_agent import get_public_agent
+
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
             "failure_error_function", default_tool_error_function
@@ -263,7 +277,7 @@ class AgentBase(Generic[TContext]):
             self.mcp_servers,
             convert_schemas_to_strict,
             run_context,
-            self,
+            get_public_agent(self),
             failure_error_function=failure_error_function,
             include_server_in_tool_names=include_server_in_tool_names,
             reserved_tool_names=reserved_tool_names,
@@ -271,6 +285,14 @@ class AgentBase(Generic[TContext]):
 
     async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
         """All agent tools, including MCP tools and function tools."""
+        from ._public_agent import get_public_agent
+        from .run_internal.agent_tool_configuration import (
+            register_agent_tool_configuration,
+            snapshot_agent_tools,
+        )
+
+        register_agent_tool_configuration(get_public_agent(self))
+        tools = snapshot_agent_tools(self)
         mcp_tools = await self.get_mcp_tools(run_context)
 
         async def _check_tool_enabled(tool: Tool) -> bool:
@@ -280,15 +302,16 @@ class AgentBase(Generic[TContext]):
             attr = tool.is_enabled
             if isinstance(attr, bool):
                 return attr
-            res = attr(run_context, self)
+            res = attr(run_context, get_public_agent(self))
             if inspect.isawaitable(res):
                 return bool(await res)
             return bool(res)
 
-        results = await gather_with_cancel(*(_check_tool_enabled(t) for t in self.tools))
-        enabled: list[Tool] = [t for t, ok in zip(self.tools, results, strict=False) if ok]
+        results = await gather_with_cancel(*(_check_tool_enabled(t) for t in tools))
+        enabled: list[Tool] = [t for t, ok in zip(tools, results, strict=False) if ok]
         all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
         _validate_codex_tool_name_collisions(all_tools)
+        snapshot_agent_tools(get_public_agent(self))
         return all_tools
 
 
@@ -602,6 +625,7 @@ class Agent(AgentBase, Generic[TContext]):
         parameters: type[Any] | None = None,
         input_builder: StructuredToolInputBuilder | None = None,
         include_input_schema: bool = False,
+        on_stream_max_pending_events: int | None = 1024,
     ) -> FunctionTool:
         """Transform this agent into a tool, callable by other agents.
 
@@ -616,7 +640,9 @@ class Agent(AgentBase, Generic[TContext]):
             tool_description: The description of the tool, which should indicate what it does and
                 when to use it.
             custom_output_extractor: A function that extracts the output from the agent. If not
-                provided, the last message from the agent will be used. Nested run results expose
+                provided, the final output is used. When output guardrails ran, empty final
+                outputs are preserved; otherwise, empty final outputs fall back to the latest
+                nonempty message or tool output from the nested run. Nested run results expose
                 `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
             is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
                 context and agent and returns whether the tool is enabled. Disabled tools are hidden
@@ -625,6 +651,13 @@ class Agent(AgentBase, Generic[TContext]):
                 agent run. The callback receives an `AgentToolStreamEvent` containing the nested
                 agent, the originating tool call (when available), and each stream event. When
                 provided, the nested agent is executed in streaming mode.
+            on_stream_max_pending_events: Maximum number of events waiting for `on_stream`,
+                excluding the event currently being handled. Defaults to 1024. Use a positive
+                integer to change the limit or None to allow an unlimited backlog. If the queue
+                remains full after giving the handler an opportunity to run, the nested run and
+                callback dispatch are cancelled and the tool fails through `failure_error_function`.
+                This limits pending event count, not event sizes or total run memory. Has no effect
+                when `on_stream` is not provided.
             failure_error_function: If provided, generate an error message when the tool (agent) run
                 fails. The message is sent to the LLM. If None, the exception is raised instead.
             needs_approval: Bool or callable to decide if this agent tool should pause for approval.
@@ -632,6 +665,15 @@ class Agent(AgentBase, Generic[TContext]):
             input_builder: Optional function to build the nested agent input from structured data.
             include_input_schema: Whether to include the full JSON schema in structured input.
         """
+
+        if on_stream is not None and not callable(on_stream):
+            raise UserError(
+                "on_stream must be callable or None. Pass run configuration with run_config=... "
+                "instead of as the fifth positional argument."
+            )
+
+        if on_stream_max_pending_events is not None and on_stream_max_pending_events <= 0:
+            raise UserError("on_stream_max_pending_events must be a positive integer or None")
 
         if run_config is not None:
             from .run_config import _coerce_run_config
@@ -902,9 +944,16 @@ class Agent(AgentBase, Generic[TContext]):
                         conversation_id=None if resume_state is not None else conversation_id,
                         session=session,
                     )
-                    # Dispatch callbacks in the background so slow handlers do not block
-                    # event consumption.
-                    event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue()
+                    # Keep callbacks decoupled from event consumption within a bounded backlog.
+                    # Reserve one extra slot for completion, including on failure/cancellation.
+                    event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue(
+                        maxsize=on_stream_max_pending_events + 1
+                        if on_stream_max_pending_events is not None
+                        else 0
+                    )
+                    stream_events = cast(
+                        AsyncGenerator["StreamEvent", None], run_result_streaming.stream_events()
+                    )
 
                     async def _run_handler(payload: AgentToolStreamEvent) -> None:
                         """Execute the user callback while capturing exceptions."""
@@ -942,7 +991,7 @@ class Agent(AgentBase, Generic[TContext]):
 
                         current_agent = run_result_streaming.current_agent
                         try:
-                            async for event in run_result_streaming.stream_events():
+                            async for event in stream_events:
                                 if isinstance(event, AgentUpdatedStreamEvent):
                                     current_agent = event.new_agent
 
@@ -951,11 +1000,45 @@ class Agent(AgentBase, Generic[TContext]):
                                     "agent": current_agent,
                                     "tool_call": context.tool_call,
                                 }
-                                await event_queue.put(payload)
+                                if (
+                                    on_stream_max_pending_events is not None
+                                    and event_queue.qsize() >= on_stream_max_pending_events
+                                ):
+                                    # A burst of ready events must let a ready callback catch up.
+                                    await asyncio.sleep(0)
+                                    if event_queue.qsize() >= on_stream_max_pending_events:
+                                        raise _AgentToolStreamOverflow(
+                                            "Agent tool on_stream backlog exceeded "
+                                            "on_stream_max_pending_events="
+                                            f"{on_stream_max_pending_events}. "
+                                            "Use a faster handler, increase the limit, "
+                                            "or set it to None."
+                                        )
+                                event_queue.put_nowait(payload)
                         finally:
-                            await event_queue.put(None)
+                            event_queue.put_nowait(None)
 
-                    await run_producer_consumer(enqueue_stream_events(), dispatch_stream_events())
+                    try:
+                        await run_producer_consumer(
+                            enqueue_stream_events(),
+                            dispatch_stream_events(),
+                            fail_fast_exceptions=(_AgentToolStreamOverflow,),
+                            # Stop upstream work before awaiting callback cancellation cleanup.
+                            on_failure=lambda: run_result_streaming.cancel(),
+                        )
+                    except BaseException:
+                        # Cancellation can interrupt the producer between iterator advances.
+                        # Explicitly close the iterator after its owning task has stopped.
+                        try:
+                            await stream_events.aclose()
+                        except BaseException as close_error:
+                            # Cleanup cancellation must not replace the primary failure either.
+                            log_model_and_tool_action_error(
+                                logger,
+                                "Error while closing an agent tool stream after failure",
+                                close_error,
+                            )
+                        raise
                     run_result = run_result_streaming
                 else:
                     run_result = await Runner.run(
@@ -996,6 +1079,10 @@ class Agent(AgentBase, Generic[TContext]):
                 return run_result.final_output
 
             from .items import ItemHelpers, MessageOutputItem, ToolCallOutputItem
+
+            # Output guardrails validated the final output, not intermediate run items.
+            if run_result.output_guardrail_results:
+                return run_result.final_output
 
             for item in reversed(run_result.new_items):
                 if isinstance(item, MessageOutputItem):
@@ -1079,5 +1166,5 @@ class Agent(AgentBase, Generic[TContext]):
         return await PromptUtil.to_model_input(
             self.prompt,
             run_context,
-            cast(Agent[TContext], get_public_agent(self)),
+            get_public_agent(self),
         )

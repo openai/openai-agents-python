@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import importlib
+import json
 import sys
 import types as pytypes
 from collections.abc import AsyncIterator
 from typing import Any, Literal, cast
 
+import httpx2
 import pytest
 from openai.types.chat import (
     ChatCompletion,
@@ -16,7 +19,11 @@ from openai.types.chat import (
 )
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_chunk import Choice as ChunkChoice, ChoiceDelta
-from openai.types.completion_usage import CompletionUsage, PromptTokensDetails
+from openai.types.completion_usage import (
+    CompletionTokensDetails,
+    CompletionUsage,
+    PromptTokensDetails,
+)
 from openai.types.responses import (
     Response,
     ResponseCompletedEvent,
@@ -43,6 +50,8 @@ from agents import (
     ModelBehaviorError,
     ModelSettings,
     ModelTracing,
+    RunConfig,
+    Runner,
     Tool,
     TResponseInputItem,
     __version__,
@@ -53,6 +62,8 @@ from agents import (
 from agents.exceptions import UserError
 from agents.models.chatcmpl_helpers import HEADERS_OVERRIDE
 from agents.models.fake_id import FAKE_RESPONSES_ID
+from agents.tracing.processors import BackendSpanExporter
+from tests.testing_processor import fetch_ordered_spans
 
 
 class FakeAnyLLMProvider:
@@ -104,12 +115,39 @@ def _import_any_llm_module(
     fake_any_llm: Any = pytypes.ModuleType("any_llm")
     fake_any_llm.AnyLLM = FakeAnyLLMFactory
 
-    sys.modules.pop("agents.extensions.models.any_llm_model", None)
+    # Importing the submodule fresh replaces both bindings that other code resolves
+    # it through: the ``sys.modules`` entry and the ``any_llm_model`` attribute on the
+    # parent package. Route both through ``monkeypatch`` so teardown restores them
+    # together; otherwise a later ``from agents.extensions.models import any_llm_model``
+    # would still see the stub-backed module while ``sys.modules`` has the original.
+    parent_package = importlib.import_module("agents.extensions.models")
+    monkeypatch.delitem(sys.modules, "agents.extensions.models.any_llm_model", raising=False)
+    monkeypatch.delattr(parent_package, "any_llm_model", raising=False)
     monkeypatch.setitem(sys.modules, "any_llm", fake_any_llm)
 
     module = importlib.import_module("agents.extensions.models.any_llm_model")
     monkeypatch.setattr(module, "AnyLLM", FakeAnyLLMFactory, raising=True)
     return module, create_calls
+
+
+def test_import_any_llm_module_restores_module_bindings_on_teardown() -> None:
+    pytest.importorskip(
+        "any_llm",
+        reason="`any-llm-sdk` is only available when the optional dependency is installed.",
+    )
+    parent_package = importlib.import_module("agents.extensions.models")
+    original = importlib.import_module("agents.extensions.models.any_llm_model")
+
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        module, _ = _import_any_llm_module(
+            monkeypatch, FakeAnyLLMProvider(supports_responses=False)
+        )
+        assert module is not original
+        assert sys.modules["agents.extensions.models.any_llm_model"] is module
+        assert parent_package.any_llm_model is module
+
+    assert sys.modules["agents.extensions.models.any_llm_model"] is original
+    assert parent_package.any_llm_model is original
 
 
 def _chat_completion(text: str) -> ChatCompletion:
@@ -1558,6 +1596,50 @@ def test_any_llm_stream_flattens_reasoning_object_when_reasoning_content_is_empt
     assert normalized.choices[0].delta.reasoning == "Plaintext reasoning"
 
 
+@pytest.mark.allow_call_model_methods
+async def test_any_llm_thinking_is_omitted_from_default_trace_export(monkeypatch) -> None:
+    secret = "PRIVATE_ANY_LLM_THINKING_SENTINEL"
+    completion = _chat_completion("Visible answer")
+    completion.choices[0].message = ChatCompletionMessage.model_validate(
+        {"role": "assistant", "content": "Visible answer", "thinking": secret}
+    )
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=completion)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/test-model", api="chat_completions")
+    result = await Runner.run(
+        Agent(name="Test", model=model),
+        "Question",
+        run_config=RunConfig(trace_include_sensitive_data=True),
+    )
+    generation = next(span for span in fetch_ordered_spans() if span.span_data.type == "generation")
+    original = copy.deepcopy(generation.export())
+    assert original is not None
+    assert original["span_data"]["output"][0]["thinking"] == secret
+    replay = result.to_input_list()
+    assert secret in json.dumps(replay)
+    assert result.final_output == "Visible answer"
+
+    payloads: list[dict[str, Any]] = []
+
+    def post(self, url, **kwargs):
+        payloads.append(copy.deepcopy(kwargs["json"]))
+        return httpx2.Response(200)
+
+    monkeypatch.setattr(httpx2.Client, "post", post)
+    exporter = BackendSpanExporter(api_key="test-key", max_retries=0)
+    try:
+        exporter.export([generation])
+        sent = payloads[-1]["data"][0]["span_data"]
+        assert secret not in json.dumps(sent)
+        assert sent["output"][0]["content"] == "Visible answer"
+        assert sent["usage"]["output_tokens"] == 5
+        assert generation.export() == original
+        assert result.to_input_list() == replay
+    finally:
+        exporter.close()
+        await model.close()
+
+
 def test_any_llm_nonstream_preserves_native_reasoning_content_field(monkeypatch) -> None:
     provider = FakeAnyLLMProvider(supports_responses=False)
     module, _create_calls = _import_any_llm_module(monkeypatch, provider)
@@ -2075,6 +2157,59 @@ class _CloseSignalingStream(_ClosableStream):
         self._close_started.set()
         await self._release.wait()
         self.aclose_completed += 1
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_usage", [False, True], ids=["no-usage", "detailed-usage"])
+@pytest.mark.parametrize("tracing", [ModelTracing.ENABLED, ModelTracing.ENABLED_WITHOUT_DATA])
+async def test_any_llm_chat_stream_preserves_trace_data_at_completed(
+    monkeypatch, with_usage: bool, tracing: ModelTracing
+) -> None:
+    """Exercise real chat stream conversion while the adapter is suspended at its terminal yield."""
+    chunk = _chat_chunk("Hello")
+    if with_usage:
+        chunk.usage = CompletionUsage(
+            completion_tokens=5,
+            prompt_tokens=7,
+            total_tokens=12,
+            prompt_tokens_details=PromptTokensDetails(cached_tokens=2),
+            completion_tokens_details=CompletionTokensDetails(reasoning_tokens=3),
+        )
+    stream = _ClosableStream([chunk])
+    provider = FakeAnyLLMProvider(supports_responses=False, chat_response=stream)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    model = module.AnyLLMModel(model="openrouter/openai/gpt-5.4-mini")
+    spans = _capture_spans(monkeypatch, module, "generation_span")
+
+    with trace(workflow_name="any-llm-chat-terminal-span"):
+        stream_agen = _stream_events(model, tracing)
+        try:
+            async for event in stream_agen:
+                if event.type == "response.completed":
+                    [span] = spans
+                    assert span.span_data.usage == {
+                        "requests": 1,
+                        "input_tokens": 7 if with_usage else 0,
+                        "output_tokens": 5 if with_usage else 0,
+                        "total_tokens": 12 if with_usage else 0,
+                        "input_tokens_details": {
+                            "cached_tokens": 2 if with_usage else 0,
+                            "cache_write_tokens": 0,
+                        },
+                        "output_tokens_details": {"reasoning_tokens": 3 if with_usage else 0},
+                    }
+                    assert span.span_data.output == (
+                        [event.response.model_dump()] if tracing == ModelTracing.ENABLED else None
+                    )
+                    assert (event.response.usage is not None) == with_usage
+                    break
+            else:
+                pytest.fail("The stream did not yield a completed response.")
+        finally:
+            await stream_agen.aclose()
+
+    assert stream.aclose_calls == 1
 
 
 @pytest.mark.allow_call_model_methods

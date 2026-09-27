@@ -9,7 +9,7 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff
+from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff, output_guardrail
 from agents.agent import ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
@@ -38,6 +38,7 @@ from agents.run_internal.run_loop import (
     SingleStepResult,
 )
 from agents.run_state import RunState
+from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.tool import Tool
 from agents.tool_guardrails import (
@@ -66,8 +67,14 @@ class _FailingResumeSession(SimpleListSession):
         self.block_next_add = False
         self.add_started = asyncio.Event()
         self.release_add = asyncio.Event()
+        self.fail_on_output: str | None = None
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        if self.fail_on_output is not None and any(
+            self.fail_on_output in json.dumps(item, default=str) for item in items
+        ):
+            self.fail_on_output = None
+            raise self.error
         failure, self.failure = self.failure, None
         if failure == "before":
             raise self.error
@@ -526,19 +533,44 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape"])
+@pytest.mark.parametrize("invalid", ["old-schema", "batch-shape", "compaction-under-1.17"])
 async def test_pending_session_write_rejects_invalid_serialized_checkpoint(invalid: str) -> None:
     agent, _, session, state, _ = await _approved_session_state(False)
     session.failure = "before"
     with pytest.raises(RuntimeError):
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
+    if invalid in {"old-schema", "compaction-under-1.17"}:
+        for entry in payload["context"].pop("function_tool_approvals", []):
+            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     if invalid == "old-schema":
         payload["$schemaVersion"] = "1.16"
+    elif invalid == "compaction-under-1.17":
+        payload["$schemaVersion"] = "1.17"
     else:
         payload["pending_session_write"]["items"] = "not an item batch"
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_legacy_pending_session_write_still_resumes_without_compaction_metadata() -> None:
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    payload["$schemaVersion"] = "1.17"
+    for entry in payload["context"].pop("function_tool_approvals", []):
+        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+    for key in ("response_id", "store", "has_local_tool_outputs"):
+        payload["pending_session_write"].pop(key)
+    restored = await RunState.from_json(agent, payload)
+    result = await _run_session_resume(agent, restored, session, False)
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert len(model.calls) == 2
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
 @pytest.mark.asyncio
@@ -945,6 +977,149 @@ async def test_resumed_interruption_passes_server_managed_conversation_flag(
     assert server_managed_values == [True]
 
 
+def _sent_tool_outputs(model: ScriptedModel, *, first_call_index: int) -> list[tuple[str, str]]:
+    """Collect the tool outputs the model received, from `first_call_index` onward."""
+    outputs: list[tuple[str, str]] = []
+    for call in model.calls[first_call_index:]:
+        for item in cast(list[dict[str, Any]], call.input):
+            if item.get("type") == "function_call_output":
+                outputs.append((str(item.get("call_id")), str(item.get("output"))))
+    return outputs
+
+
+async def _run_server_managed(
+    agent: Agent[Any],
+    agent_input: Any,
+    *,
+    run_config: RunConfig,
+    use_conversation_id: bool,
+    streaming: bool,
+) -> Any:
+    """Run the agent under one of the server-managed continuation modes."""
+    kwargs: dict[str, Any] = (
+        {"conversation_id": "conv-resume"}
+        if use_conversation_id
+        else {"auto_previous_response_id": True}
+    )
+    if streaming:
+        streamed = Runner.run_streamed(agent, agent_input, run_config=run_config, **kwargs)
+        async for _ in streamed.stream_events():
+            pass
+        return streamed
+    return await Runner.run(agent, agent_input, run_config=run_config, **kwargs)
+
+
+@pytest.mark.parametrize("streaming", [False, True], ids=["non_streamed", "streamed"])
+@pytest.mark.parametrize("serialize_state", [False, True], ids=["live_state", "serialized_state"])
+@pytest.mark.parametrize(
+    "use_conversation_id", [False, True], ids=["auto_previous_response_id", "conversation_id"]
+)
+@pytest.mark.asyncio
+async def test_resumed_server_managed_run_sends_tool_not_found_output(
+    streaming: bool,
+    serialize_state: bool,
+    use_conversation_id: bool,
+) -> None:
+    """A resumed server-managed run must send the output built for a missing tool.
+
+    The interrupted turn answers the unknown tool locally while another call waits for
+    approval. The server already owns both calls, so resuming has to deliver both outputs.
+    """
+
+    @function_tool(name_override="needs_ok", needs_approval=True)
+    async def needs_ok(text: str) -> str:
+        return text
+
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model, tools=[needs_ok])
+    model.extend(
+        [
+            [
+                get_function_tool_call(
+                    "needs_ok", json.dumps({"text": "one"}), call_id="call-approval"
+                ),
+                get_function_tool_call("missing_tool", json.dumps({}), call_id="call-missing"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    run_config = RunConfig(tool_not_found_behavior="return_error_to_model")
+
+    async def run_once(agent_input: Any) -> Any:
+        return await _run_server_managed(
+            agent,
+            agent_input,
+            run_config=run_config,
+            use_conversation_id=use_conversation_id,
+            streaming=streaming,
+        )
+
+    first = await run_once("Use needs_ok and missing_tool")
+    state = first.to_state()
+    if serialize_state:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    interruptions = state.get_interruptions()
+    assert [item.raw_item.call_id for item in interruptions] == ["call-approval"]
+    state.approve(interruptions[0])
+
+    resumed = await run_once(state)
+
+    assert resumed.final_output == "done"
+    delivered = _sent_tool_outputs(model, first_call_index=1)
+    assert sorted(call_id for call_id, _ in delivered) == ["call-approval", "call-missing"]
+    assert "missing_tool" in dict(delivered)["call-missing"]
+
+
+@pytest.mark.asyncio
+async def test_resumed_server_managed_run_sends_each_tool_output_once() -> None:
+    """Staged approvals must deliver every output exactly once to a server-managed conversation.
+
+    Approving one of two gated calls resumes and interrupts again without a model request, so
+    the same model response stays current across both resumes.
+    """
+
+    @function_tool(name_override="needs_ok", needs_approval=True)
+    async def needs_ok(text: str) -> str:
+        return f"ok:{text}"
+
+    model = ScriptedModel()
+    agent = Agent(name="test", model=model, tools=[needs_ok])
+    model.extend(
+        [
+            [
+                get_function_tool_call("needs_ok", json.dumps({"text": "a"}), call_id="call-a"),
+                get_function_tool_call("needs_ok", json.dumps({"text": "b"}), call_id="call-b"),
+                get_function_tool_call("missing_tool", json.dumps({}), call_id="call-missing"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+    run_config = RunConfig(tool_not_found_behavior="return_error_to_model")
+
+    async def run_once(agent_input: Any) -> Any:
+        return await _run_server_managed(
+            agent,
+            agent_input,
+            run_config=run_config,
+            use_conversation_id=False,
+            streaming=False,
+        )
+
+    result = await run_once("Use needs_ok twice and missing_tool")
+    for expected_model_calls in (1, 2):
+        state = await RunState.from_json(agent, json.loads(json.dumps(result.to_state().to_json())))
+        interruptions = state.get_interruptions()
+        assert interruptions
+        state.approve(interruptions[0])
+        result = await run_once(state)
+        # Approving only the first gated call resumes without asking the model again.
+        assert len(model.calls) == expected_model_calls
+
+    assert result.final_output == "done"
+    delivered = _sent_tool_outputs(model, first_call_index=1)
+    assert sorted(call_id for call_id, _ in delivered) == ["call-a", "call-b", "call-missing"]
+
+
 @pytest.mark.asyncio
 async def test_resumed_approval_does_not_duplicate_session_items() -> None:
     async def test_tool() -> str:
@@ -990,12 +1165,17 @@ async def test_resumed_approval_does_not_duplicate_session_items() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
+    "decision",
+    ["approve", "reject", "always_approve", "always_reject", "legacy_approve", "legacy_reject"],
+)
+@pytest.mark.parametrize(
     ("schema_version", "expect_execution"),
     [("1.6", True), ("1.7", False)],
 )
 async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_approval_agents(
     schema_version: str,
     expect_execution: bool,
+    decision: str,
 ) -> None:
     calls: list[str] = []
 
@@ -1058,13 +1238,29 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
     interruption_agent_data = cast(dict[str, str], interruption_data["agent"])
     assert interruption_agent_data["identity"] == current_agent_data["identity"]
     interruption_agent_data.pop("identity")
+    if schema_version != "1.18":
+        for entry in json_data["context"].pop("function_tool_approvals", []):
+            json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     json_data["$schemaVersion"] = schema_version
+    if decision.startswith("legacy_"):
+        json_data["context"]["approvals"]["needs_ok"] = {
+            "approved": decision == "legacy_approve",
+            "rejected": decision == "legacy_reject",
+            "sticky_rejection_message": "Old unowned rejection",
+        }
 
     restored = await RunState.from_json(root, json_data)
     assert restored._schema_version == schema_version
     assert restored._current_agent is resumed_duplicate
     restored_approval = restored.get_interruptions()[0]
-    restored.approve(restored_approval)
+    if decision in ("approve", "always_approve"):
+        restored.approve(restored_approval, always_approve=decision == "always_approve")
+    elif decision in ("reject", "always_reject"):
+        restored.reject(
+            restored_approval,
+            always_reject=decision == "always_reject",
+            rejection_message="Legacy exact rejection",
+        )
     assert restored._context is not None
     assert restored._last_processed_response is not None
 
@@ -1080,11 +1276,18 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
         run_state=restored,
     )
 
-    if expect_execution:
+    if expect_execution and decision in ("approve", "always_approve"):
         assert isinstance(result.next_step, NextStepRunAgain)
         assert calls == ["one"]
         assert any(
             isinstance(item, ToolCallOutputItem) and item.output == "one"
+            for item in result.new_step_items
+        )
+    elif expect_execution and decision in ("reject", "always_reject"):
+        assert isinstance(result.next_step, NextStepRunAgain)
+        assert calls == []
+        assert any(
+            isinstance(item, ToolCallOutputItem) and item.output == "Legacy exact rejection"
             for item in result.new_step_items
         )
     else:
@@ -1093,6 +1296,19 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
             isinstance(item, ToolCallOutputItem) and item.output == "one"
             for item in result.new_step_items
         )
+
+    if schema_version == "1.6" and decision.startswith("legacy_"):
+        assert isinstance(result.next_step, NextStepInterruption)
+
+    future = ToolApprovalItem(
+        agent=resumed_duplicate,
+        raw_item=get_function_tool_call("needs_ok", json.dumps({"text": "two"}), call_id="future"),
+    )
+    # Reconciliation honors the current decision without moving future scope.
+    assert (
+        restored._context.get_approval_status("needs_ok", "future", current_invocation=future)
+        is None
+    )
 
 
 async def _approved_handoff_session_state(streamed: bool):
@@ -1302,18 +1518,7 @@ async def test_fresh_streamed_handoff_preserves_agent_after_session_append_failu
 async def test_fresh_streamed_handoff_publishes_agent_update_before_session_append_failure() -> (
     None
 ):
-    """The generic-loop handoff branch must queue ``AgentUpdatedStreamEvent`` for the new agent
-    before the fallible session append, so ``stream_events()`` consumers observe the transition
-    even when the append later raises. Mirrors the already-merged ordering fix for the
-    ``is_resumed_state``-specific branch (lines ~1407-1437), which is out of scope here.
-
-    Uses a session whose failing append performs a genuine ``await`` before raising: a purely
-    synchronous raise (as in ``_FailSecondAddItemsSession``) never yields control back to this
-    consumer before the run-loop task finishes, so it cannot prove event delivery either way
-    (a separate, pre-existing gate: ``stream_events()`` only drains an already-queued event past
-    a terminal error when that error was marked via ``_mark_error_to_drain_stream_events()``,
-    which session-append failures never are).
-    """
+    """A yielding Session failure still delivers the completed handoff's agent update."""
     model = ScriptedModel(
         [
             [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
@@ -1383,162 +1588,67 @@ async def test_fresh_streamed_handoff_drains_agent_update_event_for_slow_consume
 
 
 @pytest.mark.asyncio
-async def test_fresh_streamed_handoff_awaits_parallel_input_guardrail_before_transition() -> None:
-    """The generic-loop handoff branch must resolve an in-flight parallel input guardrail
-    before committing the handoff transition (current_agent, run_state, published events),
-    per the Guardrail Ordering contract in .agents/references/runner-lifecycle.md. Otherwise a
-    handoff on turn 1 can commit the transition while a still-running parallel input guardrail
-    that later raises has not yet been awaited.
-
-    Only one scripted turn is provided (the handoff itself), and the consumer adds a small
-    per-event delay: an in-process run with an instantly-draining consumer and a second
-    scripted turn can otherwise race straight through to completion before the guardrail's
-    sleep elapses, defeating the repro regardless of the fix. This mirrors an ordinary
-    consumer that does a bit of per-event work, not a contrived instant reader.
-    """
-    guardrail_error = RuntimeError("guardrail backend exploded")
+@pytest.mark.parametrize("raises_error", [False, True], ids=["tripwire", "guardrail-error"])
+@pytest.mark.parametrize("retry_streamed", [False, True])
+async def test_fresh_streamed_handoff_failed_guardrail_state_cannot_resume(
+    raises_error: bool,
+    retry_streamed: bool,
+) -> None:
+    handoff_observed = asyncio.Event()
+    guardrail_error = RuntimeError("guardrail backend failed")
 
     @input_guardrail(run_in_parallel=True)
-    async def slow_failing_guardrail(
+    async def pending_guardrail(
         ctx: RunContextWrapper[Any],
         agent: Agent[Any],
         input: str | list[TResponseInputItem],
     ) -> GuardrailFunctionOutput:
-        await asyncio.sleep(0.3)
-        raise guardrail_error
-
-    model = ScriptedModel(
-        [
-            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
-        ]
-    )
-    delegate = Agent(name="delegate", model=model)
-    triage = Agent(
-        name="triage",
-        model=model,
-        handoffs=[delegate],
-        input_guardrails=[slow_failing_guardrail],
-    )
-
-    streamed_result = Runner.run_streamed(
-        triage, "hello", run_config=RunConfig(tracing_disabled=True)
-    )
-    caught: RuntimeError | None = None
-    try:
-        async for _ in streamed_result.stream_events():
-            await asyncio.sleep(0.05)
-    except RuntimeError as error:
-        caught = error
-    assert caught is guardrail_error
-    # The handoff transition must not have been committed: the guardrail task was still
-    # in flight (sleeping) when the model returned the handoff, and it raised a real error
-    # rather than a tripwire, so no part of the observable state should have moved past triage.
-    assert streamed_result.current_agent.name == "triage"
-    state = streamed_result.to_state()
-    assert state._current_agent is not None
-    assert state._current_agent.name == "triage"
-
-
-@pytest.mark.asyncio
-async def test_fresh_streamed_handoff_stops_transition_on_real_tripwire() -> None:
-    """Sibling to test_fresh_streamed_handoff_awaits_parallel_input_guardrail_before_transition:
-    that test covers a parallel guardrail raising a genuine exception. This one covers a
-    guardrail that settles normally with tripwire_triggered=True (no exception). The generic-loop
-    handoff branch awaits the in-flight guardrail before committing the transition, but must also
-    inspect its boolean result: a normal tripwire result must raise
-    InputGuardrailTripwireTriggered and stop the transition, not silently publish the delegate
-    and a resumable NextStepRunAgain.
-    """
-
-    @input_guardrail(run_in_parallel=True)
-    async def slow_tripping_guardrail(
-        ctx: RunContextWrapper[Any],
-        agent: Agent[Any],
-        input: str | list[TResponseInputItem],
-    ) -> GuardrailFunctionOutput:
-        await asyncio.sleep(0.3)
+        await asyncio.wait_for(handoff_observed.wait(), timeout=5)
+        if raises_error:
+            raise guardrail_error
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
 
     model = ScriptedModel(
-        [
-            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
-        ]
+        [[get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")]]
     )
     delegate = Agent(name="delegate", model=model)
     triage = Agent(
-        name="triage",
-        model=model,
-        handoffs=[delegate],
-        input_guardrails=[slow_tripping_guardrail],
+        name="triage", model=model, handoffs=[delegate], input_guardrails=[pending_guardrail]
     )
-
+    session = SimpleListSession()
     streamed_result = Runner.run_streamed(
-        triage, "hello", run_config=RunConfig(tracing_disabled=True)
+        triage, "hello", session=session, run_config=RunConfig(tracing_disabled=True)
     )
-    with pytest.raises(InputGuardrailTripwireTriggered):
-        async for _ in streamed_result.stream_events():
-            await asyncio.sleep(0.05)
-    # The handoff transition must not have been committed: a real tripwire result must stop
-    # the transition the same way a raised guardrail exception does.
-    assert streamed_result.current_agent.name == "triage"
+    events: list[Any] = []
+    expected_error = RuntimeError if raises_error else InputGuardrailTripwireTriggered
+    with pytest.raises(expected_error):
+        async for event in streamed_result.stream_events():
+            events.append(event)
+            if getattr(event, "name", None) == "handoff_occured":
+                handoff_observed.set()
+                await asyncio.sleep(0)
+    assert handoff_observed.is_set()
+    assert streamed_result.current_agent is triage
+    assert not any(
+        isinstance(event, AgentUpdatedStreamEvent) and event.new_agent is delegate
+        for event in events
+    )
     state = streamed_result.to_state()
-    assert state._current_agent is not None
-    assert state._current_agent.name == "triage"
+    assert state.to_json()["terminal_unrecoverable"] is True
+    restored = await RunState.from_json(triage, state.to_json())
+    assert restored._current_agent is triage
+    for checkpoint in (state, restored):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(triage, checkpoint, session, retry_streamed)
+    assert len(model.calls) == 1
+    assert _call_pair(await session.get_items(), "handoff-1") == []
 
 
 @pytest.mark.asyncio
-async def test_fresh_streamed_handoff_tripwire_state_has_no_speculative_items() -> None:
-    """Sibling to test_fresh_streamed_handoff_stops_transition_on_real_tripwire: that test only
-    checks state._current_agent, not the item history to_state() actually serializes. Not
-    advancing current_agent doesn't undo the turn's bookkeeping: the handoff's function-call and
-    function-call-output items, its model response, and its raw response are all accumulated
-    into streamed_result BEFORE the guardrail's boolean result is even inspected. Left in place,
-    to_state() would still hand back a RunState carrying a completed handoff built on
-    guardrail-rejected input -- and Runner.run() always treats a RunState input as an
-    already-resumed run (a plain isinstance check), so resuming it would skip triage's own input
-    guardrails entirely and process that rejected input under delegate. The state returned by
-    to_state() after a tripwire must therefore look exactly like turn 0 never ran.
-    """
-
-    @input_guardrail(run_in_parallel=True)
-    async def slow_tripping_guardrail(
-        ctx: RunContextWrapper[Any],
-        agent: Agent[Any],
-        input: str | list[TResponseInputItem],
-    ) -> GuardrailFunctionOutput:
-        await asyncio.sleep(0.3)
-        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
-
-    model = ScriptedModel(
-        [
-            [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff-1")],
-        ]
-    )
-    delegate = Agent(name="delegate", model=model)
-    triage = Agent(
-        name="triage",
-        model=model,
-        handoffs=[delegate],
-        input_guardrails=[slow_tripping_guardrail],
-    )
-
-    streamed_result = Runner.run_streamed(
-        triage, "hello", run_config=RunConfig(tracing_disabled=True)
-    )
-    with pytest.raises(InputGuardrailTripwireTriggered):
-        async for _ in streamed_result.stream_events():
-            await asyncio.sleep(0.05)
-
-    state = streamed_result.to_state()
-    # Turn 0's handoff call/output must not have leaked into the resumable state: a fresh
-    # run's pre-turn snapshot is empty, so surviving items here would BE the speculative pair.
-    assert state._generated_items == []
-    assert state._session_items == []
-    assert state._model_responses == []
-
-
-@pytest.mark.asyncio
-async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume() -> None:
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume(
+    round_trip: bool,
+) -> None:
     """A checkpointed handoff batch that fails to append and later settles via a separate,
     standalone resume_pending_session_write() call (the generic resume-startup path in
     run.py/run_loop.py, not the original save_result_to_session() call) must still apply the
@@ -1600,6 +1710,11 @@ async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume()
     assert state._pending_session_write is not None
     assert state._pending_session_write.get("response_id") == "resp-handoff"
     assert state._pending_session_write.get("has_local_tool_outputs") is True
+
+    if round_trip:
+        payload = state.to_json()
+        assert payload["$schemaVersion"] == "1.18"
+        state = await RunState.from_json(triage, payload)
 
     result = await _run_session_resume(triage, state, session, False)
     assert result.final_output == "done"
@@ -1695,3 +1810,272 @@ async def test_fresh_streamed_handoff_retains_checkpoint_when_post_write_compact
         if isinstance(item, dict) and item.get("call_id") == "handoff-1"
     ]
     assert handoff_pair == ["function_call", "function_call_output"]
+
+
+class _TerminalLifecycleHooks(RunHooks[Any]):
+    """Count the agent lifecycle hooks an application can attach its own effects to."""
+
+    def __init__(self) -> None:
+        self.starts = 0
+        self.ends: list[str] = []
+
+    async def on_agent_start(self, context: Any, agent: Agent[Any]) -> None:
+        self.starts += 1
+
+    async def on_agent_end(self, context: Any, agent: Agent[Any], output: Any) -> None:
+        self.ends.append(str(output))
+
+
+async def _terminal_output_session_state(
+    streamed: bool,
+    session: Session | None = None,
+    hooks: RunHooks[Any] | None = None,
+):
+    """Pause on an approval whose tool output becomes the terminal agent output."""
+    effects: list[int] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        effects.append(amount)
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("retry-final")],
+        ]
+    )
+    agent = Agent(
+        name="payment",
+        model=model,
+        tools=[charge],
+        tool_use_behavior="stop_on_first_tool",
+    )
+    session = session if session is not None else _FailingResumeSession()
+    paused = await _run_session_resume(agent, "charge 7", session, streamed, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    return agent, model, session, state, effects
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed", [(False, False), (False, True), (True, False), (True, True)]
+)
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["before", "after"], ids=["atomic-failure", "lost-ack"])
+async def test_terminal_session_append_failure_rejects_every_later_resume(
+    failing_streamed: bool, retry_streamed: bool, round_trip: bool, failure: str
+) -> None:
+    """An accepted terminal output whose append failed is not resumable, and never replayed."""
+    hooks = _TerminalLifecycleHooks()
+    agent, model, session, state, effects = await _terminal_output_session_state(
+        failing_streamed, hooks=hooks
+    )
+    session.failure = failure
+    with pytest.raises(RuntimeError) as error:
+        await _run_session_resume(agent, state, session, failing_streamed, hooks=hooks)
+    assert error.value is session.error
+
+    # The output, its guardrails, and its terminal hooks all completed exactly once.
+    assert effects == [7]
+    assert len(model.calls) == 1
+    assert hooks.ends == ["receipt-7"]
+    starts_after_failure = hooks.starts
+    assert state.to_json()["terminal_unrecoverable"] is True
+
+    if round_trip:
+        state = await RunState.from_json(agent, state.to_json())
+
+    # Every later resume fails closed, including a second one.
+    for _ in range(2):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(agent, state, session, retry_streamed, hooks=hooks)
+        assert len(model.calls) == 1
+        assert effects == [7]
+        assert hooks.starts == starts_after_failure
+        assert hooks.ends == ["receipt-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_unrecoverable_terminal_state_rejects_before_any_resumed_work(
+    streamed: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rejection precedes Session reconciliation and sandbox preparation."""
+    agent, model, session, state, effects = await _terminal_output_session_state(streamed)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, streamed)
+
+    async def _fail_get_items(*args: Any, **kwargs: Any) -> list[TResponseInputItem]:
+        raise AssertionError("Session reconciliation must not run for a rejected terminal state")
+
+    async def _fail_prepare_agent(*args: Any, **kwargs: Any):
+        raise AssertionError("sandbox preparation must not run for a rejected terminal state")
+
+    monkeypatch.setattr(type(session), "get_items", _fail_get_items)
+    monkeypatch.setattr(SandboxRuntime, "prepare_agent", _fail_prepare_agent)
+
+    restored = await RunState.from_json(agent, state.to_json())
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await _run_session_resume(agent, restored, session, not streamed)
+    assert len(model.calls) == 1
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_terminal_marker_is_cleared_once_the_turn_is_persisted(streamed: bool) -> None:
+    """A terminal turn that persists cleanly leaves a normal, unmarked result."""
+    agent, model, session, state, effects = await _terminal_output_session_state(streamed)
+    result = await _run_session_resume(agent, state, session, streamed)
+
+    assert result.final_output == "receipt-7"
+    assert effects == [7]
+    assert "terminal_unrecoverable" not in result.to_state().to_json()
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_marker_rejects_an_older_schema_label() -> None:
+    """The marker is only honored on the schema boundary that introduced it."""
+    agent, _, session, state, _ = await _terminal_output_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await _run_session_resume(agent, state, session, False)
+
+    payload = state.to_json()
+    for entry in payload["context"].pop("function_tool_approvals", []):
+        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+    payload["$schemaVersion"] = "1.16"
+    with pytest.raises(UserError, match="terminal marker is invalid"):
+        await RunState.from_json(agent, payload)
+
+
+@pytest.mark.asyncio
+async def test_failed_stream_result_checkpoint_keeps_the_terminal_marker() -> None:
+    """A checkpoint taken from a failed streamed run stays closed to resumes.
+
+    A streamed result exists before its terminal append does, so `to_state()` is reachable on the
+    failed attempt. If that snapshot dropped the marker it would look like an ordinary resumable
+    state and bypass the rejection entirely.
+    """
+    agent, model, session, state, effects = await _terminal_output_session_state(True)
+    session.failure = "before"
+    streamed = Runner.run_streamed(
+        agent, state, session=session, run_config=RunConfig(tracing_disabled=True)
+    )
+    with pytest.raises(RuntimeError, match="session append failed"):
+        async for _ in streamed.stream_events():
+            pass
+
+    checkpoint = streamed.to_state()
+    assert checkpoint.to_json()["terminal_unrecoverable"] is True
+
+    restored = await RunState.from_json(agent, checkpoint.to_json())
+    for candidate in (checkpoint, restored):
+        with pytest.raises(UserError, match="cannot be resumed"):
+            await _run_session_resume(agent, candidate, session, False)
+    assert len(model.calls) == 1
+    assert effects == [7]
+
+
+@pytest.mark.asyncio
+async def test_max_turns_handler_output_is_marked_before_it_is_persisted() -> None:
+    """The max-turns fallback is a final output too, so its failed append closes the state."""
+    handler_calls: list[str] = []
+    hooks = _TerminalLifecycleHooks()
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")],
+            [get_text_message("unused")],
+        ]
+    )
+    agent = Agent(name="payment", model=model, tools=[charge])
+    session = _FailingResumeSession()
+    config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(
+        agent, "charge 7", session=session, run_config=config, max_turns=1, hooks=hooks
+    )
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    def _handler(_data: Any) -> str:
+        handler_calls.append("handled")
+        return "max-turns-output"
+
+    session.fail_on_output = "max-turns-output"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=config,
+            hooks=hooks,
+            error_handlers={"max_turns": _handler},
+        )
+
+    # The handler and its end hook each ran exactly once before the append failed.
+    assert handler_calls == ["handled"]
+    assert hooks.ends == ["max-turns-output"]
+    assert state.to_json()["terminal_unrecoverable"] is True
+
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await Runner.run(
+            agent,
+            state,
+            session=session,
+            run_config=config,
+            hooks=hooks,
+            error_handlers={"max_turns": _handler},
+        )
+    assert handler_calls == ["handled"]
+    assert hooks.ends == ["max-turns-output"]
+
+
+@pytest.mark.asyncio
+async def test_max_turns_guardrail_failure_leaves_the_state_retryable() -> None:
+    """A handler output that never passed its guardrails must not close the state.
+
+    `finalize_max_turns_handler_output()` drives the same save callback from its guardrail-error
+    path. Marking there would reject every later resume for an output the caller never received,
+    which is a worse outcome than the replay the marker exists to prevent.
+    """
+    guardrail_calls: list[str] = []
+
+    @tool(needs_approval=True)
+    async def charge(amount: int) -> str:
+        return "receipt-7"
+
+    @output_guardrail
+    async def exploding(context: Any, agent: Agent[Any], output: Any) -> GuardrailFunctionOutput:
+        guardrail_calls.append(str(output))
+        raise RuntimeError("guardrail exploded")
+
+    model = ScriptedModel([[get_function_tool_call("charge", '{"amount":7}', call_id="charge-1")]])
+    agent = Agent(name="payment", model=model, tools=[charge], output_guardrails=[exploding])
+    session = _FailingResumeSession()
+    config = RunConfig(tracing_disabled=True)
+
+    paused = await Runner.run(agent, "charge 7", session=session, run_config=config, max_turns=1)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    handlers: dict[str, Any] = {"max_turns": lambda _data: "max-turns-output"}
+    session.fail_on_output = "max-turns-output"
+    with pytest.raises(RuntimeError, match="session append failed"):
+        await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)
+
+    assert guardrail_calls == ["max-turns-output"]
+    assert "terminal_unrecoverable" not in state.to_json()
+
+    # The retry reports the real guardrail failure rather than a fail-closed rejection.
+    with pytest.raises(RuntimeError, match="guardrail exploded"):
+        await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)

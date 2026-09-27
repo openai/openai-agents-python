@@ -710,7 +710,7 @@ async def test_default_function_tool_error_trace_respects_sensitive_data_setting
     assert isinstance(result.next_step, NextStepRunAgain)
     assert_item_is_function_tool_call_output(
         result.generated_items[1],
-        "An error occurred while running the tool. Please try again. Error: secret-token-123",
+        "An error occurred while running the tool. Please try again.",
     )
 
     function_spans = _function_spans()
@@ -721,6 +721,107 @@ async def test_default_function_tool_error_trace_respects_sensitive_data_setting
     assert error["data"]["tool_name"] == "error_tool"
     assert error["data"]["error"] == "Tool execution failed. Error details are redacted."
     assert "secret-token-123" not in str(error)
+
+
+def _make_approval_function_tool() -> FunctionTool:
+    async def _approval_tool() -> str:
+        return "ok"
+
+    return function_tool(_approval_tool, name_override="approval_tool", needs_approval=True)
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_function_span_output_excludes_internal_result_object():
+    agent = Agent(
+        name="test",
+        instructions="system-prompt-abc",
+        tools=[_make_approval_function_tool()],
+    )
+    response = ModelResponse(
+        output=[get_function_tool_call("approval_tool", "{}", call_id="1")],
+        usage=Usage(),
+        response_id=None,
+    )
+
+    with trace("test"):
+        await get_execute_result(
+            agent,
+            response,
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    output = function_spans[0]["span_data"]["output"]
+    assert output is None
+    assert "system-prompt-abc" not in str(function_spans[0])
+
+
+@pytest.mark.asyncio
+async def test_rejected_tool_function_span_output_respects_sensitive_data_setting():
+    agent = Agent(name="test", tools=[_make_approval_function_tool()])
+    tool_call = get_function_tool_call("approval_tool", "{}", call_id="1")
+    response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(None)
+    reject_tool_call(
+        context_wrapper,
+        agent,
+        tool_call,
+        tool_name="approval_tool",
+        rejection_message="secret-denial-456",
+    )
+
+    with trace("test"):
+        await get_execute_result(
+            agent,
+            response,
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(trace_include_sensitive_data=False),
+        )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    exported = function_spans[0]
+    assert exported["span_data"]["output"] is None
+    error = exported["error"]
+    assert error["message"] == "Tool execution rejected"
+    assert error["data"]["tool_name"] == "approval_tool"
+    assert error["data"]["error"] == "Tool execution for 1 was manually rejected by user."
+    assert "secret-denial-456" not in json.dumps(exported, default=str)
+
+
+@pytest.mark.asyncio
+async def test_rejected_tool_function_span_keeps_rejection_message_when_sensitive_data_included():
+    agent = Agent(name="test", tools=[_make_approval_function_tool()])
+    tool_call = get_function_tool_call("approval_tool", "{}", call_id="1")
+    response = ModelResponse(output=[tool_call], usage=Usage(), response_id=None)
+
+    context_wrapper: RunContextWrapper[Any] = RunContextWrapper(None)
+    reject_tool_call(
+        context_wrapper,
+        agent,
+        tool_call,
+        tool_name="approval_tool",
+        rejection_message="denied-by-policy",
+    )
+
+    with trace("test"):
+        await get_execute_result(
+            agent,
+            response,
+            context_wrapper=context_wrapper,
+            run_config=RunConfig(trace_include_sensitive_data=True),
+        )
+
+    function_spans = _function_spans()
+
+    assert len(function_spans) == 1
+    exported = function_spans[0]
+    assert exported["span_data"]["output"] == "denied-by-policy"
+    assert exported["error"]["message"] == "denied-by-policy"
 
 
 @pytest.mark.asyncio
@@ -920,7 +1021,7 @@ async def test_multiple_tool_calls_use_default_failure_error_function_for_copied
     assert_item_is_function_tool_call_output(result.generated_items[2], "ok")
     assert_item_is_function_tool_call_output(
         result.generated_items[3],
-        "An error occurred while running the tool. Please try again. Error: tool-cancelled",
+        "An error occurred while running the tool. Please try again.",
     )
 
 
@@ -957,7 +1058,7 @@ async def test_multiple_tool_calls_use_default_failure_error_function_for_manual
     assert_item_is_function_tool_call_output(result.generated_items[2], "ok")
     assert_item_is_function_tool_call_output(
         result.generated_items[3],
-        "An error occurred while running the tool. Please try again. Error: manual-tool-cancelled",
+        "An error occurred while running the tool. Please try again.",
     )
 
 
@@ -980,7 +1081,7 @@ async def test_single_tool_call_uses_default_failure_error_function_for_cancelle
     assert isinstance(result.next_step, NextStepRunAgain)
     assert_item_is_function_tool_call_output(
         result.generated_items[1],
-        "An error occurred while running the tool. Please try again. Error: tool-cancelled",
+        "An error occurred while running the tool. Please try again.",
     )
 
 
@@ -1008,7 +1109,7 @@ async def test_cancelled_function_tool_error_trace_respects_sensitive_data_setti
     assert isinstance(result.next_step, NextStepRunAgain)
     assert_item_is_function_tool_call_output(
         result.generated_items[1],
-        "An error occurred while running the tool. Please try again. Error: secret-token-123",
+        "An error occurred while running the tool. Please try again.",
     )
 
     function_spans = _function_spans()
@@ -1182,7 +1283,7 @@ async def test_mixed_tool_calls_preserve_shell_output_when_function_tool_cancell
     assert isinstance(result.next_step, NextStepRunAgain)
     assert_item_is_function_tool_call_output(
         result.generated_items[2],
-        "An error occurred while running the tool. Please try again. Error: tool-cancelled",
+        "An error occurred while running the tool. Please try again.",
     )
     shell_output = cast(ToolCallOutputItem, result.generated_items[3])
     assert shell_output.output == "shell ok"
@@ -2996,7 +3097,7 @@ async def test_input_guardrail_runs_on_invalid_json(monkeypatch: pytest.MonkeyPa
     output_item = next(
         item for item in result.generated_items if isinstance(item, ToolCallOutputItem)
     )
-    assert "An error occurred while parsing tool arguments" in str(output_item.output)
+    assert output_item.output == "An error occurred while running the tool. Please try again."
 
 
 @pytest.mark.asyncio

@@ -388,6 +388,7 @@ async with MCPServerManager(servers) as manager:
 Key behaviors:
 
 - `active_servers` includes only successfully connected servers when `drop_failed_servers=True` (the default).
+- If the input iterable repeats the same server object, the manager owns that server once: `all_servers` and `active_servers` contain one entry, and connection and cleanup run once for that server.
 - Failures are tracked in `failed_servers` and `errors`.
 - Set `strict=True` to raise on the first connection failure.
 - Call `reconnect(failed_only=True)` to retry failed servers, or `reconnect(failed_only=False)` to restart all servers.
@@ -452,6 +453,39 @@ async with MCPServerStdio(
 
 The filter context exposes the active `run_context`, the `agent` requesting the tools, and the `server_name`.
 
+## Tool guardrails
+
+Local MCP server classes accept `tool_input_guardrails` and `tool_output_guardrails`. The SDK attaches these server-wide guardrails to every MCP tool that remains after filtering. Input guardrails can prevent the MCP server call and supply replacement content, while output guardrails inspect the converted MCP result before the SDK sends that result back to the model. These guardrails use the same function-tool execution pipeline, approval ordering, result tracking, and tripwire exceptions described in [Tool guardrails](guardrails.md#tool-guardrails).
+
+```python
+import json
+
+from agents import ToolGuardrailFunctionOutput
+from agents.decorators import tool_input_guardrail
+from agents.mcp import MCPServerStdio
+
+
+@tool_input_guardrail
+def block_secret_arguments(data):
+    arguments = json.loads(data.context.tool_arguments or "{}")
+    if "secret" in arguments:
+        return ToolGuardrailFunctionOutput.reject_content(
+            "Remove secrets before calling this MCP tool."
+        )
+    return ToolGuardrailFunctionOutput.allow()
+
+
+filesystem_server = MCPServerStdio(
+    params={
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+    },
+    tool_input_guardrails=[block_secret_arguments],
+)
+```
+
+This configuration applies only to tools exposed by local MCP server objects such as `MCPServerStdio`, `MCPServerSse`, and `MCPServerStreamableHttp`. It does not add client-side tool guardrails to [`HostedMCPTool`][agents.tool.HostedMCPTool], which the Responses API executes as a hosted tool.
+
 ## Prompts
 
 MCP servers can also provide prompts that dynamically generate agent instructions. Servers that support prompts expose two
@@ -485,6 +519,8 @@ Resources remain explicitly paginated. Pass the `nextCursor` from `list_resource
 ## Caching
 
 Every agent run calls `list_tools()` on each MCP server. Remote servers can introduce noticeable latency, so all of the MCP server classes expose a `cache_tools_list` option. Set it to `True` only if you are confident that the tool definitions do not change frequently. To force a fresh list later, call `invalidate_tools_cache()` on the server instance.
+
+When caching is enabled, each `list_tools()` result contains detached copies of the cached tool definitions, including nested input schemas. Dynamic tool-filter callbacks also inspect detached copies. Mutating a returned tool or a tool received by a filter therefore does not change the server's cached schema or later `list_tools()` results.
 
 ## Tracing
 

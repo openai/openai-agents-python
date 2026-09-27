@@ -6,11 +6,11 @@ import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Annotated, Any, Literal, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Literal, cast, get_args, get_origin, get_type_hints
 
 # griffelib exposes the `griffe` package at runtime but currently does not ship typing markers.
 from griffe import Docstring, DocstringSectionKind  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, create_model
+from pydantic import BaseModel, ConfigDict, Field, create_model
 from pydantic.fields import FieldInfo
 
 from .exceptions import ModelBehaviorError, UserError
@@ -421,6 +421,7 @@ def function_schema(
     # We will collect field definitions for create_model as a dict:
     #   field_name -> (type_annotation, default_value_or_Field(...))
     fields: dict[str, Any] = {}
+    model_config = ConfigDict()
 
     for name, param in filtered_params:
         ann = type_hints.get(name, param.annotation)
@@ -433,6 +434,13 @@ def function_schema(
         # If a docstring param description exists, use it
         field_description = param_descs.get(name, None)
 
+        value_ann = ann
+        if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
+            field_info = _extract_field_info_from_metadata(param_metadata.get(name, ()))
+            if field_info is not None and field_info.metadata:
+                # Constraints apply to each value, not the collected container or its defaults.
+                value_ann = Annotated[(ann, *cast(Any, field_info).metadata)]
+
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:
             # e.g. *args: extend positional args
@@ -440,7 +448,7 @@ def function_schema(
                 # Preserve a homogeneous tuple as the type of each positional argument.
                 args_of_tuple = get_args(ann)
                 if len(args_of_tuple) == 2 and args_of_tuple[1] is Ellipsis:
-                    ann = list[ann]  # type: ignore
+                    ann = list[value_ann]  # type: ignore
                 # tuple[()] parameterizes an empty tuple and reports no args, while a bare
                 # typing.Tuple is unparameterized and carries no element type to reject.
                 elif hasattr(ann, "__args__"):
@@ -453,7 +461,7 @@ def function_schema(
                     ann = list[Any]
             else:
                 # If user wrote *args: int, treat as List[int]
-                ann = list[ann]  # type: ignore
+                ann = list[value_ann]  # type: ignore
 
             # Default factory to empty list
             fields[name] = (
@@ -462,12 +470,21 @@ def function_schema(
             )
 
         elif param.kind == param.VAR_KEYWORD:
+            if strict_json_schema:
+                raise UserError(
+                    f"Variadic keyword parameter `**{name}` in function {func.__name__} cannot"
+                    " use a strict schema. Set strict_mode=False on the function tool"
+                    " (or strict_json_schema=False on function_schema) and pass keyword arguments"
+                    f" in the nested `{name}` object, or use explicit parameters for a strict tool."
+                )
+            # Reject flat keyword arguments instead of silently dropping them before invocation.
+            model_config["extra"] = "forbid"
             # **kwargs handling: a ``**kwargs: X`` annotation applies to each keyword *value*
             # (PEP 484), so the collected container is always ``dict[str, X]``. Preserve the full
             # annotation as the value type -- mirroring the variadic-positional handling above,
             # where ``*args: X`` becomes ``list[X]`` (see #4655). A bare ``**kwargs`` has ``ann``
             # set to ``Any`` above, yielding ``dict[str, Any]``.
-            ann = dict[str, ann]  # type: ignore
+            ann = dict[str, value_ann]  # type: ignore
 
             fields[name] = (
                 ann,
@@ -511,7 +528,9 @@ def function_schema(
                 )
 
     # 3. Dynamically build a Pydantic model
-    dynamic_model = create_model(f"{func_name}_args", __base__=BaseModel, **fields)
+    dynamic_model = create_model(
+        f"{func_name}_args", __base__=BaseModel, __config__=model_config, **fields
+    )
 
     # 4. Build JSON schema from that model
     json_schema = dynamic_model.model_json_schema()

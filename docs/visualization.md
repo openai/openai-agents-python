@@ -70,6 +70,7 @@ This generates a graph that visually represents the structure of the **triage ag
 
 `draw_graph()` recursively expands target agents supplied directly in `handoffs` or registered through `handoff(agent)`. In both forms, the graph includes each target's tools, MCP servers, and downstream handoffs. A custom `Handoff` without an available target `Agent` is rendered as a named destination only, so the graph cannot expand resources behind that destination.
 
+Graph nodes are identified by the underlying agent, tool, MCP server, or custom handoff object rather than by the displayed name. Distinct objects that share the same name remain separate nodes with the same visible label, and each edge connects to the corresponding object.
 
 ## Understanding the visualization
 

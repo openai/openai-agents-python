@@ -7,10 +7,8 @@ import pytest
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from integration_tests._contract_support import (
-    load_api_contract,
-    validate_released_api_contract,
-)
+from integration_tests._contract_surface import load_api_contract
+from integration_tests._contract_validation import validate_released_api_contract
 
 pytestmark = pytest.mark.packaging
 

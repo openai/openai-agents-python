@@ -1,0 +1,41 @@
+name: Repository skills
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .agents/**
+      - .github/scripts/*repo_skill_tests.py
+      - .github/scripts/repo-skill-tests.md
+      - .github/workflows/repo-skills.yml
+      - Makefile
+  pull_request:
+    paths:
+      - .agents/**
+      - .github/scripts/*repo_skill_tests.py
+      - .github/scripts/repo-skill-tests.md
+      - .github/workflows/repo-skills.yml
+      - Makefile
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repo-skills:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          python-version: "3.11"
+          enable-cache: false
+      - name: Run repository skill tests
+        run: make tests-repo-skills

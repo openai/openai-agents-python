@@ -1,6 +1,6 @@
 ---
 name: examples-run-analysis
-description: Analyze artifacts from the latest completed manual examples Make run. Read the main log, every relevant per-example log, and example source; validate every exit-0 example and classify failures, skips, and environment restrictions. Never execute or control examples.
+description: Analyze logs and source from a completed manual examples run. Never execute or control examples.
 ---
 
 # Examples Run Analysis

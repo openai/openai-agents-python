@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 
 from .._config_coercion import coerce_dataclass_config
@@ -10,7 +12,8 @@ from ..logger import (
     log_model_and_tool_action_warning,
     logger,
 )
-from ..tracing import TraceCtxManager
+from ..tracing import TraceCtxManager, get_trace_provider
+from ..tracing.span_data import CustomSpanData
 from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
 from .pipeline_config import VoicePipelineConfig
@@ -93,25 +96,48 @@ class VoicePipeline:
             self.config.trace_include_sensitive_audio_data,
         )
 
+    @contextmanager
+    def _trace_context(self) -> Iterator[None]:
+        if self.config.tracing_disabled:
+            # Let the configured provider mask both inherited contexts in the producer task.
+            provider = get_trace_provider()
+            with (
+                provider.create_trace(
+                    name=self.config.workflow_name or "Voice Agent",
+                    group_id=self.config.group_id,
+                    metadata=self.config.trace_metadata,
+                    tracing=self.config.tracing,
+                    disabled=True,
+                ),
+                provider.create_span(CustomSpanData(name="Voice pipeline", data={}), disabled=True),
+            ):
+                yield
+            return
+        with TraceCtxManager(
+            workflow_name=self.config.workflow_name or "Voice Agent",
+            trace_id=None,
+            group_id=self.config.group_id,
+            metadata=self.config.trace_metadata,
+            tracing=self.config.tracing,
+            disabled=False,
+        ):
+            yield
+
     async def _run_single_turn(self, audio_input: AudioInput) -> StreamedAudioResult:
         output = StreamedAudioResult(self._get_tts_model(), self.config.tts_settings, self.config)
 
         async def stream_events():
             # Keep the trace scope active for the entire async processing lifecycle.
-            with TraceCtxManager(
-                workflow_name=self.config.workflow_name or "Voice Agent",
-                trace_id=None,  # Automatically generated
-                group_id=self.config.group_id,
-                metadata=self.config.trace_metadata,
-                tracing=self.config.tracing,
-                disabled=self.config.tracing_disabled,
-            ):
+            with self._trace_context():
                 try:
                     input_text = await self._process_audio_input(audio_input)
                     async for text_event in self.workflow.run(input_text):
                         await output._add_text(text_event)
                     await output._turn_done()
                     await output._done()
+                except asyncio.CancelledError:
+                    await output._cancel()
+                    raise
                 except Exception as e:
                     log_model_and_tool_action_error(logger, "Error processing single voice turn", e)
                     await output._add_error(e)
@@ -125,73 +151,83 @@ class VoicePipeline:
 
         async def process_turns():
             # Keep the trace scope active for the full streamed session.
-            with TraceCtxManager(
-                workflow_name=self.config.workflow_name or "Voice Agent",
-                trace_id=None,
-                group_id=self.config.group_id,
-                metadata=self.config.trace_metadata,
-                tracing=self.config.tracing,
-                disabled=self.config.tracing_disabled,
-            ):
+            with self._trace_context():
                 transcription_session = None
-                reported_error = False
                 try:
+                    primary_exception: BaseException | None = None
                     try:
-                        emitted_intro = False
                         try:
-                            async for intro_text in self.workflow.on_start():
-                                await output._add_text(intro_text)
-                                emitted_intro = True
-                        except Exception as e:
-                            log_model_and_tool_action_warning(
-                                logger, "Voice workflow on_start failed", e
+                            emitted_intro = False
+                            try:
+                                async for intro_text in self.workflow.on_start():
+                                    await output._add_text(intro_text)
+                                    emitted_intro = True
+                            except Exception as e:
+                                log_model_and_tool_action_warning(
+                                    logger, "Voice workflow on_start failed", e
+                                )
+
+                            if emitted_intro:
+                                # Finalize the intro turn as part of startup. Leaving it open would
+                                # hold a greeting with no sentence-final punctuation until the
+                                # session ends, or merge it into the first user turn.
+                                await output._turn_done()
+
+                            transcription_session = await self._get_stt_model().create_session(
+                                audio_input,
+                                self.config.stt_settings,
+                                self.config.trace_include_sensitive_data,
+                                self.config.trace_include_sensitive_audio_data,
                             )
 
-                        if emitted_intro:
-                            # Finalize the intro turn as part of startup. Leaving it open would
-                            # hold a greeting with no sentence-final punctuation until the session
-                            # ends, or merge it into the first user turn.
-                            await output._turn_done()
-
-                        transcription_session = await self._get_stt_model().create_session(
-                            audio_input,
-                            self.config.stt_settings,
-                            self.config.trace_include_sensitive_data,
-                            self.config.trace_include_sensitive_audio_data,
-                        )
-
-                        async for input_text in transcription_session.transcribe_turns():
-                            result = self.workflow.run(input_text)
-                            async for text_event in result:
-                                await output._add_text(text_event)
-                            await output._turn_done()
-                    except Exception as e:
-                        # Report before closing the session below. A `close()` that also fails
-                        # would otherwise replace this exception on its way out and the consumer
-                        # would see only the cleanup error.
-                        log_model_and_tool_action_error(logger, "Error processing voice turns", e)
-                        await output._add_error(e)
-                        reported_error = True
-                        raise
-                finally:
-                    if transcription_session is not None:
-                        try:
-                            await transcription_session.close()
+                            async for input_text in transcription_session.transcribe_turns():
+                                result = self.workflow.run(input_text)
+                                async for text_event in result:
+                                    await output._add_text(text_event)
+                                await output._turn_done()
+                        except asyncio.CancelledError as e:
+                            primary_exception = e
                         except Exception as e:
+                            # Report before closing the session below. A close failure must not
+                            # replace this primary turn error.
                             log_model_and_tool_action_error(
-                                logger, "Error closing voice transcription session", e
+                                logger, "Error processing voice turns", e
                             )
-                            # Report only if nothing else has, which keeps the turn error's
-                            # precedence. Clean runs and cancelled producers both arrive here
-                            # with no terminal event queued and no other way to be released.
-                            if not reported_error:
-                                await output._add_error(e)
-                            raise
+                            await output._add_error(e)
+                            primary_exception = e
+                    finally:
+                        if transcription_session is not None:
+                            close_future = asyncio.gather(
+                                transcription_session.close(), return_exceptions=True
+                            )
+                            while True:
+                                try:
+                                    close_result = (await asyncio.shield(close_future))[0]
+                                    break
+                                except asyncio.CancelledError as e:
+                                    if primary_exception is None:
+                                        primary_exception = e
 
-                # Only a clean run reaches here. The error path above has already queued its
-                # terminal event, and a cancelled producer has no consumer left to serve, so
-                # neither should start TTS work or wait on it.
-                await output._done()
+                            if isinstance(close_result, asyncio.CancelledError):
+                                if primary_exception is None:
+                                    primary_exception = close_result
+                            elif isinstance(close_result, Exception):
+                                log_model_and_tool_action_error(
+                                    logger,
+                                    "Error closing voice transcription session",
+                                    close_result,
+                                )
+                                if primary_exception is None:
+                                    await output._add_error(close_result)
+                                    primary_exception = close_result
+
+                    if primary_exception is not None:
+                        raise primary_exception
+
+                    await output._done()
+                except asyncio.CancelledError:
+                    await output._cancel()
+                    raise
 
         output._set_task(asyncio.create_task(process_turns()))
         return output

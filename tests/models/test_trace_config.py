@@ -1,3 +1,4 @@
+from agents import ModelTracing
 from agents.model_settings import ModelSettings
 from agents.models._trace import model_config_for_trace, sanitize_url_for_trace
 
@@ -19,6 +20,7 @@ def test_model_config_for_trace_sanitizes_base_url_and_omits_request_extras() ->
             extra_body={"secret": "body-token"},
             extra_args={"api_key": "arg-token"},
         ),
+        ModelTracing.ENABLED,
         base_url="https://user:pass@example.com/v1?api-key=secret#fragment",
         extra_config={"model_impl": "test-model"},
     )

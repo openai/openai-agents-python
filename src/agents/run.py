@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import warnings
 from typing import TYPE_CHECKING, Any, cast
+from uuid import uuid4
 
 from typing_extensions import Unpack
 
@@ -55,7 +56,6 @@ from .run_config import (
     ToolExecutionConfig,
     ToolNameCollisionPolicy as ToolNameCollisionPolicy,
     ToolNotFoundBehavior,
-    _coerce_run_config,
 )
 from .run_context import RunContextWrapper, TContext
 from .run_error_handlers import RunErrorHandlers
@@ -70,6 +70,7 @@ from .run_internal.agent_runner_helpers import (
     finalize_conversation_tracking,
     get_unsent_tool_call_ids_for_interrupted_state,
     input_guardrails_triggered,
+    reject_unrecoverable_terminal_state,
     resolve_processed_response,
     resolve_resumed_context,
     resolve_trace_settings,
@@ -82,6 +83,7 @@ from .run_internal.agent_runner_helpers import (
     validate_output_guardrails_with_server_managed_conversation,
     validate_session_conversation_settings,
 )
+from .run_internal.agent_tool_configuration import agent_tool_configuration_run
 from .run_internal.approvals import approvals_from_step
 from .run_internal.blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
@@ -108,6 +110,10 @@ from .run_internal.items import (
     normalize_resumed_input,
     reconcile_nested_history_owned_input_after_rewrite,
 )
+from .run_internal.model_provider_lifecycle import (
+    _close_runner_owned_model_provider,
+    _normalize_run_config_for_runner,
+)
 from .run_internal.oai_conversation import OpenAIServerConversationTracker
 from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
@@ -115,9 +121,7 @@ from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
-    get_all_tools,
     get_output_schema,
-    initialize_computer_tools,
     resolve_interrupted_turn,
     run_input_guardrails,
     run_output_guardrails,
@@ -553,18 +557,31 @@ class AgentRunner:
         input: str | list[TResponseInputItem] | RunState[TContext],
         **kwargs: Unpack[RunOptions[TContext]],
     ) -> RunResult:
+        run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
+        cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
         try:
-            return await self._run_impl(starting_agent, input, **kwargs)
-        except BaseException as error:
-            if not _is_error_data_redacted(error):
-                raise
-            _detach_data_redacted_error_traceback(error)
-            redacted_error = error
+            try:
+                configuration_agent = (
+                    input._current_agent
+                    if isinstance(input, RunState) and input._current_agent is not None
+                    else starting_agent
+                )
+                with agent_tool_configuration_run(configuration_agent):
+                    return await self._run_impl(starting_agent, input, **kwargs)
+            except BaseException as error:
+                if not _is_error_data_redacted(error):
+                    raise
+                _detach_data_redacted_error_traceback(error)
+                redacted_error = error
+        finally:
+            if owns_model_provider:
+                await _close_runner_owned_model_provider(run_config.model_provider)
 
         self = cast(Any, None)
         starting_agent = cast(Any, None)
         input = cast(Any, None)
+        run_config = cast(Any, None)
         cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
         _detach_data_redacted_error_traceback(redacted_error)
@@ -586,7 +603,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config = cast(RunConfig, run_config)
 
         is_resumed_state = isinstance(input, RunState)
         run_state: RunState[TContext] | None = (
@@ -633,8 +650,10 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
 
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             max_turns = run_state._max_turns
         else:
@@ -648,8 +667,9 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
-            set_agent_tool_state_scope(context_wrapper, None)
+            set_agent_tool_state_scope(context_wrapper, uuid4().hex)
 
             server_manages_conversation = (
                 conversation_id is not None
@@ -1367,6 +1387,11 @@ class AgentRunner:
                                     current_agent,
                                     run_config,
                                 )
+                                # The output, its guardrails, and its terminal hooks are all
+                                # complete, so from here until the turn is persisted this run owns
+                                # a result no resume can reproduce.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = True
                                 await save_final_turn_items_after_guardrails(
                                     session=session,
                                     run_state=run_state,
@@ -1377,6 +1402,10 @@ class AgentRunner:
                                     store=store_setting,
                                     wrapper=context_wrapper,
                                 )
+                                # The append and any post-append maintenance both succeeded,
+                                # so the turn is durable and the state is open again.
+                                if run_state is not None:
+                                    run_state._terminal_unrecoverable = False
                                 current_step = getattr(run_state, "_current_step", None)
                                 approvals_from_state = approvals_from_step(current_step)
                                 result = RunResult(
@@ -1460,11 +1489,6 @@ class AgentRunner:
                             if not run_state._pending_input:
                                 run_state._generated_items = list(generated_items)
                                 run_state._session_items = list(session_items)
-                    all_tools = await get_all_tools(execution_agent, context_wrapper)
-                    all_tools = await initialize_computer_tools(
-                        tools=all_tools, context_wrapper=context_wrapper
-                    )
-
                     if current_span is None:
                         if (output_schema := get_output_schema(execution_agent)) is not None:
                             output_type_name = output_schema.name()
@@ -1550,7 +1574,16 @@ class AgentRunner:
                             include_in_history=include_in_history,
                         )
                         if include_in_history and not handler_output_recorded:
+                            # Only reachable once the handler output cleared its guardrails and
+                            # ran its end hooks, so this append carries an accepted result like
+                            # any other terminal one. The callback itself stays unmarked because
+                            # finalize_max_turns_handler_output() also drives it from its
+                            # guardrail-error path, where no output was ever accepted.
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await _save_max_turns_handler_output([synthesized_item])
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
                         current_step = getattr(run_state, "_current_step", None)
                         approvals_from_state = approvals_from_step(current_step)
                         result = RunResult(
@@ -1668,7 +1701,6 @@ class AgentRunner:
                             model_task = asyncio.create_task(
                                 run_single_turn(
                                     bindings=current_bindings,
-                                    all_tools=all_tools,
                                     original_input=original_input,
                                     generated_items=items_for_model,
                                     hooks=hooks,
@@ -1743,7 +1775,6 @@ class AgentRunner:
                         else:
                             turn_result = await run_single_turn(
                                 bindings=current_bindings,
-                                all_tools=all_tools,
                                 original_input=original_input,
                                 generated_items=items_for_model,
                                 hooks=hooks,
@@ -1994,6 +2025,8 @@ class AgentRunner:
                                 current_agent,
                                 run_config,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = True
                             await save_final_turn_items_after_guardrails(
                                 session=session,
                                 run_state=run_state,
@@ -2004,6 +2037,8 @@ class AgentRunner:
                                 store=store_setting,
                                 wrapper=context_wrapper,
                             )
+                            if run_state is not None:
+                                run_state._terminal_unrecoverable = False
 
                             # Ensure starting_input is not None and not RunState
                             final_output_result_input: str | list[TResponseInputItem] = (
@@ -2347,7 +2382,7 @@ class AgentRunner:
         conversation_id = kwargs.get("conversation_id")
         session = kwargs.get("session")
 
-        run_config = RunConfig() if run_config is None else _coerce_run_config(run_config)
+        run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 
         # Handle RunState input
         is_resumed_state = isinstance(input, RunState)
@@ -2402,6 +2437,7 @@ class AgentRunner:
                 run_state=run_state,
                 context=context,
             )
+            context_wrapper._resolve_function_approval_owners(starting_agent)
             context = context_wrapper.context
 
             # Override max_turns with the state's max_turns to preserve it across resumption
@@ -2418,7 +2454,8 @@ class AgentRunner:
                 auto_previous_response_id=auto_previous_response_id,
             )
             context_wrapper = ensure_context_wrapper(context)
-            set_agent_tool_state_scope(context_wrapper, None)
+            context_wrapper._resolve_function_approval_owners(starting_agent)
+            set_agent_tool_state_scope(context_wrapper, uuid4().hex)
             # input_for_state is the same as input_for_result here
             input_for_state = input_for_result
             run_state = RunState(
@@ -2565,9 +2602,14 @@ class AgentRunner:
             sandbox_runtime.apply_result_metadata(streamed_result)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
-        streamed_result.run_loop_task = asyncio.create_task(
-            _await_data_redacted_error_boundary(
-                lambda: start_streaming(
+        async def run_loop() -> None:
+            configuration_agent = (
+                run_state._current_agent
+                if run_state is not None and run_state._current_agent is not None
+                else starting_agent
+            )
+            with agent_tool_configuration_run(configuration_agent):
+                await start_streaming(
                     starting_input=input_for_result,
                     streamed_result=streamed_result,
                     starting_agent=starting_agent,
@@ -2585,8 +2627,16 @@ class AgentRunner:
                     is_resumed_state=is_resumed_state,
                     sandbox_runtime=sandbox_runtime,
                 )
-            )
+
+        # Keep the outer task frame inside the boundary so it cannot retain run payloads.
+        streamed_result.run_loop_task = asyncio.create_task(
+            _await_data_redacted_error_boundary(run_loop)
         )
+        if owns_model_provider:
+            model_provider = run_config.model_provider
+            streamed_result._ensure_model_provider_cleanup_on_completion(
+                lambda: _close_runner_owned_model_provider(model_provider)
+            )
         if sandbox_runtime.enabled:
             streamed_result.ensure_sandbox_cleanup_on_completion()
         return streamed_result

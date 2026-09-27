@@ -90,6 +90,50 @@ __all__ = [
 _SESSION_LIMIT_UNSET = object()
 
 
+def prepare_compaction_model_input(
+    session: Session | None,
+    wrapper: RunContextWrapper[Any],
+    input_items: list[TResponseInputItem],
+) -> tuple[str, ...] | None:
+    """Snapshot the model input without retaining mutable or plaintext history."""
+    if session is None or not is_openai_responses_compaction_aware_session(session):
+        return None
+    # A failed request must not reuse evidence from an earlier model exchange.
+    wrapper._session_compaction_model_exchange = ((), None)  # type: ignore[attr-defined]
+    ignore_ids = _ignore_ids_for_matching(session)
+    return tuple(
+        digest
+        for item in input_items
+        if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
+    )
+
+
+def record_compaction_model_response(
+    session: Session | None,
+    wrapper: RunContextWrapper[Any],
+    input_digests: tuple[str, ...] | None,
+    response: ModelResponse,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+) -> None:
+    """Authorize automatic compaction only from the latest successful model exchange."""
+    if input_digests is None or session is None:
+        return
+    response_items = apply_reasoning_item_id_policy(
+        response.to_input_items(), reasoning_item_id_policy
+    )
+    ignore_ids = _ignore_ids_for_matching(session)
+    response_digests = tuple(
+        digest
+        for item in response_items
+        if (digest := digest_input_item(item, ignore_ids_for_matching=ignore_ids)) is not None
+    )
+    # Keep the resolved replay policy bound to the same successful exchange.
+    wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
+        input_digests + response_digests,
+        reasoning_item_id_policy,
+    )
+
+
 async def admit_pending_input(
     *,
     run_state: RunState[Any],
@@ -199,14 +243,26 @@ async def _session_get_items(
     limit: int | None | object = _SESSION_LIMIT_UNSET,
     *,
     wrapper: RunContextWrapper[Any] | None = None,
+    capture_compaction_generation: bool = False,
 ) -> list[TResponseInputItem]:
     """Read session items while preserving the legacy method call shape."""
-    wrapper = _get_session_wrapper(session, wrapper)
-    if limit is _SESSION_LIMIT_UNSET:
-        result = await _call_session_method(session.get_items, wrapper=wrapper)
-    else:
-        result = await _call_session_method(session.get_items, limit=limit, wrapper=wrapper)
-    return cast(list[TResponseInputItem], result)
+    session_wrapper = _get_session_wrapper(session, wrapper)
+
+    async def read_items() -> list[TResponseInputItem]:
+        if limit is _SESSION_LIMIT_UNSET:
+            result = await _call_session_method(session.get_items, wrapper=session_wrapper)
+        else:
+            result = await _call_session_method(
+                session.get_items, limit=limit, wrapper=session_wrapper
+            )
+        return cast(list[TResponseInputItem], result)
+
+    get_with_generation = getattr(session, "_get_items_with_generation", None)
+    if capture_compaction_generation and wrapper is not None and callable(get_with_generation):
+        result, generation = await _call_session_method(get_with_generation, read_items)
+        wrapper._session_compaction_generation = generation  # type: ignore[attr-defined]
+        return cast(list[TResponseInputItem], result)
+    return await read_items()
 
 
 async def _session_add_items(
@@ -216,8 +272,22 @@ async def _session_add_items(
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Append session items while preserving the legacy method call shape."""
-    wrapper = _get_session_wrapper(session, wrapper)
-    await _call_session_method(session.add_items, items, wrapper=wrapper)
+    session_wrapper = _get_session_wrapper(session, wrapper)
+
+    async def write_items() -> None:
+        await _call_session_method(session.add_items, items, wrapper=session_wrapper)
+
+    add_with_generation = getattr(session, "_add_items_with_generation", None)
+    if wrapper is not None and callable(add_with_generation):
+        expected_generation = getattr(wrapper, "_session_compaction_generation", None)
+        generation = await _call_session_method(
+            add_with_generation,
+            write_items,
+            expected_generation=expected_generation,
+        )
+        wrapper._session_compaction_generation = generation  # type: ignore[attr-defined]
+        return
+    await write_items()
 
 
 async def _session_pop_item(
@@ -360,9 +430,14 @@ async def prepare_input_with_session(
             session,
             limit=resolved_settings.limit,
             wrapper=wrapper,
+            capture_compaction_generation=True,
         )
     else:
-        history = await _session_get_items(session, wrapper=wrapper)
+        history = await _session_get_items(
+            session,
+            wrapper=wrapper,
+            capture_compaction_generation=True,
+        )
     is_openai_conversation_session = isinstance(session, OpenAIConversationsSession)
     converted_history = [
         strip_internal_input_item_metadata(ensure_input_item_format(item)) for item in history
@@ -608,11 +683,17 @@ async def _apply_post_write_compaction(
     }
     if store is not None:
         compaction_args["store"] = store
-    await _call_session_method(
-        session.run_compaction,
-        compaction_args,
-        wrapper=wrapper,
-    )
+    if wrapper is not None:
+        wrapper._session_compaction_is_automatic = True  # type: ignore[attr-defined]
+    try:
+        await _call_session_method(
+            session.run_compaction,
+            compaction_args,
+            wrapper=wrapper,
+        )
+    finally:
+        if wrapper is not None:
+            wrapper._session_compaction_is_automatic = False  # type: ignore[attr-defined]
 
 
 async def save_result_to_session(
@@ -746,11 +827,10 @@ async def save_result_to_session(
         await resume_pending_session_write(
             resumed_write_state,
             session,
-            wrapper=wrapper,
-            compaction_wrapper=compaction_wrapper,
+            wrapper=compaction_wrapper,
         )
     else:
-        await _session_add_items(session, items_to_save, wrapper=wrapper)
+        await _session_add_items(session, items_to_save, wrapper=compaction_wrapper)
 
     if run_state is not None:
         run_state._current_turn_persisted_item_count = already_persisted + saved_run_items_count
@@ -805,18 +885,12 @@ async def resume_pending_session_write(
     session: Session | None,
     *,
     wrapper: RunContextWrapper[Any] | None = None,
-    compaction_wrapper: RunContextWrapper[Any] | None = None,
 ) -> None:
     """Settle a resumed output batch before allowing further model work.
 
     The application must supply the original backend and serialize access to its history,
     including independently restored RunState copies. Session has no distributed compare-and-swap
     or backend identity contract. A changed tail is not repaired or searched for similar items.
-
-    ``compaction_wrapper`` defaults to ``wrapper`` when omitted; ``save_result_to_session``
-    passes its own raw (pre-gating) wrapper explicitly so a batch that settles here -- either
-    inline or on a later, separate resume -- gets the exact same post-write Responses
-    compaction decision ``save_result_to_session`` would otherwise have applied itself.
     """
     pending = run_state._pending_session_write
     if pending is None:
@@ -848,7 +922,15 @@ async def resume_pending_session_write(
             append = True
         else:
             expected = before + digests(pending["items"])
-            tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
+            observed_generation: int | None = None
+            get_with_generation = getattr(session, "_get_items_with_generation", None)
+            if wrapper is not None and callable(get_with_generation):
+                tail, observed_generation = await _call_session_method(
+                    get_with_generation,
+                    lambda: _session_get_items(session, limit=len(expected), wrapper=wrapper),
+                )
+            else:
+                tail = await _session_get_items(session, limit=len(expected), wrapper=wrapper)
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
@@ -858,6 +940,11 @@ async def resume_pending_session_write(
                     "Repair the original Session before resuming; do not rerun the completed tool."
                 )
             append = unchanged
+            # The original append can advance the wrapper generation even when it fails
+            # atomically. Reconciled unchanged history is also safe to append against;
+            # subsequent mutations still revoke ownership through the normal generation check.
+            if observed_generation is not None and wrapper is not None:
+                wrapper._session_compaction_generation = observed_generation  # type: ignore[attr-defined]
         if append:
             # Backends may retain or transform their input; the durable checkpoint stays detached.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
@@ -871,7 +958,7 @@ async def resume_pending_session_write(
             response_id=pending.get("response_id"),
             store=pending.get("store"),
             has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
-            wrapper=compaction_wrapper if compaction_wrapper is not None else wrapper,
+            wrapper=wrapper,
         )
         run_state._pending_session_write = None
     finally:

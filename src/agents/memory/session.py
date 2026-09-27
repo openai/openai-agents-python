@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, runtime_checkable
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeGuard, TypeVar, runtime_checkable
 
 from typing_extensions import TypedDict
 
@@ -10,6 +13,40 @@ if TYPE_CHECKING:
     from ..items import TResponseInputItem
     from ..run_context import RunContextWrapper
     from .session_settings import SessionSettings
+
+
+_T = TypeVar("_T")
+
+
+async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
+    """Wait for a mutation outcome despite repeated caller cancellation."""
+    task = asyncio.ensure_future(awaitable)
+    cancellation: asyncio.CancelledError | None = None
+    while not task.done():
+        try:
+            await asyncio.wait({task})
+        except asyncio.CancelledError as exc:
+            if cancellation is None:
+                cancellation = exc
+
+    try:
+        result = task.result()
+    except BaseException:
+        if cancellation is not None:
+            raise cancellation from None
+        raise
+    if cancellation is not None:
+        raise cancellation from None
+    return result
+
+
+@dataclass(frozen=True)
+class _CompactionSnapshot:
+    """Bounded logical history with a backend-owned atomic suffix replacement."""
+
+    items: list[TResponseInputItem]
+    complete: bool
+    replace_suffix: Callable[[int, list[TResponseInputItem]], Awaitable[bool]]
 
 
 @runtime_checkable

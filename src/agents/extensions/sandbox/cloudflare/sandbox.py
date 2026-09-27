@@ -24,7 +24,7 @@ from collections import deque
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 import aiohttp
@@ -53,12 +53,14 @@ from ....sandbox.errors import (
 from ....sandbox.manifest import Manifest
 from ....sandbox.session import SandboxSession, SandboxSessionState
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.bounded_read import collect_bounded
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
 from ....sandbox.session.mount_lifecycle import (
     _settle_mount_transition,
     with_ephemeral_mounts_removed,
 )
+from ....sandbox.session.pty_output import collect_pty_output
 from ....sandbox.session.pty_types import (
     PTY_PROCESSES_MAX,
     PTY_PROCESSES_WARNING,
@@ -67,7 +69,6 @@ from ....sandbox.session.pty_types import (
     clamp_pty_yield_time_ms,
     process_id_to_prune_from_meta,
     resolve_pty_write_yield_time_ms,
-    truncate_text_by_tokens,
 )
 from ....sandbox.session.runtime_helpers import RESOLVE_WORKSPACE_PATH_HELPER, RuntimeHelperScript
 from ....sandbox.session.sandbox_client import BaseSandboxClient, BaseSandboxClientOptions
@@ -1033,34 +1034,15 @@ class CloudflareSandboxSession(BaseSandboxSession):
         entry: _CloudflarePtyProcessEntry,
         yield_time_ms: int,
         max_output_tokens: int | None,
-    ) -> tuple[bytes, int | None]:
-        deadline = time.monotonic() + (yield_time_ms / 1000)
-        output = bytearray()
-
-        while True:
-            async with entry.output_lock:
-                while entry.output_chunks:
-                    output.extend(entry.output_chunks.popleft())
-
-            if entry.output_closed.is_set():
-                async with entry.output_lock:
-                    while entry.output_chunks:
-                        output.extend(entry.output_chunks.popleft())
-                break
-
-            remaining_s = deadline - time.monotonic()
-            if remaining_s <= 0:
-                break
-
-            try:
-                await asyncio.wait_for(entry.output_notify.wait(), timeout=remaining_s)
-            except asyncio.TimeoutError:
-                break
-            entry.output_notify.clear()
-
-        text = output.decode("utf-8", errors="replace")
-        truncated_text, original_token_count = truncate_text_by_tokens(text, max_output_tokens)
-        return truncated_text.encode("utf-8", errors="replace"), original_token_count
+    ) -> tuple[bytes, int | None, bool]:
+        return await collect_pty_output(
+            output_chunks=entry.output_chunks,
+            output_lock=entry.output_lock,
+            output_notify=entry.output_notify,
+            is_done=entry.output_closed.is_set,
+            yield_time_ms=yield_time_ms,
+            max_output_tokens=max_output_tokens,
+        )
 
     async def _finalize_pty_update(
         self,
@@ -1069,10 +1051,11 @@ class CloudflareSandboxSession(BaseSandboxSession):
         entry: _CloudflarePtyProcessEntry,
         output: bytes,
         original_token_count: int | None,
+        output_closed: bool,
     ) -> PtyExecUpdate:
-        exit_code = entry.exit_code if entry.output_closed.is_set() else None
+        exit_code = entry.exit_code if output_closed else None
         live_process_id: int | None = process_id
-        if entry.output_closed.is_set():
+        if output_closed:
             async with self._pty_lock:
                 removed = self._pty_processes.pop(process_id, None)
                 self._reserved_pty_process_ids.discard(process_id)
@@ -1146,7 +1129,10 @@ class CloudflareSandboxSession(BaseSandboxSession):
         process_count = 0
 
         try:
-            ws = await self._session().ws_connect(self._ws_pty_url())
+            ws = cast(
+                "aiohttp.ClientWebSocketResponse[Any]",
+                await self._session().ws_connect(self._ws_pty_url()),
+            )
 
             ready_deadline = time.monotonic() + 30.0
             while True:
@@ -1220,7 +1206,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             )
 
         yield_time_ms = 10_000 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=clamp_pty_yield_time_ms(yield_time_ms),
             max_output_tokens=max_output_tokens,
@@ -1230,6 +1216,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_write_stdin(
@@ -1253,7 +1240,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             await asyncio.sleep(0.1)
 
         yield_time_ms = 250 if yield_time_s is None else int(yield_time_s * 1000)
-        output, original_token_count = await self._collect_pty_output(
+        output, original_token_count, output_closed = await self._collect_pty_output(
             entry=entry,
             yield_time_ms=resolve_pty_write_yield_time_ms(
                 yield_time_ms=yield_time_ms,
@@ -1267,6 +1254,7 @@ class CloudflareSandboxSession(BaseSandboxSession):
             entry=entry,
             output=output,
             original_token_count=original_token_count,
+            output_closed=output_closed,
         )
 
     async def pty_terminate_all(self) -> None:
@@ -1277,6 +1265,43 @@ class CloudflareSandboxSession(BaseSandboxSession):
 
         for entry in entries:
             await self._terminate_pty_entry(entry)
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        workspace_path = await self._validate_path_access(path)
+        url_path = quote(sandbox_path_str(workspace_path).lstrip("/"), safe="/")
+        async with self._session().get(
+            self._url(f"file/{url_path}"), timeout=self._request_timeout()
+        ) as response:
+            if response.status == 404:
+                raise WorkspaceReadNotFoundError(path=path)
+            if response.status != 200:
+                raise WorkspaceArchiveReadError(
+                    path=path,
+                    retryable=False
+                    if response.status == 403
+                    else _cloudflare_retryability_for_status(response.status),
+                )
+            # Existing Workers return either bytes or an SSE-encoded file. Bound
+            # the wire representation too, before the existing decoder allocates.
+            try:
+                prefix = await response.content.readexactly(7)
+            except asyncio.IncompleteReadError as error:
+                prefix = error.partial
+            if prefix != b"data: {":
+                if len(prefix) >= max_bytes:
+                    return prefix[:max_bytes]
+                return prefix + await collect_bounded(
+                    response.content.iter_chunked(65536), max_bytes - len(prefix)
+                )
+            wire_limit = 8 * max_bytes + 65536
+            body = prefix + await collect_bounded(
+                response.content.iter_chunked(65536), wire_limit + 1 - len(prefix)
+            )
+            if len(body) > wire_limit:
+                raise WorkspaceArchiveReadError(
+                    path=path, context={"reason": "bounded_read_wire_limit"}
+                )
+            return self._decode_streamed_payload(body)[:max_bytes]
 
     async def read(self, path: Path | str, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:

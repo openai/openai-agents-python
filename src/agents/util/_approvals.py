@@ -3,9 +3,14 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
+from .._function_tool_arguments import FunctionToolApproval
 from ..exceptions import UserError
+
+if TYPE_CHECKING:
+    from ..run_context import RunContextWrapper
+    from ..tool import FunctionTool
 
 # Keep this helper here so both run_internal and realtime can import it without
 # creating cross-package dependencies.
@@ -49,3 +54,38 @@ async def evaluate_needs_approval_setting(
             f"got {type(needs_approval_setting).__name__}."
         )
     return default
+
+
+async def evaluate_function_tool_approval(
+    function_tool: FunctionTool,
+    context: RunContextWrapper[Any],
+    arguments: str,
+    call_id: str,
+    *,
+    strict: bool = True,
+) -> FunctionToolApproval:
+    """Evaluate a policy against unchanged input, retaining one prepared invocation."""
+    from ..tool import _FailureHandlingFunctionToolInvoker
+
+    invoker = function_tool.on_invoke_tool
+    result = FunctionToolApproval("require_approval", function_tool, invoker, arguments)
+    params: dict[str, Any] = {}
+    if callable(function_tool.needs_approval):
+        parsed = parse_function_tool_arguments(arguments)
+        if parsed is None:
+            return result
+        params = parsed
+        if isinstance(invoker, _FailureHandlingFunctionToolInvoker):
+            result.prepared = invoker.prepare_arguments(arguments, function_tool.name)
+            if result.prepared is not None:
+                if not result.prepared.unchanged:
+                    result.prepared = None
+                    return result
+    needs_approval = await evaluate_needs_approval_setting(
+        function_tool.needs_approval, context, params, call_id, strict=strict
+    )
+    result.check_invocation(function_tool, arguments)
+    result.outcome = "require_approval" if needs_approval else "invoke"
+    if needs_approval:
+        result.prepared = None
+    return result

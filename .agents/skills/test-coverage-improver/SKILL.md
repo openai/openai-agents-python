@@ -1,42 +1,24 @@
 ---
 name: test-coverage-improver
-description: 'Improve test coverage in the OpenAI Agents Python repository: run `make coverage`, inspect coverage artifacts, identify low-coverage files, propose high-impact tests, and confirm with the user before writing tests.'
+description: Measure Python SDK coverage or address measured coverage gaps. Use for coverage audits and metric regressions, not routine test additions.
 ---
 
 # Test Coverage Improver
 
-## Overview
+Use current coverage evidence to identify missing caller-visible behavior tests. Select this workflow for coverage measurement, coverage-metric regressions, or finding gaps from coverage artifacts. When the user already specifies the behaviors to test, use the ordinary implementation/review workflow without coverage measurement unless measurement is also requested. Adding tests alone does not trigger this skill or its final `make coverage` step.
 
-Use this skill whenever coverage needs assessment or improvement (coverage regressions, failing thresholds, or user requests for stronger tests). It runs the coverage suite, analyzes results, highlights the biggest gaps, and prepares test additions while confirming with the user before changing code.
+## Scope and authorization
 
-## Quick Start
+For assessment or proposal-only requests, report gaps and suggested tests without editing. When the user requests test improvements or has approved a plan, implement the scoped tests and complete review and verification without asking again. Ask only when a new contract decision, expanded scope, or additional authority is needed. Coverage work never authorizes live API calls or broader sandbox access.
 
-1. From the repo root run `make coverage` to regenerate `.coverage` data and `coverage.xml`.
-2. Collect artifacts: `.coverage` and `coverage.xml`, plus the console output from `coverage report -m` for drill-downs.
-3. Summarize coverage: total percentages, lowest files, and uncovered lines/paths.
-4. Draft test ideas per file: scenario, behavior under test, expected outcome, and likely coverage gain.
-5. Ask the user for approval to implement the proposed tests; pause until they agree.
-6. After approval, write the tests in `tests/`, rerun `make coverage`, and then run `$code-change-verification` before marking work complete.
+## Workflow
 
-## Workflow Details
+1. Inspect current `.coverage`, `coverage.xml`, and any recorded command/environment evidence. Reuse them only when they represent the relevant source and test state. If missing or stale, run `make coverage` under the repository's verification sandbox and credential policy; this initial measurement precedes implementation review. Respect host-capacity guidance before broad measurement.
+2. Identify uncovered behavior within the requested scope. Prioritize public behavior and meaningful error, cancellation, and lifecycle paths over percentage-only targets. Use `uv run coverage report -m` or `coverage.xml` to locate gaps.
+3. For an assessment, report evidence and proposed scenarios. For authorized implementation, choose tests with independent expected results at the highest controllable caller boundary. Do not add tests that merely reproduce helper logic or enumerate unsupported permutations.
+4. Implement tests, run affected checks, and complete `$implementation-final-review`. Keep iterative verification focused; do not repeatedly run full coverage while review is incomplete.
+5. After clean review, run `make coverage` for the final measurement and `$code-change-verification` for the required SDK gates. These have different purposes; reuse an already valid final measurement rather than repeating it. Report coverage changes, verified behaviors, and material gaps that remain.
 
-- **Run coverage**: Execute `make coverage` at repo root. Avoid watch flags and keep prior coverage artifacts only if comparing trends.
-- **Parse summaries efficiently**:
-  - Prefer the console output from `coverage report -m` for file-level totals; fallback to `coverage.xml` for tooling or spreadsheets.
-  - Use `uv run coverage html` to generate `htmlcov/index.html` if you need an interactive drill-down.
-- **Prioritize targets**:
-  - Public APIs or shared utilities in `src/agents/` before examples or docs.
-  - Files with low statement coverage or newly added code at 0%.
-  - Recent bug fixes or risky code paths (error handling, retries, timeouts, concurrency).
-- **Design impactful tests**:
-  - Hit uncovered paths: error cases, boundary inputs, optional flags, and cancellation/timeouts.
-  - Cover combinational logic rather than trivial happy paths.
-  - Place tests under `tests/` and avoid flaky async timing.
-- **Coordinate with the user**: Present a numbered, concise list of proposed test additions and expected coverage gains. Ask explicitly before editing code or fixtures.
-- **After implementation**: Rerun coverage, report the updated summary, and note any remaining low-coverage areas.
+## Reporting
 
-## Notes
-
-- Keep any added comments or code in English.
-- Do not create `scripts/`, `references/`, or `assets/` unless needed later.
-- If coverage artifacts are missing or stale, rerun `make coverage` instead of guessing.
+State the scope and age of coverage evidence, the behavior each new test protects, validation results, and unresolved gaps. Keep comments and code in English. Do not treat coverage percentages alone as proof of correctness.

@@ -233,6 +233,41 @@ class TestOpenAIConversationsSessionBasicOperations:
         mock_openai_client.conversations.items.list.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_get_items_applies_large_limit_after_provider_pagination(
+        self, mock_openai_client
+    ):
+        """A session limit must not be forwarded as the Conversations API page size."""
+
+        class ConversationItem:
+            def __init__(self, item_id: int) -> None:
+                self.item_id = item_id
+
+            def model_dump(self, *, exclude_unset: bool) -> dict[str, int]:
+                assert exclude_unset is True
+                return {"item_id": self.item_id}
+
+        yielded_item_ids: list[int] = []
+
+        async def descending_items():
+            # Yield one extra newest-first item so the local cutoff can prove it stops at N.
+            for item_id in range(101, -1, -1):
+                yielded_item_ids.append(item_id)
+                yield ConversationItem(item_id)
+
+        mock_openai_client.conversations.items.list = MagicMock(return_value=descending_items())
+        session = OpenAIConversationsSession(
+            conversation_id="test_id", openai_client=mock_openai_client
+        )
+
+        items = await session.get_items(limit=101)
+
+        assert [cast(dict[str, int], item)["item_id"] for item in items] == list(range(1, 102))
+        assert yielded_item_ids == list(range(101, 0, -1))
+        mock_openai_client.conversations.items.list.assert_called_once_with(
+            conversation_id="test_id", order="desc"
+        )
+
+    @pytest.mark.asyncio
     async def test_add_items_simple(self, mock_openai_client):
         """Test adding items to the conversation."""
         session = OpenAIConversationsSession(
@@ -335,6 +370,97 @@ class TestOpenAIConversationsSessionBasicOperations:
         # Should delete the conversation and clear session ID
         mock_openai_client.conversations.delete.assert_called_once_with(conversation_id="test_id")
         assert session._session_id is None
+
+    @pytest.mark.asyncio
+    async def test_clear_session_cancellation_settles_delete_before_reinitializing(
+        self, mock_openai_client
+    ):
+        """A cancelled clear must settle deletion before the session can be reused."""
+        delete_started = asyncio.Event()
+        allow_delete_finish = asyncio.Event()
+        delete_finished = False
+
+        async def slow_delete(*, conversation_id: str) -> None:
+            nonlocal delete_finished
+            assert conversation_id == "old_id"
+            delete_started.set()
+            await allow_delete_finish.wait()
+            delete_finished = True
+
+        mock_openai_client.conversations.delete.side_effect = slow_delete
+        session = OpenAIConversationsSession(
+            conversation_id="old_id", openai_client=mock_openai_client
+        )
+        clear_task = asyncio.create_task(session.clear_session())
+
+        try:
+            await delete_started.wait()
+            clear_task.cancel("caller-cancelled")
+            await asyncio.sleep(0)
+
+            allow_delete_finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await clear_task
+
+            items: list[Any] = [{"role": "user", "content": "Next turn"}]
+            await session.add_items(items)
+        finally:
+            allow_delete_finish.set()
+            if not clear_task.done():
+                clear_task.cancel()
+                await asyncio.gather(clear_task, return_exceptions=True)
+
+        assert session.session_id == "test_conversation_id"
+        assert delete_finished is True
+        mock_openai_client.conversations.delete.assert_awaited_once_with(conversation_id="old_id")
+        mock_openai_client.conversations.create.assert_awaited_once_with(items=[])
+        mock_openai_client.conversations.items.create.assert_awaited_once_with(
+            conversation_id="test_conversation_id", items=items
+        )
+
+    @pytest.mark.asyncio
+    async def test_clear_session_cancellation_preserves_replacement_session_id(
+        self, mock_openai_client
+    ):
+        """A settled delete must not clear a replacement conversation ID."""
+        delete_started = asyncio.Event()
+        allow_delete_finish = asyncio.Event()
+
+        async def slow_delete(*, conversation_id: str) -> None:
+            assert conversation_id == "old_id"
+            delete_started.set()
+            await allow_delete_finish.wait()
+
+        mock_openai_client.conversations.delete.side_effect = slow_delete
+        session = OpenAIConversationsSession(
+            conversation_id="old_id", openai_client=mock_openai_client
+        )
+        clear_task = asyncio.create_task(session.clear_session())
+
+        try:
+            await delete_started.wait()
+            clear_task.cancel("caller-cancelled")
+            await asyncio.sleep(0)
+
+            session.session_id = "replacement_id"
+            allow_delete_finish.set()
+            with pytest.raises(asyncio.CancelledError):
+                await clear_task
+
+            items: list[Any] = [{"role": "user", "content": "Next turn"}]
+            await session.add_items(items)
+        finally:
+            allow_delete_finish.set()
+            if not clear_task.done():
+                clear_task.cancel()
+                await asyncio.gather(clear_task, return_exceptions=True)
+
+        assert session.session_id == "replacement_id"
+        mock_openai_client.conversations.delete.assert_awaited_once_with(conversation_id="old_id")
+        mock_openai_client.conversations.create.assert_not_awaited()
+        mock_openai_client.conversations.items.create.assert_awaited_once_with(
+            conversation_id="replacement_id", items=items
+        )
 
     @pytest.mark.asyncio
     async def test_clear_session_uninitialized_does_not_create_session(self, mock_openai_client):

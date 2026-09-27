@@ -103,10 +103,12 @@ from .agent_runner_helpers import (
     apply_resumed_conversation_settings,
     attach_usage_to_span,
     get_unsent_tool_call_ids_for_interrupted_state,
+    reject_unrecoverable_terminal_state,
     snapshot_usage,
     usage_delta,
     validate_output_guardrails_with_server_managed_conversation,
 )
+from .agent_tool_configuration import guard_agent_tool_configuration
 from .approvals import approvals_from_step
 from .blocked_output import (
     OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT,
@@ -176,8 +178,10 @@ from .session_persistence import (
     admit_pending_input,
     commit_server_pending_input,
     persist_session_items_for_guardrail_trip,
+    prepare_compaction_model_input,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
+    record_compaction_model_response,
     resume_pending_session_write,
     resumed_turn_items,
     rewind_session_items,
@@ -375,45 +379,6 @@ def _publish_streamed_result_agent(
     """Publish an agent transition before cancellation can complete the streamed run."""
     streamed_result.current_agent = agent
     streamed_result._current_agent_output_schema = get_output_schema(agent)
-
-
-def _trim_to_owner_starts(
-    streamed_result: RunResultStreaming,
-    run_state: RunState[Any] | None,
-    owner_starts: _BlockedOutputOwnerStarts,
-) -> None:
-    """Discard everything a turn appended, back to its pre-turn snapshot.
-
-    Used when a turn's outcome is rejected after its items were already
-    accumulated into ``streamed_result`` (and ``run_state``, if resuming) --
-    currently only the handoff-branch input-guardrail tripwire above. Reuses
-    ``_BlockedOutputOwnerStarts``' pre-turn lengths (already captured for the
-    same turn's blocked-output handling) rather than introducing a second
-    snapshot mechanism; every field here is one that ``to_state()`` reads
-    directly off ``streamed_result``, so trimming these is sufficient to make
-    a rejected turn invisible to a caller who calls ``to_state()`` on the
-    failed result.
-    """
-
-    def _trim(items: list[Any], start: int | None) -> None:
-        if start is not None and 0 <= start <= len(items):
-            del items[start:]
-
-    _trim(streamed_result.new_items, owner_starts.streamed_new_items)
-    _trim(streamed_result._model_input_items, owner_starts.streamed_model_input_items)
-    _trim(streamed_result.raw_responses, owner_starts.streamed_raw_responses)
-    _trim(
-        streamed_result.tool_output_guardrail_results,
-        owner_starts.streamed_tool_output_guardrail_results,
-    )
-    if run_state is not None:
-        _trim(run_state._generated_items, owner_starts.run_state_generated_items)
-        _trim(run_state._session_items, owner_starts.run_state_session_items)
-        _trim(run_state._model_responses, owner_starts.run_state_model_responses)
-        _trim(
-            run_state._tool_output_guardrail_results,
-            owner_starts.run_state_tool_output_guardrail_results,
-        )
 
 
 async def _save_resumed_stream_items(
@@ -670,6 +635,10 @@ async def _finalize_streamed_final_output(
     # Saved as one ordered batch so the session mirrors the model response. Doing it in two
     # halves would both reorder the turn and, because the first save advances the turn's
     # persisted-item count, make the second one a no-op.
+    # The output, its guardrails, and its terminal hooks are all complete, so from here until
+    # the turn is persisted this run owns a result no resume can reproduce.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = True
     if on_persisted_after_guardrails is None:
         await save_items(final_turn_items, response_id, store_setting)
     else:
@@ -682,6 +651,10 @@ async def _finalize_streamed_final_output(
             streamed_result.is_complete = True
             streamed_result._event_queue.put_nowait(QueueCompleteSentinel())
             return
+    # The append and any post-append maintenance both succeeded, so the turn is durable and the
+    # state is open again.
+    if streamed_result._state is not None:
+        streamed_result._state._terminal_unrecoverable = False
 
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
@@ -965,6 +938,7 @@ async def start_streaming(
         streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
 
         if is_resumed_state and run_state is not None:
+            reject_unrecoverable_terminal_state(run_state)
             await resume_pending_session_write(run_state, session, wrapper=context_wrapper)
             streamed_result._current_turn_persisted_item_count = (
                 run_state._current_turn_persisted_item_count
@@ -1587,11 +1561,6 @@ async def start_streaming(
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
 
-            all_tools = await get_all_tools(execution_agent, context_wrapper)
-            all_tools = await initialize_computer_tools(
-                tools=all_tools, context_wrapper=context_wrapper
-            )
-
             if current_span is None:
                 if (output_schema := get_output_schema(execution_agent)) is not None:
                     output_type_name = output_schema.name()
@@ -1836,7 +1805,6 @@ async def start_streaming(
                         run_config,
                         should_run_agent_start_hooks,
                         tool_use_tracker,
-                        all_tools,
                         server_conversation_tracker,
                         pending_server_items=pending_server_items,
                         session=session,
@@ -1927,38 +1895,19 @@ async def start_streaming(
                     server_conversation_tracker.track_server_items(turn_result.model_response)
 
                 if isinstance(turn_result.next_step, NextStepHandoff):
-                    # Resolve any still-in-flight parallel input guardrail before committing the
-                    # handoff transition, so a tripwire or guardrail exception is surfaced instead
-                    # of the state (current_agent, run_state, published events) racing ahead of an
-                    # input guardrail that was still validating the original input.
-                    triggered = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
-                    if triggered:
-                        first_trigger = next(
-                            (
-                                result
-                                for result in streamed_result.input_guardrail_results
-                                if result.output.tripwire_triggered
-                            ),
-                            None,
-                        )
-                        if first_trigger is not None:
-                            # Not raising the transition doesn't undo it: this turn's model
-                            # response, generated items, and session items were already
-                            # accumulated into streamed_result (and run_state, if resuming)
-                            # ABOVE, before we knew the guardrail had rejected the original
-                            # input. Left in place, to_state() would still serialize a
-                            # speculative handoff turn built on rejected input -- and
-                            # Runner.run() always treats a RunState input as already-resumed
-                            # (a plain isinstance check), skipping the starting agent's input
-                            # guardrails entirely regardless of this turn's outcome. Trim every
-                            # owner back to its pre-turn length (the same snapshot
-                            # blocked_output_owner_starts already took for this exact turn) so
-                            # a caller who calls to_state() on the failed result gets back
-                            # exactly the state as of before this turn ran, not one turn ahead.
-                            _trim_to_owner_starts(
-                                streamed_result, run_state, blocked_output_owner_starts
-                            )
-                            raise InputGuardrailTripwireTriggered(first_trigger)
+                    # A failed input check makes this completed speculative turn non-resumable:
+                    # replaying it would skip the starting agent's guardrails. Keep its executed
+                    # call/output records coherent instead of partially rolling back history.
+                    try:
+                        if streamed_result._input_guardrails_task is not None:
+                            await streamed_result._input_guardrails_task
+                        for guardrail_result in streamed_result.input_guardrail_results:
+                            if guardrail_result.output.tripwire_triggered:
+                                raise InputGuardrailTripwireTriggered(guardrail_result)
+                    except BaseException:
+                        if run_state is not None:
+                            run_state._terminal_unrecoverable = True
+                        raise
                     current_agent = turn_result.next_step.new_agent
                     if run_state is not None:
                         run_state._current_agent = current_agent
@@ -2145,7 +2094,6 @@ async def run_single_turn_streamed(
     run_config: RunConfig,
     should_run_agent_start_hooks: bool,
     tool_use_tracker: AgentToolUseTracker,
-    all_tools: list[Tool],
     server_conversation_tracker: OpenAIServerConversationTracker | None = None,
     session: Session | None = None,
     pending_server_items: list[RunItem] | None = None,
@@ -2184,21 +2132,25 @@ async def run_single_turn_streamed(
         turn_input = []
     context_wrapper.turn_input = list(turn_input)
 
-    if should_run_agent_start_hooks:
-        agent_hook_context = AgentHookContext(
-            context=context_wrapper.context,
-            usage=context_wrapper.usage,
-            turn_input=turn_input,
-        )
-        context_wrapper._share_tool_state_with(agent_hook_context)
-        await gather_with_cancel(
-            hooks.on_agent_start(agent_hook_context, public_agent),
-            (
-                public_agent.hooks.on_start(agent_hook_context, public_agent)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-        )
+    with guard_agent_tool_configuration(public_agent):
+        if should_run_agent_start_hooks:
+            agent_hook_context = AgentHookContext(
+                context=context_wrapper.context,
+                usage=context_wrapper.usage,
+                turn_input=turn_input,
+            )
+            context_wrapper._share_tool_state_with(agent_hook_context)
+            await gather_with_cancel(
+                hooks.on_agent_start(agent_hook_context, public_agent),
+                (
+                    public_agent.hooks.on_start(agent_hook_context, public_agent)
+                    if public_agent.hooks is not None
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+        all_tools = await get_all_tools(execution_agent, context_wrapper)
+    all_tools = await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
     output_schema = get_output_schema(execution_agent)
 
@@ -2328,6 +2280,9 @@ async def run_single_turn_streamed(
 
     stream_failed_retry_attempts: list[int] = [0]
 
+    compaction_input_digests = prepare_compaction_model_input(
+        session, context_wrapper, filtered.input
+    )
     retry_stream = stream_response_with_retry(
         get_stream=lambda: model.stream_response(
             filtered.instructions,
@@ -2414,6 +2369,9 @@ async def run_single_turn_streamed(
     if final_response is None:
         raise ModelBehaviorError("Model did not produce a final response!")
 
+    record_compaction_model_response(
+        session, context_wrapper, compaction_input_digests, final_response, reasoning_item_id_policy
+    )
     context_wrapper.usage.add(final_response.usage)
 
     if server_conversation_tracker is not None:
@@ -2488,7 +2446,6 @@ async def run_single_turn_streamed(
 async def run_single_turn(
     *,
     bindings: AgentBindings[TContext],
-    all_tools: list[Tool],
     original_input: str | list[TResponseInputItem],
     generated_items: list[RunItem],
     hooks: RunHooks[TContext],
@@ -2516,21 +2473,25 @@ async def run_single_turn(
         turn_input = []
     context_wrapper.turn_input = list(turn_input)
 
-    if should_run_agent_start_hooks:
-        agent_hook_context = AgentHookContext(
-            context=context_wrapper.context,
-            usage=context_wrapper.usage,
-            turn_input=turn_input,
-        )
-        context_wrapper._share_tool_state_with(agent_hook_context)
-        await gather_with_cancel(
-            hooks.on_agent_start(agent_hook_context, public_agent),
-            (
-                public_agent.hooks.on_start(agent_hook_context, public_agent)
-                if public_agent.hooks is not None
-                else _coro.noop_coroutine()
-            ),
-        )
+    with guard_agent_tool_configuration(public_agent):
+        if should_run_agent_start_hooks:
+            agent_hook_context = AgentHookContext(
+                context=context_wrapper.context,
+                usage=context_wrapper.usage,
+                turn_input=turn_input,
+            )
+            context_wrapper._share_tool_state_with(agent_hook_context)
+            await gather_with_cancel(
+                hooks.on_agent_start(agent_hook_context, public_agent),
+                (
+                    public_agent.hooks.on_start(agent_hook_context, public_agent)
+                    if public_agent.hooks is not None
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+        all_tools = await get_all_tools(execution_agent, context_wrapper)
+    all_tools = await initialize_computer_tools(tools=all_tools, context_wrapper=context_wrapper)
 
     system_prompt, prompt_config = await gather_with_cancel(
         execution_agent.get_system_prompt(context_wrapper),
@@ -2574,6 +2535,7 @@ async def run_single_turn(
         session_items_to_rewind=session_items_to_rewind,
         prompt_cache_key_resolver=prompt_cache_key_resolver,
         defer_llm_end_hooks=True,
+        reasoning_item_id_policy=reasoning_item_id_policy,
     )
 
     response_accepted = False
@@ -2633,6 +2595,7 @@ async def get_new_response(
     session_items_to_rewind: list[TResponseInputItem] | None = None,
     prompt_cache_key_resolver: PromptCacheKeyResolver | None = None,
     defer_llm_end_hooks: bool = False,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
 ) -> ModelResponse:
     """Call the model and return the raw response, handling retries and hooks."""
     public_agent = bindings.public_agent
@@ -2710,6 +2673,9 @@ async def get_new_response(
             )
             server_conversation_tracker.rewind_input(filtered.input)
 
+    compaction_input_digests = prepare_compaction_model_input(
+        session, context_wrapper, filtered.input
+    )
     with model_run_context(tool_use_tracker):
         new_response = await get_response_with_retry(
             get_response=lambda: model.get_response(
@@ -2744,6 +2710,13 @@ async def get_new_response(
         server_conversation_tracker.mark_input_as_accepted(filtered.input)
         server_conversation_tracker.track_server_items(new_response)
 
+    record_compaction_model_response(
+        session,
+        context_wrapper,
+        compaction_input_digests,
+        new_response,
+        reasoning_item_id_policy,
+    )
     context_wrapper.usage.add(new_response.usage)
 
     if not defer_llm_end_hooks:

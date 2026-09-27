@@ -30,6 +30,7 @@ from agents.extensions.sandbox.e2b.sandbox import (
     E2BSandboxClientOptions,
     E2BSandboxSession,
     E2BSandboxSessionState,
+    _E2BPtyProcessEntry,
 )
 from agents.sandbox import Manifest
 from agents.sandbox.entries import (
@@ -973,6 +974,27 @@ async def test_e2b_mkdir_recreates_workspace_root_when_readiness_is_stale() -> N
 
     assert sandbox.files.make_dir_calls == [("/workspace", 10)]
     assert sandbox.commands.calls == command_calls_before_recovery
+
+
+@pytest.mark.asyncio
+async def test_e2b_mkdir_probes_the_parent_with_a_posix_path() -> None:
+    """The parent probe must stay POSIX so `mkdir` works from a Windows host.
+
+    A Windows host resolves the sandbox path to a native one, so stringifying its parent sent
+    `test -d \\workspace` into the Linux sandbox. That probe always fails, and every `mkdir` without
+    `parents=True` then raised `ExecNonZeroError` even though the parent existed.
+    """
+    session, sandbox = _session(workspace_root_ready=False)
+    sandbox.commands.exec_root_ready = True
+    await session.start()
+
+    await session.mkdir("sub/dir")
+
+    probe_commands = [
+        str(call["command"]) for call in sandbox.commands.calls if "test -d" in str(call["command"])
+    ]
+    assert "test -d /workspace/sub" in probe_commands
+    assert not any("\\" in command for command in probe_commands)
 
 
 @pytest.mark.asyncio
@@ -2102,7 +2124,7 @@ async def test_e2b_pty_start_non_tty_wakes_on_nonzero_wait_exit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_e2b_pty_start_non_tty_exited_command_preserves_waiter() -> None:
+async def test_e2b_pty_start_non_tty_keeps_session_until_waiter_closes_output() -> None:
     sandbox = _FakeE2BSandbox()
     handle = _FakeE2BAsyncCommandHandle(initial_exit_code=0, wait_until_released=True)
     sandbox.commands.next_async_command_handle = handle
@@ -2116,12 +2138,12 @@ async def test_e2b_pty_start_non_tty_exited_command_preserves_waiter() -> None:
     session = E2BSandboxSession.from_state(state, sandbox=sandbox)
 
     started = await asyncio.wait_for(
-        session.pty_exec_start("true", shell=False, tty=False, yield_time_s=10),
+        session.pty_exec_start("true", shell=False, tty=False, yield_time_s=0.25),
         timeout=1,
     )
 
-    assert started.process_id is None
-    assert started.exit_code == 0
+    assert started.process_id is not None
+    assert started.exit_code is None
     assert started.output == b""
     assert handle.kill_calls == 0
 
@@ -2135,6 +2157,90 @@ async def test_e2b_pty_start_non_tty_exited_command_preserves_waiter() -> None:
 
     handle.release_wait()
     await asyncio.sleep(0)
+    finished = await session.pty_write_stdin(
+        session_id=started.process_id,
+        chars="",
+        yield_time_s=0,
+    )
+
+    assert finished.process_id is None
+    assert finished.exit_code == 0
+    assert finished.output == b""
+
+
+@pytest.mark.asyncio
+async def test_e2b_waiter_closes_output_after_pending_callback_append() -> None:
+    entry = _E2BPtyProcessEntry(handle=_FakeE2BAsyncCommandHandle(), tty=False)
+    await entry.output_lock.acquire()
+
+    async def append_terminal_tail() -> None:
+        async with entry.output_lock:
+            entry.output_chunks.append(b"tail")
+
+    callback_task = asyncio.create_task(append_terminal_tail())
+    await asyncio.sleep(0)
+    session = E2BSandboxSession.from_state(
+        E2BSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id="sandbox-id",
+            workspace_root_ready=True,
+        ),
+        sandbox=_FakeE2BSandbox(),
+    )
+    waiter_task = asyncio.create_task(session._run_pty_waiter(entry))  # noqa: SLF001
+    await asyncio.sleep(0)
+
+    assert entry.output_closed.is_set() is False
+
+    entry.output_lock.release()
+    await callback_task
+    await waiter_task
+
+    assert entry.output_closed.is_set() is True
+    assert list(entry.output_chunks) == [b"tail"]
+
+
+def test_e2b_prune_prefers_settled_output_over_exit_visible_entry() -> None:
+    from agents.sandbox.session.pty_types import PTY_PROCESSES_MAX
+
+    sandbox = _FakeE2BSandbox()
+    session = E2BSandboxSession.from_state(
+        E2BSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.sandbox_id,
+            workspace_root_ready=True,
+        ),
+        sandbox=sandbox,
+    )
+    exit_visible = _E2BPtyProcessEntry(
+        handle=_FakeE2BAsyncCommandHandle(initial_exit_code=0),
+        tty=False,
+        last_used=0,
+    )
+    settled = _E2BPtyProcessEntry(
+        handle=_FakeE2BAsyncCommandHandle(initial_exit_code=0),
+        tty=False,
+        last_used=1,
+    )
+    settled.output_closed.set()
+    session._pty_processes = {1: exit_visible, 2: settled}  # noqa: SLF001
+    for process_id in range(3, PTY_PROCESSES_MAX + 1):
+        session._pty_processes[process_id] = _E2BPtyProcessEntry(  # noqa: SLF001
+            handle=_FakeE2BAsyncCommandHandle(),
+            tty=False,
+            last_used=float(process_id),
+        )
+    session._reserved_pty_process_ids = set(session._pty_processes)  # noqa: SLF001
+
+    removed = session._prune_pty_processes_if_needed()  # noqa: SLF001
+
+    assert removed is settled
+    assert 1 in session._pty_processes  # noqa: SLF001
+    assert 2 not in session._pty_processes  # noqa: SLF001
 
 
 @pytest.mark.asyncio
@@ -2668,3 +2774,81 @@ async def test_e2b_pty_start_maps_missing_sandbox_not_found_to_transport_error(
     assert exc_info.value.context["provider_error"] == "The sandbox was not found: request failed"
     assert exc_info.value.context["reason"] == "_FakeNotFound"
     assert exc_info.value.retryable is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "wait_error", [RuntimeError("transport unavailable"), asyncio.CancelledError()]
+)
+async def test_e2b_indeterminate_wait_does_not_close_surviving_output(
+    wait_error: BaseException,
+) -> None:
+    handle = _FakeE2BAsyncCommandHandle(wait_error=wait_error)
+    entry = _E2BPtyProcessEntry(handle=handle, tty=False)
+    session = E2BSandboxSession.from_state(
+        E2BSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id="sandbox-id",
+            workspace_root_ready=True,
+        ),
+        sandbox=_FakeE2BSandbox(),
+    )
+    session._pty_processes[1] = entry  # noqa: SLF001
+    if isinstance(wait_error, asyncio.CancelledError):
+        with pytest.raises(asyncio.CancelledError):
+            await session._run_pty_waiter(entry)  # noqa: SLF001
+    else:
+        await session._run_pty_waiter(entry)  # noqa: SLF001
+    assert not entry.output_closed.is_set()
+    entry.output_chunks.append(b"\xc3")
+    # Inspect the zero-length collection window without the public five-second clamp.
+    output, _, closed = await session._collect_pty_output(  # noqa: SLF001
+        entry=entry,
+        yield_time_ms=0,
+        max_output_tokens=None,
+    )
+    assert output == b""
+    assert closed is False
+    assert list(entry.output_chunks) == [b"\xc3"]
+    entry.output_chunks.append(b"\xa9")
+    handle.wait_error = None
+    await session._run_pty_waiter(entry)  # noqa: SLF001
+    final = await session.pty_write_stdin(session_id=1, chars="", yield_time_s=0)
+    assert final.output == "é".encode()
+    assert final.exit_code == 0
+    assert final.process_id is None
+
+
+@pytest.mark.asyncio
+async def test_e2b_exit_visible_polling_allows_terminal_waiter_to_run() -> None:
+    sandbox = _FakeE2BSandbox()
+    handle = _FakeE2BAsyncCommandHandle(initial_exit_code=0)
+    sandbox.commands.next_async_command_handle = handle
+    session = E2BSandboxSession.from_state(
+        E2BSandboxSessionState(
+            session_id=uuid.uuid4(),
+            manifest=Manifest(root="/workspace"),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.sandbox_id,
+            workspace_root_ready=True,
+        ),
+        sandbox=sandbox,
+    )
+    try:
+        update = await session.pty_exec_start("true", shell=False, tty=False, yield_time_s=0.25)
+        # A sequential caller must not need to insert sleeps to schedule the waiter.
+        for _ in range(3):
+            if update.process_id is None:
+                break
+            update = await session.pty_write_stdin(
+                session_id=update.process_id,
+                chars="",
+                yield_time_s=0.25,
+            )
+        assert update.process_id is None
+        assert update.exit_code == 0
+        assert handle.wait_calls == 1
+    finally:
+        await session.pty_terminate_all()

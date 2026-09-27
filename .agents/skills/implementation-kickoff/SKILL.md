@@ -1,6 +1,6 @@
 ---
 name: implementation-kickoff
-description: Start and carry an explicitly invoked openai-agents-python implementation through a fresh isolated worktree and a local PR-ready handoff. Fetch the latest origin/main, keep task changes uncommitted, replay them onto the latest main before final review, run applicable verification and $implementation-final-review, use $pr-draft-summary to generate the complete PR draft and branch name, then create one clean local commit with takeover provenance when applicable. Use only when the user explicitly invokes this skill; never push, open a PR, or mutate GitHub.
+description: Carry implementation through an isolated worktree and local handoff. Use only when this skill is explicitly invoked.
 ---
 
 # Implementation Kickoff
@@ -64,11 +64,9 @@ Record this observed `origin/main` commit as the final-base candidate. Do not ca
 
 ## 5. Complete final review and verification
 
-Run the repository's applicable completion gates against the complete task-owned diff on the final-base candidate. Before freezing the first review fingerprint, inspect the actual final commit-hook configuration and run the exact safe, non-committing equivalent of every hook step that can rewrite a shipped path. Repeat rewriting steps until content-idempotent, and verify generated-file hashes or provenance after normalization. Generate final-review evidence with `review_state.py --complete-diff-output <complete.diff>` so ordinary task-owned untracked files are present in the reviewed diff without staging them. For runtime code, tests, examples, build or test behavior, or behavior-impacting docs, run `$implementation-final-review` and the required `$code-change-verification` sequence in their mandated order. Honor their fingerprint and invalidation rules.
+Run applicable completion gates against the complete task-owned diff on the final-base candidate. Apply formatting and safe hook-equivalent normalization before review, including generated-file provenance checks where relevant. Use `$implementation-final-review` to select lightweight, ordinary, or high-risk review; supply all task-owned untracked file contents as well as tracked changes. Only high-risk review requires `review_state.py --complete-diff-output <complete.diff>` and the strict packet/ledger protocol. Follow the selected procedure's evidence and invalidation rules.
 
-Skip those skills only when their own repository rules say the task is ineligible, such as a repo-meta-only change. Do not weaken an eligible gate merely because the diff is small.
-
-Do not create the branch or commit when review is non-converging, verification fails, required evidence is missing, or the final content lacks clean-review credit.
+Run `$code-change-verification` after clean review whenever its SDK eligibility rules apply. A lightweight review exemption does not waive an otherwise required SDK verification stack. Repo-meta work uses its applicable skill and focused checks. Do not create the branch or commit while required review, verification, or evidence remains incomplete.
 
 ## 6. Generate the complete PR handoff
 
@@ -82,7 +80,7 @@ If the diff, scope, base, behavior claim, issue relationship, or provenance chan
 
 ## 7. Recheck main and create one commit
 
-Fetch `origin main` once more immediately before creating the branch. If it differs from the final-base candidate, return to section 4 and replay onto the new base. Then apply `$implementation-final-review` step 20: preserve clean-review credit only when the verified base-advance closure proves an identical task diff and component workspace plus a complete, non-overlapping upstream dependency/tooling audit. Even when that closure applies, rerun every mandatory final verification gate on the new base and regenerate the PR handoff. If any closure condition is missing or ambiguous, repeat affected checks, fresh independent review, verification, and PR handoff. Once stable:
+Fetch `origin main` once more immediately before creating the branch. If it differs from the final-base candidate, return to section 4 and replay onto the new base. Apply the selected review tier's base-change rules in `$implementation-final-review`; only high-risk work uses the verified base-advance closure in [high-risk-review.md](../implementation-final-review/references/high-risk-review.md) step 20. Recheck relevant upstream dependencies and tooling before retaining review evidence. Rerun applicable final verification on the new base and regenerate the PR handoff; obtain affected independent re-review whenever the selected tier requires it. Once stable:
 
 1. Check whether the suggested branch exists locally, remotely, or in another worktree. Ask `$pr-draft-summary` for the next available numeric suffix and regenerate the handoff before creating a colliding branch.
 2. Create the exact suggested branch in the task worktree.

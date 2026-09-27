@@ -93,7 +93,9 @@ class DaprSession(SessionABC):
                 the underlying state store implementation. Defaults to None.
             consistency (ConsistencyLevel, optional): Consistency level for state operations.
                 Use DAPR_CONSISTENCY_EVENTUAL or DAPR_CONSISTENCY_STRONG constants.
-                Defaults to DAPR_CONSISTENCY_EVENTUAL.
+                Note that strong consistency is requested for write and delete operations
+                (store-dependent); read operations depend on the underlying Dapr client
+                exposing wire-level consistency. Defaults to DAPR_CONSISTENCY_EVENTUAL.
             session_settings (SessionSettings | None): Session configuration settings including
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
@@ -160,7 +162,9 @@ class DaprSession(SessionABC):
     def _get_read_metadata(self) -> dict[str, str]:
         """Get metadata for read operations including consistency.
 
-        The consistency level is passed through state_metadata as per Dapr's state API.
+        Passes consistency through state_metadata. Note that Dapr's gRPC runtime
+        expects consistency as a dedicated field on GetStateRequest, which is not
+        currently exposed by the Dapr Python client.
         """
         metadata: dict[str, str] = {}
         # Add consistency level to metadata for read operations

@@ -83,6 +83,8 @@ asyncio.run(main())
 
 This pattern is fine for single runs. If you call `Runner.run()` / `Runner.run_streamed()` repeatedly, each run may reconnect unless you manually reuse the same `RunConfig` / provider instance.
 
+The Runner owns the model provider only when `run_config` is omitted or when a `dict`-based config omits `model_provider`. The Runner closes that implicitly created provider after a non-streaming run returns or after a streamed run settles, including error and cancellation paths. If you pass a `RunConfig` instance or a `dict` that contains `model_provider`, your application owns that provider; the Runner leaves it open so you can reuse it, and your application must eventually call its `aclose()` method.
+
 ##### Pattern 2: Use `responses_websocket_session()` (recommended for multi-turn reuse)
 
 Use [`responses_websocket_session()`][agents.responses_websocket_session] when you want a shared websocket-capable provider and `RunConfig` across multiple runs (including nested agent-as-tool calls that inherit the same `run_config`).

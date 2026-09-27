@@ -101,6 +101,8 @@ async def run(prompt: str, background_tasks: BackgroundTasks):
 
 [`flush_traces()`][agents.tracing.flush_traces] blocks until currently buffered traces and spans are exported, so call it after `trace()` closes to avoid flushing a partially built trace. You can skip this call when the default export latency is acceptable.
 
+Disabling tracing prevents the default provider from creating new traces and spans, but it does not discard data that its processors already buffered. [`flush_traces()`][agents.tracing.flush_traces] continues to flush that buffered data after tracing has been disabled through `set_tracing_disabled(True)` or `OPENAI_AGENTS_DISABLE_TRACING=1`.
+
 ## Higher level traces
 
 Sometimes, you might want multiple calls to `run()` to be part of a single trace. You can do this by wrapping the entire code in a `trace()`.
@@ -141,9 +143,13 @@ Certain spans may capture potentially sensitive data.
 
 The `generation_span()` stores the inputs/outputs of the LLM generation, and `function_span()` stores the inputs/outputs of function calls. These may contain sensitive data, so you can disable capturing that data via [`RunConfig.trace_include_sensitive_data`][agents.run.RunConfig.trace_include_sensitive_data].
 
+For an approval-gated function tool, a span that pauses for approval does not store the SDK's internal result wrapper as tool output. If the application rejects the call with a custom rejection message, the function span stores that message as output and error text only when `trace_include_sensitive_data` is `True`. When the setting is `False`, the span omits the output and uses the generic error text `Tool execution rejected`.
+
 Similarly, Audio spans include base64-encoded PCM data for input and output audio by default. You can disable capturing this audio data by configuring [`VoicePipelineConfig.trace_include_sensitive_audio_data`][agents.voice.pipeline_config.VoicePipelineConfig.trace_include_sensitive_audio_data].
 
 By default, `trace_include_sensitive_data` is `True`. You can set the default without code by exporting the `OPENAI_AGENTS_TRACE_INCLUDE_SENSITIVE_DATA` environment variable to `true/1` or `false/0` before running your app.
+
+When `trace_include_sensitive_data` is `False`, Responses model spans omit the request input and response output. For calls to an official OpenAI endpoint, the spans still include the Responses API `response_id` as correlation metadata. The SDK omits that identifier from redacted spans for custom endpoints.
 
 ## Custom tracing processors
 
@@ -156,6 +162,16 @@ To customize this default setup, to send traces to alternative or additional bac
 
 1. [`add_trace_processor()`][agents.tracing.add_trace_processor] lets you add an **additional** trace processor that will receive traces and spans as they are ready. This lets you do your own processing in addition to sending traces to OpenAI's backend.
 2. [`set_trace_processors()`][agents.tracing.set_trace_processors] lets you **replace** the default processors with your own trace processors. This means traces will not be sent to the OpenAI backend unless you include a `TracingProcessor` that does so.
+
+### Redaction before export
+
+Trace processors are independent observers. The default provider catches a processor's callback exceptions and continues calling the other registered processors. A redaction processor registered before an exporter therefore does not prevent that exporter from receiving data if redaction fails. Adding a processor with `add_trace_processor()` also leaves the default OpenAI exporter registered.
+
+When export depends on successful redaction, keep redaction and delivery inside the same application-owned exporter. Use `set_trace_processors()` to replace the default processors with a `BatchTraceProcessor` configured with that exporter. The exporter should copy the serialized payloads, redact the copies, and pass only the redacted results to the destination. If serialization, copying, or redaction fails, discard the batch before invoking the destination. Log a fixed failure message without the payload, exception text, or traceback.
+
+The [trace redaction example](https://github.com/openai/openai-agents-python/blob/main/examples/basic/trace_redaction.py) demonstrates this composition using existing tracing APIs. The example prints only event categories and trace/span linkage IDs to the local console; it makes no API calls. Its allowlist omits names, metadata, errors, and span data. Caller-supplied IDs must contain no sensitive information, or the application must map those IDs to safe values. This diagnostic output is not the OpenAI tracing ingest schema; an application sending data to a backend must supply a redaction policy and destination compatible with that backend.
+
+The redactor and destination are trusted application code. They must not independently log or send the original data. The batch processor can invoke the exporter during background export, explicit flush, or shutdown, so callbacks must be safe to use from those execution contexts. A failed batch is dropped; subsequent batches can still be exported. Replacement affects future processor callbacks and does not erase data already buffered by a previously registered processor. Configure the replacement before creating traces or running agents.
 
 
 ## Tracing with non-OpenAI models
@@ -201,6 +217,8 @@ await Runner.run(
 
 The following community and vendor integrations support the tracing API surface of the OpenAI Agents SDK.
 
+The integration maintainers provide support for their integrations. Inclusion in this list does not constitute an OpenAI endorsement or security certification. To request a new listing, follow the [integration listing criteria](https://github.com/openai/openai-agents-python/blob/main/CONTRIBUTING.md#tracing-integration-listings).
+
 ### External tracing processors list
 
 -   [Weights & Biases](https://docs.wandb.ai/weave/guides/integrations/agents/openai-agents-sdk)
@@ -232,3 +250,5 @@ The following community and vendor integrations support the tracing API surface 
 -   [Latitude](https://docs.latitude.so/telemetry/frameworks/openai-agents)
 -   [DProvenanceKit](https://dprovenance.dev/openai-agents/)
 -   [Tuning Engines](https://github.com/cerebrixos-org/tuning-engines-cli/tree/main/packages/tuning-agents#openai-agents-sdk)
+-   [Laminar](https://laminar.sh/docs/tracing/integrations/openai-agents-sdk)
+-   [Noveum](https://github.com/Noveum/noveum-trace/blob/main/docs/OPENAI_AGENTS_INTEGRATION.md)
