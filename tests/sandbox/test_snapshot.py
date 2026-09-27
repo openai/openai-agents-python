@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
+import subprocess
 from pathlib import Path
 from typing import Literal
 
@@ -9,7 +11,7 @@ import pytest
 from pydantic import PrivateAttr, ValidationError
 
 from agents.sandbox import Manifest, RemoteSnapshot, RemoteSnapshotSpec, resolve_snapshot
-from agents.sandbox.entries import File
+from agents.sandbox.entries import Dir, File
 from agents.sandbox.errors import SnapshotPersistError
 from agents.sandbox.materialization import MaterializationResult
 from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxSessionState
@@ -448,7 +450,7 @@ async def test_non_noop_snapshot_stop_records_snapshot_fingerprint(tmp_path: Pat
     await session.stop()
 
     assert session.state.snapshot_fingerprint is not None
-    assert session.state.snapshot_fingerprint_version == "workspace_tar_sha256_v1"
+    assert session.state.snapshot_fingerprint_version == "workspace_tar_sha256_v2"
     cache_payload = session._parse_snapshot_fingerprint_record(
         session._snapshot_fingerprint_cache_path().read_text()
     )
@@ -471,6 +473,60 @@ async def test_start_skips_snapshot_restore_when_live_workspace_fingerprint_matc
     assert session.hydrate_payloads == []
     assert session.provision_manifest_accounts_calls == 0
     assert session.apply_manifest_calls == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workspace_drifted", [False, True])
+async def test_start_compares_legacy_fingerprint_before_restoring_workspace(
+    tmp_path: Path, workspace_drifted: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "data").mkdir(parents=True)
+    (workspace / "app/data").mkdir(parents=True)
+    durable = workspace / "app/data/users.csv"
+    durable.write_bytes(b"id,name")
+    ordinary = workspace / "app/main.py"
+    ordinary.write_bytes(b"print(1)")
+    (workspace / "data/scratch.txt").write_bytes(b"scratch")
+    # Capture the released archive and fingerprint independently of the current helper.
+    legacy_archive = subprocess.run(
+        [
+            "tar",
+            "--exclude=data",
+            "--exclude=./data",
+            "-C",
+            str(workspace),
+            "-cf",
+            "-",
+            ".",
+        ],
+        check=True,
+        capture_output=True,
+    ).stdout
+    session = _ResumeTrackingSession(
+        workspace_root=workspace,
+        snapshot=TestRestorableSnapshot(id="legacy", payload=legacy_archive),
+    )
+    session.state.manifest = Manifest(
+        root=workspace.as_posix(), entries={"data": Dir(ephemeral=True)}
+    )
+    archive_hash = hashlib.sha256(legacy_archive).hexdigest()
+    legacy_hash = hashlib.sha256(
+        f"{archive_hash}\n{session._resume_manifest_digest()}\n".encode()
+    ).hexdigest()
+    session.state.snapshot_fingerprint = legacy_hash
+    session.state.snapshot_fingerprint_version = "workspace_tar_sha256_v1"
+    if workspace_drifted:
+        ordinary.write_bytes(b"print(2)")
+
+    await session.start()
+
+    assert session.clear_calls == int(workspace_drifted)
+    assert session.hydrate_payloads == ([legacy_archive] if workspace_drifted else [])
+    if not workspace_drifted:
+        assert durable.read_bytes() == b"id,name"
+        await session.stop()
+        assert session.state.snapshot_fingerprint_version == "workspace_tar_sha256_v2"
 
 
 @pytest.mark.asyncio

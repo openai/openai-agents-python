@@ -81,6 +81,51 @@ def test_workspace_fingerprint_helper_treats_exclusions_as_literal(tmp_path: Pat
     assert fingerprint() != first
 
 
+@pytest.mark.skipif(
+    sys.platform != "linux",
+    reason="cloud workspace fingerprints use Linux tar; BSD tar has different exclusion semantics",
+)
+def test_workspace_fingerprint_detects_nested_paths_with_excluded_name(tmp_path: Path) -> None:
+    helper_path = _install_fingerprint_helper(tmp_path)
+    workspace = tmp_path / "workspace"
+    excluded = workspace / "data/scratch.txt"
+    durable = workspace / "app/data/users.csv"
+    excluded.parent.mkdir(parents=True)
+    durable.parent.mkdir(parents=True)
+    excluded.write_text("scratch-one", encoding="utf-8")
+    durable.write_text("id,name", encoding="utf-8")
+    ordinary = workspace / "app/main.py"
+    ordinary.write_text("print(1)", encoding="utf-8")
+
+    def fingerprint() -> str:
+        result = subprocess.run(
+            [
+                str(helper_path),
+                str(workspace),
+                "test-version",
+                str(tmp_path / "fingerprint.json"),
+                "manifest-digest",
+                "data",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return str(json.loads(result.stdout)["fingerprint"])
+
+    first = fingerprint()
+    assert fingerprint() == first
+    excluded.write_text("scratch-two", encoding="utf-8")
+    assert fingerprint() == first
+
+    durable.write_text("ID,NAME", encoding="utf-8")
+    nested_changed = fingerprint()
+    assert nested_changed != first
+
+    ordinary.write_text("print(2)", encoding="utf-8")
+    assert fingerprint() != nested_changed
+
+
 @requires_posix_shell
 def test_resolve_workspace_path_helper_allows_extra_root_symlink_target(tmp_path: Path) -> None:
     helper_path = _install_resolve_helper(tmp_path)

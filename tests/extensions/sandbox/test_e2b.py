@@ -1628,10 +1628,7 @@ async def test_e2b_persist_workspace_excludes_runtime_skip_paths() -> None:
     archive = await session.persist_workspace()
 
     assert archive.read() == b"fake-tar-bytes"
-    expected_command = (
-        "tar --exclude=logs/events.jsonl --exclude=./logs/events.jsonl "
-        "-C /workspace -cf - . | base64 -w0"
-    )
+    expected_command = "tar --exclude=./logs/events.jsonl -C /workspace -cf - . | base64 -w0"
     assert sandbox.commands.calls == [
         {
             "command": expected_command,
@@ -1826,9 +1823,7 @@ async def test_e2b_persist_workspace_uses_nested_mount_targets_and_resolved_excl
         "/workspace/repo/sub",
     ]
     tar_command = str(sandbox.commands.calls[-1]["command"])
-    assert "--exclude=repo" in tar_command
     assert "--exclude=./repo" in tar_command
-    assert "--exclude=repo/sub" in tar_command
     assert "--exclude=./repo/sub" in tar_command
 
 
