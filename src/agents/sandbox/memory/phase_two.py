@@ -34,4 +34,4 @@ async def run_phase_two(
         selection=selection,
         extra_prompt=config.extra_prompt,
     )
-    await Runner.run(agent, prompt, run_config=run_config, max_turns=500)
+    await Runner.run(agent, prompt, run_config=run_config, max_turns=config.phase_two_max_turns)

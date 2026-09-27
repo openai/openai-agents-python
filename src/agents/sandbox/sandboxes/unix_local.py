@@ -70,6 +70,7 @@ from ..util.tar_utils import (
     UnsafeTarMemberError,
     safe_extract_tarfile,
     should_skip_tar_member,
+    validate_tarfile,
 )
 from ..workspace_paths import _raise_if_filesystem_root
 from . import _unix_local_file_ops
@@ -163,6 +164,11 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     """
     Unix-only session implementation that runs commands on the host and uses the host filesystem
     as the workspace (rooted at `self.state.manifest.root`).
+
+    On Linux, commands run without OS-level confinement added by this backend. On macOS,
+    commands use sandbox-exec filesystem restrictions, which do not provide network isolation.
+    Workspace paths and SDK file API guards do not confine arbitrary Linux shell commands.
+    Use this backend for trusted local execution or within externally provided isolation.
 
     User-scoped listing and writing require sudo access to a system python3 and its standard
     library. These operations run a trusted file worker in Python isolated mode, independently
@@ -780,18 +786,20 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 seen.add(key)
                 allowed.append(root)
 
-        for path_entry in env.get("PATH", "").split(os.pathsep):
+        child_path_entries = env.get("PATH", "").split(os.pathsep)
+        for path_entry in child_path_entries:
             if path_entry:
                 _append(path_entry)
 
         executable = shutil.which(command_parts[0], path=env.get("PATH"))
         _append(executable)
 
-        # Only host-controlled PATH entries may widen a bin grant to its virtual environment
-        # root. Manifest environment overrides must not authorize broader host filesystem reads.
-        for path_entry in os.environ.get("PATH", "").split(os.pathsep):
-            if path_entry:
-                _append(path_entry, allow_virtual_environment_root=True)
+        # The client must permit PATH inheritance before retained host entries can widen a bin
+        # grant to its virtual environment root. Matching manifest values cannot grant authority.
+        if self._host_environment_allowlist is None or "PATH" in self._host_environment_allowlist:
+            for path_entry in os.environ.get("PATH", "").split(os.pathsep):
+                if path_entry and path_entry in child_path_entries:
+                    _append(path_entry, allow_virtual_environment_root=True)
         return allowed
 
     def _darwin_extra_path_grant_roots(self) -> list[tuple[Path, bool]]:
@@ -1023,6 +1031,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        return self._files.read_bounded(self.normalize_path(path), max_bytes)
+
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:
         if user is not None:
             await self._check_read_with_exec(path, user=user)
@@ -1064,8 +1075,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         # A rename of the entry, descriptor-relative like every other file operation here,
         # so the paths validated above are the ones acted on. `os.rename` never puts the
         # source inside an existing directory the way `mv` does; it fails instead.
-        normalized_source = self.normalize_path(source, for_write=True)
-        normalized_destination = self.normalize_path(destination, for_write=True)
+        normalized_source = self._normalize_entry_path(source, for_write=True)
+        normalized_destination = self._normalize_entry_path(destination, for_write=True)
         command = ("mv", "-f", "--", str(normalized_source), str(normalized_destination))
         if user is not None:
             try:
@@ -1103,8 +1114,9 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         follow_symlinks: bool = True,
         user: str | User | None = None,
     ) -> bool:
-        normalized_left = self.normalize_path(left)
-        normalized_right = self.normalize_path(right)
+        normalize = self.normalize_path if follow_symlinks else self._normalize_entry_path
+        normalized_left = normalize(left)
+        normalized_right = normalize(right)
         command = ("test", str(normalized_left), "-ef", str(normalized_right))
         if user is not None:
             try:
@@ -1139,6 +1151,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                 command=command,
                 cause=e,
             ) from e
+
+    def _normalize_entry_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        # Resolve and authorize the parent without following the leaf that rename/stat owns.
+        self._files.configure(self.state.manifest)
+        lexical = Path(path)
+        if not lexical.is_absolute():
+            lexical = self._workspace_path_policy().absolute_workspace_path(path)
+        resolved = lexical.parent.resolve(strict=False) / lexical.name
+        return self._files.authorize(resolved, for_write=for_write)
 
     async def _write_stream_with_exec(
         self,
@@ -1225,19 +1246,17 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         def _archive_workspace() -> None:
             with tarfile.open(fileobj=buf, mode="w") as tar:
-                tar.add(
-                    root,
-                    arcname=".",
-                    filter=lambda ti: (
-                        None
-                        if should_skip_tar_member(
-                            ti.name,
-                            skip_rel_paths=skip,
-                            root_name=None,
-                        )
-                        else ti
-                    ),
-                )
+
+                def filter_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
+                    # tarfile records inodes before filtering. Clear even excluded entries so
+                    # every retained hardlink has its own payload. Unlike dereference=True,
+                    # this preserves symlinks instead of reading their targets on the host.
+                    getattr(tar, "inodes").clear()  # noqa: B009 - Not exposed by typeshed.
+                    if should_skip_tar_member(member.name, skip_rel_paths=skip, root_name=None):
+                        return None
+                    return member
+
+                tar.add(root, arcname=".", filter=filter_member)
 
         try:
             await run_blocking_workspace_io(_archive_workspace)
@@ -1246,6 +1265,32 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
         buf.seek(0)
         return buf
+
+    async def _restore_snapshot_into_workspace_on_resume(self) -> None:
+        root = Path(self.state.manifest.root)
+        archive = await self.state.snapshot.restore(dependencies=self.dependencies)
+
+        def validate_archive() -> None:
+            try:
+                with tarfile.open(fileobj=archive, mode="r:*") as tar:
+                    validate_tarfile(tar, allow_external_symlink_targets=False)
+                archive.seek(0)
+            except UnsafeTarMemberError as e:
+                raise WorkspaceArchiveWriteError(
+                    path=root, context={"reason": e.reason, "member": e.member}, cause=e
+                ) from e
+            except (tarfile.TarError, OSError) as e:
+                raise WorkspaceArchiveWriteError(path=root, cause=e) from e
+
+        try:
+            # Older snapshots may contain unsupported members. Reject them before discarding
+            # the live files; keep hydrate_workspace's own validation for direct callers too.
+            await run_blocking_workspace_io(validate_archive)
+            await self._clear_workspace_root_on_resume()
+            await self.hydrate_workspace(archive)
+        finally:
+            with suppress(Exception):
+                archive.close()
 
     async def hydrate_workspace(self, data: io.IOBase) -> None:
         root = Path(self.state.manifest.root)
@@ -1270,6 +1315,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
 
 class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | None]):
+    """Create local host sessions for trusted development or externally isolated execution.
+
+    Linux sessions add no OS-level command confinement. macOS sessions apply filesystem
+    restrictions through sandbox-exec, but do not provide network isolation. Separate
+    workspaces and host environment filtering do not establish an OS isolation boundary.
+    For untrusted commands, including commands influenced by untrusted inputs, use an
+    appropriately configured Docker or hosted backend, or provide external isolation.
+    """
+
     backend_id = "unix_local"
     supports_default_options = True
     _instrumentation: Instrumentation
@@ -1312,7 +1366,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         manifest = manifest if manifest is not None else Manifest()
         _assert_unix_local_host_path_grants_unsupported(manifest)
         self._validate_manifest_for_create(manifest)
-        # For local execution, runner-created sessions should always get an isolated temp root
+        # For local execution, runner-created sessions should always get a dedicated temp root
         # unless the caller explicitly chose a custom host path.
         workspace_root_owned = False
         if manifest.root == _DEFAULT_MANIFEST_ROOT:
@@ -1358,7 +1412,7 @@ class UnixLocalSandboxClient(BaseSandboxClient[UnixLocalSandboxClientOptions | N
         if unmount_failed:
             return session
         try:
-            shutil.rmtree(Path(inner.state.manifest.root), ignore_errors=False)
+            await run_blocking_workspace_io(shutil.rmtree, Path(inner.state.manifest.root))
         except FileNotFoundError:
             pass
         except Exception:

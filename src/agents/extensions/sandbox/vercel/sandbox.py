@@ -56,6 +56,7 @@ from ....sandbox.manifest import Manifest
 from ....sandbox.materialization import MaterializationResult
 from ....sandbox.session import SandboxSession, SandboxSessionState, manifest_ops
 from ....sandbox.session.base_sandbox_session import BaseSandboxSession
+from ....sandbox.session.bounded_read import collect_bounded
 from ....sandbox.session.dependencies import Dependencies
 from ....sandbox.session.manager import Instrumentation
 from ....sandbox.session.mount_lifecycle import (
@@ -1238,6 +1239,35 @@ class VercelSandboxSession(BaseSandboxSession):
             port=parsed.port or (443 if tls else 80),
             tls=tls,
         )
+
+    @redact_mount_error_data
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        async with self._s3_mount_operation():
+            normalized_path = await self._validate_path_access(path)
+            sandbox = await self._ensure_sandbox()
+            try:
+                chunks = await sandbox.iter_file(
+                    sandbox_path_str(normalized_path), chunk_size=65536
+                )
+                completed = False
+                try:
+                    payload = await collect_bounded(chunks, max_bytes)
+                    completed = True
+                    return payload
+                finally:
+                    try:
+                        await chunks.aclose()
+                    except Exception:
+                        # Preserve the primary read failure or cancellation.
+                        # A close failure is primary only after a successful read.
+                        if completed:
+                            raise
+            except vercel_sandbox.SandboxNotFoundError:
+                raise WorkspaceReadNotFoundError(path=path) from None
+            except Exception as error:
+                raise WorkspaceArchiveReadError(
+                    path=path, retryable=_vercel_provider_retryability(error)
+                ) from None
 
     @redact_mount_error_data
     async def read(self, path: Path, *, user: str | User | None = None) -> io.IOBase:

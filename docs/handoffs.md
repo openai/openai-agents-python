@@ -116,6 +116,14 @@ When a handoff occurs, it's as though the new agent takes over the conversation,
 
 Nested handoff history is available as an opt-in beta and is disabled by default while we stabilize it. When you enable [`RunConfig.nest_handoff_history`][agents.run.RunConfig.nest_handoff_history], the runner compacts summarizable history into ordered assistant summary segments while preserving lossless message items in their original positions. Each generated summary segment uses the `<CONVERSATION HISTORY>` wrapper, and later handoffs flatten earlier generated segments before rebuilding the ordered transcript. Sessions, `RunState`, and `RunResult.to_input_list()` track exact message occurrences moved into this SDK-default history so those occurrences are not appended twice; separate identical messages are still preserved. You can provide your own mapping function via [`RunConfig.handoff_history_mapper`][agents.run.RunConfig.handoff_history_mapper] to return the exact list of input items for the next agent instead of using the built-in segmentation. The opt-in applies only when neither the handoff's `input_filter` nor the active run's `RunConfig.handoff_input_filter` is set, so existing code that already customizes the payload (including the examples in this repository) keeps its current behavior without changes. You can override the nesting behaviour for a single handoff by passing `nest_handoff_history=True` or `False` to [`handoff(...)`][agents.handoffs.handoff], which sets [`Handoff.nest_handoff_history`][agents.handoffs.Handoff.nest_handoff_history]. If you just need to change the wrapper text for generated summary segments, call [`set_conversation_history_wrappers`][agents.handoffs.set_conversation_history_wrappers] before running your agents. Call [`reset_conversation_history_wrappers`][agents.handoffs.reset_conversation_history_wrappers] before a later run when you need to restore the default wrappers.
 
+Nested handoff history changes how the transcript is represented; it does not redact sensitive data. Tool-call arguments and tool outputs can remain in the generated assistant summary even when the corresponding structured tool items are no longer forwarded separately. Treat the receiving agent and its model provider as recipients of the forwarded history.
+
+For client-managed history, use an explicit [`input_filter`][agents.handoffs.Handoff.input_filter] or [`RunConfig.handoff_input_filter`][agents.run.RunConfig.handoff_input_filter] to select or redact the content that the receiving agent may see. If a custom filter also calls `nest_handoff_history`, sanitize `input_history`, `pre_handoff_items`, and `new_items` before that call. The helper builds nested history from those three fields and ignores any existing `input_items` override. Filtering only `input_items` can therefore leave excluded tool content in the generated summary.
+
+If the filter must preserve the original `new_items` for session history, the filter can instead call `nest_handoff_history` and sanitize the returned `input_history` before returning the nested result. Clearing or replacing only `input_items` after nesting does not remove content already included in `input_history`.
+
+Server-managed conversations (`conversation_id`, `previous_response_id`, or `auto_previous_response_id`) do not support handoff input filters; use a separate run with explicitly selected input when the receiving agent must not inherit that server-managed history. Do not reuse the original `conversation_id` or `previous_response_id` in that separate run.
+
 If both the handoff and the active [`RunConfig.handoff_input_filter`][agents.run.RunConfig.handoff_input_filter] define a filter, the per-handoff [`input_filter`][agents.handoffs.Handoff.input_filter] takes precedence for that specific handoff.
 
 !!! note
@@ -137,6 +145,8 @@ handoff_obj = handoff(
 ```
 
 1. This will automatically remove all tool-related items from the history when `FAQ agent` is called.
+
+`remove_all_tools` removes structured tool items. It does not redact tool arguments or results already copied into ordinary messages or nested-history summaries. Use a custom input filter to remove or redact those message contents when needed.
 
 ## Recommended prompts
 

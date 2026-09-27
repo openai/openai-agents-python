@@ -220,37 +220,12 @@ class WorkspaceEditor:
         moved_destination: Path,
         text: str,
     ) -> None:
-        """Apply an update that renames the file, without a window in which it does not exist.
+        """Stage filesystem aliases; retain ordinary destination write semantics otherwise.
 
-        Writing the destination and then removing the source destroys the file whenever the two
-        paths are one file on disk, which is what a case-only rename is on a filesystem that
-        folds case. Removing the source first destroys it whenever the replacement write fails.
-
-        So neither path is written or removed until the new content is committed somewhere else:
-        the text goes to a staging file, a single `mv` puts it at the destination, and only then
-        is the source removed when the filesystem says it is a different entry. When both names
-        are one entry and the leaf spellings differ, a second move changes the stored spelling.
-        Before the first move the original is untouched; after it the new content exists. There
-        is no moment where the only copy is in memory, and nothing is restored after the fact.
-
-        The identity answer can still go stale. On the different-entry branch, a writer that
-        replaces the source before the removal loses its file. On the same-entry branch, a writer
-        that replaces the source before the second move has its content moved onto the destination
-        and reported as the patched file. Closing either race needs an operation tied to the entry
-        whose identity was checked, which no backend here offers.
-
-        The staging file is a new inode. Committing it replaces the mode, ownership and
-        extended attributes of whatever entry was at the destination: the original, when the
-        filesystem folds the two names onto one entry, and an existing distinct file, when the
-        rename lands on one. An update without `move_to` keeps them, because it writes into the
-        existing inode. Carrying them across would mean reading and reapplying them per backend,
-        or asking the sandbox whether the destination exists and writing in place when it does,
-        which gives up the single-`mv` commit for that case. The committed content is worth more
-        than the mode bits.
-
-        The staging name is a fixed length rather than a decoration of the destination name,
-        because a destination basename near the filesystem's 255-byte limit would make the
-        decorated name exceed it and the write would fail with ENAMETOOLONG.
+        An alias needs a staged replacement because writing and then removing the source
+        would delete the updated file. Distinct files retain the released write/remove path,
+        including an existing destination's metadata and file-level write permissions.
+        These operations do not provide a transaction against concurrent workspace writers.
         """
         if source.as_posix() == moved_destination.as_posix():
             # Not a rename, so nothing needs committing elsewhere. Writing in place is what an
@@ -262,6 +237,13 @@ class WorkspaceEditor:
             # take this branch for a case-only rename and never create the new name. Paths that
             # differ only in case go down the staging path, where `same_file` asks the sandbox.
             await self._write_text(source, text)
+            return
+
+        if not await self._session.same_file(
+            source, moved_destination, follow_symlinks=False, user=self._user
+        ):
+            await self._write_text(moved_destination, text)
+            await self._session.rm(source, user=self._user)
             return
 
         staging = moved_destination.with_name(f".apply_patch-{uuid4().hex}.tmp")

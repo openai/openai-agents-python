@@ -48,7 +48,7 @@ def _authoritative_interruption(
 
 
 @pytest.mark.asyncio
-async def test_resume_warn_mode_rebinds_queued_mcp_call_to_local_winner() -> None:
+async def test_resume_warn_mode_rejects_mcp_approval_for_local_winner() -> None:
     calls: list[str] = []
     server = FakeMCPServer(require_approval="always")
     server.add_tool("lookup", {"type": "object", "properties": {}})
@@ -68,10 +68,10 @@ async def test_resume_warn_mode_rebinds_queued_mcp_call_to_local_winner() -> Non
     agent.tools = [local_tool]
     model.enqueue([get_text_message("done")])
 
-    resumed_result = await Runner.run(agent, state)
+    with pytest.raises(UserError, match="different recipient"):
+        await Runner.run(agent, state)
 
-    assert resumed_result.final_output == "done"
-    assert calls == ["local"]
+    assert calls == []
     assert server.tool_calls == []
 
 

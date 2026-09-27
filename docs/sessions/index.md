@@ -2,7 +2,7 @@
 
 The Agents SDK provides built-in session memory to automatically maintain conversation history across multiple agent runs, eliminating the need to manually handle `.to_input_list()` between turns.
 
-Sessions stores conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
+Sessions store conversation history for a specific session, allowing agents to maintain context without requiring explicit manual memory management. This is particularly useful for building chat applications or multi-turn conversations where you want the agent to remember previous interactions.
 
 Use sessions when you want the SDK to manage client-side memory for you. In the same run, a session cannot be combined with the run-level continuation options `conversation_id`, `previous_response_id`, or `auto_previous_response_id`. If you want OpenAI server-managed continuation instead, choose one of those mechanisms rather than layering a session on top.
 
@@ -136,7 +136,7 @@ If your session implementation exposes default session settings, each non-`None`
 
 ### Basic operations
 
-Sessions supports several operations for managing conversation history:
+Sessions support several operations for managing conversation history:
 
 ```python
 from agents import SQLiteSession
@@ -534,6 +534,14 @@ Use meaningful session IDs that help you organize conversations:
 -   Use OpenAI-hosted storage (`OpenAIConversationsSession()`) when you prefer to store history in the OpenAI Conversations API
 -   Use encrypted sessions (`EncryptedSession(session_id, underlying_session, encryption_key)`) to wrap any session with transparent encryption and TTL-based expiration
 -   Consider implementing custom session backends for other production systems (for example, Django) for more advanced use cases
+
+### SQLite storage trust boundary
+
+`SQLiteSession` assumes that the application trusts the SQLite database and its storage. The backend does not authenticate stored rows or detect external edits, deletions, reordering, or replay. A session ID selects conversation history; the session ID does not authenticate a user or authorize access to that history.
+
+When `get_items()` reads history, the method selects rows by `session_id`, orders the rows by their insertion IDs, and decodes each row's `message_data` as JSON. Changes made directly to the database can therefore appear in the history returned to the application and used by the next agent run. Rows whose `message_data` cannot be decoded as JSON are skipped without an integrity error. Changing a row's `created_at` value does not change the returned item or its order.
+
+The application must authorize access to each session and restrict access to the database file, its containing storage, and backups. For deployments that require tamper detection on shared or untrusted storage, use storage controls or a custom [`Session`][agents.memory.session.Session] implementation that enforces the required integrity guarantees. The [`EncryptedSession`](encrypted_session.md) wrapper provides encryption, but does not verify the completeness or order of conversation history and accepts unencrypted items; the wrapper is not a substitute for those integrity controls.
 
 ### Multiple sessions
 

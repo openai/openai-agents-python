@@ -55,6 +55,11 @@ class FakeStdout:
             return b""
         return self._lines.pop(0)
 
+    async def read(self, _size: int) -> bytes:
+        if not self._lines:
+            return b""
+        return self._lines.pop(0)
+
 
 class FakeStderr:
     def __init__(self, chunks: list[bytes]) -> None:
@@ -423,6 +428,137 @@ async def test_codex_exec_run_handles_large_single_line_events(
 
 
 @pytest.mark.asyncio
+async def test_codex_exec_run_drains_stdout_before_waiting_for_live_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stderr_eof = asyncio.Event()
+    stdout_drained = asyncio.Event()
+
+    class BlockingStderr:
+        async def read(self, _size: int) -> bytes:
+            await stderr_eof.wait()
+            return b""
+
+    class BackpressuredStdout:
+        def __init__(self) -> None:
+            self._line_read = False
+            self._unread_chunks = [b"discarded output", b""]
+
+        async def readline(self) -> bytes:
+            if self._line_read:
+                return b""
+            self._line_read = True
+            return b"line\n"
+
+        async def read(self, _size: int) -> bytes:
+            chunk = self._unread_chunks.pop(0)
+            if not chunk:
+                stdout_drained.set()
+            return chunk
+
+    class LiveProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = BackpressuredStdout()
+            self.stderr = BlockingStderr()
+            self.returncode: int | None = None
+            self.killed = False
+            self.wait_called = False
+
+        async def wait(self) -> None:
+            self.wait_called = True
+            await stdout_drained.wait()
+            self.returncode = -9
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def terminate(self) -> None:
+            raise AssertionError("terminate() should not be used when the stream is closed")
+
+    process = LiveProcess()
+
+    async def fake_create_subprocess_exec(*_args: Any, **_kwargs: Any) -> LiveProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    stream = exec_client.run(exec_module.CodexExecArgs(input="hello"))
+
+    assert await anext(stream) == "line"
+    close_task = asyncio.create_task(stream.aclose())
+    await asyncio.sleep(0)
+    killed_before_stderr_eof = process.killed
+    stderr_eof.set()
+    await asyncio.wait_for(close_task, timeout=1)
+
+    assert killed_before_stderr_eof is True
+    assert stdout_drained.is_set()
+    assert process.wait_called is True
+    assert process.returncode == -9
+
+
+@pytest.mark.asyncio
+async def test_codex_exec_run_cancels_pending_timeout_read_before_draining_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_started = asyncio.Event()
+    readline_cancelled = asyncio.Event()
+
+    class BlockingStdout:
+        async def readline(self) -> bytes:
+            read_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                readline_cancelled.set()
+                raise
+            raise AssertionError("readline unexpectedly completed")
+
+        async def read(self, _size: int) -> bytes:
+            assert readline_cancelled.is_set()
+            return b""
+
+    class LiveProcess:
+        def __init__(self) -> None:
+            self.stdin = FakeStdin()
+            self.stdout = BlockingStdout()
+            self.stderr = FakeStderr([])
+            self.returncode: int | None = None
+            self.killed = False
+
+        async def wait(self) -> None:
+            self.returncode = -9
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def terminate(self) -> None:
+            raise AssertionError("terminate() should not be used before the idle timeout")
+
+    process = LiveProcess()
+
+    async def fake_create_subprocess_exec(*_args: Any, **_kwargs: Any) -> LiveProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    exec_client = exec_module.CodexExec(executable_path="/bin/codex")
+    stream = exec_client.run(exec_module.CodexExecArgs(input="hello", idle_timeout_seconds=60))
+    read_task = asyncio.create_task(anext(stream))
+    await read_started.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert readline_cancelled.is_set()
+    assert process.killed is True
+    assert process.returncode == -9
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enabled", "expected_config"),
     [
@@ -452,10 +588,13 @@ async def test_codex_exec_run_web_search_enabled_flags(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stderr_text", ["bad", "找不到命令"])
 async def test_codex_exec_run_raises_on_non_zero_exit(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, stderr_text: str
 ) -> None:
-    process = FakeProcess(stdout_lines=[], stderr_chunks=[b"bad"], returncode=2)
+    process = FakeProcess(
+        stdout_lines=[], stderr_chunks=[stderr_text.encode("utf-8")], returncode=2
+    )
 
     async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
         return process
@@ -465,9 +604,43 @@ async def test_codex_exec_run_raises_on_non_zero_exit(
     exec_client = exec_module.CodexExec(executable_path="/bin/codex")
     args = exec_module.CodexExecArgs(input="hello")
 
-    with pytest.raises(RuntimeError, match="exited with code 2"):
+    with pytest.raises(RuntimeError) as exc_info:
         async for _ in exec_client.run(args):
             pass
+
+    assert str(exc_info.value) == f"Codex exec exited with code 2: {stderr_text}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_codex_thread_preserves_exit_error_with_non_utf8_stderr(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool
+) -> None:
+    # Captured Windows CP950 diagnostic from the npm Codex shim in issue #5185.
+    stderr = (
+        b"'\"node\"' \xa4\xa3\xacO\xa4\xba\xb3\xa1\xa9\xce\xa5~\xb3\xa1\xa9R\xa5O"
+        b"\xa1B\xa5i\xb0\xf5\xa6\xe6\xaa\xba\xb5{\xa6\xa1\xa9\xce\xa7\xe5\xa6\xb8\xc0\xc9\xa1C\r\n"
+    )
+    process = FakeProcess(stdout_lines=[], stderr_chunks=[stderr], returncode=1)
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    thread = Codex(codex_path_override="/bin/codex").start_thread()
+
+    with pytest.raises(RuntimeError) as exc_info:
+        if streamed:
+            result = await thread.run_streamed("hello")
+            async for _ in result.events:
+                pass
+        else:
+            await thread.run("hello")
+
+    message = str(exc_info.value)
+    assert message.startswith("Codex exec exited with code 1: '\"node\"' ")
+    assert "\ufffd" in message
+    assert message.endswith("\r\n")
 
 
 @pytest.mark.asyncio
@@ -695,6 +868,62 @@ async def test_thread_run_raises_on_stream_error() -> None:
     )
     with pytest.raises(RuntimeError, match="Codex stream error: boom"):
         await thread.run("hello")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event, error_message",
+    [
+        ({"type": "turn.failed", "error": {"message": "boom"}}, "boom"),
+        ({"type": "error", "message": "boom"}, "Codex stream error: boom"),
+        (
+            {
+                "type": "turn.completed",
+                "usage": {"input_tokens": 2, "cached_input_tokens": 1, "output_tokens": 3},
+            },
+            None,
+        ),
+    ],
+    ids=["turn-failed", "stream-error", "success"],
+)
+async def test_thread_run_cleans_up_owned_resources(
+    monkeypatch: pytest.MonkeyPatch, event: dict[str, Any], error_message: str | None
+) -> None:
+    # Keep the subprocess live after its event to exercise ownership at Thread.run().
+    process = FakeProcess(stdout_lines=[json.dumps(event) + "\n"], returncode=None)
+    schema_path: Path | None = None
+
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> FakeProcess:
+        nonlocal schema_path
+        schema_path = Path(args[args.index("--output-schema") + 1])
+        assert schema_path.is_file()
+        return process
+
+    monkeypatch.setattr(exec_module.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    thread = Thread(
+        exec_client=CodexExec(executable_path="/bin/codex"),
+        options=CodexOptions(),
+        thread_options=ThreadOptions(),
+    )
+    options = TurnOptions(output_schema={"type": "object"})
+    generator = thread._run_streamed_internal("hello", options)
+    # Retain the owned iterator so garbage collection cannot stand in for explicit cleanup.
+    monkeypatch.setattr(thread, "_run_streamed_internal", lambda *args: generator)
+
+    try:
+        if error_message is not None:
+            with pytest.raises(RuntimeError, match=error_message):
+                await thread.run("hello", options)
+        else:
+            result = await thread.run("hello", options)
+            assert result.usage == Usage(input_tokens=2, cached_input_tokens=1, output_tokens=3)
+
+        assert process.killed is (error_message is not None)
+        assert process.returncode == 0
+        assert schema_path is not None
+        assert not schema_path.exists()
+    finally:
+        await generator.aclose()
 
 
 @pytest.mark.asyncio

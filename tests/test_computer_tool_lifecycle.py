@@ -347,3 +347,53 @@ async def test_streamed_run_disposes_computer_after_completion() -> None:
     resolved_tool = cast(ComputerTool[Any], model.calls[-1].tools[0])
     assert resolved_tool is not tool
     assert resolved_tool.computer is created
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("fail_prompt", [False, True])
+async def test_start_hook_replaces_computer_before_initialization(
+    streamed: bool, fail_prompt: bool
+) -> None:
+    old_create = AsyncMock(return_value=FakeComputer("old"))
+    old_dispose = AsyncMock()
+    new_create = AsyncMock(return_value=FakeComputer("new"))
+    new_dispose = AsyncMock()
+    old_tool = ComputerTool(computer=ComputerProvider(create=old_create, dispose=old_dispose))
+    new_tool = ComputerTool(computer=ComputerProvider(create=new_create, dispose=new_dispose))
+
+    class ReplaceComputerHooks(RunHooks):
+        async def on_agent_start(self, context, agent) -> None:
+            await asyncio.sleep(0)
+            agent.tools = [new_tool]
+
+    async def instructions(context, agent) -> str:
+        if fail_prompt:
+            raise RuntimeError("prompt failed")
+        return "Use the computer."
+
+    model = ScriptedModel(steps=[[_make_message("done")]])
+    agent = Agent(name="computer", model=model, tools=[old_tool], instructions=instructions)
+
+    async def run() -> None:
+        if streamed:
+            result = Runner.run_streamed(agent, "go", hooks=ReplaceComputerHooks())
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "go", hooks=ReplaceComputerHooks())
+        assert result.final_output == "done"
+
+    if fail_prompt:
+        with pytest.raises(RuntimeError, match="prompt failed"):
+            await run()
+        assert model.calls == ()
+    else:
+        await run()
+        assert len(model.calls[0].tools) == 1
+        assert isinstance(model.calls[0].tools[0], ComputerTool)
+        assert model.calls[0].tools[0].computer is new_create.return_value
+    old_create.assert_not_awaited()
+    old_dispose.assert_not_awaited()
+    new_create.assert_awaited_once()
+    new_dispose.assert_awaited_once()

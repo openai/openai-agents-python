@@ -248,6 +248,10 @@ class _ResponseCreateSequencer:
         return self._ongoing_response
 
     @property
+    def ongoing_response_id(self) -> str | None:
+        return self._ongoing_response_id
+
+    @property
     def response_control(self) -> Literal["free", "create_requested", "cancel_requested"]:
         return self._response_control
 
@@ -542,8 +546,8 @@ class TransportConfig(TypedDict):
 
     max_size: NotRequired[int | None]
     """Maximum size in bytes of an incoming websocket message.
-    Defaults to None (no limit). Set an explicit byte limit to bound memory usage for
-    long-lived connections behind proxies or in memory-constrained containers."""
+    Defaults to 8 MiB (8 * 1024 * 1024 bytes). Messages above the limit close the connection.
+    Set a different byte limit to match application needs, or None to disable the limit."""
 
 
 class OpenAIRealtimeWebSocketModel(RealtimeModel):
@@ -680,7 +684,7 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
         connect_kwargs: dict[str, Any] = {
             "user_agent_header": _USER_AGENT,
             "additional_headers": headers,
-            "max_size": None,  # Allow any size of message
+            "max_size": 8 * 1024 * 1024,
         }
 
         if transport_config:
@@ -1017,6 +1021,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "elapsed_ms": None,
         }
 
+    def _ongoing_response_owns_audio(self, item_id: str, item_content_index: int) -> bool:
+        if not self._ongoing_response:
+            return False
+        response_id = self._response_create_sequencer.ongoing_response_id
+        audio_state = self._audio_state_tracker.get_state(item_id, item_content_index)
+        # Preserve interruption when ownership is unknown. With known identities, only
+        # the response that produced this item can extend its received audio length.
+        if response_id is None or audio_state is None or audio_state.response_id is None:
+            return True
+        return audio_state.response_id == response_id
+
     def _get_audio_limits(self, item_id: str, item_content_index: int) -> tuple[float, int] | None:
         audio_state = self._audio_state_tracker.get_state(item_id, item_content_index)
         if audio_state is None:
@@ -1099,7 +1114,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     _, max_audio_ms = audio_limits
                 truncated_ms = max(int(elapsed_ms), 0)
                 if (
-                    (self._ongoing_response and not event.playback_only)
+                    (
+                        not event.playback_only
+                        and self._ongoing_response_owns_audio(
+                            current_item_id, current_item_content_index
+                        )
+                    )
                     or max_audio_ms is None
                     or truncated_ms < max_audio_ms
                 ):
@@ -1256,8 +1276,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
 
     async def close(self) -> None:
         """Close the session."""
+        transport_teardown_started = False
         try:
             await self._cancel_response_create_tasks()
+            # A cancellation above leaves the websocket and its listener running, so the
+            # connection is only considered gone from this point on.
+            transport_teardown_started = True
             cleanup_error: BaseException | None = None
 
             if self._websocket:
@@ -1290,7 +1314,24 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             if cleanup_error is not None:
                 raise cleanup_error
         finally:
-            self._clear_response_audio_indexes()
+            if transport_teardown_started:
+                self._reset_connection_state()
+            else:
+                self._clear_response_audio_indexes()
+
+    def _reset_connection_state(self) -> None:
+        # The runner reuses one model instance across runs and connect() accepts a new
+        # connection after close(), so every value that names an item or a session of the
+        # closed connection has to go here. Left in place, the next connection would emit
+        # audio_interrupted for the old item on its first speech_started and send
+        # conversation.item.truncate and conversation.item.retrieve for an item id the new
+        # server session has never seen.
+        self._clear_response_audio_indexes()
+        self._audio_state_tracker = ModelAudioTracker()
+        self._current_item_id = None
+        self._created_session = None
+        if self._playback_tracker is not None:
+            self._playback_tracker.on_interrupted()
 
     def _retire_response_audio(self, response_id: str) -> None:
         self._interrupted_audio_response_ids.discard(response_id)
@@ -1431,7 +1472,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     if (
                         max_audio_ms is not None
                         and truncated_ms >= max_audio_ms
-                        and not self._ongoing_response
+                        and not self._ongoing_response_owns_audio(
+                            playback_item_id, playback_content_index
+                        )
                     ):
                         logger.debug(
                             "Skipping truncate because playback appears complete. Item id: %s, "

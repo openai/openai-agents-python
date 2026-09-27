@@ -25,6 +25,7 @@ from ..errors import (
     InvalidManifestPathError,
     MountConfigError,
     PtySessionNotFoundError,
+    SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
     WorkspaceReadNotFoundError,
@@ -929,6 +930,55 @@ class BaseSandboxSession(abc.ABC):
         :raises: FileNotFoundError: If the path does not exist.
         """
 
+    async def read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        """Read a prefix of at most ``max_bytes`` bytes.
+
+        Uses the session identity and the same path scope as ``read(path)``.
+        A result of exactly ``max_bytes`` bytes does not indicate EOF. Backends
+        provided by the SDK bound acquisition from the source. For compatibility,
+        custom backends inherit a fallback that consumes and closes the stream
+        returned by ``read()``. That fallback cannot bound any data acquired inside
+        ``read()`` before it returns. Override ``_read_bounded`` to provide that
+        guarantee. Encoded transports may reject responses exceeding their bounded
+        framing budget. Failures use payload-free ``WorkspaceArchiveReadError``
+        diagnostics.
+        """
+        if max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        # Raise outside the handler: provider exceptions may retain response bodies.
+        reason = "bounded_read_failed"
+        retryable: bool | None = None
+        missing = False
+        try:
+            return await self._read_bounded(path, max_bytes=max_bytes)
+        except (FileNotFoundError, WorkspaceReadNotFoundError):
+            missing = True
+        except SandboxError as error:
+            retryable = error.retryable
+            if error.context.get("reason") == "bounded_read_wire_limit":
+                reason = "bounded_read_wire_limit"
+        except Exception:
+            # Discard payload-bearing provider diagnostics at this boundary.
+            reason = "bounded_read_failed"
+        if missing:
+            raise WorkspaceReadNotFoundError(path=path)
+        raise WorkspaceArchiveReadError(path=path, context={"reason": reason}, retryable=retryable)
+
+    async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
+        stream = await self.read(path)
+        try:
+            result = bytearray()
+            while len(result) < max_bytes:
+                remaining = max_bytes - len(result)
+                payload = stream.read(remaining)
+                if not payload:
+                    break
+                chunk = payload.encode("utf-8") if isinstance(payload, str) else bytes(payload)
+                result.extend(chunk[:remaining])
+            return bytes(result)
+        finally:
+            stream.close()
+
     @abc.abstractmethod
     async def write(
         self,
@@ -1155,14 +1205,9 @@ class BaseSandboxSession(abc.ABC):
     ) -> None:
         """Rename a path, replacing the destination if it exists.
 
-        This is a rename, not `mv`'s other behavior. Given an existing directory as the
-        destination, `mv` puts the source inside it and reports success, which for a caller
-        that then removes the source is a way to delete a file while believing it moved. The
-        destination is checked in the same shell invocation as the move, which keeps the
-        check and the move in one round trip. It does not make them one syscall.
-
-        `mv -T` would say this directly and is GNU-only, so it is unavailable on the BSD
-        userland this also has to run against.
+        The exec fallback requires ``mv -T`` (GNU or compatible). A tool without that option
+        fails without moving the source. Do not replace it with a directory precheck: a
+        concurrently created directory could otherwise receive the source as a child.
 
         This is the shell fallback for backends that only offer `exec`. A backend with
         direct filesystem access, such as UnixLocal, overrides it with a descriptor-relative
@@ -1179,14 +1224,7 @@ class BaseSandboxSession(abc.ABC):
 
         source_arg = sandbox_path_str(source)
         destination_arg = sandbox_path_str(destination)
-        cmd = (
-            "sh",
-            "-lc",
-            'if [ -d "$2" ]; then exit 3; fi\nmv -f -- "$1" "$2"',
-            "sh",
-            source_arg,
-            destination_arg,
-        )
+        cmd = ("mv", "-fT", "--", source_arg, destination_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise ExecNonZeroError(
@@ -1210,17 +1248,16 @@ class BaseSandboxSession(abc.ABC):
         No string comparison can answer this, and neither can the host that is driving the
         session, which may not be the kind of system the sandbox is running on.
 
-        `test -ef` resolves symlinks, so a symlink and the file it points at are the same
-        file by this test while being two directory entries. Pass ``follow_symlinks=False``
-        when the caller needs to distinguish those entries.
+        `test -ef` resolves symlinks. With ``follow_symlinks=False``, return false if either
+        leaf is a symlink, including two paths naming the same symlink. This mode compares
+        only non-symlink entries and is used before removing an apply-patch source.
 
         This is the shell fallback for backends that only offer `exec`. UnixLocal overrides
         it with a descriptor-relative `stat` on both entries.
 
         :param left: First path to compare.
         :param right: Second path to compare.
-        :param follow_symlinks: If false, a symlink on either side is not the same file as
-                its target when the backend preserves the requested leaf path.
+        :param follow_symlinks: If false, return false when either leaf is a symlink.
         :param user: Optional sandbox user to compare as.
         :returns: True when both paths resolve to the same file.
         """
@@ -1437,10 +1474,14 @@ class BaseSandboxSession(abc.ABC):
 
         return True
 
-    async def _compute_and_cache_snapshot_fingerprint(self) -> dict[str, str]:
+    async def _compute_and_cache_snapshot_fingerprint(
+        self, *, version: str | None = None
+    ) -> dict[str, str]:
         """Compute the current workspace fingerprint in-container and atomically cache it."""
 
-        return await snapshot_lifecycle.compute_and_cache_snapshot_fingerprint(self)
+        return await snapshot_lifecycle.compute_and_cache_snapshot_fingerprint(
+            self, version=version
+        )
 
     async def _read_cached_snapshot_fingerprint(self) -> dict[str, str]:
         """Read the cached snapshot fingerprint record from the running sandbox."""

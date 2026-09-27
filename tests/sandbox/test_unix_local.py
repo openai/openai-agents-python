@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
+import os
+import shutil
 import signal
 import tarfile
 import threading
@@ -13,8 +16,8 @@ from typing import cast
 import pytest
 
 from agents.editor import ApplyPatchOperation
-from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import ExecNonZeroError, PtySessionNotFoundError
+from agents.sandbox import LocalSnapshotSpec, SandboxPathGrant
+from agents.sandbox.errors import PtySessionNotFoundError, WorkspaceArchiveWriteError
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -23,7 +26,7 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSessionState,
     _UnixPtyProcessEntry,
 )
-from agents.sandbox.snapshot import NoopSnapshot
+from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
 from agents.sandbox.types import ExecResult, User
 
 
@@ -45,6 +48,155 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
         _ = timeout
         self.exec_commands.append(tuple(str(part) for part in command))
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exclude_first", [False, True])
+async def test_unix_local_snapshot_round_trips_hardlinks(
+    tmp_path: Path, exclude_first: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    first = workspace / "a.py"
+    second = workspace / "b.py"
+    first.write_bytes(b"VALUE = 1\n")
+    first.chmod(0o755)
+    os.link(first, second)
+    (workspace / "link.py").symlink_to("b.py")
+    (workspace / "copy.py").write_bytes(b"independent\n")
+    if exclude_first:
+        session.register_persist_workspace_skip_path("a.py")
+    await session.stop()
+    archive = await session.state.snapshot.restore()
+    try:
+        with tarfile.open(fileobj=archive) as tar:
+            members = {member.name: member for member in tar.getmembers()}
+        assert members["./b.py"].isreg()
+        assert members["./link.py"].issym()
+        if exclude_first:
+            assert "./a.py" not in members
+        else:
+            assert members["./a.py"].isreg()
+    finally:
+        archive.close()
+
+    # Prove that resume actually restores the snapshot, not the surviving workspace.
+    second.write_bytes(b"changed after snapshot\n")
+    (workspace / "stale.txt").write_bytes(b"remove on resume")
+    resumed = await client.resume(session.state)
+    try:
+        await resumed.start()
+        assert second.read_bytes() == b"VALUE = 1\n"
+        assert second.stat().st_mode & 0o777 == 0o755
+        assert (workspace / "copy.py").read_bytes() == b"independent\n"
+        assert (workspace / "link.py").is_symlink()
+        assert (workspace / "link.py").read_bytes() == b"VALUE = 1\n"
+        assert not (workspace / "stale.txt").exists()
+        if exclude_first:
+            assert not first.exists()
+        else:
+            assert first.read_bytes() == b"VALUE = 1\n"
+            assert first.stat().st_ino != second.stat().st_ino
+    finally:
+        await resumed.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_kind", ["hardlink", "external_symlink", "invalid_tar"])
+async def test_unix_local_resume_rejects_invalid_snapshot_before_clearing_workspace(
+    tmp_path: Path, invalid_kind: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    (workspace / "keep.txt").write_bytes(b"live workspace")
+    archive = io.BytesIO()
+    if invalid_kind == "invalid_tar":
+        archive.write(b"not a tar archive")
+    else:
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            member = tarfile.TarInfo("link")
+            member.type = tarfile.LNKTYPE if invalid_kind == "hardlink" else tarfile.SYMTYPE
+            member.linkname = "keep.txt" if invalid_kind == "hardlink" else "../outside"
+            tar.addfile(member)
+    archive.seek(0)
+    await session.state.snapshot.persist(archive)
+    archive.close()
+
+    resumed = await client.resume(session.state)
+    try:
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await resumed.start()
+        assert (workspace / "keep.txt").read_bytes() == b"live workspace"
+        assert sorted(path.name for path in workspace.iterdir()) == ["keep.txt"]
+        assert not await resumed.running()
+    finally:
+        await resumed.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unix_local_resume_cancellation_waits_for_archive_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    (workspace / "keep.txt").write_bytes(b"live workspace")
+    await session.stop()
+    archive = await session.state.snapshot.restore()
+    started = threading.Event()
+    release = threading.Event()
+    events: list[str] = []
+    validate = unix_local_module.validate_tarfile
+
+    async def restore(self: LocalSnapshot, **kwargs: object) -> io.IOBase:
+        return archive
+
+    def slow_validate(tar: tarfile.TarFile, **kwargs: object) -> None:
+        started.set()
+        assert release.wait(timeout=5)
+        validate(tar, allow_external_symlink_targets=False)
+        events.append("validated")
+
+    monkeypatch.setattr(LocalSnapshot, "restore", restore)
+    monkeypatch.setattr(unix_local_module, "validate_tarfile", slow_validate)
+    resumed = await client.resume(session.state)
+    task = asyncio.create_task(resumed.start())
+    try:
+        while not started.is_set():
+            if task.done():
+                await task
+                pytest.fail("resume did not validate the archive")
+            await asyncio.sleep(0.005)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not archive.closed
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert events == ["validated"]
+        assert archive.closed
+        assert (workspace / "keep.txt").read_bytes() == b"live workspace"
+    finally:
+        release.set()
+        await resumed.shutdown()
+        await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -654,9 +806,7 @@ class TestUnixLocalApplyPatchRename:
     async def test_move_to_an_existing_directory_keeps_the_source(self, tmp_path: Path) -> None:
         """A directory destination is refused, and the source is where it was.
 
-        `mv` given an existing directory moves the source inside it and exits 0, and a caller
-        that removes the source on that exit code deletes the file. The rename here goes
-        through `os.rename`, which fails instead. The unit tests model this; this one runs it.
+        The destination write must fail before the editor removes the source.
         """
         workspace = tmp_path / "workspace"
         client = UnixLocalSandboxClient()
@@ -666,7 +816,7 @@ class TestUnixLocalApplyPatchRename:
             await session.write(Path("notes.txt"), io.BytesIO(b"alpha\nbeta\n"))
             await session.mkdir(Path("docs"))
 
-            with pytest.raises(ExecNonZeroError):
+            with pytest.raises(WorkspaceArchiveWriteError):
                 await session.apply_patch(
                     ApplyPatchOperation(
                         type="update_file",
@@ -692,3 +842,65 @@ class TestUnixLocalApplyPatchRename:
 
             assert await session.same_file(workspace / "one.txt", workspace / "one.txt") is True
             assert await session.same_file(workspace / "one.txt", workspace / "two.txt") is False
+
+
+@pytest.mark.asyncio
+async def test_client_delete_keeps_workspace_removal_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The event loop must keep running while `delete()` removes the workspace root.
+
+    The removal walks the whole workspace tree, so running it inline starves every other
+    task on the loop for its full duration. `rm(recursive=True)`, `persist_workspace`, and
+    `hydrate_workspace` already hand that work to `run_blocking_workspace_io`.
+
+    The handshake below measures the removal itself rather than the whole `delete()` call,
+    so an `await` elsewhere in the method, such as the ephemeral unmount loop, cannot
+    satisfy it.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "payload.txt").write_text("payload", encoding="utf-8")
+
+    client = UnixLocalSandboxClient()
+    session = await client.resume(
+        UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+            workspace_root_owned=True,
+        )
+    )
+
+    real_rmtree = shutil.rmtree
+    removal_started = threading.Event()
+    loop_advanced = threading.Event()
+    loop_advanced_during_removal: list[bool] = []
+
+    def _slow_rmtree(path: object, *args: object, **kwargs: object) -> None:
+        removal_started.set()
+        # The observer can only answer while the removal is in flight if the loop is
+        # still free. An inline removal holds the loop here until this call returns.
+        loop_advanced_during_removal.append(loop_advanced.wait(timeout=5.0))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(unix_local_module.shutil, "rmtree", _slow_rmtree)
+
+    async def _observe_loop() -> None:
+        while not removal_started.is_set():
+            await asyncio.sleep(0)
+        loop_advanced.set()
+
+    observer = asyncio.create_task(_observe_loop())
+    try:
+        returned = await client.delete(session)
+    finally:
+        observer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await observer
+
+    assert removal_started.is_set()
+    assert loop_advanced_during_removal == [True]
+    # The removal still targets the manifest root, and `delete()` still hands the same
+    # session back to the caller.
+    assert not workspace.exists()
+    assert returned is session

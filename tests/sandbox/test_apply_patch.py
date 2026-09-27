@@ -447,8 +447,14 @@ async def test_apply_patch_move_to_an_existing_directory_keeps_the_source() -> N
 
 @pytest.mark.asyncio
 async def test_apply_patch_move_to_commits_the_destination_before_removing_the_source() -> None:
-    """The order is the fix. Assert it directly, so a future reordering fails here."""
-    session = PosixHostApplyPatchSession()
+    """Ordinary moves write the destination before removing the source, without staging."""
+
+    class OrderedSession(PosixHostApplyPatchSession):
+        async def rm(self, path, *, recursive=False, user=None):
+            assert self.files[PurePosixPath("/workspace/Notes.txt")] == b"alpha\ngamma\n"
+            await super().rm(path, recursive=recursive, user=user)
+
+    session = OrderedSession()
     session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
 
     await session.apply_patch(
@@ -460,11 +466,7 @@ async def test_apply_patch_move_to_commits_the_destination_before_removing_the_s
         )
     )
 
-    assert len(session.mv_calls) == 1
-    staging, moved_to = session.mv_calls[0]
-    assert staging.parent == PurePosixPath("/workspace")
-    assert staging.name.endswith(".tmp")
-    assert moved_to == PurePosixPath("/workspace/Notes.txt")
+    assert session.mv_calls == []
     assert session.rm_calls == [(cast(Path, PurePosixPath("/workspace/notes.txt")), False)]
 
 
@@ -488,7 +490,7 @@ async def test_apply_patch_move_to_removes_a_source_symlink_pointing_at_the_dest
     )
 
     assert session.files == {target: b"alpha\ngamma\n"}
-    assert session.mv_calls[-1][1] == target
+    assert session.mv_calls == []
     assert session.rm_calls == [(link, False)]
 
 
@@ -532,23 +534,23 @@ async def test_apply_patch_move_to_the_same_path_writes_in_place() -> None:
 @pytest.mark.asyncio
 async def test_apply_patch_move_to_a_long_name_keeps_the_staging_name_within_the_limit() -> None:
     """A staging name built from the destination name overflows the 255-byte basename limit."""
-    session = PosixHostApplyPatchSession()
-    session.files[cast(Path, PurePosixPath("/workspace/notes.txt"))] = b"alpha\nbeta\n"
+    session = CaseFoldingApplyPatchSession()
     long_name = "n" * 250 + ".txt"
+    session.files[cast(Path, PurePosixPath(f"/workspace/{long_name}"))] = b"alpha\nbeta\n"
 
     await session.apply_patch(
         ApplyPatchOperation(
             type="update_file",
-            path="notes.txt",
+            path=long_name,
             diff="@@\n alpha\n-beta\n+gamma\n",
-            move_to=long_name,
+            move_to=long_name.upper(),
         )
     )
 
-    assert len(session.mv_calls) == 1
+    assert len(session.mv_calls) == 2
     staging, _ = session.mv_calls[0]
     assert len(staging.name.encode("utf-8")) <= 255
-    assert session.files == {PurePosixPath(f"/workspace/{long_name}"): b"alpha\ngamma\n"}
+    assert session.files == {PurePosixPath(f"/workspace/{long_name.upper()}"): b"alpha\ngamma\n"}
 
 
 @pytest.mark.asyncio
@@ -715,3 +717,78 @@ async def test_apply_patch_mapping_operation_rejects_non_string_move_to() -> Non
         )
 
     assert session.files[Path("/workspace/old.txt")] == b"alpha\n"
+
+
+@pytest.mark.asyncio
+async def test_fallback_move_cannot_put_source_inside_a_new_directory(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    import sys
+
+    from agents.sandbox.errors import ExecNonZeroError
+    from agents.sandbox.manifest import Manifest
+    from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+    from agents.sandbox.types import ExecResult
+
+    executable = shutil.which("gmv") or (shutil.which("mv") if sys.platform == "linux" else None)
+    if executable is None:
+        pytest.skip("requires a GNU-compatible mv")
+    source = tmp_path / "source"
+    source.write_bytes(b"original")
+    destination = tmp_path / "destination"
+
+    class ShellSession(ApplyPatchSession):
+        mv = BaseSandboxSession.mv
+
+        async def exec(self, *command, **kwargs):
+            # The directory arrives after validation but before the actual move.
+            destination.mkdir()
+            result = subprocess.run(
+                [executable, *map(str, command[1:])], capture_output=True, check=False
+            )
+            return ExecResult(
+                stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
+            )
+
+    with pytest.raises(ExecNonZeroError):
+        await ShellSession(Manifest(root=str(tmp_path))).mv(source, destination)
+    assert source.read_bytes() == b"original"
+    assert list(destination.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_fallback_move_replaces_a_directory_symlink(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    import sys
+
+    from agents.sandbox.manifest import Manifest
+    from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+    from agents.sandbox.types import ExecResult
+
+    executable = shutil.which("gmv") or (shutil.which("mv") if sys.platform == "linux" else None)
+    if executable is None:
+        pytest.skip("requires a GNU-compatible mv")
+    source = tmp_path / "source"
+    source.write_bytes(b"replacement")
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(directory, target_is_directory=True)
+
+    class ShellSession(ApplyPatchSession):
+        mv = BaseSandboxSession.mv
+
+        async def exec(self, *command, **kwargs):
+            result = subprocess.run(
+                [executable, *map(str, command[1:])], capture_output=True, check=False
+            )
+            return ExecResult(
+                stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
+            )
+
+    await ShellSession(Manifest(root=str(tmp_path))).mv(source, link)
+    assert not link.is_symlink()
+    assert link.read_bytes() == b"replacement"
+    assert directory.is_dir()
+    assert not source.exists()

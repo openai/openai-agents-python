@@ -10,6 +10,9 @@ import pytest
 from agents.sandbox import Manifest
 from agents.sandbox.capabilities.tools import ViewImageArgs, ViewImageTool
 from agents.sandbox.capabilities.tools.shell_tool import _resolve_workdir_command
+from agents.sandbox.config import MemoryLayoutConfig
+from agents.sandbox.memory.storage import SandboxMemoryStorage
+from agents.sandbox.types import ExecResult
 from agents.testing import scripted_sandbox_session
 from agents.tool import ToolOutputImage
 
@@ -70,4 +73,33 @@ async def test_view_image_normalizes_backslashes_as_sandbox_separators() -> None
 
     assert isinstance(output, ToolOutputImage)
     assert session.calls[0].args[0].as_posix() == "/workspace/images/plot.png"
+    session.assert_complete()
+
+
+@pytest.mark.asyncio
+async def test_memory_layout_probes_existing_files_with_posix_paths() -> None:
+    """The existence probe must be POSIX so an existing memory file is not replaced.
+
+    A Windows host normalizes the sandbox path to a native one, and stringifying it sends
+    ``test -f \\workspace\\memories\\MEMORY.md`` into a POSIX sandbox. That probe can never
+    succeed, so every layout check overwrites the file with an empty one. ``ensure_layout`` runs on
+    each rollout enqueue and on flush, so the loss repeats.
+    """
+    session = scripted_sandbox_session(
+        [
+            *({"method": "mkdir", "result": None} for _ in range(5)),
+            {"method": "exec", "result": ExecResult(stdout=b"", stderr=b"", exit_code=0)},
+            {"method": "exec", "result": ExecResult(stdout=b"", stderr=b"", exit_code=0)},
+        ],
+        manifest=Manifest(root="/workspace"),
+    )
+    storage = SandboxMemoryStorage(session=session, layout=MemoryLayoutConfig())
+
+    await storage.ensure_layout()
+
+    probes = [call for call in session.calls if call.method == "exec"]
+    assert [call.args[2] for call in probes] == [
+        "/workspace/memories/MEMORY.md",
+        "/workspace/memories/memory_summary.md",
+    ]
     session.assert_complete()

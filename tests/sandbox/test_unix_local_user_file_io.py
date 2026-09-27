@@ -80,6 +80,12 @@ async def test_user_write_uses_shared_traversal_and_preserves_input(
     closed = Mock()
     monkeypatch.setattr(os, "open", opened)
     monkeypatch.setattr(os, "close", closed)
+    regular = os.stat_result((stat.S_IFREG | 0o600, 0, 0, 1, 501, 20, 12, 0, 0, 0))
+    monkeypatch.setattr(os, "stat", Mock(return_value=regular))
+    monkeypatch.setattr(os, "fstat", Mock(return_value=regular))
+    monkeypatch.setattr(os, "set_blocking", Mock())
+    truncated = Mock()
+    monkeypatch.setattr(os, "ftruncate", truncated)
     written: list[bytes] = []
 
     class Output(io.BytesIO):
@@ -105,7 +111,8 @@ async def test_user_write_uses_shared_traversal_and_preserves_input(
         {"dir_fd": 12},
     ]
     assert all(call.args[1] & os.O_NOFOLLOW for call in opened.call_args_list)
-    assert opened.call_args.args[1] & os.O_TRUNC
+    assert not opened.call_args.args[1] & os.O_TRUNC
+    truncated.assert_called_once_with(13, 0)
     fdopen.assert_called_once_with(13, "wb")
     assert [call.args[0] for call in closed.call_args_list] == [10, 11, 12]
     assert output.closed
@@ -155,7 +162,7 @@ async def test_user_rename_failure_keeps_the_error(
     with pytest.raises(ExecNonZeroError) as error:
         await session.mv(Path("file"), Path("docs"), user="example-user")
     assert dispatch.call_count == 1
-    assert b"Is a directory" in error.value.result.stderr
+    assert b"Is a directory" in error.value.stderr
 
 
 @pytest.mark.asyncio
@@ -177,7 +184,13 @@ async def test_user_same_file_asks_the_worker(
     monkeypatch.setattr(os, "open", Mock(side_effect=[10, 11, 12, 13]))
     monkeypatch.setattr(os, "close", Mock())
     stats = [os.stat_result((stat.S_IFREG, ino, 1, 1, 0, 0, 0, 0, 0, 0)) for ino in inodes]
-    stat_mock = Mock(side_effect=stats)
+    original_stat = os.stat
+    entries = iter(stats)
+    stat_mock = Mock(
+        side_effect=lambda *args, **kwargs: (
+            next(entries) if "dir_fd" in kwargs else original_stat(*args, **kwargs)
+        )
+    )
     monkeypatch.setattr(os, "stat", stat_mock)
     dispatch = Mock(side_effect=_worker)
     monkeypatch.setattr(subprocess, "run", dispatch)
@@ -188,7 +201,11 @@ async def test_user_same_file_asks_the_worker(
     assert dispatch.call_count == 1
     assert dispatch.call_args.args[0][9:] == ["same_file", "/workspace/left", "/workspace/right"]
     assert dispatch.call_args.kwargs["input"] == (b"1" if follow_symlinks else b"0")
-    assert [call.kwargs["follow_symlinks"] for call in stat_mock.call_args_list] == [
+    assert [
+        call.kwargs["follow_symlinks"]
+        for call in stat_mock.call_args_list
+        if "dir_fd" in call.kwargs
+    ] == [
         follow_symlinks,
         follow_symlinks,
     ]
@@ -225,6 +242,8 @@ async def test_user_leaf_permission_failure_does_not_write(
     session: unix_local.UnixLocalSandboxSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     opened = Mock(side_effect=[10, 11, PermissionError("File is not writable")])
+    regular = os.stat_result((stat.S_IFREG | 0o400, 0, 0, 1, 501, 20, 12, 0, 0, 0))
+    monkeypatch.setattr(os, "stat", Mock(return_value=regular))
     closed = Mock()
     monkeypatch.setattr(os, "open", opened)
     monkeypatch.setattr(os, "close", closed)

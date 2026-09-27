@@ -64,6 +64,8 @@ class ApplyPatchSession(BaseSandboxSession):
     ) -> None:
         _ = user
         normalized = self.normalize_path(path)
+        if normalized in self.directories:
+            raise IsADirectoryError(normalized)
         payload = data.read()
         if isinstance(payload, str):
             self.files[normalized] = payload.encode("utf-8")
@@ -402,7 +404,7 @@ class WriteFailureApplyPatchSession(CaseFoldingApplyPatchSession):
         await super().write(path, data, user=user)
 
 
-class ConcurrentWriterApplyPatchSession(PosixHostApplyPatchSession):
+class ConcurrentWriterApplyPatchSession(CaseFoldingApplyPatchSession):
     """A case-sensitive session where another writer takes the source path and the move fails.
 
     The rename is committed by a move. This session lets the staging write land, then has a

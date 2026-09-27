@@ -301,7 +301,7 @@ async def test_sqlite_fallback_reserves_writer_before_tail_claim(
 
     assert sum(item is not None for item in popped) == 1
     assert [item.get("content") for item in popped if item is not None] == ["only"]
-    assert any(statement.strip().upper() == "BEGIN IMMEDIATE" for statement in statements)
+    assert any(statement.startswith("UPDATE agent_sessions SET") for statement in statements)
 
 
 async def test_pop_item_supports_unknown_delete_rowcount(
@@ -319,6 +319,9 @@ async def test_pop_item_supports_unknown_delete_rowcount(
 
         def one_or_none(self) -> Any:
             return self._row
+
+        def scalar_one_or_none(self) -> Any:
+            return 1
 
     class FakeTransaction:
         async def __aenter__(self) -> None:
@@ -407,6 +410,8 @@ async def test_pop_item_retries_returning_claim_lost_to_concurrent_delete(
             return FakeTransaction()
 
         async def execute(self, statement: Any) -> FakeResult:
+            if isinstance(statement, Select) and statement._for_update_arg is not None:
+                return FakeResult(1)
             if self._attempt == 1:
                 if isinstance(statement, Select):
                     return FakeResult(1)

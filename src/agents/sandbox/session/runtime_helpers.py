@@ -231,9 +231,14 @@ for rel in "$@"; do
     if [ "$escape_tar_patterns" -eq 1 ]; then
         rel=$(printf '%s\\n' "$rel" | sed 's/[][\\\\*?]/\\\\&/g')
     fi
-    quoted_rel=$(quote_sh "$rel")
+    # Reproduce released fingerprints when comparing a preserved live workspace.
+    # Switching algorithms before comparison could restore an incomplete old archive.
+    if [ "$version" = "workspace_tar_sha256_v1" ]; then
+        quoted_rel=$(quote_sh "$rel")
+        tar_cmd="$tar_cmd --exclude=$quoted_rel"
+    fi
     quoted_dot_rel=$(quote_sh "./$rel")
-    tar_cmd="$tar_cmd --exclude=$quoted_rel --exclude=$quoted_dot_rel"
+    tar_cmd="$tar_cmd --exclude=$quoted_dot_rel"
 done
 
 tar_cmd="$tar_cmd -C $(quote_sh "$workspace_root") -cf - ."
