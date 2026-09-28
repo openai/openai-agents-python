@@ -24,6 +24,10 @@ Security issues in dependencies or external providers can affect this SDK. Expla
 
 Applications choose credentials, providers, tools, storage, and execution permissions. Tool implementations and local subprocesses can exercise the host application's privileges. Applications must authorize those capabilities and isolate untrusted execution using appropriate controls. Model output, tool and MCP responses, remote content, and serialized state do not by themselves authorize access to host resources or credentials.
 
+For availability reports about model-request retry delays, the threat model trusts OpenAI-controlled model endpoints and their service-generated retry metadata. It assumes application-controlled provider selection and authenticated connections to the intended endpoint. Reports that rely solely on a malicious third-party model provider choosing retry delays are outside this scope.
+
+This retry-metadata trust does not extend to model-generated content or grant access to host resources. SDK defects that allow an attacker to influence retry metadata on an OpenAI-controlled path, bypass endpoint authentication, or violate cancellation or resource-ownership boundaries remain in scope. Operational failures of an OpenAI-controlled service can still warrant reliability fixes.
+
 Security review should verify that changes preserve these properties:
 
 - Credentials and sensitive payloads stay within their intended request, storage, and telemetry destinations. Redaction controls must be checked at the actual logging, exception, tracing, and serialization paths; a tracing option does not sanitize every output channel.
