@@ -23,7 +23,13 @@ Release Please does not regenerate the public API snapshot. Before marking the r
    The generator records the checked-out source commit and freezes the API surface for the proposed version. Review the generated `tests/fixtures/released_api_contract.json` diff, then commit and push it to the release PR branch using the maintainer’s own GitHub credentials. This push triggers the repository’s normal pull-request CI for the completed candidate. Do not merely replace its version string: new exports and signatures must be captured too. If the bot or another maintainer updates the candidate's source or version, regenerate and review the snapshot again before merging.
 3. Run the required verification and wait for CI on the final candidate. The initial bot PR may fail the snapshot-version test until step 2 is complete. Mark the PR ready for review only after the snapshot and metadata agree.
 
+### Standalone manual release
+
 The standalone `$release-candidate-prep` skill prepares a manual four-file candidate: `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, and `tests/fixtures/released_api_contract.json`. The helper synchronizes the manifest with the requested version so the next automated proposal starts from the version actually released. The manual route uses maintainer-written GitHub Release notes and does not generate a changelog entry. It does not complete a bot PR; for that route, follow the steps above.
+
+Before merging a standalone manual release PR, an authorized maintainer must [disable the **Release Please** workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows) (`gh workflow disable release-please.yml --repo openai/openai-agents-python`). Wait for every already queued or running Release Please run to finish, then close any open bot release PR superseded by the manual candidate. Keep release PR CI, required review, and publishing workflows enabled.
+
+Keep Release Please disabled until the manual candidate has merged and its matching tag and GitHub Release exist. Advancing the manifest without that tag can cause Release Please to propose another version using already-released commits; a manual PR does not have the bot's pending-release guard. If release publication is delayed, leave Release Please disabled until that boundary is complete. Then re-enable it (`gh workflow enable release-please.yml --repo openai/openai-agents-python`); the next push to `main` or manual workflow dispatch can propose subsequent changes. Do not apply `autorelease` labels to a manual PR as a substitute for this procedure.
 
 ### Temporary GitHub Actions authentication
 

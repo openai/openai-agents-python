@@ -166,6 +166,8 @@ Apply the repository's GitHub paste-readiness rules to the report. Use native `#
 
 Also report the dedicated worktree path, local branch, commit SHA, parent `origin/main` commit, and the exact four-file manifest outside the copy-ready block. State explicitly that the source checkout was left unchanged, nothing was pushed, and no pull request was created. Leave the worktree in place for the user's handoff.
 
+Include the [standalone manual release procedure](../../../.github/RELEASING.md#standalone-manual-release) in the handoff: before merging, an authorized maintainer pauses Release Please, waits for its queued/running jobs, and closes any superseded bot release PR. Release Please resumes only after the manual candidate's tag and GitHub Release exist. This skill does not perform those GitHub operations.
+
 If `release/v<version>` already exists on `origin`, inspect its exact current commit with credential-free `git ls-remote --heads origin release/v<version>` immediately before handoff and record it as `<observed-remote-release-commit>`. State explicitly that the local branch has replaced the old candidate and now contains exact current `origin/main` plus only the new `release: <version>` commit. Because this skill never mutates GitHub, provide the user with the exact `git push --force-with-lease=refs/heads/release/v<version>:<observed-remote-release-commit> origin release/v<version>` command to replace the remote branch themselves; never run it. A normal push or an unspecified lease is insufficient for this replacement case. If the remote branch changes after inspection, the explicit lease must reject the push instead of overwriting unseen work.
 
 ## Failure behavior
