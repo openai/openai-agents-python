@@ -1473,6 +1473,10 @@ class BaseSandboxSession(abc.ABC):
 
         await snapshot_lifecycle.clear_workspace_root_on_resume(self)
 
+    async def _remove_workspace_entry_on_resume(self, path: Path) -> None:
+        """Remove a stale workspace entry before restoring a snapshot."""
+        await self.rm(path, recursive=True)
+
     def _workspace_resume_mount_skip_relpaths(self) -> set[Path]:
         return snapshot_lifecycle.workspace_resume_mount_skip_relpaths(self)
 

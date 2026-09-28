@@ -1037,6 +1037,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
+    async def _remove_workspace_entry_on_resume(self, path: Path) -> None:
+        # Snapshot cleanup owns the entry, not the target of a stale symlink.
+        target = self.normalize_path(path.parent, for_write=True) / path.name
+        try:
+            await run_blocking_workspace_io(partial(self._files.rm, target, recursive=True))
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=target, cause=e) from e
+
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         return self._files.read_bounded(self.normalize_path(path), max_bytes)
 

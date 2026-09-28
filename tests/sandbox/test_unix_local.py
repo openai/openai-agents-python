@@ -113,6 +113,48 @@ async def test_unix_local_snapshot_round_trips_hardlinks(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target_kind", ["directory", "file", "missing"])
+async def test_unix_local_snapshot_resume_removes_stale_link_without_following_target(
+    tmp_path: Path, target_kind: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "keep.txt"
+    sentinel.write_bytes(b"external data")
+    target = external if target_kind == "directory" else external / target_kind
+    if target_kind == "file":
+        target.write_bytes(b"external file")
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(
+            root=str(workspace), extra_path_grants=(SandboxPathGrant(path=str(external)),)
+        ),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    (workspace / "original.txt").write_bytes(b"snapshot content")
+    await session.stop()
+    (workspace / "original.txt").write_bytes(b"changed after snapshot")
+    stale_link = workspace / "stale-link"
+    stale_link.symlink_to(target, target_is_directory=target_kind == "directory")
+    resumed = await client.resume(session.state)
+    try:
+        await resumed.start()
+        assert (workspace / "original.txt").read_bytes() == b"snapshot content"
+        assert sentinel.read_bytes() == b"external data"
+        if target_kind == "file":
+            assert target.read_bytes() == b"external file"
+        elif target_kind == "missing":
+            assert not target.exists()
+        assert not stale_link.is_symlink()
+        assert not stale_link.exists()
+    finally:
+        await resumed.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("invalid_kind", ["hardlink", "external_symlink", "invalid_tar"])
 async def test_unix_local_resume_rejects_invalid_snapshot_before_clearing_workspace(
     tmp_path: Path, invalid_kind: str
