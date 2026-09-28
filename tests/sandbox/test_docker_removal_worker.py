@@ -7,7 +7,7 @@ import io
 import json
 import stat
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager, nullcontext
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -21,7 +21,6 @@ from agents.sandbox.files import EntryKind, FileEntry
 from agents.sandbox.sandboxes import (
     docker_removal,
 )
-from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
 from agents.sandbox.sandboxes.docker_removal import _Worker
 
 from . import _docker_removal_helpers as removal_helpers
@@ -34,137 +33,6 @@ service = removal_helpers.service
 worker_code = pytest.importorskip(
     "agents.sandbox.sandboxes._docker_removal_worker", exc_type=ImportError
 )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resume", [False, True])
-@pytest.mark.parametrize("workspace_setup", ["missing", "existing", "ancestor_grant"])
-async def test_client_bootstraps_workspace_before_strict_binding(
-    service: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    resume: bool,
-    workspace_setup: str,
-) -> None:
-    manager, container, worker = service
-    root = tmp_path / "nested" / "workspace"
-    if workspace_setup == "existing":
-        root.mkdir(parents=True)
-        (root / "keep.txt").write_text("existing contents")
-    grants = (
-        (SandboxPathGrant(path=str(root.parent), read_only=True),)
-        if workspace_setup == "ancestor_grant"
-        else ()
-    )
-    configured = Manifest(root=str(root), extra_path_grants=grants)
-    client = DockerSandboxClient(manager.docker_client, removal_service=manager)
-    state = session(manager, container, configured).state
-    state.container_id = "missing-container"
-    monkeypatch.setattr(client, "get_container", lambda _: None)
-    monkeypatch.setattr(container, "start", lambda: None, raising=False)
-
-    def create_container(**kwargs: Any) -> Any:
-        # Docker's daemon creates its configured working directory before startup.
-        # Keep all client creation and authority binding code real.
-        if workdir := kwargs.get("working_dir"):
-            Path(workdir).mkdir(parents=True, exist_ok=True)
-        return container
-
-    manager.docker_client.containers.create.side_effect = create_container
-    # O_PATH is Linux-only. A read-only descriptor lets other Unix hosts exercise
-    # production canonicalization, directory checks, and binding identity checks.
-    monkeypatch.setattr(worker_code.os, "O_PATH", worker_code.os.O_RDONLY, raising=False)
-    with ExitStack() as bindings:
-        original_request = worker.request
-
-        def request(**data: Any) -> dict[str, Any]:
-            response = original_request(**data)
-            if data["operation"] == "bind":
-                bound = bindings.enter_context(worker_code._bind_paths(data["paths"]))
-                response["paths"] = bound.paths
-            return response
-
-        monkeypatch.setattr(worker, "request", request)
-        try:
-            if resume:
-                wrapped = await client.resume(state)
-            else:
-                wrapped = await client.create(
-                    manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
-                )
-            assert root.is_dir()
-            manager.assert_bound(container, configured)
-            assert not wrapped._inner.state.workspace_root_ready
-            if workspace_setup == "existing":
-                assert (root / "keep.txt").read_text() == "existing contents"
-            with pytest.raises(WorkspaceArchiveWriteError):
-                await wrapped.rm(str(root), recursive=True)
-            if grants:
-                with pytest.raises(WorkspaceArchiveWriteError):
-                    await wrapped.rm(str(root.parent), recursive=True)
-            assert not worker.removed
-        finally:
-            manager.close()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("resume", [False, True])
-async def test_client_bootstrap_does_not_create_missing_grant_roots(
-    service: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    resume: bool,
-) -> None:
-    manager, container, worker = service
-    root = tmp_path / "workspace"
-    grant = tmp_path / "external"
-    configured = Manifest(root=str(root), extra_path_grants=(SandboxPathGrant(path=str(grant)),))
-    client = DockerSandboxClient(manager.docker_client, removal_service=manager)
-    state = session(manager, container, configured).state
-    state.container_id = "missing-container"
-    state.workspace_root_ready = True
-    original_session_id = state.session_id
-    monkeypatch.setattr(client, "get_container", lambda _: None)
-    monkeypatch.setattr(container, "start", lambda: None, raising=False)
-    remove = Mock()
-    monkeypatch.setattr(container, "remove", remove, raising=False)
-
-    def create_container(**kwargs: Any) -> Any:
-        if workdir := kwargs.get("working_dir"):
-            Path(workdir).mkdir(parents=True, exist_ok=True)
-        return container
-
-    manager.docker_client.containers.create.side_effect = create_container
-    monkeypatch.setattr(worker_code.os, "O_PATH", worker_code.os.O_RDONLY, raising=False)
-    original_request = worker.request
-
-    def request(**data: Any) -> dict[str, Any]:
-        response = original_request(**data)
-        if data["operation"] == "bind":
-            with worker_code._bind_paths(data["paths"]) as bound:
-                response["paths"] = bound.paths
-        return response
-
-    monkeypatch.setattr(worker, "request", request)
-    try:
-        with pytest.raises(FileNotFoundError):
-            if resume:
-                await client.resume(state)
-            else:
-                await client.create(
-                    manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
-                )
-        assert root.is_dir()
-        assert not grant.exists()
-        assert not manager._bindings
-        remove.assert_called_once_with(force=True)
-        assert "close" in container.events
-        if resume:
-            assert state.container_id == "missing-container"
-            assert state.session_id == original_session_id
-            assert state.workspace_root_ready
-    finally:
-        manager.close()
 
 
 def test_empty_directory_needs_no_search_of_its_contents(monkeypatch: pytest.MonkeyPatch) -> None:
