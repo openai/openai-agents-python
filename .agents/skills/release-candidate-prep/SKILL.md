@@ -9,10 +9,10 @@ Use this skill only when the user explicitly invokes `$release-candidate-prep` a
 
 ## Non-negotiable boundaries
 
-- Treat explicit invocation as authorization to fetch `origin/main`, create one dedicated detached release worktree, run branch-free release-readiness gates there, create or replace the local `release/v<version>` in that worktree only after those gates pass, update the four release-owned files, and create one local commit. If the branch already exists locally or remotely, the required final local state is still exact current `origin/main` plus only the new release commit; an existing local branch may be replaced only when it is not checked out in another worktree.
+- Treat explicit invocation as authorization to fetch `origin/main`, create one dedicated detached release worktree, run branch-free release-readiness gates there, create or replace the local `release/v<version>` in that worktree only after those gates pass, update the five release-owned files, and create one local commit. If the branch already exists locally or remotely, the required final local state is still exact current `origin/main` plus only the new release commit; an existing local branch may be replaced only when it is not checked out in another worktree.
 - Keep the user's source checkout on its existing clean `main` commit. Do not fast-forward it, switch its branch, or materialize release files there. Leave the dedicated release worktree in place for green handoff, blocked review, or recoverable failure.
 - Never push, open or edit a pull request, add labels or milestones, create a release, or otherwise mutate GitHub. Never run `gh`.
-- Own exactly `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, and `tests/fixtures/released_api_contract.json`. Runtime, documentation, workflow, or other repository changes must land on `main` before release preparation.
+- Own exactly `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `tests/fixtures/released_api_contract.json`. Runtime, documentation, workflow, or other repository changes must land on `main` before release preparation.
 - Do not stash, delete, overwrite or remove an existing worktree, or work around unrelated local changes. Fail before branch creation when the initial checkout is dirty or is not on `main`, the dedicated worktree is not clean and detached at refreshed `origin/main`, an existing local release branch is checked out in another worktree, the prospective packaged-contract gate fails after the allowed dependency-bootstrap recovery, the planning review blocks, or `origin/main` advances after those gates run.
 - Treat `$final-release-review` as the controlling release checker, not only as a report generator. Its planning gate must be green before branch creation, and its final-candidate gate must inspect the materialized worktree and be green before PR-ready handoff. Any candidate content, commit, or base change invalidates the previous green result.
 - Remove inherited `OPENAI_API_KEY` from every child command. Release preparation does not require a live OpenAI API request.
@@ -89,10 +89,10 @@ The helper must complete all of these operations or fail with an actionable erro
 1. Repeat the source-root, clean `main`, version, registered-worktree, detached-HEAD, and release-branch replaceability checks.
 2. Refresh `origin/main` again without moving the source checkout.
 3. Require refreshed `origin/main` and `<release-worktree>` HEAD to equal `<preflight-base>`. If `origin/main` advanced, retain the old detached worktree and rerun preflight plus both readiness gates in a new exact-base worktree.
-4. Keep the worktree detached while updating the single project version declaration in `pyproject.toml` and the root version in `.release-please-manifest.json`.
+4. Keep the worktree detached while updating the single project version declaration in `pyproject.toml`, the root version in `.release-please-manifest.json`, and the literal `__version__` fallback in `src/agents/version.py`.
 5. Run `make sync` with `UV_DEFAULT_INDEX=https://pypi.org/simple`.
 6. Run `make update-released-api-contract VERSION=<version>` and then `make check-released-api-contract VERSION=<version>`.
-7. Require exactly the four release-owned paths to be modified in `<release-worktree>`, leave them unstaged and uncommitted, and confirm that the source checkout remains unchanged.
+7. Require exactly the five release-owned paths to be modified in `<release-worktree>`, leave them unstaged and uncommitted, and confirm that the source checkout remains unchanged.
 8. Only after those candidate checks pass, create or reset the local `release/v<version>` inside `<release-worktree>` to exact `<preflight-base>` while preserving the validated unstaged manifest. Do not retain commits or content from an older local or remote candidate. This delayed replacement must leave an existing local branch unchanged when candidate generation fails.
 
 If the helper fails after branch creation, preserve its local branch, dedicated worktree, and working-tree evidence. Report the failing command and state rather than guessing whether a partial run is safe to resume. Never remove the worktree as automatic cleanup.
@@ -104,21 +104,21 @@ Run the remaining commands from `<release-worktree>`. Inspect all release-owned 
 ```bash
 git status --short
 git diff --check
-git diff -- pyproject.toml uv.lock .release-please-manifest.json tests/fixtures/released_api_contract.json
+git diff -- pyproject.toml uv.lock .release-please-manifest.json src/agents/version.py tests/fixtures/released_api_contract.json
 ```
 
 Confirm all of the following:
 
-- `pyproject.toml`, the editable `openai-agents` entry in `uv.lock`, and the root entry in `.release-please-manifest.json` declare the requested version.
+- `pyproject.toml`, the editable `openai-agents` entry in `uv.lock`, the root entry in `.release-please-manifest.json`, and the source fallback in `src/agents/version.py` declare the requested version.
 - The API contract baseline is `v<version>` and its `baseline_commit` is the exact `origin/main` source commit on which the release branch is based.
 - The generated contract preserves the previous release and freezes intended new exports and signatures.
 - Any intended `public_properties`, `canonical_imports`, or `public_modules` policy additions have been reviewed explicitly; the updater deliberately does not infer them.
-- No path outside the four-file release manifest is changed, staged, or untracked.
+- No path outside the five-file release manifest is changed, staged, or untracked.
 
 Stage only the manifest and create exactly one local commit:
 
 ```bash
-git add pyproject.toml uv.lock .release-please-manifest.json tests/fixtures/released_api_contract.json
+git add pyproject.toml uv.lock .release-please-manifest.json src/agents/version.py tests/fixtures/released_api_contract.json
 git commit -m "release: <version>"
 ```
 
@@ -126,7 +126,7 @@ Do not amend unrelated content into the commit.
 
 ## 6. Run the final-candidate release review
 
-Invoke `$final-release-review` from `<release-worktree>` in final-candidate mode with the release commit as `TARGET=HEAD`. This invocation is a release checker: it must inspect the complete candidate diff and the actual checked-out `release/v<version>` contents, including `pyproject.toml`, the editable `openai-agents` entry in `uv.lock`, `.release-please-manifest.json`, and `tests/fixtures/released_api_contract.json`. The branch, package metadata, lockfile, Release Please manifest, contract baseline, contract `baseline_commit`, and intended version must agree.
+Invoke `$final-release-review` from `<release-worktree>` in final-candidate mode with the release commit as `TARGET=HEAD`. This invocation is a release checker: it must inspect the complete candidate diff and the actual checked-out `release/v<version>` contents, including `pyproject.toml`, the editable `openai-agents` entry in `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `tests/fixtures/released_api_contract.json`. The branch, package metadata, lockfile, Release Please manifest, source fallback, contract baseline, contract `baseline_commit`, and intended version must agree.
 
 If the review is blocked, stop. Return its unblock checklist, retain the local branch, commit, and worktree for follow-up, and do not present the candidate as PR-ready. A report body does not authorize continuation when the release call is blocked. After any fix, regenerate the API contract when the public surface may have changed, restore a single release commit, and rerun the complete final-candidate review.
 
@@ -134,7 +134,7 @@ The earlier planning review proves that the source commit was ready before branc
 
 ## 7. Recheck main freshness
 
-After a green review, fetch `origin main` again without credentials from `<release-worktree>` and compare it with the release commit's parent. If they differ, the candidate is stale. First verify that the branch is clean, has exactly one local commit, and that the commit changes only the four-file release manifest. Rebase that commit onto the new `origin/main` so Git detects any conflicting release metadata. After a clean rebase, move the local release branch back to `origin/main` with a mixed reset, which preserves the rebased release tree as unstaged task-owned changes. Restore all four release-owned files (`pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, and `tests/fixtures/released_api_contract.json`) from `origin/main`, run `make sync`, and require the worktree to be clean at the new base. Run `make check-prospective-released-api-contract` only in that internally consistent base state, where the installed project version and frozen contract baseline agree. Then update `pyproject.toml` and the root entry in `.release-please-manifest.json` to `<version>`, run `make sync`, run `make update-released-api-contract VERSION=<version>` and `make check-released-api-contract VERSION=<version>`, review the exact manifest again, and recreate the single `release: <version>` commit. The base and candidate content changed, so the previous green check is invalid: rerun `$final-release-review` from the worktree and require a new green release call. Repeat until the reviewed local branch is exactly one commit ahead of current `origin/main` and that commit changes only the four-file release manifest.
+After a green review, fetch `origin main` again without credentials from `<release-worktree>` and compare it with the release commit's parent. If they differ, the candidate is stale. First verify that the branch is clean, has exactly one local commit, and that the commit changes only the five-file release manifest. Rebase that commit onto the new `origin/main` so Git detects any conflicting release metadata. After a clean rebase, move the local release branch back to `origin/main` with a mixed reset, which preserves the rebased release tree as unstaged task-owned changes. Restore all five release-owned files (`pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `tests/fixtures/released_api_contract.json`) from `origin/main`, run `make sync`, and require the worktree to be clean at the new base. Run `make check-prospective-released-api-contract` only in that internally consistent base state, where the installed project version and frozen contract baseline agree. Then update `pyproject.toml`, the root entry in `.release-please-manifest.json`, and the literal `__version__` fallback in `src/agents/version.py` to `<version>`, run `make sync`, run `make update-released-api-contract VERSION=<version>` and `make check-released-api-contract VERSION=<version>`, review the exact manifest again, and recreate the single `release: <version>` commit. The base and candidate content changed, so the previous green check is invalid: rerun `$final-release-review` from the worktree and require a new green release call. Repeat until the reviewed local branch is exactly one commit ahead of current `origin/main` and that commit changes only the five-file release manifest.
 
 If replay conflicts or another path changes, stop with recoverable evidence. Do not force a resolution that expands the release commit beyond its manifest.
 
@@ -164,7 +164,7 @@ Release <version>
 
 Apply the repository's GitHub paste-readiness rules to the report. Use native `#123` references for this repository and `owner/repo#123` for another repository. Keep the required compare URL. Do not include local paths, Codex citations, operational diagnostics, or app directives inside the copy-ready description.
 
-Also report the dedicated worktree path, local branch, commit SHA, parent `origin/main` commit, and the exact four-file manifest outside the copy-ready block. State explicitly that the source checkout was left unchanged, nothing was pushed, and no pull request was created. Leave the worktree in place for the user's handoff.
+Also report the dedicated worktree path, local branch, commit SHA, parent `origin/main` commit, and the exact five-file manifest outside the copy-ready block. State explicitly that the source checkout was left unchanged, nothing was pushed, and no pull request was created. Leave the worktree in place for the user's handoff.
 
 Include the [standalone manual release procedure](../../../.github/RELEASING.md#standalone-manual-release) in the handoff: before merging, an authorized maintainer pauses Release Please, waits for its queued/running jobs, and closes any superseded bot release PR. Release Please resumes only after the manual candidate's tag and GitHub Release exist. This skill does not perform those GitHub operations.
 

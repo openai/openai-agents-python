@@ -25,7 +25,7 @@ Release Please does not regenerate the public API snapshot. Before marking the r
 
 ### Standalone manual release
 
-The standalone `$release-candidate-prep` skill prepares a manual four-file candidate: `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, and `tests/fixtures/released_api_contract.json`. The helper synchronizes the manifest with the requested version so the next automated proposal starts from the version actually released. The manual route uses maintainer-written GitHub Release notes and does not generate a changelog entry. It does not complete a bot PR; for that route, follow the steps above.
+The standalone `$release-candidate-prep` skill prepares a manual five-file candidate: `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, `src/agents/version.py`, and `tests/fixtures/released_api_contract.json`. The helper synchronizes the manifest and source-checkout fallback with the requested version so the next automated proposal starts from the version actually released. The manual route uses maintainer-written GitHub Release notes and does not generate a changelog entry. It does not complete a bot PR; for that route, follow the steps above.
 
 Before merging a standalone manual release PR, an authorized maintainer must [disable the **Release Please** workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/disable-and-enable-workflows) (`gh workflow disable release-please.yml --repo openai/openai-agents-python`). Wait for every already queued or running Release Please run to finish, then close any open bot release PR superseded by the manual candidate. Keep release PR CI, required review, and publishing workflows enabled.
 

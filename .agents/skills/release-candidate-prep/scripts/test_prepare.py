@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import os
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -57,6 +59,15 @@ class ReleaseRepository:
 
     def _write_fixture_files(self) -> None:
         (self.repo / "tests/fixtures").mkdir(parents=True)
+        (self.repo / "src/agents").mkdir(parents=True)
+        (self.repo / "src/agents/version.py").write_text(
+            "import importlib.metadata\n\n"
+            "try:\n"
+            '    __version__ = importlib.metadata.version("openai-agents")\n'
+            "except importlib.metadata.PackageNotFoundError:\n"
+            '    __version__ = "0.19.4"\n',
+            encoding="utf-8",
+        )
         (self.repo / ".release-please-manifest.json").write_text(
             json.dumps({".": "0.19.4"}, indent=2) + "\n", encoding="utf-8"
         )
@@ -251,12 +262,21 @@ class PreparationTests(unittest.TestCase):
 
             self.assertEqual(candidate.base_commit, fixture.base_commit)
             self.assertEqual(candidate.branch, "release/v0.20.0")
+            version_module = candidate.worktree / "src/agents/version.py"
+            with mock.patch(
+                "importlib.metadata.version",
+                side_effect=importlib.metadata.PackageNotFoundError("openai-agents"),
+            ):
+                self.assertEqual(runpy.run_path(str(version_module))["__version__"], "0.20.0")
+            with mock.patch("importlib.metadata.version", return_value="0.21.0"):
+                self.assertEqual(runpy.run_path(str(version_module))["__version__"], "0.21.0")
             self.assertEqual(set(candidate.changed_paths), prepare.RELEASE_PATHS)
             self.assertEqual(
                 set(candidate.changed_paths),
                 {
                     ".release-please-manifest.json",
                     "pyproject.toml",
+                    "src/agents/version.py",
                     "uv.lock",
                     "tests/fixtures/released_api_contract.json",
                 },
