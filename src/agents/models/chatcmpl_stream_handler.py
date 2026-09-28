@@ -383,7 +383,8 @@ class ChatCmplStreamHandler:
         choice = Choice(
             index=0,
             delta=ChoiceDelta(tool_calls=tool_call_deltas),
-            finish_reason="tool_calls",
+            # Assembling buffered deltas does not prove the provider finished the choice.
+            finish_reason=None,
         )
         return template_chunk.model_copy(update={"choices": [choice], "usage": None})
 
@@ -445,11 +446,8 @@ class ChatCmplStreamHandler:
 
                 if has_passthrough_output:
                     passthrough_choices.append(choice)
-                elif choice.finish_reason in {"content_filter", "length"}:
-                    # A content-filtered or truncated choice ends the stream with an empty
-                    # delta, so it would otherwise be dropped here and the handler would
-                    # never see the finish_reason it needs to act on.
-                    # Forward a delta-stripped copy so buffering semantics are unchanged.
+                elif choice.finish_reason is not None:
+                    # Preserve real terminal evidence even when all output was buffered.
                     passthrough_choices.append(choice.model_copy(update={"delta": ChoiceDelta()}))
 
             if passthrough_choices or chunk.usage is not None:
@@ -610,6 +608,7 @@ class ChatCmplStreamHandler:
         strict_feature_validation: bool = False,
         preserve_raw_usage: bool = False,
         raise_on_length_truncation: bool = False,
+        require_finish_reason: bool = False,
     ) -> AsyncIterator[TResponseStreamEvent]:
         """
         Handle a streaming chat completion response and yield response events.
@@ -626,6 +625,8 @@ class ChatCmplStreamHandler:
                 This is an internal option enabled only by OpenAIChatCompletionsModel:
                 the shared handler also serves LiteLLM and AnyLLM, whose streaming
                 behavior must remain unchanged.
+            require_finish_reason: Whether choice zero must have a provider finish reason
+                before completion. Enabled for the official OpenAI endpoint only.
         """
         usage: CompletionUsage | None = None
         raw_usage: dict[str, Any] | None = None
@@ -641,6 +642,7 @@ class ChatCmplStreamHandler:
         # behavior error instead of collapsing into an empty turn.
         saw_content_filter = False
         saw_length = False
+        saw_finish_reason = False
         async for chunk in stream:
             if not state.started:
                 state.started = True
@@ -683,6 +685,8 @@ class ChatCmplStreamHandler:
             if choice is None:
                 continue
 
+            if choice.finish_reason is not None:
+                saw_finish_reason = True
             if choice.finish_reason == "content_filter":
                 saw_content_filter = True
             elif choice.finish_reason == "length":
@@ -1184,6 +1188,15 @@ class ChatCmplStreamHandler:
                 output_index=output_layout.assistant_message_output_index(state),
                 type="response.refusal.delta",
                 sequence_number=sequence_number.get_and_increment(),
+            )
+
+        if require_finish_reason and not saw_finish_reason:
+            if usage is not None:
+                response.usage = cls._build_response_usage(usage)
+            if preserve_raw_usage and raw_usage is not None:
+                _attach_raw_usage_snapshot(response, raw_usage)
+            raise ModelBehaviorError(
+                "Chat Completions stream ended before receiving a finish_reason for choice 0."
             )
 
         # A completion truncated before any visible token (finish_reason ==

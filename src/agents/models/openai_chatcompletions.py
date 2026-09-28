@@ -494,6 +494,7 @@ class OpenAIChatCompletionsModel(Model):
                     model=self.model,
                     strict_feature_validation=self._strict_feature_validation,
                     raise_on_length_truncation=True,
+                    require_finish_reason=ChatCmplHelpers.is_openai(self._client),
                     **raw_usage_options,
                 ):
                     if chunk.type == "response.completed":
