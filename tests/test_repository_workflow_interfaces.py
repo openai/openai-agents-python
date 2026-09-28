@@ -176,8 +176,9 @@ def test_prospective_contract_preparation_removes_api_key_before_uv() -> None:
     assert recipe.index("unset OPENAI_API_KEY") < recipe.index("uv run")
 
 
-def test_release_build_validates_before_executing_candidate_code() -> None:
-    build = _workflow_job("build", PUBLISH_WORKFLOW)
+@pytest.mark.parametrize("job_name", ["checks", "build"])
+def test_release_build_validates_before_executing_candidate_code(job_name: str) -> None:
+    build = _workflow_job(job_name, PUBLISH_WORKFLOW)
 
     assert "contents: read" in build
     assert "id-token:" not in build
@@ -187,8 +188,10 @@ def test_release_build_validates_before_executing_candidate_code() -> None:
     assert build.count("persist-credentials: false") == 2
     assert "fetch-depth: 0" in build
     validation = build.index("python -I control/.github/scripts/verify_release.py")
-    assert validation < build.index('UV_PYTHON="$python_version" make sync tests')
-    assert build.index("make typecheck") < build.index("run: uv build")
+    candidate_command = (
+        'UV_PYTHON="$python_version" make sync tests' if job_name == "checks" else "run: uv build"
+    )
+    assert validation < build.index(candidate_command)
     assert ' --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"' in build
     assert "enable-cache: false" in build
 
@@ -199,20 +202,21 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
     if bash is None:
         pytest.skip("The publish workflow requires Bash.")
     workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
-    build = workflow["jobs"]["build"]
-    steps = build["steps"]
+    jobs = workflow["jobs"]
+    checks = jobs["checks"]
+    build = jobs["build"]
+    steps = checks["steps"]
     check_index = next(i for i, step in enumerate(steps) if step["name"] == "Check release source")
     check = steps[check_index]
-    package_index = next(i for i, step in enumerate(steps) if step.get("run") == "uv build")
-    assert check_index < package_index
-    assert (
-        check["working-directory"] == steps[package_index]["working-directory"] == "release-source"
-    )
+    package = next(step for step in build["steps"] if step.get("run") == "uv build")
+    assert check["working-directory"] == package["working-directory"] == "release-source"
+    assert build["needs"] == "checks"
     assert check["shell"] == "bash"
     assert check["env"] == {"OPENAI_API_KEY": "fake-for-tests", "UV_LOCKED": "1"}
-    assert "if" not in build and "continue-on-error" not in build
-    for step in steps[check_index:]:
-        assert "if" not in step and "continue-on-error" not in step
+    for job in (checks, build, jobs["publish"]):
+        assert "if" not in job and "continue-on-error" not in job
+        for step in job["steps"]:
+            assert "if" not in step and "continue-on-error" not in step
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -258,7 +262,7 @@ def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:
     workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
     check = next(
         step
-        for step in workflow["jobs"]["build"]["steps"]
+        for step in workflow["jobs"]["checks"]["steps"]
         if step["name"] == "Check release source"
     )
     dependency = tmp_path / "dependency"
@@ -296,6 +300,29 @@ def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "lockfile" in result.stderr and "needs to be updated" in result.stderr
     assert lockfile.read_bytes() == original_lock
+
+
+def test_release_build_is_isolated_from_test_execution() -> None:
+    workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    checks = workflow["jobs"]["checks"]
+    build = workflow["jobs"]["build"]
+    # Separate GitHub-hosted jobs provide fresh runners, not just new directories.
+    assert checks["runs-on"] == build["runs-on"] == "ubuntu-latest"
+    assert checks["permissions"] == build["permissions"] == {"contents": "read"}
+    assert "outputs" not in checks
+    assert build["needs"] == "checks"
+    for job in (checks, build):
+        assert "env" not in job and "container" not in job
+        for step in job["steps"]:
+            action = step.get("uses", "")
+            assert not action.startswith(("actions/cache@", "actions/download-artifact@"))
+            if action.startswith("astral-sh/setup-uv@"):
+                assert step["with"]["enable-cache"] is False
+            if job is checks:
+                assert not action.startswith("actions/upload-artifact@")
+    build_commands = [step["run"] for step in build["steps"] if "run" in step]
+    assert len(build_commands) == 2  # Provenance validation, then packaging; no test execution.
+    assert build_commands[-1] == "uv build"
 
 
 def test_pypi_job_only_publishes_the_build_artifact() -> None:
