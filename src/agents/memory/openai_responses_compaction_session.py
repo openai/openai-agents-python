@@ -77,6 +77,7 @@ def is_openai_model_name(model: str) -> bool:
     # Handle fine-tuned models: ft:gpt-4.1:org:proj:suffix
     without_ft_prefix = trimmed[3:] if trimmed.startswith("ft:") else trimmed
     root = without_ft_prefix.split(":", 1)[0]
+    root = root.rsplit("/", 1)[-1]
 
     # Allow gpt-* and o* models
     if root.startswith("gpt-"):
