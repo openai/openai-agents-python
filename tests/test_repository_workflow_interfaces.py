@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import os
 import re
 import runpy
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = ROOT / "Makefile"
@@ -180,9 +186,68 @@ def test_release_build_validates_before_executing_candidate_code() -> None:
     assert build.count("persist-credentials: false") == 2
     assert "fetch-depth: 0" in build
     validation = build.index("python -I control/.github/scripts/verify_release.py")
-    assert validation < build.index("run: make sync") < build.index("run: uv build")
+    assert validation < build.index('UV_PYTHON="$python_version" make sync tests')
+    assert build.index("make typecheck") < build.index("run: uv build")
     assert ' --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"' in build
     assert "enable-cache: false" in build
+
+
+@pytest.mark.parametrize("failed_check", [None, "3.12:sync tests", ":typecheck"])
+def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("The publish workflow requires Bash.")
+    workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    build = workflow["jobs"]["build"]
+    steps = build["steps"]
+    check_index = next(i for i, step in enumerate(steps) if step["name"] == "Check release source")
+    check = steps[check_index]
+    package_index = next(i for i, step in enumerate(steps) if step.get("run") == "uv build")
+    assert check_index < package_index
+    assert (
+        check["working-directory"] == steps[package_index]["working-directory"] == "release-source"
+    )
+    assert check["shell"] == "bash"
+    assert check["env"] == {"OPENAI_API_KEY": "fake-for-tests", "UV_FROZEN": "1"}
+    assert "if" not in build and "continue-on-error" not in build
+    for step in steps[check_index:]:
+        assert "if" not in step and "continue-on-error" not in step
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make = bin_dir / "make"
+    make.write_text(
+        "#!/bin/sh\n"
+        'check="${UV_PYTHON:-}:$*"\n'
+        'printf "%s\\n" "$check" >> "$CHECK_LOG"\n'
+        '[ "$check" != "$FAILED_CHECK" ]\n',
+        encoding="utf-8",
+    )
+    make.chmod(0o755)
+    log = tmp_path / "checks.log"
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", check["run"]],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+            "CHECK_LOG": str(log),
+            "FAILED_CHECK": failed_check or "",
+            **check["env"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    expected = [f"3.{minor}:sync tests" for minor in range(10, 15)] + [":typecheck"]
+    if failed_check is None:
+        assert result.returncode == 0, result.stderr
+        assert log.read_text(encoding="utf-8").splitlines() == expected
+    else:
+        assert result.returncode != 0
+        assert (
+            log.read_text(encoding="utf-8").splitlines()
+            == expected[: expected.index(failed_check) + 1]
+        )
 
 
 def test_pypi_job_only_publishes_the_build_artifact() -> None:

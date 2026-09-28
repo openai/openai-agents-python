@@ -52,11 +52,17 @@ jobs:
           version: "0.11.14"
           enable-cache: false
           python-version: "3.14"
-      - name: Install dependencies
+      - name: Check release source
         working-directory: release-source
+        shell: bash
         env:
           OPENAI_API_KEY: fake-for-tests
-        run: make sync
+          UV_FROZEN: "1"
+        run: |
+          for python_version in 3.10 3.11 3.12 3.13 3.14; do
+            UV_PYTHON="$python_version" make sync tests
+          done
+          make typecheck
       - name: Build package
         working-directory: release-source
         run: uv build
