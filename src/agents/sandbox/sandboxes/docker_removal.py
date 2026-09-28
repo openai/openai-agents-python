@@ -9,8 +9,9 @@ authority. Other backends and Docker clients without the service retain their
 existing recursive removal and snapshot restoration behavior.
 
 The service requires a trusted image, Docker 26+ with its builtin seccomp profile,
-and the runc runtime. The client asks the daemon to create a missing workspace
-and its parents before binding. Path-only grant roots must exist at binding time;
+and the runc runtime. Before binding, the client creates a missing workspace and
+its parents using the trusted image's default user, as normal session startup does.
+Path-only grant roots must exist at binding time;
 the client does not create unrelated grant directories.
 Read-only host bind mounts are supported outside the private workspace. Writable
 shared mounts, additional capabilities, user namespaces, and missing grant roots are excluded.

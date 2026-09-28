@@ -1639,7 +1639,9 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             assert container_id is not None
             service = self._removal_service
             if service is not None:
-                await run_blocking_workspace_io(lambda: service.bind_new(container, manifest))
+                await run_blocking_workspace_io(
+                    lambda: self._bind_new_removal_authority(container, manifest)
+                )
             snapshot_id = str(session_id)
             snapshot_instance = resolve_snapshot(snapshot, snapshot_id)
             state = DockerSandboxSessionState(
@@ -1816,7 +1818,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 if service is not None:
                     container.start()
                     await run_blocking_workspace_io(
-                        lambda: service.bind_new(container, state.manifest)
+                        lambda: self._bind_new_removal_authority(container, state.manifest)
                     )
 
             inner = DockerSandboxSession(
@@ -1847,6 +1849,23 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
         return self._deserialize_session_state_payload(payload, DockerSandboxSessionState)
+
+    def _bind_new_removal_authority(self, container: Container, manifest: Manifest) -> None:
+        service = self._removal_service
+        assert service is not None
+        # Only newly created containers reach this bootstrap, before application
+        # workloads run. Use the trusted image's default user, as session.mkdir
+        # does, rather than Docker working_dir creation (which creates as root).
+        result = container.exec_run(
+            cmd=["mkdir", "-p", "--", manifest.root],
+            user="",
+            workdir="/",
+            stdout=False,
+            stderr=False,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError("Unable to create Docker workspace before removal binding")
+        service.bind_new(container, manifest)
 
     async def _create_container(
         self,
@@ -1881,10 +1900,6 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         if labels:
             create_kwargs["labels"] = labels
         if manifest is not None:
-            if self._removal_service is not None:
-                # The trusted daemon creates a missing workspace before bind_new's
-                # strict canonicalization, including for replacement containers.
-                create_kwargs["working_dir"] = manifest.root
             docker_mounts = _build_docker_volume_mounts(manifest, session_id=session_id)
             if docker_mounts:
                 create_kwargs["mounts"] = docker_mounts

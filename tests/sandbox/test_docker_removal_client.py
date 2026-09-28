@@ -37,14 +37,42 @@ def client_lifecycle(
     monkeypatch.setattr(client, "get_container", lambda _: None)
     monkeypatch.setattr(container, "start", lambda: None, raising=False)
     monkeypatch.setattr(container, "remove", Mock(), raising=False)
+    owners: dict[Path, str] = {}
 
     def create_container(**kwargs: Any) -> RecordingContainer:
         # Docker's daemon creates its working directory before startup.
         if workdir := kwargs.get("working_dir"):
-            Path(workdir).mkdir(parents=True, exist_ok=True)
+            root = Path(workdir)
+            if not root.exists():
+                root.mkdir(parents=True)
+                owners[root] = "0:0"
         return container
 
     manager.docker_client.containers.create.side_effect = create_container
+
+    def exec_run(
+        cmd: list[str], *, user: str = "", demux: bool = False, **kwargs: Any
+    ) -> SimpleNamespace:
+        effective_user = user or container.attrs["Config"]["User"]
+        target = Path(cmd[-1])
+        exit_code = 0
+        if cmd[:3] == ["mkdir", "-p", "--"]:
+            if not target.exists():
+                target.mkdir(parents=True)
+                owners[target] = effective_user
+        elif cmd[:2] == ["test", "-d"]:
+            exit_code = 0 if target.is_dir() else 1
+        elif cmd[0] == "touch":
+            # A daemon-created 0755 workspace is not writable by the image user.
+            if owners.get(target.parent, effective_user) != effective_user:
+                exit_code = 1
+            else:
+                target.touch()
+        else:
+            raise AssertionError(f"Unexpected test command: {cmd}")
+        return SimpleNamespace(exit_code=exit_code, output=(b"", b"") if demux else b"")
+
+    monkeypatch.setattr(container, "exec_run", exec_run)
     # The real worker enters the container root. Model that root on tmp_path's
     # filesystem, which may differ from the host root (for example, tmpfs /tmp).
     # Keep canonicalization, open/fstat, and descriptor identity checks real.
@@ -106,6 +134,9 @@ async def test_client_bootstraps_workspace_before_strict_binding(
     assert root.is_dir()
     manager.assert_bound(container, configured)
     assert not wrapped._inner.state.workspace_root_ready
+    result = await wrapped.exec("touch", str(root / "created.txt"), shell=False)
+    assert result.ok()
+    assert (root / "created.txt").is_file()
     if workspace_setup == "existing":
         assert (root / "keep.txt").read_text() == "existing contents"
     with pytest.raises(WorkspaceArchiveWriteError):
@@ -143,6 +174,37 @@ async def test_client_bootstrap_does_not_create_missing_grant_roots(
     assert not manager._bindings
     container.remove.assert_called_once_with(force=True)
     assert "close" in container.events
+    if resume:
+        assert state.container_id == "missing-container"
+        assert state.session_id == original_session_id
+        assert state.workspace_root_ready
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+async def test_failed_workspace_bootstrap_cleans_up_before_binding(
+    client_lifecycle: tuple[DockerSandboxClient, DockerRemovalService, Any, RecordingWorker],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resume: bool,
+) -> None:
+    client, manager, container, worker = client_lifecycle
+    configured = Manifest(root=str(tmp_path / "workspace"))
+    state = session(manager, container, configured).state
+    state.container_id = "missing-container"
+    state.workspace_root_ready = True
+    original_session_id = state.session_id
+    monkeypatch.setattr(container, "exec_run", Mock(return_value=SimpleNamespace(exit_code=1)))
+    with pytest.raises(RuntimeError, match="Unable to create Docker workspace"):
+        if resume:
+            await client.resume(state)
+        else:
+            await client.create(
+                manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
+            )
+    assert not manager._bindings
+    assert not worker.calls
+    container.remove.assert_called_once_with(force=True)
     if resume:
         assert state.container_id == "missing-container"
         assert state.session_id == original_session_id
