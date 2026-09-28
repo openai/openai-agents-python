@@ -1640,7 +1640,7 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
             service = self._removal_service
             if service is not None:
                 await run_blocking_workspace_io(
-                    lambda: self._bind_new_removal_authority(container, manifest)
+                    lambda: service._bind_new(container, manifest, bootstrap_workspace=True)
                 )
             snapshot_id = str(session_id)
             snapshot_instance = resolve_snapshot(snapshot, snapshot_id)
@@ -1818,7 +1818,9 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
                 if service is not None:
                     container.start()
                     await run_blocking_workspace_io(
-                        lambda: self._bind_new_removal_authority(container, state.manifest)
+                        lambda: service._bind_new(
+                            container, state.manifest, bootstrap_workspace=True
+                        )
                     )
 
             inner = DockerSandboxSession(
@@ -1849,23 +1851,6 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
 
     def deserialize_session_state(self, payload: dict[str, object]) -> SandboxSessionState:
         return self._deserialize_session_state_payload(payload, DockerSandboxSessionState)
-
-    def _bind_new_removal_authority(self, container: Container, manifest: Manifest) -> None:
-        service = self._removal_service
-        assert service is not None
-        # Only newly created containers reach this bootstrap, before application
-        # workloads run. Use the trusted image's default user, as session.mkdir
-        # does, rather than Docker working_dir creation (which creates as root).
-        result = container.exec_run(
-            cmd=["mkdir", "-p", "--", manifest.root],
-            user="",
-            workdir="/",
-            stdout=False,
-            stderr=False,
-        )
-        if result.exit_code != 0:
-            raise RuntimeError("Unable to create Docker workspace before removal binding")
-        service.bind_new(container, manifest)
 
     async def _create_container(
         self,

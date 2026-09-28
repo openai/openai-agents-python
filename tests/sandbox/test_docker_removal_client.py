@@ -209,3 +209,69 @@ async def test_failed_workspace_bootstrap_cleans_up_before_binding(
         assert state.container_id == "missing-container"
         assert state.session_id == original_session_id
         assert state.workspace_root_ready
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resume", [False, True])
+@pytest.mark.parametrize("mount_kind", ["host_grant", "image_volume"])
+async def test_ineligible_mount_is_rejected_before_bootstrap_writes(
+    client_lifecycle: tuple[DockerSandboxClient, DockerRemovalService, Any, RecordingWorker],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resume: bool,
+    mount_kind: str,
+) -> None:
+    client, manager, container, worker = client_lifecycle
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "keep.txt").write_text("host contents")
+    alias = tmp_path / "image-workspace"
+    alias.symlink_to(shared, target_is_directory=True)
+    configured = Manifest(
+        root=str(alias / "build"),
+        extra_path_grants=(
+            (SandboxPathGrant(path=str(shared), host_path=str(shared)),)
+            if mount_kind == "host_grant"
+            else ()
+        ),
+    )
+    container.attrs["Mounts"] = [
+        {
+            "Type": "bind" if mount_kind == "host_grant" else "volume",
+            "Destination": str(shared),
+            "Source": str(shared),
+            "RW": True,
+            "Propagation": "rprivate",
+        }
+    ]
+    container.attrs["HostConfig"] = {}
+    container.attrs["State"].update(Running=True, Pid=123, StartedAt="incarnation")
+    manager.docker_client.info.return_value = {
+        "SecurityOptions": ["name=seccomp,profile=builtin"],
+        "DefaultRuntime": "runc",
+    }
+    manager.docker_client.version.return_value = {"Version": "26.0.0"}
+    monkeypatch.setattr(manager, "_state", DockerRemovalService._state.__get__(manager))
+    execute = Mock(wraps=container.exec_run)
+    monkeypatch.setattr(container, "exec_run", execute)
+    state = session(manager, container, configured).state
+    state.container_id = "missing-container"
+    state.workspace_root_ready = True
+    original_session_id = state.session_id
+    with pytest.raises(ValueError, match="shared host paths|private container"):
+        if resume:
+            await client.resume(state)
+        else:
+            await client.create(
+                manifest=configured, options=DockerSandboxClientOptions(image="trusted-image")
+            )
+    assert sorted(path.name for path in shared.iterdir()) == ["keep.txt"]
+    assert (shared / "keep.txt").read_text() == "host contents"
+    execute.assert_not_called()
+    assert not worker.calls
+    assert not manager._bindings
+    container.remove.assert_called_once_with(force=True)
+    if resume:
+        assert state.container_id == "missing-container"
+        assert state.session_id == original_session_id
+        assert state.workspace_root_ready
