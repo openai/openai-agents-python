@@ -280,6 +280,7 @@ async def test_stream_response_yields_events_for_text_content(monkeypatch) -> No
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
     # Patch _fetch_response to inject our fake stream
     async def patched_fetch_response(self, *args, **kwargs):
@@ -1681,7 +1682,9 @@ async def test_stream_response_warns_and_ignores_server_managed_conversation_sta
     async def patched_fetch_response(self, *args, **kwargs):
         nonlocal called
         called = True
-        return _empty_response(), _empty_chat_completion_stream()
+        return _empty_response(), _completion_stream(
+            _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
+        )
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
@@ -1716,7 +1719,9 @@ async def test_stream_response_warns_and_ignores_prompt_by_default(
     async def patched_fetch_response(self, *args, **kwargs):
         nonlocal captured_prompt
         captured_prompt = kwargs.get("prompt")
-        return _empty_response(), _empty_chat_completion_stream()
+        return _empty_response(), _completion_stream(
+            _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
+        )
 
     monkeypatch.setattr(OpenAIChatCompletionsModel, "_fetch_response", patched_fetch_response)
     model = OpenAIProvider(use_responses=False).get_model("gpt-4")
@@ -1874,6 +1879,7 @@ async def test_stream_response_includes_logprobs(monkeypatch) -> None:
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -1957,6 +1963,7 @@ async def test_stream_response_accumulates_logprobs_across_many_deltas(monkeypat
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for token in tokens:
             yield make_chunk(token)
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -2029,6 +2036,7 @@ async def test_stream_response_yields_events_for_refusal_content(monkeypatch) ->
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -2120,6 +2128,7 @@ async def test_stream_response_yields_events_for_tool_call(monkeypatch) -> None:
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -2208,6 +2217,7 @@ async def test_stream_response_buffers_tool_call_deltas_when_enabled(monkeypatch
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for chunk in (chunk1, chunk2):
             yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         return _empty_response(), fake_stream()
@@ -2404,6 +2414,7 @@ async def test_stream_response_buffers_tool_call_usage_chunk_without_replay(
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         return _empty_response(), fake_stream()
@@ -2483,6 +2494,7 @@ async def test_stream_response_buffers_tool_call_provider_fields(monkeypatch) ->
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for chunk in (chunk1, chunk2):
             yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         return _empty_response(), fake_stream()
@@ -2636,6 +2648,7 @@ async def test_buffered_tool_calls_do_not_merge_nonzero_choice_tool_call_indexes
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         return _empty_response(), fake_stream()
@@ -2872,6 +2885,7 @@ async def test_stream_response_ignores_custom_tool_call_chunks_by_default(monkey
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for chunk in chunks:
             yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         return _empty_response(), fake_stream()
@@ -2977,6 +2991,7 @@ async def test_stream_response_yields_real_time_function_call_arguments(monkeypa
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2, chunk3, chunk4):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -3091,6 +3106,7 @@ async def test_fallback_function_calls_have_unique_output_indexes(monkeypatch) -
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -3192,6 +3208,7 @@ async def test_fallback_function_call_keeps_index_before_streamed_call(monkeypat
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for c in (chunk1, chunk2, chunk3):
             yield c
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -3286,6 +3303,7 @@ async def test_fallback_function_call_before_text_uses_final_output_index(
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for chunk in (chunk1, chunk2):
             yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         response = Response(
@@ -3389,6 +3407,7 @@ async def test_streamed_function_call_before_text_keeps_realtime_order(
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for chunk in (chunk1, chunk2, chunk3):
             yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         response = Response(
@@ -3504,6 +3523,7 @@ async def test_mixed_function_calls_before_text_keep_tracked_order(
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         for chunk in (chunk1, chunk2, chunk3, chunk4):
             yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="tool_calls")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         response = Response(
@@ -3930,8 +3950,7 @@ async def test_buffer_tool_call_stream_forwards_length_finish_reason() -> None:
 
 @pytest.mark.asyncio
 async def test_buffer_tool_call_stream_does_not_duplicate_tool_calls_finish() -> None:
-    """finish_reason == "tool_calls" is still emitted only by the synthesized
-    buffered chunk, so the terminal choice is not forwarded twice."""
+    """Only the real terminal choice carries a finish reason after buffering."""
     tool_call_delta = ChoiceDeltaToolCall(
         index=0,
         id="tool-id",
@@ -3956,7 +3975,9 @@ async def test_buffer_tool_call_stream_does_not_duplicate_tool_calls_finish() ->
         if choice.finish_reason == "tool_calls"
     ]
     assert len(finish_choices) == 1
-    assert finish_choices[0].delta.tool_calls
+    assert finish_choices[0].delta.tool_calls is None
+    assert buffered[-1].choices[0].delta.tool_calls == [tool_call_delta]
+    assert buffered[-1].choices[0].finish_reason is None
 
 
 @pytest.mark.allow_call_model_methods
@@ -3989,6 +4010,7 @@ async def test_stream_response_propagates_request_id(monkeypatch) -> None:
         def __aiter__(self) -> AsyncIterator[ChatCompletionChunk]:
             async def gen() -> AsyncIterator[ChatCompletionChunk]:
                 yield chunk
+                yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
             return gen()
 
@@ -4042,6 +4064,7 @@ async def test_stream_response_without_http_response_has_no_request_id(monkeypat
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(
@@ -4222,6 +4245,7 @@ def _usageless_stream_patch(usage: CompletionUsage | None = None):
 
     async def fake_stream() -> AsyncIterator[ChatCompletionChunk]:
         yield chunk
+        yield _chunk_with([Choice(index=0, delta=ChoiceDelta(), finish_reason="stop")])
 
     async def patched_fetch_response(self, *args, **kwargs):
         resp = Response(

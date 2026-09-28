@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sqlite3
 import threading
@@ -11,7 +12,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI
 from openai.types.responses.response_usage import (
     InputTokensDetails,
     OutputTokensDetails,
@@ -19,7 +22,7 @@ from openai.types.responses.response_usage import (
 )
 
 import agents._debug as _debug
-from agents import Agent, Runner
+from agents import Agent, OpenAIResponsesModel, RunConfig, Runner
 from agents.items import MessageOutputItem, TResponseInputItem
 from agents.memory import (
     OpenAIResponsesCompactionSession,
@@ -45,8 +48,92 @@ from agents.run_internal.session_persistence import (
 )
 from agents.run_state import RunState
 from agents.testing import ModelStep, ScriptedModel
+from tests.model_test_helpers import get_response_obj
 from tests.test_responses import get_function_tool, get_function_tool_call, get_text_message
 from tests.utils.simple_session import SimpleListSession
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+@pytest.mark.parametrize("history_source", ["automatic", "manual", "stored"])
+async def test_compaction_replay_strips_created_by(history_source: str) -> None:
+    compacted_item = {
+        "id": "cmp_synthetic",
+        "type": "compaction",
+        "encrypted_content": "synthetic-encrypted-content",
+        "created_by": "server",
+    }
+    request_inputs: list[list[dict[str, Any]]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        request_inputs.append(json.loads(request.content)["input"])
+        if request.url.path.endswith("/compact"):
+            return httpx2.Response(
+                200,
+                json={
+                    "id": "cmp_response",
+                    "object": "response.compaction",
+                    "created_at": 1,
+                    "output": [compacted_item],
+                },
+            )
+        assert request.url.path.endswith("/responses")
+        return httpx2.Response(
+            200, content=get_response_obj([get_text_message("42")]).model_dump_json()
+        )
+
+    underlying = SQLiteSession("created-by-replay")
+    try:
+        async with AsyncOpenAI(
+            api_key="synthetic-key",
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+        ) as client:
+            session = OpenAIResponsesCompactionSession(
+                session_id="created-by-replay",
+                underlying_session=underlying,
+                client=client,
+                model="gpt-5",
+                compaction_mode="input",
+                should_trigger_compaction=lambda ctx: bool(ctx["compaction_candidate_items"]),
+            )
+            agent = Agent(name="test", model=OpenAIResponsesModel("gpt-5", openai_client=client))
+            config = RunConfig(tracing_disabled=True)
+            if history_source == "stored":
+                # History saved before the fix must also remain usable.
+                await underlying.add_items([cast(TResponseInputItem, compacted_item)])
+            elif history_source == "manual":
+                await session.add_items([{"role": "user", "content": "How many?"}])
+                await session.run_compaction({"force": True})
+            else:
+                await Runner.run(agent, "How many?", session=session, run_config=config)
+
+            stored_items = await underlying.get_items()
+            assert stored_items == [compacted_item]
+            if history_source == "manual":
+                # Repeated manual compaction reuses cached output without a history reload.
+                await session.add_items([{"role": "user", "content": "More context"}])
+                await session.run_compaction({"force": True})
+            result = await Runner.run(agent, "And urgent?", session=session, run_config=config)
+            assert result.final_output == "42"
+
+            # Inspect encoded inputs to both Responses and the next compact request.
+            replayed_items = [
+                item
+                for items in request_inputs
+                for item in items
+                if item.get("type") == "compaction"
+            ]
+            assert replayed_items == [
+                {
+                    "id": "cmp_synthetic",
+                    "type": "compaction",
+                    "encrypted_content": "synthetic-encrypted-content",
+                }
+            ] * (3 if history_source == "manual" else 2)
+            assert stored_items[0] == compacted_item
+            assert (await underlying.get_items())[0] == compacted_item
+    finally:
+        underlying.close()
 
 
 class TestIsOpenAIModelName:
@@ -1685,6 +1772,58 @@ class TestOpenAIResponsesCompactionSession:
         await session.run_compaction({"response_id": "resp-123", "force": True})
 
         mock_client.responses.compact.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_run_compaction_retains_deferred_marker_when_api_call_fails(self) -> None:
+        """A forced compaction driven by a previously-deferred response must not lose that
+        "this must be forced" signal if the compact API call itself fails: a later retry needs
+        _deferred_response_id to still be set so it recomputes force=True, not force=False.
+        """
+        mock_session = self.create_mock_session()
+        mock_session.get_items.return_value = []
+
+        call_count = 0
+
+        async def compact(**kwargs: Any) -> MagicMock:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("compact API blew up")
+            response = MagicMock()
+            response.output = []
+            return response
+
+        mock_client = MagicMock()
+        mock_client.responses.compact = AsyncMock(side_effect=compact)
+
+        session = OpenAIResponsesCompactionSession(
+            session_id="test",
+            underlying_session=mock_session,
+            client=mock_client,
+            should_trigger_compaction=lambda _ctx: False,
+        )
+        # Simulate a prior turn (e.g. a handoff with local tool outputs) having deferred
+        # compaction for this response, the way _defer_compaction() would.
+        session._deferred_response_id = "resp-handoff"
+
+        with pytest.raises(RuntimeError, match="compact API blew up"):
+            await session.run_compaction(
+                {
+                    "response_id": "resp-delegate",
+                    "force": session._get_deferred_compaction_response_id() is not None,
+                }
+            )
+        assert session._get_deferred_compaction_response_id() == "resp-handoff"
+
+        # Retry, recomputing force the same way the checkpoint-recovery code does.
+        await session.run_compaction(
+            {
+                "response_id": "resp-delegate",
+                "force": session._get_deferred_compaction_response_id() is not None,
+            }
+        )
+        assert call_count == 2
+        assert session._get_deferred_compaction_response_id() is None
 
     @pytest.mark.asyncio
     async def test_run_compaction_suppresses_model_dump_warnings(self) -> None:

@@ -541,6 +541,56 @@ async def test_runner_preserves_direct_error_for_schema_backed_tool() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("custom_failure", [False, True])
+async def test_runner_validates_only_user_output_after_late_tool_timeout(
+    monkeypatch: pytest.MonkeyPatch, custom_failure: bool
+) -> None:
+    expected_error = "An error occurred while running the tool. Please try again."
+
+    async def lookup_inventory() -> InventoryOutput:
+        raise RuntimeError("inventory unavailable")
+
+    tool_options: dict[str, Any] = {}
+    if custom_failure:
+        tool_options["failure_error_function"] = lambda _context, _error: expected_error
+    inventory_tool = function_tool(
+        lookup_inventory, timeout=1.0, output_type=InventoryOutput, **tool_options
+    )
+
+    async def wait_for_after_task_finishes(
+        future: asyncio.Future[Any], timeout: float | None = None
+    ) -> Any:
+        # Reproduce a deadline firing after the task settles but before its waiter resumes.
+        await future
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", wait_for_after_task_finishes)
+    direct_call = ResponseFunctionToolCall(
+        id="function_item",
+        call_id=FUNCTION_CALL_ID,
+        name=inventory_tool.name,
+        arguments="{}",
+        type="function_call",
+    )
+    model = ScriptedModel([[direct_call], [get_text_message("inventory lookup failed")]])
+    agent = Agent(name="inventory", model=model, tools=[inventory_tool])
+
+    if custom_failure:
+        with pytest.raises(UserError, match="does not match its declared output schema"):
+            await Runner.run(agent, "Check inventory")
+        assert len(model.calls) == 1
+        return
+
+    result = await Runner.run(agent, "Check inventory")
+    assert result.final_output == "inventory lookup failed"
+    next_input = model.calls[-1].input
+    assert isinstance(next_input, list)
+    outputs = [item for item in next_input if item.get("type") == "function_call_output"]
+    assert len(outputs) == 1
+    assert outputs[0]["output"] == expected_error
+
+
+@pytest.mark.asyncio
 async def test_runner_preserves_direct_default_timeout_for_schema_backed_tool() -> None:
     model = ScriptedModel()
     direct_call = ResponseFunctionToolCall(

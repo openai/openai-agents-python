@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from functools import wraps
+from typing import TYPE_CHECKING, Any, overload
 
 from .._config_coercion import _declared_dataclass_type, coerce_dataclass_config
 from ..tracing import TracingConfig
@@ -10,6 +11,24 @@ from .model import STTModelSettings, TTSModelSettings, VoiceModelProvider
 from .models.openai_model_provider import OpenAIVoiceModelProvider
 
 
+def _preserve_legacy_positional_arguments(
+    cls: type[VoicePipelineConfig],
+) -> type[VoicePipelineConfig]:
+    generated_init = cls.__init__
+
+    @wraps(generated_init)
+    def init(self: VoicePipelineConfig, *args: Any, **kwargs: Any) -> None:
+        # Before tracing was added, the third positional argument was the text privacy flag.
+        # Insert only that slot so the dataclass still owns defaults and argument validation.
+        if len(args) >= 3 and isinstance(args[2], bool):
+            args = (*args[:2], kwargs.pop("tracing", None), *args[2:])
+        generated_init(self, *args, **kwargs)
+
+    cls.__init__ = init  # type: ignore[method-assign]
+    return cls
+
+
+@_preserve_legacy_positional_arguments
 @dataclass
 class VoicePipelineConfig:
     """Configuration for a `VoicePipeline`."""
@@ -54,6 +73,7 @@ class VoicePipelineConfig:
 
     if TYPE_CHECKING:
 
+        @overload
         def __init__(
             self,
             model_provider: VoiceModelProvider = ...,
@@ -67,6 +87,25 @@ class VoicePipelineConfig:
             stt_settings: STTModelSettings | dict[str, Any] = ...,
             tts_settings: TTSModelSettings | dict[str, Any] = ...,
         ) -> None: ...
+
+        @overload
+        def __init__(
+            self,
+            model_provider: VoiceModelProvider,
+            tracing_disabled: bool,
+            trace_include_sensitive_data: bool,
+            /,
+            trace_include_sensitive_audio_data: bool = True,
+            workflow_name: str = "Voice Agent",
+            group_id: str = ...,
+            trace_metadata: dict[str, Any] | None = None,
+            stt_settings: STTModelSettings | dict[str, Any] = ...,
+            tts_settings: TTSModelSettings | dict[str, Any] = ...,
+            *,
+            tracing: TracingConfig | None = None,
+        ) -> None: ...
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None: ...
 
     def __post_init__(self) -> None:
         self.stt_settings = coerce_dataclass_config(

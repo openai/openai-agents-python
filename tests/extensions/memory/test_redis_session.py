@@ -145,6 +145,151 @@ async def test_redis_session_direct_ops():
         await session.close()
 
 
+@pytest.mark.parametrize("decode_responses", [False, True])
+@pytest.mark.parametrize("suffix", ["messages", "counter"])
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_colliding_session_clear_preserves_existing_session(
+    decode_responses: bool, suffix: str, reverse: bool
+) -> None:
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.exceptions import ResponseError
+
+    client = fakeredis.aioredis.FakeRedis(decode_responses=decode_responses)
+    existing_id, other_id = "conversation", f"conversation:{suffix}"
+    if reverse:
+        existing_id, other_id = other_id, existing_id
+    existing = RedisSession(existing_id, redis_client=cast("Redis", client))
+    other = RedisSession(other_id, redis_client=cast("Redis", client))
+    items: list[TResponseInputItem] = [{"role": "user", "content": "saved history"}]
+    try:
+        await existing.add_items(items)
+        if suffix == "counter" and not reverse:
+            await client.set("agents:session:conversation:counter", "7")
+        metadata = await client.hgetall(existing._session_key)  # type: ignore[misc]
+
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await other.clear_session()
+
+        assert await existing.get_items() == items
+        assert await client.hgetall(existing._session_key) == metadata  # type: ignore[misc]
+        if suffix == "counter" and not reverse:
+            assert await client.get("agents:session:conversation:counter") in (b"7", "7")
+        await existing.clear_session()
+        assert await existing.get_items() == []
+    finally:
+        await client.aclose()
+
+
+async def test_colliding_counter_rejects_ttl_write_before_side_effects() -> None:
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.exceptions import ResponseError
+
+    client = fakeredis.aioredis.FakeRedis()
+    existing = RedisSession("conversation:counter", redis_client=cast("Redis", client))
+    other = RedisSession("conversation", redis_client=cast("Redis", client), ttl=1)
+    items: list[TResponseInputItem] = [{"role": "user", "content": "saved history"}]
+    try:
+        await existing.add_items(items)
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await other.add_items(items)
+        assert await client.ttl(existing._session_key) == -1
+        assert await existing.get_items() == items
+        assert await other.get_items() == []
+    finally:
+        await client.aclose()
+
+
+async def test_clear_rechecks_key_types_after_concurrent_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.exceptions import ResponseError
+
+    client = fakeredis.aioredis.FakeRedis()
+    clearing = RedisSession("conversation:messages", redis_client=cast("Redis", client))
+    replacement = RedisSession("conversation", redis_client=cast("Redis", client))
+    items: list[TResponseInputItem] = [{"role": "user", "content": "surviving history"}]
+    await clearing.add_items([{"role": "user", "content": "old history"}])
+    types_checked = asyncio.Event()
+    allow_execute = asyncio.Event()
+    original_pipeline = client.pipeline
+    attempts = 0
+
+    def controlled_pipeline(*args: Any, **kwargs: Any) -> Any:
+        nonlocal attempts
+        pipe = original_pipeline(*args, **kwargs)
+        attempts += 1
+        if attempts == 1:
+            original_execute = pipe.execute
+
+            async def controlled_execute(*args: Any, **kwargs: Any) -> Any:
+                types_checked.set()
+                await allow_execute.wait()
+                return await original_execute(*args, **kwargs)
+
+            pipe.execute = controlled_execute
+        return pipe
+
+    monkeypatch.setattr(client, "pipeline", controlled_pipeline)
+    task = asyncio.create_task(clearing.clear_session())
+    try:
+        await asyncio.wait_for(types_checked.wait(), 5)
+        other_instance = RedisSession("conversation:messages", redis_client=cast("Redis", client))
+        await other_instance.clear_session()
+        await replacement.add_items(items)
+        allow_execute.set()
+        with pytest.raises(ResponseError, match="WRONGTYPE"):
+            await asyncio.wait_for(task, 5)
+        assert attempts == 4  # Two clears, replacement append, then the retried clear.
+        assert await replacement.get_items() == items
+    finally:
+        allow_execute.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await client.aclose()
+
+
+@pytest.mark.parametrize("decode_responses", [False, True])
+async def test_released_redis_layout_remains_usable(decode_responses: bool) -> None:
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    client = fakeredis.aioredis.FakeRedis(decode_responses=decode_responses)
+    # Literal v0.22.3 storage fixture, independent of the current key builder.
+    session_key = "agents:session:customer:archive"
+    messages_key = "agents:session:customer:archive:messages"
+    counter_key = "agents:session:customer:archive:counter"
+    first: TResponseInputItem = {"role": "user", "content": "persisted"}
+    second: TResponseInputItem = {"role": "assistant", "content": "appended"}
+    try:
+        await client.hset(
+            session_key,
+            mapping={"session_id": "customer:archive", "created_at": "123", "updated_at": "123"},
+        )  # type: ignore[misc]
+        await _safe_rpush(cast("Redis", client), messages_key, json.dumps(first))
+        await client.set(counter_key, "7")
+        session = RedisSession("customer:archive", redis_client=cast("Redis", client), ttl=60)
+        assert await session.get_items() == [first]
+        await session.add_items([second])
+        assert await session.get_items() == [first, second]
+        assert await client.hget(session_key, "created_at") in (b"123", "123")  # type: ignore[misc]
+        assert await client.get(counter_key) in (b"7", "7")
+        for key in (session_key, messages_key, counter_key):
+            assert 0 < await client.ttl(key) <= 60
+        assert await session.pop_item() == second
+        await session.clear_session()
+        assert await session.get_items() == []
+        assert await client.exists(session_key, messages_key, counter_key) == 0
+        await session.clear_session()
+    finally:
+        await client.aclose()
+
+
 @pytest.mark.parametrize("operation", ["pop", "clear"])
 async def test_mutation_cancellation_waits_for_authoritative_outcome(
     monkeypatch: pytest.MonkeyPatch,
@@ -169,15 +314,22 @@ async def test_mutation_cancellation_waits_for_authoritative_outcome(
         monkeypatch.setattr(session._redis, "rpop", controlled_rpop)
         task: asyncio.Task[Any] = asyncio.create_task(session.pop_item())
     else:
-        original_delete = session._redis.delete
+        original_pipeline = session._redis.pipeline
 
-        async def controlled_delete(*args: Any, **kwargs: Any) -> Any:
-            result = await original_delete(*args, **kwargs)
-            mutation_applied.set()
-            await allow_return.wait()
-            return result
+        def controlled_pipeline(*args: Any, **kwargs: Any) -> Any:
+            pipe = original_pipeline(*args, **kwargs)
+            original_execute = pipe.execute
 
-        monkeypatch.setattr(session._redis, "delete", controlled_delete)
+            async def controlled_execute(*args: Any, **kwargs: Any) -> Any:
+                result = await original_execute(*args, **kwargs)
+                mutation_applied.set()
+                await allow_return.wait()
+                return result
+
+            pipe.execute = controlled_execute
+            return pipe
+
+        monkeypatch.setattr(session._redis, "pipeline", controlled_pipeline)
         task = asyncio.create_task(session.clear_session())
 
     try:

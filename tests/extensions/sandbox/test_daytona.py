@@ -1195,11 +1195,9 @@ class TestDaytonaSandbox:
             f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/repo/sub",
         }
         tar_command = sandbox.process.exec_calls[0][0]
-        assert "--exclude=repo" in tar_command
         assert "--exclude=./repo" in tar_command
-        assert "--exclude=repo/sub" in tar_command
         assert "--exclude=./repo/sub" in tar_command
-        assert "--exclude=runtime.tmp" in tar_command
+        assert "--exclude=./runtime.tmp" in tar_command
 
     @pytest.mark.asyncio
     async def test_persist_workspace_remounts_prior_mounts_after_unmount_failure(

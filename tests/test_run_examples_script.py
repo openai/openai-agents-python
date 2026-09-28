@@ -2,10 +2,80 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import examples.run_examples as run_examples
+
+
+@pytest.mark.parametrize("auto_source", ["argument", "environment", "manual"])
+def test_local_temporal_runner_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    auto_source: str,
+) -> None:
+    monkeypatch.delenv("EXAMPLES_AUTO_SKIP", raising=False)
+    monkeypatch.setenv(
+        "EXAMPLES_INTERACTIVE_MODE", "auto" if auto_source == "environment" else "manual"
+    )
+    monkeypatch.setattr(run_examples, "build_command_path", lambda: "")
+    spawn = Mock(side_effect=AssertionError("The runner must not start this example"))
+    monkeypatch.setattr(run_examples.subprocess, "Popen", spawn)
+    args = [
+        "run_examples.py",
+        "--filter",
+        "local_hello_workflow",
+        "--logs-dir",
+        str(tmp_path / "logs"),
+        "--main-log",
+        str(tmp_path / "main.log"),
+        "--artifacts-dir",
+        str(tmp_path / "artifacts"),
+    ]
+    if auto_source == "argument":
+        args.append("--auto-mode")
+    elif auto_source == "manual":
+        args.append("--dry-run")
+    monkeypatch.setattr(sys, "argv", args)
+
+    assert run_examples.main() == 0
+
+    output = capsys.readouterr().out
+    relpath = "examples/sandbox/extensions/temporal/local_hello_workflow.py"
+    assert f"- {'RUN ' if auto_source == 'manual' else 'SKIP'} {relpath}" in output
+    if auto_source != "manual":
+        assert "(skipped: auto-skip)" in output
+    spawn.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["auto", "AUTO", "manual"])
+@pytest.mark.skipif(sys.platform == "win32", reason="The example requires the Unix-only backend")
+@pytest.mark.asyncio
+async def test_local_temporal_entrypoint_refuses_auto_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    pytest.importorskip("temporalio")
+    from examples.sandbox.extensions.temporal import local_hello_workflow
+
+    monkeypatch.setenv("EXAMPLES_INTERACTIVE_MODE", mode)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-test-key")
+    # A custom skip list can select the example, but cannot authorize auto-mode execution.
+    monkeypatch.setenv("EXAMPLES_AUTO_SKIP", "examples/basic/hello_world.py")
+    start_server = AsyncMock(side_effect=RuntimeError("test server startup boundary"))
+    monkeypatch.setattr(
+        local_hello_workflow.WorkflowEnvironment, "start_time_skipping", start_server
+    )
+
+    if mode.lower() == "auto":
+        with pytest.raises(SystemExit, match="cannot run in auto mode"):
+            await local_hello_workflow.main()
+        start_server.assert_not_awaited()
+    else:
+        with pytest.raises(RuntimeError, match="test server startup boundary"):
+            await local_hello_workflow.main()
+        start_server.assert_awaited_once()
 
 
 def test_default_auto_skip_excludes_prerequisite_bound_examples() -> None:
@@ -110,7 +180,7 @@ def test_prepare_redis_for_example_uses_existing_local_redis(monkeypatch) -> Non
 
     assert redis_server is None
     assert env["REDIS_URL"] == run_examples.DEFAULT_REDIS_URL
-    assert messages == [f"Using existing Redis server at {run_examples.DEFAULT_REDIS_URL}."]
+    assert messages == ["Using existing local Redis server."]
 
 
 def test_prepare_redis_for_example_starts_managed_redis(monkeypatch) -> None:
@@ -152,9 +222,7 @@ def test_prepare_redis_for_example_respects_configured_url(monkeypatch) -> None:
 
     assert redis_server is None
     assert env["REDIS_URL"] == "redis://localhost:6380/2"
-    assert messages == [
-        "REDIS_URL is set but not reachable before example start: redis://localhost:6380/2."
-    ]
+    assert messages == ["Using configured REDIS_URL; local preflight did not confirm availability."]
 
 
 def test_prerequisite_skip_reasons_skip_dapr_without_sidecar(monkeypatch) -> None:
@@ -199,3 +267,77 @@ def test_prerequisite_skip_reasons_allow_non_dapr_example(monkeypatch) -> None:
     )
 
     assert reasons == set()
+
+
+@pytest.mark.parametrize("buffered", [True, False])
+@pytest.mark.parametrize(
+    "url,reachable",
+    [
+        ("redis://synthetic-user:synthetic-pass@localhost/0?password=query-secret", True),
+        ("rediss://synthetic-user:synthetic-pass@remote.example/0?password=query-secret", False),
+        ("redis://localhost:query-secret/0", False),
+    ],
+)
+def test_redis_runner_output_and_logs_omit_configured_connection_details(
+    monkeypatch, tmp_path, capsys, url, reachable, buffered
+):
+    monkeypatch.setenv("REDIS_URL", url)
+    monkeypatch.setenv("EXAMPLES_BUFFER_OUTPUT", "1")
+    monkeypatch.setattr(run_examples, "build_command_path", lambda: "")
+    monkeypatch.setattr(run_examples, "redis_ping_url", lambda url: reachable)
+    monkeypatch.setattr(
+        run_examples,
+        "start_temporary_redis_server",
+        lambda: pytest.fail("Configured Redis must not be replaced"),
+    )
+    # Run the actual example entry point in a child. Fail construction after verifying
+    # that the complete configured URL survived the runner's environment forwarding.
+    child = """
+import os
+import runpy
+from unittest.mock import patch
+from agents.extensions.memory import RedisSession
+
+def fail_construction(*args, **kwargs):
+    assert kwargs['url'] == os.environ['REDIS_URL']
+    raise ValueError('Connection failed: ' + kwargs['url'])
+
+with patch.object(RedisSession, 'from_url', side_effect=fail_construction):
+    runpy.run_module('examples.memory.redis_session_example', run_name='__main__')
+"""
+    monkeypatch.setattr(
+        run_examples.ExampleScript,
+        "command",
+        property(lambda self: [sys.executable, "-c", child]),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_examples.py",
+            "--include-external",
+            "--logs-dir",
+            str(tmp_path / "logs"),
+            "--main-log",
+            str(tmp_path / "main.log"),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+            *([] if buffered else ["--no-buffer-output"]),
+        ],
+    )
+    script = run_examples.ExampleScript(run_examples.ROOT_DIR / run_examples.REDIS_SESSION_EXAMPLE)
+    assert run_examples.run_examples([script], run_examples.parse_args()) == 1
+
+    captured = capsys.readouterr()
+    logs = "".join(path.read_text() for path in tmp_path.rglob("*.log"))
+    main_log = (tmp_path / "main.log").read_text()
+    assert "FAILED examples/memory/redis_session_example.py exit=1" in main_log
+    assert "PASSED" not in main_log
+    for output in (captured.out + captured.err, logs):
+        assert "[runner]" in output
+        assert "Check the Redis configuration and connection." in output
+        assert url not in output
+        assert "synthetic-user" not in output
+        assert "synthetic-pass" not in output
+        assert "query-secret" not in output
+        assert "Traceback" not in output

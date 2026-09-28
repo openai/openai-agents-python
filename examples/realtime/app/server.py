@@ -266,7 +266,8 @@ class RealtimeWebSocketManager:
                 result.guardrail.name for result in event.guardrail_results
             ]
         elif event.type == "error":
-            event_summary["error"] = str(event.error)
+            # Error messages and validation inputs can contain transcript or tool payloads.
+            event_summary["error_type"] = type(event.error).__name__
         elif event.type == "input_audio_timeout_triggered":
             pass
         else:

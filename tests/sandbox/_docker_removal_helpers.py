@@ -79,6 +79,9 @@ def service(
     limits.update(getattr(request, "param", {}))
     instance = DockerRemovalService(**limits)
     container = RecordingContainer()
+    monkeypatch.setattr(
+        container, "exec_run", Mock(return_value=SimpleNamespace(exit_code=0)), raising=False
+    )
     worker = RecordingWorker(container)
     monkeypatch.setattr(instance, "_state", lambda _: (123, "incarnation"))
     monkeypatch.setattr(docker_removal, "_Worker", lambda _: worker)

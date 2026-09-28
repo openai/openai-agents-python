@@ -1332,6 +1332,123 @@ class TestEventHandlingRobustness(TestOpenAIRealtimeWebSocketModel):
         assert truncate_events[0].audio_end_ms == 1000
 
 
+class TestAudioResponseOwnership(TestOpenAIRealtimeWebSocketModel):
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("interrupt", [False, True], ids=["vad", "session-interrupt"])
+    @pytest.mark.parametrize("use_playback_tracker", [False, True], ids=["clock", "tracker"])
+    @pytest.mark.parametrize(
+        ("start_second_response", "elapsed_ms", "expected_truncates"),
+        [
+            (True, 5000, []),
+            (False, 5000, [("audio_1", 1000)]),
+            (True, 500, [("audio_1", 500)]),
+        ],
+        ids=["heard-earlier-response", "same-response-streaming", "unplayed-earlier-audio"],
+    )
+    async def test_interrupt_truncates_only_unfinished_audio(
+        self,
+        model,
+        monkeypatch,
+        interrupt,
+        use_playback_tracker,
+        start_second_response,
+        elapsed_ms,
+        expected_truncates,
+    ):
+        model._websocket = AsyncMock()
+        model._send_raw_message = AsyncMock()
+        model._audio_state_tracker.set_audio_format("pcm16")
+        listener = AsyncMock()
+        model.add_listener(listener)
+
+        def response(response_id, status):
+            return {
+                "id": response_id,
+                "object": "realtime.response",
+                "status": status,
+                "output": [],
+            }
+
+        monkeypatch.setattr(time, "monotonic", lambda: 100.0)
+        await model._handle_ws_event(
+            {
+                "type": "response.created",
+                "event_id": "e1",
+                "response": response("r1", "in_progress"),
+            }
+        )
+        await model._handle_ws_event(
+            {
+                "type": "response.output_audio.delta",
+                "event_id": "e2",
+                "response_id": "r1",
+                "item_id": "audio_1",
+                "output_index": 0,
+                "content_index": 0,
+                # One second of PCM16 audio at 24 kHz.
+                "delta": base64.b64encode(bytes(48_000)).decode(),
+            }
+        )
+        if start_second_response:
+            await model._handle_ws_event(
+                {
+                    "type": "response.done",
+                    "event_id": "e3",
+                    "response": response("r1", "completed"),
+                }
+            )
+            await model._handle_ws_event(
+                {
+                    "type": "response.created",
+                    "event_id": "e4",
+                    "response": response("r2", "in_progress"),
+                }
+            )
+            # A later response can generate tool arguments without producing audio.
+            await model._handle_ws_event(
+                {
+                    "type": "response.function_call_arguments.delta",
+                    "event_id": "e5",
+                    "response_id": "r2",
+                    "item_id": "tool_2",
+                    "output_index": 0,
+                    "call_id": "call_2",
+                    "delta": '{"query":',
+                }
+            )
+
+        if use_playback_tracker:
+            model._playback_tracker = RealtimePlaybackTracker()
+            model._playback_tracker.on_play_ms("audio_1", 0, min(elapsed_ms, 1000))
+        monkeypatch.setattr(time, "monotonic", lambda: 100.0 + elapsed_ms / 1000)
+        if interrupt:
+            session = RealtimeSession(model=model, agent=RealtimeAgent(name="Test"), context=None)
+            await session.interrupt()
+        else:
+            await model._handle_ws_event(
+                {
+                    "type": "input_audio_buffer.speech_started",
+                    "event_id": "e6",
+                    "item_id": "user_2",
+                    "audio_start_ms": 0,
+                }
+            )
+
+        sent = [call.args[0] for call in model._send_raw_message.await_args_list]
+        assert [
+            (event.item_id, event.audio_end_ms)
+            for event in sent
+            if event.type == "conversation.item.truncate"
+        ] == expected_truncates
+        assert sum(event.type == "response.cancel" for event in sent) == 1
+        emitted = [call.args[0] for call in listener.on_event.await_args_list]
+        assert not [event for event in emitted if event.type in {"error", "exception"}]
+        assert [event.item_id for event in emitted if event.type == "audio_interrupted"] == [
+            "audio_1"
+        ]
+        assert model._get_playback_state()["current_item_id"] is None
+
+
 class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
     @pytest.mark.asyncio
     async def test_send_event_dispatch(self, model, monkeypatch):

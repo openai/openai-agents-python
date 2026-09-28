@@ -23,6 +23,7 @@ from .session import (
     OpenAIResponsesCompactionArgs,
     OpenAIResponsesCompactionAwareSession,
     SessionABC,
+    _await_mutation,
     _CompactionSnapshot,
 )
 
@@ -432,7 +433,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if is_automatic and snapshot is None and self.max_rollback_items is not None:
             await self._get_all_underlying_session_items()
 
-        self._deferred_response_id = None
         logger.debug(
             "compact: start for %s using %s (mode=%s)",
             self._response_id,
@@ -444,7 +444,8 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         if resolved_mode == "previous_response_id":
             compact_kwargs["previous_response_id"] = self._response_id
         else:
-            compact_kwargs["input"] = session_items
+            # Manual compaction may reuse cached raw output from the preceding compaction.
+            compact_kwargs["input"] = normalize_input_items_for_api(session_items)
 
         compacted = await self.client.responses.compact(**compact_kwargs)
 
@@ -457,8 +458,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         )
 
         if snapshot is not None:
-            try:
+
+            async def replace_snapshot(snapshot: _CompactionSnapshot) -> bool:
                 replaced = await snapshot.replace_suffix(suffix_start, output_items)
+                if replaced:
+                    # Publish the backend's successful outcome before caller cancellation
+                    # is propagated. Runner can settle its checkpoint without inferring
+                    # success from history that merely differs from the original append.
+                    self._deferred_response_id = None
+                    if wrapper is not None:
+                        wrapper._session_compaction_completed = True  # type: ignore[attr-defined]
+                return replaced
+
+            try:
+                replaced = await _await_mutation(replace_snapshot(snapshot))
                 if not replaced:
                     logger.warning(
                         "Skipped compaction replacement because the stored suffix changed."
@@ -490,6 +503,12 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 None if read_items is not None else select_compaction_candidate_items(output_items)
             )
             self._session_items = None if read_items is not None else output_items
+
+        # Clear the deferred marker only now that compaction has actually settled. Clearing it
+        # before the fallible API call/replacement above would let a failed forced compaction
+        # silently lose its "this must be forced" signal: a later retry recomputes `force` from
+        # this marker, so an early clear makes the retry decline work that was still owed.
+        self._deferred_response_id = None
 
         logger.debug(
             "compact: done for %s (mode=%s, output=%s, candidates=%s)",
@@ -760,7 +779,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         *,
         limit: int | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], bool]:
-        """Lazy-load candidates, or read a bounded snapshot for automatic coverage checks."""
+        """Load policy-visible candidates, or a bounded automatic coverage snapshot."""
+        if read_items is None:
+            # Resolve the wrapped policy before consulting the cache: visibility can
+            # change without a wrapper mutation, for example when encrypted items expire.
+            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
         cache_snapshot = read_items is None and limit is None
         if (
             cache_snapshot
@@ -768,10 +791,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             and self._session_items is not None
         ):
             return (self._compaction_candidate_items[:], self._session_items[:], False)
-        if read_items is None:
-            # Storage wrappers own the logical policy view and bounded raw reads,
-            # including when compaction is the outer wrapper.
-            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
         if read_items is not None:
             items, complete = await read_items(limit)
         else:

@@ -506,9 +506,10 @@ class WorkspaceArchiveWriteError(WorkspaceIOError):
         context: Mapping[str, object] | None = None,
         cause: BaseException | None = None,
         retryable: bool | None = None,
+        message: str | None = None,
     ) -> None:
         super().__init__(
-            message=f"failed to write archive for path: {path}",
+            message=message if message is not None else f"failed to write archive for path: {path}",
             error_code=ErrorCode.WORKSPACE_ARCHIVE_WRITE_ERROR,
             op="write",
             context={"path": str(path), **_as_context(context)},

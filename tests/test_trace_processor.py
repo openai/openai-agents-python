@@ -15,7 +15,7 @@ import httpx2
 import pytest
 
 import agents._debug as _debug
-from agents.tracing import flush_traces, get_trace_provider
+from agents.tracing import flush_traces, get_trace_provider, setup as tracing_setup
 from agents.tracing.processor_interface import TracingExporter, TracingProcessor
 from agents.tracing.processors import BackendSpanExporter, BatchTraceProcessor, ConsoleSpanExporter
 from agents.tracing.provider import DefaultTraceProvider, TraceProvider
@@ -271,40 +271,111 @@ def test_batch_trace_processor_shutdown_timeout_returns_when_exporter_blocks(
     assert not processor._worker_thread.is_alive()
 
 
-def test_batch_trace_processor_shutdown_passes_deadline_to_exporter() -> None:
-    seen_deadlines: list[float | None] = []
+def test_batch_trace_processor_shutdown_uses_custom_exporter_public_method() -> None:
+    exported: list[Trace | Span[Any]] = []
 
     class DeadlineExporter(TracingExporter):
         def export(self, items: list[Trace | Span[Any]]) -> None:
-            raise AssertionError("shutdown should use the deadline-aware exporter path")
+            exported.extend(items)
 
         def _export_with_deadline(
             self, items: list[Trace | Span[Any]], deadline: float | None
         ) -> None:
-            seen_deadlines.append(deadline)
+            raise AssertionError("private deadline helpers are not an exporter extension API")
 
     processor = BatchTraceProcessor(exporter=DeadlineExporter())
-    processor._queue.put_nowait(get_span(processor))
+    span = get_span(processor)
+    processor._queue.put_nowait(span)
 
     processor.shutdown(timeout=1.0)
 
-    assert len(seen_deadlines) == 1
-    assert seen_deadlines[0] is not None
+    assert exported == [span]
 
 
+@pytest.mark.parametrize("cleanup", ["flush", "shutdown", "timed_shutdown", "automatic"])
+@pytest.mark.parametrize("reject_batch", [False, True], ids=["filter", "raise"])
+def test_batch_trace_processor_cleanup_preserves_exporter_filter(
+    monkeypatch: pytest.MonkeyPatch, cleanup: str, reject_batch: bool
+) -> None:
+    received: list[dict[str, Any]] = []
+    filtered_batches: list[list[Trace | Span[Any]]] = []
+
+    def handle_request(request: httpx2.Request) -> httpx2.Response:
+        received.extend(json.loads(request.content)["data"])
+        return httpx2.Response(200)
+
+    class FilteringExporter(BackendSpanExporter):
+        def export(self, items: list[Trace | Span[Any]]) -> None:
+            filtered_batches.append(items)
+            if reject_batch:
+                raise ValueError("batch rejected by application policy")
+            super().export([item for item in items if isinstance(item, Trace)])
+
+    exporter = FilteringExporter(api_key="test_key")
+    exporter._client.close()
+    exporter._client = httpx2.Client(transport=httpx2.MockTransport(handle_request))
+    processor = BatchTraceProcessor(exporter=exporter)
+    # Keep the batch queued until the chosen cleanup entry point drains it.
+    monkeypatch.setattr(processor, "_ensure_thread_started", lambda: None)
+    allowed_trace = get_trace(processor)
+    sensitive_span = SpanImpl(
+        trace_id=allowed_trace.trace_id,
+        span_id="test_sensitive_span",
+        parent_id=None,
+        processor=processor,
+        span_data=FunctionSpanData(
+            name="test_tool", input="SYNTHETIC_PRIVATE_INPUT", output="SYNTHETIC_PRIVATE_OUTPUT"
+        ),
+        tracing_api_key=None,
+    )
+    processor.on_trace_start(allowed_trace)
+    processor.on_span_end(sensitive_span)
+    try:
+        if cleanup == "automatic":
+            provider = DefaultTraceProvider()
+            provider.register_processor(processor)
+            monkeypatch.setattr(tracing_setup, "GLOBAL_TRACE_PROVIDER", provider)
+            tracing_setup._shutdown_global_trace_provider()
+        elif cleanup == "timed_shutdown":
+            processor.shutdown(timeout=1.0)
+        elif cleanup == "shutdown":
+            processor.shutdown()
+        else:
+            processor.force_flush()
+
+        assert received == ([] if reject_batch else [allowed_trace.export()])
+        assert "SYNTHETIC_PRIVATE_INPUT" not in json.dumps(received)
+        assert "SYNTHETIC_PRIVATE_OUTPUT" not in json.dumps(received)
+        assert filtered_batches == [[allowed_trace, sensitive_span]]
+    finally:
+        processor.shutdown()
+        exporter.close()
+
+
+@pytest.mark.parametrize("use_subclass", [False, True], ids=["default", "inherited-export"])
 @patch("httpx2.Client")
-def test_batch_trace_processor_timed_shutdown_retries_final_drain(mock_client) -> None:
+def test_batch_trace_processor_timed_shutdown_retries_final_drain(
+    mock_client, use_subclass: bool
+) -> None:
+    class InheritedExportBackend(BackendSpanExporter):
+        pass
+
     transient = MagicMock(status_code=503, headers={})
     success = MagicMock(status_code=200, headers={})
     mock_client.return_value.post.side_effect = [transient, success]
 
-    exporter = BackendSpanExporter(api_key="test_key", max_retries=2, base_delay=0.001)
+    exporter_type = InheritedExportBackend if use_subclass else BackendSpanExporter
+    exporter = exporter_type(api_key="test_key", max_retries=2, base_delay=0.001)
     processor = BatchTraceProcessor(exporter=exporter)
     processor._queue.put_nowait(get_span(processor))
 
     processor.shutdown(timeout=1.0)
 
     assert mock_client.return_value.post.call_count == 2
+    for request in mock_client.return_value.post.call_args_list:
+        timeout = request.kwargs["timeout"]
+        assert isinstance(timeout, httpx2.Timeout)
+        assert timeout.read is not None and 0 < timeout.read <= 1.0
     exporter.close()
 
 
@@ -1782,3 +1853,149 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
     exporter.close()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_backend_span_exporter_bounds_multipart_normalization_work(monkeypatch):
+    from openai import AsyncOpenAI
+
+    from agents import Agent, OpenAIChatCompletionsModel, Runner
+    from tests.testing_processor import fetch_ordered_spans
+
+    provider_messages: list[Any] = []
+
+    def provider_response(request: httpx2.Request) -> httpx2.Response:
+        provider_messages.append(json.loads(request.content)["messages"])
+        return httpx2.Response(
+            200,
+            json={
+                "id": "synthetic-completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            },
+        )
+
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    original_size = exporter._value_json_size_bytes
+    work = 0
+    work_limit = 0
+
+    def counted_size(value: Any) -> int:
+        nonlocal work
+        size = original_size(value)
+        work += size
+        # Bound regression runtime as well as work; the old implementation fails
+        # after a small number of rescans instead of completing a quadratic run.
+        assert work <= work_limit
+        return size
+
+    monkeypatch.setattr(exporter, "_value_json_size_bytes", counted_size)
+    measured_work: list[int] = []
+    try:
+        async with AsyncOpenAI(
+            api_key="test_key",
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(provider_response)),
+        ) as client:
+            agent = Agent(
+                name="multipart-test", model=OpenAIChatCompletionsModel("test-model", client)
+            )
+            for width in (1_000, 2_000):
+                parts = [{"type": "input_text", "text": "synthetic " * 20} for _ in range(width)]
+                result = await Runner.run(agent, [{"role": "user", "content": parts}])
+                assert result.final_output == "ok"
+                span = [s for s in fetch_ordered_spans() if s.span_data.type == "generation"][-1]
+                original = span.export()
+                assert original is not None
+                assert original["span_data"]["input"] == provider_messages[-1]
+                assert len(provider_messages[-1][0]["content"]) == width
+                work = 0
+                work_limit = 30 * original_size(provider_messages[-1])
+                exporter.export([span])
+                measured_work.append(work)
+                sent_input = received[-1]["span_data"]["input"]
+                assert (
+                    len(json.dumps(sent_input, ensure_ascii=False, separators=(",", ":")).encode())
+                    <= 100_000
+                )
+                assert sent_input[0]["role"] == "user"
+                assert isinstance(sent_input[0]["content"], list)
+                assert any(part.get("text") for part in sent_input[0]["content"])
+                assert span.export() == original
+            assert measured_work[1] <= 3 * measured_work[0]
+
+            # An ordinary trace still leaves the same processor after the large
+            # span, in a separate batch. Mock ingest makes the completion bounded.
+            received.clear()
+            work = 0
+            processor = BatchTraceProcessor(exporter, max_batch_size=1, schedule_delay=0.01)
+            normal = get_span(mock_processor())
+            processor.on_span_end(span)
+            processor.on_span_end(normal)
+            try:
+                processor.force_flush()
+                assert len(received) == 2
+                assert received[-1] == normal.export()
+                assert received[-2]["id"] == span.span_id
+                assert processor._queue.empty()
+            finally:
+                processor.shutdown(timeout=1)
+    finally:
+        exporter.close()
+
+
+def test_backend_span_exporter_bounds_wide_mapping_normalization_work(monkeypatch):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    original_size = exporter._value_json_size_bytes
+    measured_work: list[int] = []
+    work = 0
+    work_limit = 0
+
+    def counted_size(value: Any) -> int:
+        nonlocal work
+        size = original_size(value)
+        work += size
+        assert work <= work_limit
+        return size
+
+    monkeypatch.setattr(exporter, "_value_json_size_bytes", counted_size)
+    try:
+        for width in (1_000, 2_000):
+            # Public generation spans accept structured mappings; escaped Unicode
+            # keys exercise key/colon/comma accounting when entries are removed.
+            mapping = {f'{index}:"\\雪' + "k" * 120: "value" for index in range(width)}
+            span = SpanImpl(
+                trace_id="test_trace_id",
+                span_id="generation_span_id",
+                parent_id=None,
+                processor=mock_processor(),
+                span_data=GenerationSpanData(input=[mapping]),
+                tracing_api_key=None,
+            )
+            work = 0
+            work_limit = 30 * original_size(mapping)
+
+            exporter.export([span])
+            measured_work.append(work)
+            [sent] = received[-1]["span_data"]["input"]
+            assert 0 < len(sent) < width
+            assert list(sent) == list(mapping)[-len(sent) :]
+            assert set(sent.values()) == {""}
+            assert (
+                len(json.dumps([sent], ensure_ascii=False, separators=(",", ":")).encode())
+                <= 100_000
+            )
+            assert len(mapping) == width
+        assert measured_work[1] <= 3 * measured_work[0]
+    finally:
+        exporter.close()

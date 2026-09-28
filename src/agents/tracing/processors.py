@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import heapq
 import json
 import math
 import os
@@ -7,9 +8,9 @@ import queue
 import random
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
-from typing import Any, cast
+from typing import Any
 
 import httpx2
 
@@ -510,47 +511,62 @@ class BackendSpanExporter(TracingExporter):
     ) -> dict[str, Any]:
         truncated = dict(value)
         current_size = self._value_json_size_bytes(truncated)
+        # Cache child sizes and preserve insertion order when sizes tie. Updating one
+        # child must not rescan or serialize all its siblings again.
+        children = [
+            (-self._value_json_size_bytes(child), index, key)
+            for index, (key, child) in enumerate(truncated.items())
+        ]
+        heapq.heapify(children)
 
         while truncated and current_size > max_bytes:
-            largest_key = max(
-                truncated, key=lambda key: self._value_json_size_bytes(truncated[key])
-            )
+            negative_size, index, largest_key = heapq.heappop(children)
             child = truncated[largest_key]
-            child_size = self._value_json_size_bytes(child)
+            child_size = -negative_size
             child_budget = max(0, max_bytes - (current_size - child_size))
             truncated_child = self._truncate_json_value_for_limit(child, child_budget)
 
             if truncated_child == child:
                 truncated.pop(largest_key)
+                current_size -= (
+                    self._value_json_size_bytes(largest_key) + 1 + child_size + bool(truncated)
+                )
             else:
                 truncated[largest_key] = truncated_child
-
-            current_size = self._value_json_size_bytes(truncated)
+                new_size = self._value_json_size_bytes(truncated_child)
+                current_size += new_size - child_size
+                heapq.heappush(children, (-new_size, index, largest_key))
 
         return truncated
 
     def _truncate_list_for_json_limit(self, value: list[Any], max_bytes: int) -> list[Any]:
         truncated = list(value)
         current_size = self._value_json_size_bytes(truncated)
+        children = [
+            (-self._value_json_size_bytes(child), index) for index, child in enumerate(truncated)
+        ]
+        heapq.heapify(children)
+        removed: set[int] = set()
 
-        while truncated and current_size > max_bytes:
-            largest_index = max(
-                range(len(truncated)),
-                key=lambda index: self._value_json_size_bytes(truncated[index]),
-            )
+        while children and current_size > max_bytes:
+            negative_size, largest_index = heapq.heappop(children)
             child = truncated[largest_index]
-            child_size = self._value_json_size_bytes(child)
+            child_size = -negative_size
             child_budget = max(0, max_bytes - (current_size - child_size))
             truncated_child = self._truncate_json_value_for_limit(child, child_budget)
 
             if truncated_child == child:
-                truncated.pop(largest_index)
+                # Compact once at the end instead of shifting the remaining list
+                # after each removal. Heap indices retain their original order.
+                removed.add(largest_index)
+                current_size -= child_size + bool(children)
             else:
                 truncated[largest_index] = truncated_child
+                new_size = self._value_json_size_bytes(truncated_child)
+                current_size += new_size - child_size
+                heapq.heappush(children, (-new_size, largest_index))
 
-            current_size = self._value_json_size_bytes(truncated)
-
-        return truncated
+        return [child for index, child in enumerate(truncated) if index not in removed]
 
     def _truncated_preview(self, value: Any) -> dict[str, Any]:
         type_name = type(value).__name__
@@ -838,13 +854,15 @@ class BatchTraceProcessor(TracingProcessor):
                 # cannot kill the background worker thread and silently strand all
                 # subsequent spans in the queue.
                 try:
-                    export_with_deadline = getattr(self._exporter, "_export_with_deadline", None)
-                    if deadline is not None and callable(export_with_deadline):
-                        export_fn = cast(
-                            Callable[[list[Trace | Span[Any]], float | None], None],
-                            export_with_deadline,
-                        )
-                        export_fn(items_to_export, deadline)
+                    # Preserve deadlines for inherited backend export behavior, but never
+                    # bypass an application's public export override.
+                    if (
+                        deadline is not None
+                        and isinstance(self._exporter, BackendSpanExporter)
+                        and getattr(self._exporter.export, "__func__", None)
+                        is BackendSpanExporter.export
+                    ):
+                        self._exporter._export_with_deadline(items_to_export, deadline)
                     else:
                         self._exporter.export(items_to_export)
                 except Exception as exc:

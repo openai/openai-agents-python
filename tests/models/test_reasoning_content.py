@@ -391,6 +391,9 @@ async def create_fake_stream(
 ) -> AsyncIterator[ChatCompletionChunk]:
     for chunk in chunks:
         yield chunk
+    terminal_chunk = create_chunk({})
+    terminal_chunk.choices[0].finish_reason = "stop"
+    yield terminal_chunk
 
 
 @pytest.mark.allow_call_model_methods

@@ -15,6 +15,7 @@ from agents.run_config import SandboxRunConfig
 from agents.sandbox.apply_patch import WorkspaceEditor
 from agents.sandbox.capabilities import Capability
 from agents.sandbox.errors import (
+    ApplyPatchDiffError,
     ExecNonZeroError,
     InvalidManifestPathError,
     WorkspaceArchiveReadError,
@@ -26,6 +27,7 @@ from agents.sandbox.sandbox_agent import SandboxAgent
 from agents.sandbox.snapshot import NoopSnapshot
 
 if TYPE_CHECKING or sys.platform != "win32":
+    from agents.sandbox.sandboxes._unix_local_file_ops import _FileOps
     from agents.sandbox.sandboxes.unix_local import (
         UnixLocalSandboxSession,
         UnixLocalSandboxSessionState,
@@ -41,6 +43,55 @@ def _session(root: Path, *, grants: tuple[SandboxPathGrant, ...] = ()) -> UnixLo
             snapshot=NoopSnapshot(id="file-io"),
         )
     )
+
+
+@pytest.mark.parametrize("replace_source", [False, True])
+async def test_apply_patch_preserves_diverged_alias_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, replace_source: bool
+) -> None:
+    source = tmp_path / "source.txt"
+    destination = tmp_path / "destination.txt"
+    source.write_bytes(b"original\n")
+    destination.hardlink_to(source)
+    session = _session(tmp_path)
+    committed = asyncio.Event()
+    resume = asyncio.Event()
+    move = session.mv
+
+    async def pause_after_commit(*args, **kwargs):
+        await move(*args, **kwargs)
+        committed.set()
+        await resume.wait()
+
+    monkeypatch.setattr(session, "mv", pause_after_commit)
+    operation = asyncio.create_task(
+        session.apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source.txt",
+                move_to="destination.txt",
+                diff="@@\n-original\n+updated\n",
+            )
+        )
+    )
+    try:
+        await asyncio.wait_for(committed.wait(), timeout=5)
+        assert destination.read_bytes() == b"updated\n"
+        if replace_source:
+            source.unlink()
+            source.write_bytes(b"other writer\n")
+        resume.set()
+        with pytest.raises(ApplyPatchDiffError, match="source was left untouched"):
+            await operation
+        assert source.read_bytes() == (b"other writer\n" if replace_source else b"original\n")
+        assert destination.read_bytes() == b"updated\n"
+        assert sorted(path.name for path in tmp_path.iterdir()) == [
+            "destination.txt",
+            "source.txt",
+        ]
+    finally:
+        operation.cancel()
+        await asyncio.gather(operation, return_exceptions=True)
 
 
 async def _operate(session: UnixLocalSandboxSession, operation: str, path: Path) -> object:
@@ -59,10 +110,16 @@ async def _operate(session: UnixLocalSandboxSession, operation: str, path: Path)
         )
     elif operation in {"rm", "rmtree"}:
         await session.rm(path, recursive=operation == "rmtree")
+    elif operation == "mv":
+        await session.mv(path, path.with_name("moved"))
+    elif operation == "same_file":
+        return await session.same_file(path, path, follow_symlinks=False)
     return None
 
 
-@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "ls", "rm", "rmtree", "patch"])
+@pytest.mark.parametrize(
+    "operation", ["read", "write", "mkdir", "ls", "rm", "rmtree", "patch", "mv", "same_file"]
+)
 async def test_parent_swap_after_validation_cannot_access_outside(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
@@ -79,7 +136,8 @@ async def test_parent_swap_after_validation_cannot_access_outside(
         else:
             (root / "target").write_bytes(b"original content")
     session = _session(workspace)
-    normalize = session.normalize_path
+    boundary = "_normalize_entry_path" if operation in {"mv", "same_file"} else "normalize_path"
+    normalize = getattr(session, boundary)
     swapped = False
 
     def swap(path: Path | str, *, for_write: bool = False) -> Path:
@@ -92,7 +150,23 @@ async def test_parent_swap_after_validation_cannot_access_outside(
         return result
 
     # Suspend at the check/use boundary without replacing the actual OS file operations.
-    monkeypatch.setattr(session, "normalize_path", swap)
+    monkeypatch.setattr(session, boundary, swap)
+
+    # The exclusive create authorizes through the descriptor-relative file ops rather than
+    # session.normalize_path, so the patch case injects at that boundary instead.
+    authorize = session._files.authorize
+
+    def swap_authorize(path: Path, *, for_write: bool = False) -> Path:
+        nonlocal swapped
+        result = authorize(path, for_write=for_write)
+        if not swapped and for_write and result.name == "target":
+            swapped = True
+            parent.rename(workspace / "original")
+            parent.symlink_to(outside, target_is_directory=True)
+        return result
+
+    if operation == "patch":
+        monkeypatch.setattr(session._files, "authorize", swap_authorize)
     with pytest.raises(
         (
             OSError,
@@ -108,7 +182,9 @@ async def test_parent_swap_after_validation_cannot_access_outside(
     assert sentinel.read_bytes() == b"original content"
 
 
-@pytest.mark.parametrize("operation", ["read", "write", "mkdir", "ls", "rm", "rmtree"])
+@pytest.mark.parametrize(
+    "operation", ["read", "write", "mkdir", "ls", "rm", "rmtree", "mv", "same_file"]
+)
 async def test_leaf_swap_does_not_follow_new_symlink(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
 ) -> None:
@@ -124,16 +200,23 @@ async def test_leaf_swap_does_not_follow_new_symlink(
         else:
             path.write_bytes(b"original content")
     session = _session(workspace)
-    normalize = session.normalize_path
+    boundary = "_normalize_entry_path" if operation in {"mv", "same_file"} else "normalize_path"
+    normalize = getattr(session, boundary)
+    swapped = False
 
     def swap(path: Path | str, *, for_write: bool = False) -> Path:
+        nonlocal swapped
         result = normalize(path, for_write=for_write)
-        target.rename(workspace / "original")
-        target.symlink_to(outside, target_is_directory=directory)
+        if not swapped:
+            swapped = True
+            target.rename(workspace / "original")
+            target.symlink_to(outside, target_is_directory=directory)
         return result
 
-    monkeypatch.setattr(session, "normalize_path", swap)
-    if operation in {"rm", "rmtree"}:
+    monkeypatch.setattr(session, boundary, swap)
+    if operation in {"rm", "rmtree", "mv", "same_file"}:
+        # These act on the entry itself, so a swapped-in symlink is removed, moved or
+        # compared as a link, never followed.
         await _operate(session, operation, Path("target"))
     else:
         with pytest.raises(
@@ -417,3 +500,268 @@ async def test_recursive_removal_keeps_worker_owned_until_cancelled_io_finishes(
     for fd in opened:
         with pytest.raises(OSError):
             os.fstat(fd)
+
+
+async def test_rename_replaces_the_destination_entry(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "a.txt").write_bytes(b"from a")
+    (workspace / "b.txt").write_bytes(b"from b")
+    session = _session(workspace)
+
+    await session.mv(Path("a.txt"), Path("b.txt"))
+
+    assert sorted(entry.name for entry in workspace.iterdir()) == ["b.txt"]
+    assert (workspace / "b.txt").read_bytes() == b"from a"
+
+
+async def test_rename_onto_a_directory_fails_and_keeps_the_source(tmp_path: Path) -> None:
+    # `mv` would put the source inside the directory and exit 0; a caller that then removes
+    # the source would delete the file. `os.rename` refuses instead.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "notes.txt").write_bytes(b"kept")
+    (workspace / "docs").mkdir()
+    session = _session(workspace)
+
+    with pytest.raises(ExecNonZeroError):
+        await session.mv(Path("notes.txt"), Path("docs"))
+
+    assert (workspace / "notes.txt").read_bytes() == b"kept"
+    assert list((workspace / "docs").iterdir()) == []
+
+
+async def test_rename_moves_a_symlink_entry_rather_than_its_target(tmp_path: Path) -> None:
+    # Below the session, the operation is on the entry named, so a link moves as a link.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "target.txt"
+    target.write_bytes(b"target")
+    link = workspace / "link.txt"
+    link.symlink_to(target)
+
+    _FileOps().rename(link, workspace / "moved.txt")
+
+    assert target.read_bytes() == b"target"
+    assert (workspace / "moved.txt").is_symlink()
+    assert not link.exists()
+
+
+async def test_same_file_answers_by_entry_identity(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    one = workspace / "one.txt"
+    one.write_bytes(b"one")
+    (workspace / "two.txt").write_bytes(b"two")
+    (workspace / "hard.txt").hardlink_to(one)
+    session = _session(workspace)
+
+    assert await session.same_file(Path("one.txt"), Path("one.txt")) is True
+    assert await session.same_file(Path("one.txt"), Path("hard.txt")) is True
+    assert await session.same_file(Path("one.txt"), Path("two.txt")) is False
+    assert await session.same_file(Path("one.txt"), Path("missing.txt")) is False
+
+
+async def test_same_file_distinguishes_a_link_from_its_target_when_asked(
+    tmp_path: Path,
+) -> None:
+    # The session resolves a leaf symlink before the check, so this is the module's answer.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "target.txt"
+    target.write_bytes(b"target")
+    link = workspace / "link.txt"
+    link.symlink_to(target)
+
+    files = _FileOps()
+    assert files.same_file(link, target) is True
+    assert files.same_file(link, target, follow_symlinks=False) is False
+
+
+@pytest.mark.parametrize("user", [None, "example-user"])
+async def test_public_entry_operations_preserve_leaf_symlinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str | None
+) -> None:
+    from agents.sandbox.sandboxes import unix_local
+    from agents.sandbox.session.sandbox_session import SandboxSession
+    from tests.sandbox.test_unix_local_user_file_io import _worker
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    target = workspace / "target"
+    target.write_bytes(b"untouched")
+    link = workspace / "link"
+    link.symlink_to("target")
+    parent_alias = workspace / "alias"
+    parent_alias.symlink_to(".", target_is_directory=True)
+    session = SandboxSession(_session(workspace))
+    if user is not None:
+        monkeypatch.setattr(unix_local.shutil, "which", lambda command: "/usr/bin/sudo")
+        monkeypatch.setattr(unix_local.subprocess, "run", _worker)
+
+    assert await session.same_file("link", "target", user=user)
+    assert not await session.same_file("link", "target", follow_symlinks=False, user=user)
+    assert not await session.same_file("link", "link", follow_symlinks=False, user=user)
+    await session.mv("alias/link", "moved", user=user)
+    assert not link.is_symlink()
+    assert (workspace / "moved").is_symlink()
+    assert target.read_bytes() == b"untouched"
+    (workspace / "replacement").write_bytes(b"replacement")
+    await session.mv("replacement", "moved", user=user)
+    assert not (workspace / "moved").is_symlink()
+    assert (workspace / "moved").read_bytes() == b"replacement"
+    assert target.read_bytes() == b"untouched"
+
+
+@pytest.mark.parametrize("mode", [0o755, 0o600])
+async def test_apply_patch_preserves_existing_move_destination(tmp_path: Path, mode: int) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source"
+    source.write_text("before\n")
+    destination = workspace / "destination"
+    destination.write_text("old destination\n")
+    destination.chmod(mode)
+    before = destination.stat()
+
+    await _session(workspace).apply_patch(
+        ApplyPatchOperation(
+            type="update_file", path="source", move_to="destination", diff="@@\n-before\n+after\n"
+        )
+    )
+
+    assert destination.read_text() == "after\n"
+    assert destination.stat().st_ino == before.st_ino
+    assert destination.stat().st_mode == before.st_mode
+    assert not source.exists()
+
+
+async def test_apply_patch_can_write_existing_destination_in_protected_directory(
+    tmp_path: Path,
+) -> None:
+    if os.geteuid() == 0:
+        pytest.skip("root bypasses directory permissions")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "source"
+    source.write_text("before\n")
+    protected = workspace / "protected"
+    protected.mkdir()
+    destination = protected / "destination"
+    destination.write_text("old\n")
+    protected.chmod(0o555)
+    try:
+        await _session(workspace).apply_patch(
+            ApplyPatchOperation(
+                type="update_file",
+                path="source",
+                move_to="protected/destination",
+                diff="@@\n-before\n+after\n",
+            )
+        )
+        assert destination.read_text() == "after\n"
+        assert not source.exists()
+    finally:
+        protected.chmod(0o755)
+
+
+async def test_apply_patch_move_under_aliased_workspace_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    source = workspace / "source"
+    source.write_text("before\n")
+    session = _session(alias)
+
+    await session.apply_patch(
+        ApplyPatchOperation(
+            type="update_file", path="source", move_to="destination", diff="@@\n-before\n+after\n"
+        )
+    )
+
+    destination = workspace / "destination"
+    assert destination.read_text() == "after\n"
+    assert not source.exists()
+    assert await session.same_file(destination.resolve(), "destination", follow_symlinks=False)
+    await session.mv(destination.resolve(), "renamed")
+    assert (workspace / "renamed").read_text() == "after\n"
+
+
+async def test_apply_patch_case_alias_on_real_filesystem(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / "notes.txt"
+    source.write_text("before\n")
+    if not (workspace / "Notes.txt").exists():
+        pytest.skip("volume is case-sensitive")
+    await _session(workspace).apply_patch(
+        ApplyPatchOperation(
+            type="update_file", path="notes.txt", move_to="Notes.txt", diff="@@\n-before\n+after\n"
+        )
+    )
+    assert [entry.name for entry in workspace.iterdir()] == ["Notes.txt"]
+    assert (workspace / "Notes.txt").read_text() == "after\n"
+
+
+async def test_entry_operations_honor_exact_file_grants(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    source = outside / "source"
+    destination = outside / "destination"
+    source.write_bytes(b"granted")
+    readonly = outside / "readonly"
+    readonly.write_bytes(b"read only")
+    session = _session(
+        workspace,
+        grants=(
+            SandboxPathGrant(path=str(source)),
+            SandboxPathGrant(path=str(destination)),
+            SandboxPathGrant(path=str(readonly), read_only=True),
+        ),
+    )
+    assert await session.same_file(source, source, follow_symlinks=False)
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.mv(source, readonly)
+    with pytest.raises(InvalidManifestPathError):
+        await session.mv(source, outside / "ungranted")
+    await session.mv(source, destination)
+    assert destination.read_bytes() == b"granted"
+    assert readonly.read_bytes() == b"read only"
+    assert not source.exists()
+
+
+@pytest.mark.parametrize("user", [None, "example-user"])
+async def test_move_rejects_directory_sources_through_parent_aliases(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, user: str | None
+) -> None:
+    from agents.sandbox.sandboxes import unix_local
+    from tests.sandbox.test_unix_local_user_file_io import _worker
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    shared = tmp_path / "shared"
+    protected = shared / "tree" / "private"
+    protected.mkdir(parents=True)
+    payload = protected / "file"
+    payload.write_bytes(b"protected")
+    alias = workspace / "alias"
+    alias.symlink_to(shared, target_is_directory=True)
+    session = _session(
+        workspace,
+        grants=(
+            SandboxPathGrant(path=str(shared)),
+            SandboxPathGrant(path=str(protected), read_only=True),
+        ),
+    )
+    if user is not None:
+        monkeypatch.setattr(unix_local.shutil, "which", lambda command: "/usr/bin/sudo")
+        monkeypatch.setattr(unix_local.subprocess, "run", _worker)
+
+    with pytest.raises(ExecNonZeroError, match="regular file or symlink"):
+        await session.mv(alias / "tree", workspace / "moved", user=user)
+
+    assert payload.read_bytes() == b"protected"
+    assert not (workspace / "moved").exists()

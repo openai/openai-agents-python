@@ -641,6 +641,25 @@ class SandboxSession(BaseSandboxSession):
     ) -> None:
         await self._inner.rm(path, recursive=recursive, user=user)
 
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        await self._inner.mv(source, destination, user=user)
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        follow_symlinks: bool = True,
+        user: str | User | None = None,
+    ) -> bool:
+        return await self._inner.same_file(left, right, follow_symlinks=follow_symlinks, user=user)
+
     async def mkdir(
         self,
         path: Path | str,
@@ -683,6 +702,19 @@ class SandboxSession(BaseSandboxSession):
         user: str | User | None = None,
     ) -> None:
         await self._inner.write(path, data, user=user)
+
+    @instrumented_op("write", data=_write_start_data)
+    async def _write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        # Forwarded so a backend with a native exclusive-create primitive is actually
+        # used. Without this the wrapper would fall back to the shared implementation and
+        # bypass the inner session's override.
+        await self._inner._write_new_file(path, data, user=user)
 
     @instrumented_op(
         "running",

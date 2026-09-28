@@ -521,7 +521,13 @@ The code for the schema extraction lives in [`agents.function_schema`][].
 
 You can use Pydantic's [`Field`](https://docs.pydantic.dev/latest/concepts/fields/) to add constraints (e.g. min/max for numbers, length or pattern for strings) and descriptions to tool arguments. As in Pydantic, both forms are supported: default-based (`arg: int = Field(..., ge=1)`) and `Annotated` (`arg: Annotated[int, Field(..., ge=1)]`). The generated JSON schema and validation include these constraints.
 
-For variadic parameters, an annotation describes each collected value. The SDK therefore applies `Annotated[..., Field(...)]` constraints to each value supplied through `*args` or `**kwargs`, while omitted variadic parameters remain valid empty collections. Annotate scalar positional values as `*args: T`. If each positional value is itself a homogeneous tuple, use `*args: tuple[T, ...]`; the SDK rejects fixed-length tuple annotations such as `*args: tuple[int, str]` because one fixed tuple shape cannot describe a variadic sequence of positional values.
+For variadic parameters, an annotation describes each collected value. The SDK therefore applies `Annotated[..., Field(...)]` constraints to each value supplied through `*args` or `**kwargs`, while omitted variadic parameters remain valid empty collections.
+
+The SDK ignores `Field(description=...)` in the annotation of a variadic parameter (`*args` or `**kwargs`). To describe the collected parameter, use a parameter entry in the function docstring or a string in `Annotated`, for example `*scores: Annotated[int, "Exam scores", Field(ge=0, le=100)]`. When docstring parsing is enabled and both sources provide a description, the docstring description takes precedence.
+
+For `**kwargs`, use `@tool(strict_mode=False)` and supply the keyword values in the nested object named after the parameter. For example, a tool with `**scores: int` receives `{"scores": {"exam": 90}}`.
+
+Annotate scalar positional values as `*args: T`. If each positional value is itself a homogeneous tuple, use `*args: tuple[T, ...]`; the SDK rejects fixed-length tuple annotations such as `*args: tuple[int, str]` because one fixed tuple shape cannot describe a variadic sequence of positional values.
 
 ```python
 from typing import Annotated

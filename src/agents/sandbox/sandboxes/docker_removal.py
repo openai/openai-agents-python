@@ -9,9 +9,14 @@ authority. Other backends and Docker clients without the service retain their
 existing recursive removal and snapshot restoration behavior.
 
 The service requires a trusted image, Docker 26+ with its builtin seccomp profile,
-and the runc runtime. Workspaces and path-only grant roots must exist in the image.
+and the runc runtime. For new client sessions, the service checks container eligibility,
+then creates a missing workspace and its parents using the trusted image's default
+user before binding, as normal session startup does.
+Path-only grant roots must exist at binding time;
+the client does not create unrelated grant directories.
+Canonical workspace/grant roots and removal targets must not contain backslashes.
 Read-only host bind mounts are supported outside the private workspace. Writable
-shared mounts, additional capabilities, user namespaces, and missing roots are excluded.
+shared mounts, additional capabilities, user namespaces, and missing grant roots are excluded.
 The application must exclusively own container lifecycle and Docker API access;
 other host administrators are trusted. A service/worker transport failure leaves
 the container paused. Before manually resuming it, stop all service workers.
@@ -269,6 +274,11 @@ class DockerRemovalService:
 
     def bind_new(self, container: Container, manifest: Manifest) -> None:
         """Bind before a newly created session is returned to its trusted application."""
+        self._bind_new(container, manifest, bootstrap_workspace=False)
+
+    def _bind_new(
+        self, container: Container, manifest: Manifest, *, bootstrap_workspace: bool
+    ) -> None:
         with self._lock:
             if self._closed:
                 raise ValueError("Docker removal service is closed")
@@ -287,6 +297,21 @@ class DockerRemovalService:
 
         _validate_docker_path_grants(manifest)
         _assert_existing_container_path_grants_match(container, manifest)
+        if bootstrap_workspace:
+            # Reject unsupported mounts and security settings before an image
+            # symlink could redirect mkdir into a shared host directory.
+            self._state(container)
+            # Only the client requests bootstrap, for fresh containers before
+            # application workloads run. Preserve the image's default user.
+            result = container.exec_run(
+                cmd=["mkdir", "-p", "--", manifest.root],
+                user="",
+                workdir="/",
+                stdout=False,
+                stderr=False,
+            )
+            if result.exit_code != 0:
+                raise RuntimeError("Unable to create Docker workspace before removal binding")
         worker: _Worker | None = None
         with self._paused(
             container, lambda: worker is not None and worker.uncertain
@@ -298,6 +323,11 @@ class DockerRemovalService:
                     paths=[manifest.root, *(grant.path for grant in manifest.extra_path_grants)],
                 )
                 paths = result["paths"]
+                # Linux canonical names must not be reinterpreted as caller path syntax.
+                if any("\\" in path for path in paths):
+                    raise ValueError(
+                        "Docker removal does not support canonical paths containing backslashes"
+                    )
                 root = coerce_posix_path(paths[0])
                 for grant, path in zip(manifest.extra_path_grants, paths[1:], strict=True):
                     mounted = coerce_posix_path(path)
@@ -374,6 +404,12 @@ class DockerRemovalService:
                         )
                         target = inspection["path"]
                         if target:
+                            # Policy coercion would treat literal Linux backslashes as separators.
+                            if "\\" in target:
+                                raise WorkspaceArchiveWriteError(
+                                    path=posix_path_for_error(original),
+                                    context={"reason": "docker_removal_canonical_path"},
+                                )
                             selected = coerce_posix_path(target)
                             root = binding.policy.normalize_sandbox_path(".")
                             live_roots = (

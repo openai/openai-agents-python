@@ -248,6 +248,10 @@ class _ResponseCreateSequencer:
         return self._ongoing_response
 
     @property
+    def ongoing_response_id(self) -> str | None:
+        return self._ongoing_response_id
+
+    @property
     def response_control(self) -> Literal["free", "create_requested", "cancel_requested"]:
         return self._response_control
 
@@ -1017,6 +1021,17 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
             "elapsed_ms": None,
         }
 
+    def _ongoing_response_owns_audio(self, item_id: str, item_content_index: int) -> bool:
+        if not self._ongoing_response:
+            return False
+        response_id = self._response_create_sequencer.ongoing_response_id
+        audio_state = self._audio_state_tracker.get_state(item_id, item_content_index)
+        # Preserve interruption when ownership is unknown. With known identities, only
+        # the response that produced this item can extend its received audio length.
+        if response_id is None or audio_state is None or audio_state.response_id is None:
+            return True
+        return audio_state.response_id == response_id
+
     def _get_audio_limits(self, item_id: str, item_content_index: int) -> tuple[float, int] | None:
         audio_state = self._audio_state_tracker.get_state(item_id, item_content_index)
         if audio_state is None:
@@ -1099,7 +1114,12 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     _, max_audio_ms = audio_limits
                 truncated_ms = max(int(elapsed_ms), 0)
                 if (
-                    (self._ongoing_response and not event.playback_only)
+                    (
+                        not event.playback_only
+                        and self._ongoing_response_owns_audio(
+                            current_item_id, current_item_content_index
+                        )
+                    )
                     or max_audio_ms is None
                     or truncated_ms < max_audio_ms
                 ):
@@ -1452,7 +1472,9 @@ class OpenAIRealtimeWebSocketModel(RealtimeModel):
                     if (
                         max_audio_ms is not None
                         and truncated_ms >= max_audio_ms
-                        and not self._ongoing_response
+                        and not self._ongoing_response_owns_audio(
+                            playback_item_id, playback_content_index
+                        )
                     ):
                         logger.debug(
                             "Skipping truncate because playback appears complete. Item id: %s, "

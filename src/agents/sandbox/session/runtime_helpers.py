@@ -20,9 +20,9 @@ shift 3
 max_symlink_depth=64
 
 case "$for_write" in
-    0|1) ;;
+    0|1|2) ;; # read, write, recursive removal
     *)
-        printf 'for_write must be 0 or 1: %s\\n' "$for_write" >&2
+        printf 'for_write must be 0, 1 or 2: %s\\n' "$for_write" >&2
         exit 64
         ;;
 esac
@@ -83,10 +83,6 @@ resolve_path() {
 }
 
 resolved_candidate=$(resolve_path "$candidate" 0)
-best_grant_root=""
-best_grant_original=""
-best_grant_read_only="0"
-best_grant_len=0
 
 check_root() {
     allowed_root="$1"
@@ -134,24 +130,54 @@ consider_extra_grant() {
     esac
 }
 
-while [ "$#" -gt 0 ]; do
-    consider_extra_grant "$1" "$2"
-    shift 2
-done
+authorize_candidate() (
+    # A subshell keeps each candidate's grant selection independent.
+    resolved_candidate="$1"
+    shift
+    best_grant_root=""
+    best_grant_original=""
+    best_grant_read_only="0"
+    best_grant_len=0
+    while [ "$#" -gt 0 ]; do
+        consider_extra_grant "$1" "$2"
+        shift 2
+    done
 
-check_root "$root"
-if [ -n "$best_grant_root" ]; then
-    if [ "$for_write" = "1" ] && [ "$best_grant_read_only" = "1" ]; then
-        printf 'read-only extra path grant: %s\\nresolved path: %s\\n' \
-            "$best_grant_original" "$resolved_candidate" >&2
-        exit 114
+    check_root "$root"
+    if [ -n "$best_grant_root" ]; then
+        if [ "$for_write" != "0" ] && [ "$best_grant_read_only" = "1" ]; then
+            printf 'read-only extra path grant: %s\\nresolved path: %s\\n' \
+                "$best_grant_original" "$resolved_candidate" >&2
+            exit 114
+        fi
+        printf '%s\\n' "$resolved_candidate"
+        exit 0
     fi
-    printf '%s\\n' "$resolved_candidate"
-    exit 0
-fi
+    printf 'workspace escape: %s\\n' "$resolved_candidate" >&2
+    exit 111
+)
 
-printf 'workspace escape: %s\\n' "$resolved_candidate" >&2
-exit 111
+authorize_candidate "$resolved_candidate" "$@" >/dev/null
+if [ "$for_write" = "2" ] && [ ! -L "$candidate" ]; then
+    # rm unlinks a leaf symlink; only a traversed tree needs descendant checks.
+    grant_root=""
+    for grant_part in "$@"; do
+        if [ -z "$grant_root" ]; then
+            grant_root="$grant_part"
+            continue
+        fi
+        if [ "$grant_part" = "1" ]; then
+            resolved_grant=$(resolve_path "$grant_root" 0)
+            case "$resolved_grant" in
+                "$resolved_candidate"|"$resolved_candidate"/*)
+                    authorize_candidate "$resolved_grant" "$@" >/dev/null
+                    ;;
+            esac
+        fi
+        grant_root=""
+    done
+fi
+printf '%s\\n' "$resolved_candidate"
 """.strip()
 
 _WORKSPACE_FINGERPRINT_SCRIPT: Final[str] = """
@@ -231,9 +257,14 @@ for rel in "$@"; do
     if [ "$escape_tar_patterns" -eq 1 ]; then
         rel=$(printf '%s\\n' "$rel" | sed 's/[][\\\\*?]/\\\\&/g')
     fi
-    quoted_rel=$(quote_sh "$rel")
+    # Reproduce released fingerprints when comparing a preserved live workspace.
+    # Switching algorithms before comparison could restore an incomplete old archive.
+    if [ "$version" = "workspace_tar_sha256_v1" ]; then
+        quoted_rel=$(quote_sh "$rel")
+        tar_cmd="$tar_cmd --exclude=$quoted_rel"
+    fi
     quoted_dot_rel=$(quote_sh "./$rel")
-    tar_cmd="$tar_cmd --exclude=$quoted_rel --exclude=$quoted_dot_rel"
+    tar_cmd="$tar_cmd --exclude=$quoted_dot_rel"
 done
 
 tar_cmd="$tar_cmd -C $(quote_sh "$workspace_root") -cf - ."

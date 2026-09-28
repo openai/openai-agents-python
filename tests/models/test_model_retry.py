@@ -8,8 +8,10 @@ from typing import Any, cast
 import httpx2
 import pytest
 from openai import APIConnectionError, APIStatusError, BadRequestError
+from openai.types.responses import ResponseFunctionCallArgumentsDeltaEvent, ResponseTextDeltaEvent
 from pydantic import ValidationError
 
+from agents import Agent, RunConfig, Runner
 from agents.exceptions import ModelTimeoutError
 from agents.items import ModelResponse, TResponseStreamEvent
 from agents.model_settings import ModelSettings
@@ -32,6 +34,7 @@ from agents.retry import (
     retry_policy_retries_safe_transport_errors,
 )
 from agents.run_internal.model_retry import get_response_with_retry, stream_response_with_retry
+from agents.testing import ModelCall, ModelStep, ScriptedModel
 from agents.usage import Usage
 from tests.test_responses import get_text_message
 
@@ -276,6 +279,73 @@ async def test_stream_timeout_discards_owner_task_from_traceback_locals() -> Non
             assert frame_locals.get("stream_requests") is None
             assert frame_locals.get("stream_results") is None
         traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload_kind", ["text", "tool_arguments"])
+async def test_stream_timeout_discards_previous_event_from_retry_traceback(
+    payload_kind: str,
+) -> None:
+    sensitive_payload = "synthetic-sensitive-stream-payload"
+    event: TResponseStreamEvent
+    if payload_kind == "text":
+        event = ResponseTextDeltaEvent(
+            type="response.output_text.delta",
+            delta=sensitive_payload,
+            content_index=0,
+            output_index=0,
+            item_id="synthetic-item",
+            sequence_number=0,
+            logprobs=[],
+        )
+    else:
+        event = ResponseFunctionCallArgumentsDeltaEvent(
+            type="response.function_call_arguments.delta",
+            delta=sensitive_payload,
+            output_index=0,
+            item_id="synthetic-item",
+            sequence_number=0,
+        )
+    closed = asyncio.Event()
+
+    async def stream_events(_call: ModelCall) -> AsyncIterator[TResponseStreamEvent]:
+        try:
+            yield event
+            await asyncio.Event().wait()
+        finally:
+            closed.set()
+
+    model = ScriptedModel([ModelStep.stream(stream_events)])
+    result = Runner.run_streamed(
+        Agent(name="test", model=model, model_settings=ModelSettings(timeout=0.05)),
+        "synthetic-input",
+        run_config=RunConfig(trace_include_sensitive_data=False),
+    )
+    delivered = []
+    with pytest.raises(ModelTimeoutError) as exc_info:
+        async for stream_event in result.stream_events():
+            if stream_event.type == "raw_response_event":
+                delivered.append(stream_event.data)
+
+    assert delivered == [event]
+    assert event.delta == sensitive_payload
+    assert closed.is_set()
+    assert exc_info.value.timeout_seconds == 0.05
+    assert exc_info.value.__cause__ is None
+    assert exc_info.value.__context__ is None
+    retry_frames = []
+    traceback = exc_info.value.__traceback__
+    while traceback is not None:
+        if traceback.tb_frame.f_code is stream_response_with_retry.__code__:
+            retry_frames.append(traceback.tb_frame)
+        traceback = traceback.tb_next
+    assert retry_frames
+    for frame in retry_frames:
+        # Only the retry wrapper's aliases are covered, not caller-owned run state.
+        assert frame.f_locals.get("event") is None
+        assert frame.f_locals.get("result_value") is None
+        assert frame.f_locals.get("stream_owner") is None
+        assert frame.f_locals.get("stream_results") is None
 
 
 @pytest.mark.asyncio

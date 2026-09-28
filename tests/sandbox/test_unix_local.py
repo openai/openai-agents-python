@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
+import os
+import shutil
 import signal
 import tarfile
 import threading
@@ -12,8 +15,13 @@ from typing import cast
 
 import pytest
 
-from agents.sandbox import SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError
+from agents.editor import ApplyPatchOperation
+from agents.sandbox import LocalSnapshotSpec, SandboxPathGrant
+from agents.sandbox.errors import (
+    ApplyPatchDiffError,
+    PtySessionNotFoundError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -22,8 +30,9 @@ from agents.sandbox.sandboxes.unix_local import (
     UnixLocalSandboxSessionState,
     _UnixPtyProcessEntry,
 )
-from agents.sandbox.snapshot import NoopSnapshot
+from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
 from agents.sandbox.types import ExecResult, User
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
 
 
 class _RecordingUnixLocalSession(UnixLocalSandboxSession):
@@ -44,6 +53,197 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
         _ = timeout
         self.exec_commands.append(tuple(str(part) for part in command))
         return ExecResult(stdout=b"", stderr=b"", exit_code=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exclude_first", [False, True])
+async def test_unix_local_snapshot_round_trips_hardlinks(
+    tmp_path: Path, exclude_first: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    first = workspace / "a.py"
+    second = workspace / "b.py"
+    first.write_bytes(b"VALUE = 1\n")
+    first.chmod(0o755)
+    os.link(first, second)
+    (workspace / "link.py").symlink_to("b.py")
+    (workspace / "copy.py").write_bytes(b"independent\n")
+    if exclude_first:
+        session.register_persist_workspace_skip_path("a.py")
+    await session.stop()
+    archive = await session.state.snapshot.restore()
+    try:
+        with tarfile.open(fileobj=archive) as tar:
+            members = {member.name: member for member in tar.getmembers()}
+        assert members["./b.py"].isreg()
+        assert members["./link.py"].issym()
+        if exclude_first:
+            assert "./a.py" not in members
+        else:
+            assert members["./a.py"].isreg()
+    finally:
+        archive.close()
+
+    # Prove that resume actually restores the snapshot, not the surviving workspace.
+    second.write_bytes(b"changed after snapshot\n")
+    (workspace / "stale.txt").write_bytes(b"remove on resume")
+    resumed = await client.resume(session.state)
+    try:
+        await resumed.start()
+        assert second.read_bytes() == b"VALUE = 1\n"
+        assert second.stat().st_mode & 0o777 == 0o755
+        assert (workspace / "copy.py").read_bytes() == b"independent\n"
+        assert (workspace / "link.py").is_symlink()
+        assert (workspace / "link.py").read_bytes() == b"VALUE = 1\n"
+        assert not (workspace / "stale.txt").exists()
+        if exclude_first:
+            assert not first.exists()
+        else:
+            assert first.read_bytes() == b"VALUE = 1\n"
+            assert first.stat().st_ino != second.stat().st_ino
+    finally:
+        await resumed.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target_kind", ["directory", "file", "missing"])
+async def test_unix_local_snapshot_resume_removes_stale_link_without_following_target(
+    tmp_path: Path, target_kind: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "keep.txt"
+    sentinel.write_bytes(b"external data")
+    target = external if target_kind == "directory" else external / target_kind
+    if target_kind == "file":
+        target.write_bytes(b"external file")
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(
+            root=str(workspace), extra_path_grants=(SandboxPathGrant(path=str(external)),)
+        ),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    (workspace / "original.txt").write_bytes(b"snapshot content")
+    await session.stop()
+    (workspace / "original.txt").write_bytes(b"changed after snapshot")
+    stale_link = workspace / "stale-link"
+    stale_link.symlink_to(target, target_is_directory=target_kind == "directory")
+    resumed = await client.resume(session.state)
+    try:
+        await resumed.start()
+        assert (workspace / "original.txt").read_bytes() == b"snapshot content"
+        assert sentinel.read_bytes() == b"external data"
+        if target_kind == "file":
+            assert target.read_bytes() == b"external file"
+        elif target_kind == "missing":
+            assert not target.exists()
+        assert not stale_link.is_symlink()
+        assert not stale_link.exists()
+    finally:
+        await resumed.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_kind", ["hardlink", "external_symlink", "invalid_tar"])
+async def test_unix_local_resume_rejects_invalid_snapshot_before_clearing_workspace(
+    tmp_path: Path, invalid_kind: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    (workspace / "keep.txt").write_bytes(b"live workspace")
+    archive = io.BytesIO()
+    if invalid_kind == "invalid_tar":
+        archive.write(b"not a tar archive")
+    else:
+        with tarfile.open(fileobj=archive, mode="w") as tar:
+            member = tarfile.TarInfo("link")
+            member.type = tarfile.LNKTYPE if invalid_kind == "hardlink" else tarfile.SYMTYPE
+            member.linkname = "keep.txt" if invalid_kind == "hardlink" else "../outside"
+            tar.addfile(member)
+    archive.seek(0)
+    await session.state.snapshot.persist(archive)
+    archive.close()
+
+    resumed = await client.resume(session.state)
+    try:
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await resumed.start()
+        assert (workspace / "keep.txt").read_bytes() == b"live workspace"
+        assert sorted(path.name for path in workspace.iterdir()) == ["keep.txt"]
+        assert not await resumed.running()
+    finally:
+        await resumed.shutdown()
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unix_local_resume_cancellation_waits_for_archive_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(
+        manifest=Manifest(root=str(workspace)),
+        snapshot=LocalSnapshotSpec(base_path=tmp_path / "snapshots"),
+    )
+    await session.start()
+    (workspace / "keep.txt").write_bytes(b"live workspace")
+    await session.stop()
+    archive = await session.state.snapshot.restore()
+    started = threading.Event()
+    release = threading.Event()
+    events: list[str] = []
+    validate = unix_local_module.validate_tarfile
+
+    async def restore(self: LocalSnapshot, **kwargs: object) -> io.IOBase:
+        return archive
+
+    def slow_validate(tar: tarfile.TarFile, **kwargs: object) -> None:
+        started.set()
+        assert release.wait(timeout=5)
+        validate(tar, allow_external_symlink_targets=False)
+        events.append("validated")
+
+    monkeypatch.setattr(LocalSnapshot, "restore", restore)
+    monkeypatch.setattr(unix_local_module, "validate_tarfile", slow_validate)
+    resumed = await client.resume(session.state)
+    task = asyncio.create_task(resumed.start())
+    try:
+        while not started.is_set():
+            if task.done():
+                await task
+                pytest.fail("resume did not validate the archive")
+            await asyncio.sleep(0.005)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not archive.closed
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert events == ["validated"]
+        assert archive.closed
+        assert (workspace / "keep.txt").read_bytes() == b"live workspace"
+    finally:
+        release.set()
+        await resumed.shutdown()
+        await session.shutdown()
 
 
 @pytest.mark.asyncio
@@ -567,6 +767,205 @@ class TestUnixLocalUserScopedFilesystem:
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
 
 
+class TestUnixLocalPersistWorkspaceRestorable:
+    """Persist eligible local links and omit special files without relaxing hydration."""
+
+    @staticmethod
+    def _workspace(tmp_path: Path) -> Path:
+        workspace = tmp_path / "workspace"
+        (workspace / "sub").mkdir(parents=True)
+        (workspace / "a.txt").write_text("shared", encoding="utf-8")
+        os.mkfifo(workspace / "dev.fifo")
+        (workspace / "abs_inside").symlink_to(workspace / "a.txt")
+        (workspace / "sub" / "abs_up").symlink_to(workspace / "a.txt")
+        (workspace / "rel").symlink_to("a.txt")
+        (workspace / "double_slash").symlink_to("/" + str(workspace / "a.txt"))
+        (workspace / "double_sep").symlink_to(str(workspace) + "//a.txt")
+        (workspace / "outside").symlink_to(tmp_path / "elsewhere.txt")
+        return workspace
+
+    @pytest.mark.asyncio
+    async def test_persist_emits_restorable_members(self, tmp_path: Path) -> None:
+        workspace = self._workspace(tmp_path)
+        session = _RecordingUnixLocalSession(workspace)
+
+        blob = await session.persist_workspace()
+
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
+            members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
+            assert "dev.fifo" not in members
+            assert members["abs_inside"].linkname == "a.txt"
+            assert members["sub/abs_up"].linkname == "../a.txt"
+            assert members["rel"].linkname == "a.txt"
+            assert members["double_slash"].linkname == "a.txt"
+            assert members["double_sep"].linkname == "a.txt"
+            assert members["outside"].linkname == str(tmp_path / "elsewhere.txt")
+
+    @pytest.mark.asyncio
+    async def test_rebased_symlink_keeps_parent_steps_after_symlink_components(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`<root>/current/../config` with `current -> releases/v1` names `releases/config`;
+        collapsing the `..` lexically would silently retarget the restored link."""
+        workspace = tmp_path / "workspace"
+        (workspace / "releases" / "v1").mkdir(parents=True)
+        (workspace / "releases" / "config").write_text("right", encoding="utf-8")
+        (workspace / "config").write_text("wrong", encoding="utf-8")
+        (workspace / "current").symlink_to("releases/v1")
+        (workspace / "abs_config").symlink_to(workspace / "current" / ".." / "config")
+        (workspace / "releases" / "v1" / "abs_up").symlink_to(
+            workspace / "current" / ".." / "config"
+        )
+        assert (workspace / "abs_config").read_text(encoding="utf-8") == "right"
+
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+        restored_root = tmp_path / "restored"
+        await _RecordingUnixLocalSession(restored_root).hydrate_workspace(blob)
+
+        assert os.readlink(restored_root / "abs_config") == "current/../config"
+        assert (
+            os.readlink(restored_root / "releases" / "v1" / "abs_up") == "../../current/../config"
+        )
+        assert (restored_root / "abs_config").read_text(encoding="utf-8") == "right"
+        assert (restored_root / "releases" / "v1" / "abs_up").read_text(encoding="utf-8") == "right"
+
+    @pytest.mark.asyncio
+    async def test_rebased_symlink_that_escapes_through_a_link_stays_absolute(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """`a/link -> ..` resolves to the workspace root, so `<root>/a/link/../tmp` names
+        `/tmp`; the relative `a/link/../tmp` would pass hydrate's lexical check and escape,
+        so the target is left absolute for hydrate to refuse as before. A hop through an
+        absolute link (`outside`) or a loop proves nothing either, even when the live tree
+        happens to lead back inside."""
+        workspace = tmp_path / "workspace"
+        (workspace / "a").mkdir(parents=True)
+        (workspace / "a" / "link").symlink_to("..")
+        (workspace / "victim").symlink_to(workspace / "a" / "link" / ".." / "tmp")
+        (workspace / "outside").symlink_to(tmp_path)
+        (workspace / "via_outside").symlink_to(workspace / "outside" / "workspace" / "a")
+        (workspace / "loop").symlink_to("loop")
+        (workspace / "via_loop").symlink_to(workspace / "loop" / ".." / ".." / "etc")
+        (workspace / "b").symlink_to("a/link")
+        (workspace / "a" / "fine").symlink_to(workspace / "b" / "a")
+
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
+            members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
+            assert members["victim"].linkname == str(workspace / "a" / "link" / ".." / "tmp")
+            assert members["via_outside"].linkname == str(workspace / "outside" / "workspace" / "a")
+            assert members["via_loop"].linkname == str(workspace / "loop" / ".." / ".." / "etc")
+            # `..` after `b -> a/link -> ..` lands on the root, so `b/a` is provably inside.
+            assert members["a/fine"].linkname == "../b/a"
+
+    @pytest.mark.asyncio
+    async def test_rebased_symlink_through_components_the_snapshot_does_not_create_stays_absolute(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Hydration extracts into an existing root, so a component the snapshot does not
+        create may already be a symlink there. Only components the snapshot establishes
+        (present, not skipped, directories on the way) count towards the proof."""
+        workspace = tmp_path / "workspace"
+        (workspace / "skipped").mkdir(parents=True)
+        (workspace / "secret").write_text("s", encoding="utf-8")
+        (workspace / "notes.txt").write_text("n", encoding="utf-8")
+        (workspace / "via_missing").symlink_to(workspace / "alias" / ".." / "secret")
+        (workspace / "dangling").symlink_to(workspace / "missing.txt")
+        (workspace / "via_file").symlink_to(workspace / "notes.txt" / ".." / "secret")
+        (workspace / "via_skipped").symlink_to(workspace / "skipped" / ".." / "secret")
+        (workspace / "fine").symlink_to(workspace / "secret")
+
+        session = _RecordingUnixLocalSession(workspace)
+        session._runtime_persist_workspace_skip_relpaths = {Path("skipped")}
+        blob = await session.persist_workspace()
+
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as tar:
+            members = {member.name.removeprefix("./"): member for member in tar.getmembers()}
+            assert "skipped" not in members
+            assert members["via_missing"].linkname == str(workspace / "alias" / ".." / "secret")
+            assert members["dangling"].linkname == str(workspace / "missing.txt")
+            assert members["via_file"].linkname == str(workspace / "notes.txt" / ".." / "secret")
+            assert members["via_skipped"].linkname == str(workspace / "skipped" / ".." / "secret")
+            assert members["fine"].linkname == "secret"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("mutation_order", ["before_absolute_link", "after_absolute_link"])
+    async def test_rebase_uses_archived_topology_when_workspace_changes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation_order: str
+    ) -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "m-trigger").write_text("capture boundary", encoding="utf-8")
+        if mutation_order == "before_absolute_link":
+            (workspace / "dir").mkdir()
+            (workspace / "outside").write_text("inside", encoding="utf-8")
+            changed_path = workspace / "a-hop"
+            changed_path.symlink_to(".")
+            absolute_link = workspace / "z-link"
+            original_target = str(workspace / "a-hop" / ".." / "outside")
+            replacement_target = "dir"
+        else:
+            (workspace / "q").mkdir()
+            (workspace / "q" / "hop").symlink_to("..")
+            changed_path = workspace / "z-target"
+            changed_path.write_text("inside", encoding="utf-8")
+            absolute_link = workspace / "a-link"
+            original_target = str(changed_path)
+            replacement_target = "q/hop/../outside"
+        absolute_link.symlink_to(original_target)
+
+        original_addfile = tarfile.TarFile.addfile
+        mutated = False
+
+        def addfile_with_workspace_mutation(
+            archive: tarfile.TarFile,
+            member: tarfile.TarInfo,
+            fileobj: io.BufferedReader | None = None,
+        ) -> None:
+            nonlocal mutated
+            original_addfile(archive, member, fileobj)
+            # Change the live tree at a deterministic boundary in archive capture.
+            if member.name == "./m-trigger" and not mutated:
+                changed_path.unlink()
+                changed_path.symlink_to(replacement_target)
+                mutated = True
+
+        monkeypatch.setattr(tarfile.TarFile, "addfile", addfile_with_workspace_mutation)
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+        assert mutated
+        with tarfile.open(fileobj=cast(io.BytesIO, blob), mode="r:*") as archive:
+            assert archive.getmember(f"./{absolute_link.name}").linkname == original_target
+
+        restored_root = tmp_path / "restored"
+        restored_root.mkdir()
+        sentinel = restored_root / "keep.txt"
+        sentinel.write_text("unchanged", encoding="utf-8")
+        blob.seek(0)
+        with pytest.raises(WorkspaceArchiveWriteError):
+            await _RecordingUnixLocalSession(restored_root).hydrate_workspace(blob)
+        assert sentinel.read_text(encoding="utf-8") == "unchanged"
+        assert list(restored_root.iterdir()) == [sentinel]
+
+    @pytest.mark.asyncio
+    async def test_persisted_workspace_hydrates_into_a_new_root(self, tmp_path: Path) -> None:
+        workspace = self._workspace(tmp_path)
+        (workspace / "outside").unlink()  # Hydrate rejects external targets by design.
+        blob = await _RecordingUnixLocalSession(workspace).persist_workspace()
+
+        restored_root = tmp_path / "restored"
+        restored = _RecordingUnixLocalSession(restored_root)
+        await restored.hydrate_workspace(blob)
+
+        assert not (restored_root / "dev.fifo").exists()
+        assert os.readlink(restored_root / "abs_inside") == "a.txt"
+        assert (restored_root / "abs_inside").read_text(encoding="utf-8") == "shared"
+        assert (restored_root / "sub" / "abs_up").read_text(encoding="utf-8") == "shared"
+
+
 @pytest.mark.asyncio
 async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
     tmp_path: Path,
@@ -610,3 +1009,349 @@ async def test_hydrate_workspace_cancellation_waits_for_the_extracting_worker(
     # the workspace root are only released once nothing is still writing to them.
     assert events == ["extract-start", "extract-end"]
     assert not buf.closed
+
+
+class TestUnixLocalApplyPatchRename:
+    """apply_patch renames against a real filesystem, not a model of one.
+
+    Every other test of this behaviour drives a session double. A double can only be wrong in
+    the same direction as the code it was written beside. The default macOS volume folds case,
+    so on the macOS runner these exercise the case that loses the file.
+    """
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
+    async def test_case_only_move_to_keeps_the_file(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(workspace))
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            await session.write(Path("notes.txt"), io.BytesIO(b"alpha\nbeta\n"))
+
+            source = workspace / "notes.txt"
+            destination = workspace / "Notes.txt"
+            if not await session.same_file(source, destination):
+                pytest.skip("this volume does not fold case, so it cannot exercise the bug")
+
+            await session.apply_patch(
+                ApplyPatchOperation(
+                    type="update_file",
+                    path="notes.txt",
+                    diff="@@\n alpha\n-beta\n+gamma\n",
+                    move_to="Notes.txt",
+                )
+            )
+
+            names = sorted(entry.name for entry in workspace.iterdir())
+            assert names == ["Notes.txt"]
+            assert destination.read_bytes() == b"alpha\ngamma\n"
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
+    async def test_move_to_an_existing_directory_keeps_the_source(self, tmp_path: Path) -> None:
+        """A directory destination is refused, and the source is where it was.
+
+        The destination write must fail before the editor removes the source.
+        """
+        workspace = tmp_path / "workspace"
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(workspace))
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            await session.write(Path("notes.txt"), io.BytesIO(b"alpha\nbeta\n"))
+            await session.mkdir(Path("docs"))
+
+            with pytest.raises(WorkspaceArchiveWriteError):
+                await session.apply_patch(
+                    ApplyPatchOperation(
+                        type="update_file",
+                        path="notes.txt",
+                        diff="@@\n alpha\n-beta\n+gamma\n",
+                        move_to="docs",
+                    )
+                )
+
+            assert (workspace / "notes.txt").read_bytes() == b"alpha\nbeta\n"
+            assert sorted(entry.name for entry in (workspace / "docs").iterdir()) == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.requires_native_macos_sandbox
+    async def test_same_file_answers_for_real_paths(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "workspace"
+        client = UnixLocalSandboxClient()
+        manifest = Manifest(root=str(workspace))
+
+        async with await client.create(manifest=manifest, snapshot=None, options=None) as session:
+            await session.write(Path("one.txt"), io.BytesIO(b"one\n"))
+            await session.write(Path("two.txt"), io.BytesIO(b"two\n"))
+
+            assert await session.same_file(workspace / "one.txt", workspace / "one.txt") is True
+            assert await session.same_file(workspace / "one.txt", workspace / "two.txt") is False
+
+
+def _exclusive_write_session(root: Path) -> UnixLocalSandboxSession:
+    return UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(root)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_dangling_symlink(
+    tmp_path: Path,
+) -> None:
+    """Drive the real caller path.
+
+    WorkspaceEditor normalizes the destination before dispatching, and this backend
+    resolves leaf symlinks, so a create aimed at a dangling link used to land on the
+    link's absent target and report success.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "link.txt").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="link.txt", diff="+clobbered\n")
+        )
+
+    assert not (tmp_path / "missing.txt").exists()
+    assert (tmp_path / "link.txt").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_directory(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "adir").mkdir()
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="adir", diff="+clobbered\n")
+        )
+
+    assert list((tmp_path / "adir").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_keeps_existing_content(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert (tmp_path / "notes.txt").read_bytes() == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_writes_a_new_nested_file(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="nested/dir/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "nested" / "dir" / "new.txt").read_text() == "hello"
+    assert not any(p.name.startswith(".") for p in (tmp_path / "nested" / "dir").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_reports_a_file_parent_as_a_write_error(
+    tmp_path: Path,
+) -> None:
+    """A parent that is a regular file is not a collision on the requested name.
+
+    Reporting it as one would tell the model to use update_file for a target that does
+    not exist and cannot be updated.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "parent").write_bytes(b"i am a file\n")
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="parent/child.txt", diff="+hi\n")
+        )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_accepts_a_destination_at_the_component_limit(
+    tmp_path: Path,
+) -> None:
+    """A filename accepted by ordinary writes must still support Add File."""
+    session = _exclusive_write_session(tmp_path)
+    long_name = "a" * 250 + ".txt"
+    # Confirm the platform really does accept this name, so the test fails for the
+    # right reason rather than because the limit is lower here.
+    probe = tmp_path / long_name
+    probe.write_text("probe")
+    probe.unlink()
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path=long_name, diff="+hello\n")
+    )
+
+    assert (tmp_path / long_name).read_text() == "hello"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory write permissions")
+@pytest.mark.asyncio
+async def test_apply_patch_create_reports_collision_inside_a_read_only_parent(
+    tmp_path: Path,
+) -> None:
+    """A visible collision reports the supported update alternative."""
+    session = _exclusive_write_session(tmp_path)
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    target = parent / "notes.txt"
+    target.write_bytes(b"important\n")
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(ApplyPatchDiffError):
+            await session.apply_patch(
+                ApplyPatchOperation(
+                    type="create_file", path="locked/notes.txt", diff="+clobbered\n"
+                )
+            )
+        assert target.read_bytes() == b"important\n"
+    finally:
+        parent.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_supports_a_symlinked_parent(tmp_path: Path) -> None:
+    """A supported internal symlink parent must still work.
+
+    The ordinary write path resolves these safe aliases, so the exclusive create has to
+    resolve the parent too and keep only the leaf name unresolved. Passing the whole path
+    through unresolved made the file ops open the parent with O_NOFOLLOW and fail.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "real").mkdir()
+    (tmp_path / "internal").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="internal/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "real" / "new.txt").read_text() == "hello"
+
+    # The leaf is still unresolved, so a dangling link at the target name is rejected.
+    (tmp_path / "real" / "dangling.txt").symlink_to(tmp_path / "real" / "missing.txt")
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="internal/dangling.txt", diff="+x\n")
+        )
+    assert not (tmp_path / "real" / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_allows_a_missing_parent(tmp_path: Path) -> None:
+    """Provider defaults retain the released mkdir/write behavior for nested creates."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="newdir/file.txt", diff="+hello\n")
+    )
+
+    assert (workspace / "newdir" / "file.txt").read_text() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_preserves_provider_write_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(tmp_path)), snapshot=NoopSnapshot(id="noop")
+        )
+    )
+    target = tmp_path / "existing.txt"
+    target.write_bytes(b"previous")
+
+    async def no_new_probe(*args: object, **kwargs: object) -> ExecResult:
+        raise AssertionError("Creation must not add an exec requirement to providers")
+
+    monkeypatch.setattr(session, "_exec_internal", no_new_probe)
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="existing.txt", diff="+replacement\n")
+    )
+    assert target.read_bytes() == b"replacement"
+
+
+@pytest.mark.asyncio
+async def test_client_delete_keeps_workspace_removal_off_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The event loop must keep running while `delete()` removes the workspace root.
+
+    The removal walks the whole workspace tree, so running it inline starves every other
+    task on the loop for its full duration. `rm(recursive=True)`, `persist_workspace`, and
+    `hydrate_workspace` already hand that work to `run_blocking_workspace_io`.
+
+    The handshake below measures the removal itself rather than the whole `delete()` call,
+    so an `await` elsewhere in the method, such as the ephemeral unmount loop, cannot
+    satisfy it.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "payload.txt").write_text("payload", encoding="utf-8")
+
+    client = UnixLocalSandboxClient()
+    session = await client.resume(
+        UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+            workspace_root_owned=True,
+        )
+    )
+
+    real_rmtree = shutil.rmtree
+    removal_started = threading.Event()
+    loop_advanced = threading.Event()
+    loop_advanced_during_removal: list[bool] = []
+
+    def _slow_rmtree(path: object, *args: object, **kwargs: object) -> None:
+        removal_started.set()
+        # The observer can only answer while the removal is in flight if the loop is
+        # still free. An inline removal holds the loop here until this call returns.
+        loop_advanced_during_removal.append(loop_advanced.wait(timeout=5.0))
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(unix_local_module.shutil, "rmtree", _slow_rmtree)
+
+    async def _observe_loop() -> None:
+        while not removal_started.is_set():
+            await asyncio.sleep(0)
+        loop_advanced.set()
+
+    observer = asyncio.create_task(_observe_loop())
+    try:
+        returned = await client.delete(session)
+    finally:
+        observer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await observer
+
+    assert removal_started.is_set()
+    assert loop_advanced_during_removal == [True]
+    # The removal still targets the manifest root, and `delete()` still hands the same
+    # session back to the caller.
+    assert not workspace.exists()
+    assert returned is session
