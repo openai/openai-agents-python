@@ -2,10 +2,79 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 import examples.run_examples as run_examples
+
+
+@pytest.mark.parametrize("auto_source", ["argument", "environment", "manual"])
+def test_local_temporal_runner_selection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    auto_source: str,
+) -> None:
+    monkeypatch.delenv("EXAMPLES_AUTO_SKIP", raising=False)
+    monkeypatch.setenv(
+        "EXAMPLES_INTERACTIVE_MODE", "auto" if auto_source == "environment" else "manual"
+    )
+    monkeypatch.setattr(run_examples, "build_command_path", lambda: "")
+    spawn = Mock(side_effect=AssertionError("The runner must not start this example"))
+    monkeypatch.setattr(run_examples.subprocess, "Popen", spawn)
+    args = [
+        "run_examples.py",
+        "--filter",
+        "local_hello_workflow",
+        "--logs-dir",
+        str(tmp_path / "logs"),
+        "--main-log",
+        str(tmp_path / "main.log"),
+        "--artifacts-dir",
+        str(tmp_path / "artifacts"),
+    ]
+    if auto_source == "argument":
+        args.append("--auto-mode")
+    elif auto_source == "manual":
+        args.append("--dry-run")
+    monkeypatch.setattr(sys, "argv", args)
+
+    assert run_examples.main() == 0
+
+    output = capsys.readouterr().out
+    relpath = "examples/sandbox/extensions/temporal/local_hello_workflow.py"
+    assert f"- {'RUN ' if auto_source == 'manual' else 'SKIP'} {relpath}" in output
+    if auto_source != "manual":
+        assert "(skipped: auto-skip)" in output
+    spawn.assert_not_called()
+
+
+@pytest.mark.parametrize("mode", ["auto", "AUTO", "manual"])
+@pytest.mark.asyncio
+async def test_local_temporal_entrypoint_refuses_auto_mode(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    pytest.importorskip("temporalio")
+    from examples.sandbox.extensions.temporal import local_hello_workflow
+
+    monkeypatch.setenv("EXAMPLES_INTERACTIVE_MODE", mode)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-test-key")
+    # A custom skip list can select the example, but cannot authorize auto-mode execution.
+    monkeypatch.setenv("EXAMPLES_AUTO_SKIP", "examples/basic/hello_world.py")
+    start_server = AsyncMock(side_effect=RuntimeError("test server startup boundary"))
+    monkeypatch.setattr(
+        local_hello_workflow.WorkflowEnvironment, "start_time_skipping", start_server
+    )
+
+    if mode.lower() == "auto":
+        with pytest.raises(SystemExit, match="cannot run in auto mode"):
+            await local_hello_workflow.main()
+        start_server.assert_not_awaited()
+    else:
+        with pytest.raises(RuntimeError, match="test server startup boundary"):
+            await local_hello_workflow.main()
+        start_server.assert_awaited_once()
 
 
 def test_default_auto_skip_excludes_prerequisite_bound_examples() -> None:

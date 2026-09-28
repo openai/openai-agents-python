@@ -80,6 +80,8 @@ DEFAULT_AUTO_SKIP = {
     "examples/sandbox/extensions/blaxel_runner.py",
     "examples/sandbox/extensions/cloudflare_runner.py",
     "examples/sandbox/extensions/daytona/usaspending_text2sql/setup_db.py",
+    # This local workflow gives model-selected shell commands access to the host.
+    "examples/sandbox/extensions/temporal/local_hello_workflow.py",
     "examples/sandbox/extensions/temporal/temporal_sandbox_agent.py",
     # Temporarily disabled due to credential issues.
     "examples/sandbox/extensions/vercel_runner.py",

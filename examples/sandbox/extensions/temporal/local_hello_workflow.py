@@ -8,6 +8,10 @@ It does not require the Temporal CLI, a long-running Temporal server, or cloud s
 credentials. It does require ``OPENAI_API_KEY`` because the model call runs through the Temporal
 OpenAI Agents plugin as an activity.
 
+The model selects shell commands that run on the host with the process environment.
+Use this example only for trusted local execution or within external isolation. It refuses
+automated example mode because the local Unix backend does not provide OS confinement on Linux.
+
 Usage:
     uv run --extra temporal python -m examples.sandbox.extensions.temporal.local_hello_workflow
 """
@@ -36,6 +40,7 @@ from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.capabilities import Shell
 from agents.sandbox.entries import File
 from agents.sandbox.sandboxes import UnixLocalSandboxClient, UnixLocalSandboxClientOptions
+from examples.auto_mode import is_auto_mode
 
 TASK_QUEUE = "local-temporal-sandbox-agent"
 WORKFLOW_ID = "local-temporal-sandbox-agent-workflow"
@@ -113,6 +118,11 @@ def _trace_mode_from_env() -> str:
 
 
 async def main() -> None:
+    if is_auto_mode():
+        raise SystemExit(
+            "This example cannot run in auto mode: model-selected shell commands run on the host. "
+            "Run it explicitly only for trusted local execution or within external isolation."
+        )
     _require_env("OPENAI_API_KEY")
     model = os.getenv("EXAMPLES_TEMPORAL_MODEL", DEFAULT_MODEL)
     trace_mode = _trace_mode_from_env()
