@@ -40,6 +40,50 @@ from ._docker_removal_helpers import (
 service = removal_helpers.service
 
 
+@pytest.mark.parametrize("bound_path", ["/workspace", "/external", "/grant-alias"])
+def test_binding_rejects_canonical_backslashes(service: Any, bound_path: str) -> None:
+    manager, container, worker = service
+    configured = manifest()
+    worker.aliases[bound_path] = r"/private/\root"
+    with pytest.raises(ValueError, match="canonical paths containing backslashes"):
+        manager.bind_new(container, configured)
+    assert manager._bindings == {}
+    assert worker.removed == []
+    assert container.events == ["pause", "close", "unpause"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_directory", [True, False])
+async def test_removal_rejects_canonical_backslashes(
+    service: Any, monkeypatch: pytest.MonkeyPatch, is_directory: bool
+) -> None:
+    manager, container, worker = service
+    configured = Manifest(
+        root="/workspace",
+        extra_path_grants=(SandboxPathGrant(path="/protected", read_only=True),),
+    )
+    manager.bind_new(container, configured)
+    worker.aliases["/workspace/link/data"] = r"/protected/\..\..\workspace/data"
+    original_request = worker.request
+
+    def request(**data: Any) -> dict[str, Any]:
+        result = original_request(**data)
+        if data["operation"] == "inspect":
+            result["is_directory"] = is_directory
+        return result
+
+    monkeypatch.setattr(worker, "request", request)
+    current = session(manager, container, configured)
+    with pytest.raises(WorkspaceArchiveWriteError) as caught:
+        await current.rm("link/data", recursive=True)
+    assert caught.value.context["reason"] == "docker_removal_canonical_path"
+    assert [call["operation"] for call in worker.calls] == ["bind", "inspect"]
+    assert worker.removed == []
+    assert not container.attrs["State"]["Paused"]
+    await current.rm("build", recursive=True)
+    assert worker.removed == ["/workspace/build"]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("bound", "change_grants"), [(True, True), (True, False), (False, True)])
 async def test_live_manifest_update_preserves_removal_authority(

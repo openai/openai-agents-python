@@ -14,6 +14,7 @@ then creates a missing workspace and its parents using the trusted image's defau
 user before binding, as normal session startup does.
 Path-only grant roots must exist at binding time;
 the client does not create unrelated grant directories.
+Canonical workspace/grant roots and removal targets must not contain backslashes.
 Read-only host bind mounts are supported outside the private workspace. Writable
 shared mounts, additional capabilities, user namespaces, and missing grant roots are excluded.
 The application must exclusively own container lifecycle and Docker API access;
@@ -322,6 +323,11 @@ class DockerRemovalService:
                     paths=[manifest.root, *(grant.path for grant in manifest.extra_path_grants)],
                 )
                 paths = result["paths"]
+                # Linux canonical names must not be reinterpreted as caller path syntax.
+                if any("\\" in path for path in paths):
+                    raise ValueError(
+                        "Docker removal does not support canonical paths containing backslashes"
+                    )
                 root = coerce_posix_path(paths[0])
                 for grant, path in zip(manifest.extra_path_grants, paths[1:], strict=True):
                     mounted = coerce_posix_path(path)
@@ -398,6 +404,12 @@ class DockerRemovalService:
                         )
                         target = inspection["path"]
                         if target:
+                            # Policy coercion would treat literal Linux backslashes as separators.
+                            if "\\" in target:
+                                raise WorkspaceArchiveWriteError(
+                                    path=posix_path_for_error(original),
+                                    context={"reason": "docker_removal_canonical_path"},
+                                )
                             selected = coerce_posix_path(target)
                             root = binding.policy.normalize_sandbox_path(".")
                             live_roots = (
