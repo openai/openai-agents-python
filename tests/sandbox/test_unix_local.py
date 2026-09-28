@@ -17,7 +17,11 @@ import pytest
 
 from agents.editor import ApplyPatchOperation
 from agents.sandbox import LocalSnapshotSpec, SandboxPathGrant
-from agents.sandbox.errors import PtySessionNotFoundError, WorkspaceArchiveWriteError
+from agents.sandbox.errors import (
+    ApplyPatchDiffError,
+    PtySessionNotFoundError,
+    WorkspaceArchiveWriteError,
+)
 from agents.sandbox.manifest import Environment, Manifest
 from agents.sandbox.sandboxes import unix_local as unix_local_module
 from agents.sandbox.sandboxes.unix_local import (
@@ -28,6 +32,7 @@ from agents.sandbox.sandboxes.unix_local import (
 )
 from agents.sandbox.snapshot import LocalSnapshot, NoopSnapshot
 from agents.sandbox.types import ExecResult, User
+from tests.sandbox._filesystem_test_session import FilesystemTestSandboxSession
 
 
 class _RecordingUnixLocalSession(UnixLocalSandboxSession):
@@ -842,6 +847,211 @@ class TestUnixLocalApplyPatchRename:
 
             assert await session.same_file(workspace / "one.txt", workspace / "one.txt") is True
             assert await session.same_file(workspace / "one.txt", workspace / "two.txt") is False
+
+
+def _exclusive_write_session(root: Path) -> UnixLocalSandboxSession:
+    return UnixLocalSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(root)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_dangling_symlink(
+    tmp_path: Path,
+) -> None:
+    """Drive the real caller path.
+
+    WorkspaceEditor normalizes the destination before dispatching, and this backend
+    resolves leaf symlinks, so a create aimed at a dangling link used to land on the
+    link's absent target and report success.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "link.txt").symlink_to(tmp_path / "missing.txt")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="link.txt", diff="+clobbered\n")
+        )
+
+    assert not (tmp_path / "missing.txt").exists()
+    assert (tmp_path / "link.txt").is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_rejects_a_directory(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "adir").mkdir()
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="adir", diff="+clobbered\n")
+        )
+
+    assert list((tmp_path / "adir").iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_keeps_existing_content(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "notes.txt").write_bytes(b"important\n")
+
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="notes.txt", diff="+clobbered\n")
+        )
+
+    assert (tmp_path / "notes.txt").read_bytes() == b"important\n"
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_writes_a_new_nested_file(
+    tmp_path: Path,
+) -> None:
+    session = _exclusive_write_session(tmp_path)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="nested/dir/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "nested" / "dir" / "new.txt").read_text() == "hello"
+    assert not any(p.name.startswith(".") for p in (tmp_path / "nested" / "dir").iterdir())
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_through_the_session_reports_a_file_parent_as_a_write_error(
+    tmp_path: Path,
+) -> None:
+    """A parent that is a regular file is not a collision on the requested name.
+
+    Reporting it as one would tell the model to use update_file for a target that does
+    not exist and cannot be updated.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "parent").write_bytes(b"i am a file\n")
+
+    with pytest.raises(WorkspaceArchiveWriteError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="parent/child.txt", diff="+hi\n")
+        )
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_accepts_a_destination_at_the_component_limit(
+    tmp_path: Path,
+) -> None:
+    """A filename accepted by ordinary writes must still support Add File."""
+    session = _exclusive_write_session(tmp_path)
+    long_name = "a" * 250 + ".txt"
+    # Confirm the platform really does accept this name, so the test fails for the
+    # right reason rather than because the limit is lower here.
+    probe = tmp_path / long_name
+    probe.write_text("probe")
+    probe.unlink()
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path=long_name, diff="+hello\n")
+    )
+
+    assert (tmp_path / long_name).read_text() == "hello"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses directory write permissions")
+@pytest.mark.asyncio
+async def test_apply_patch_create_reports_collision_inside_a_read_only_parent(
+    tmp_path: Path,
+) -> None:
+    """A visible collision reports the supported update alternative."""
+    session = _exclusive_write_session(tmp_path)
+    parent = tmp_path / "locked"
+    parent.mkdir()
+    target = parent / "notes.txt"
+    target.write_bytes(b"important\n")
+    parent.chmod(0o555)
+    try:
+        with pytest.raises(ApplyPatchDiffError):
+            await session.apply_patch(
+                ApplyPatchOperation(
+                    type="create_file", path="locked/notes.txt", diff="+clobbered\n"
+                )
+            )
+        assert target.read_bytes() == b"important\n"
+    finally:
+        parent.chmod(0o755)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_create_supports_a_symlinked_parent(tmp_path: Path) -> None:
+    """A supported internal symlink parent must still work.
+
+    The ordinary write path resolves these safe aliases, so the exclusive create has to
+    resolve the parent too and keep only the leaf name unresolved. Passing the whole path
+    through unresolved made the file ops open the parent with O_NOFOLLOW and fail.
+    """
+    session = _exclusive_write_session(tmp_path)
+    (tmp_path / "real").mkdir()
+    (tmp_path / "internal").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="internal/new.txt", diff="+hello\n")
+    )
+
+    assert (tmp_path / "real" / "new.txt").read_text() == "hello"
+
+    # The leaf is still unresolved, so a dangling link at the target name is rejected.
+    (tmp_path / "real" / "dangling.txt").symlink_to(tmp_path / "real" / "missing.txt")
+    with pytest.raises(ApplyPatchDiffError):
+        await session.apply_patch(
+            ApplyPatchOperation(type="create_file", path="internal/dangling.txt", diff="+x\n")
+        )
+    assert not (tmp_path / "real" / "missing.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_allows_a_missing_parent(tmp_path: Path) -> None:
+    """Provider defaults retain the released mkdir/write behavior for nested creates."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(workspace)),
+            snapshot=NoopSnapshot(id="noop"),
+        )
+    )
+
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="newdir/file.txt", diff="+hello\n")
+    )
+
+    assert (workspace / "newdir" / "file.txt").read_text() == "hello"
+
+
+@pytest.mark.asyncio
+async def test_base_default_create_preserves_provider_write_semantics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = FilesystemTestSandboxSession(
+        state=UnixLocalSandboxSessionState(
+            manifest=Manifest(root=str(tmp_path)), snapshot=NoopSnapshot(id="noop")
+        )
+    )
+    target = tmp_path / "existing.txt"
+    target.write_bytes(b"previous")
+
+    async def no_new_probe(*args: object, **kwargs: object) -> ExecResult:
+        raise AssertionError("Creation must not add an exec requirement to providers")
+
+    monkeypatch.setattr(session, "_exec_internal", no_new_probe)
+    await session.apply_patch(
+        ApplyPatchOperation(type="create_file", path="existing.txt", diff="+replacement\n")
+    )
+    assert target.read_bytes() == b"replacement"
 
 
 @pytest.mark.asyncio

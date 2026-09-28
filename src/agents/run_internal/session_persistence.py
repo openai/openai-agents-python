@@ -821,6 +821,12 @@ async def save_result_to_session(
             "store": store,
             "has_local_tool_outputs": has_local_tool_outputs,
         }
+        model_exchange = getattr(compaction_wrapper, "_session_compaction_model_exchange", None)
+        if model_exchange is not None:
+            resumed_write_state._pending_session_write["compaction_model_exchange"] = {
+                "item_digests": list(model_exchange[0]),
+                "reasoning_item_id_policy": model_exchange[1],
+            }
         # resume_pending_session_write() applies post-write compaction itself once the
         # checkpoint settles, whether that happens inline below or on a later, separate
         # resume -- so it is not repeated after this call returns.
@@ -912,8 +918,10 @@ async def resume_pending_session_write(
 
     run_state._session_write_in_progress = True
     try:
+        acknowledged = pending.get("append_acknowledged", False)
         before = pending["before"]
-        if before is None:
+        committed = False
+        if before is None and not acknowledged:
             # No append has started. Retain the batch even if this first read fails.
             tail = await _session_get_items(
                 session, limit=len(pending["items"]) + 1, wrapper=wrapper
@@ -921,7 +929,7 @@ async def resume_pending_session_write(
             pending["before"] = digests(tail)
             append = True
         else:
-            expected = before + digests(pending["items"])
+            expected = (before or []) + digests(pending["items"])
             observed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
@@ -934,32 +942,53 @@ async def resume_pending_session_write(
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
-            if committed == unchanged:
+            if (acknowledged and not committed) or (not acknowledged and committed == unchanged):
                 raise UserError(
-                    "Cannot reconcile the pending Session write: history changed or is ambiguous. "
-                    "Repair the original Session before resuming; do not rerun the completed tool."
+                    "Cannot reconcile the pending Session write: history changed or is "
+                    "ambiguous. Repair the original Session before resuming; do not rerun "
+                    "the completed tool."
                 )
-            append = unchanged
+            append = not acknowledged and unchanged
             # The original append can advance the wrapper generation even when it fails
             # atomically. Reconciled unchanged history is also safe to append against;
             # subsequent mutations still revoke ownership through the normal generation check.
-            if observed_generation is not None and wrapper is not None:
+            # An acknowledged append can regain compaction ownership only when its exact
+            # history remains, as after replacement rollback. Never re-append that batch.
+            if (
+                observed_generation is not None
+                and wrapper is not None
+                and (not acknowledged or committed)
+            ):
                 wrapper._session_compaction_generation = observed_generation  # type: ignore[attr-defined]
         if append:
-            # Backends may retain or transform their input; the durable checkpoint stays detached.
+            # Keep the checkpoint detached from backend input retention or transformation.
             await _session_add_items(session, copy.deepcopy(pending["items"]), wrapper=wrapper)
+        # Restore evidence from the successful exchange, never from all stored history.
+        # A changed history after replacement must not regain compaction ownership.
+        model_exchange = pending.get("compaction_model_exchange")
+        if wrapper is not None and model_exchange is not None and (not acknowledged or committed):
+            wrapper._session_compaction_model_exchange = (  # type: ignore[attr-defined]
+                tuple(model_exchange["item_digests"]),
+                model_exchange["reasoning_item_id_policy"],
+            )
+        pending["append_acknowledged"] = True
         run_state._current_turn_persisted_item_count = pending["persisted_count"]
-        # Keep the checkpoint until compaction also settles: if _apply_post_write_compaction
-        # raises below, a later retry must still be able to redo just the compaction step
-        # instead of silently losing it. The append itself is retry-safe (the reconciliation
-        # above detects an already-committed batch and skips re-appending it).
-        await _apply_post_write_compaction(
-            session,
-            response_id=pending.get("response_id"),
-            store=pending.get("store"),
-            has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
-            wrapper=wrapper,
-        )
+        # A confirmed atomic replacement settles this write even when the caller is
+        # cancelled before receiving its acknowledgement. All other failed replacements
+        # retain the checkpoint and must reconcile against the original appended history.
+        if wrapper is not None:
+            wrapper._session_compaction_completed = False  # type: ignore[attr-defined]
+        try:
+            await _apply_post_write_compaction(
+                session,
+                response_id=pending.get("response_id"),
+                store=pending.get("store"),
+                has_local_tool_outputs=pending.get("has_local_tool_outputs", False),
+                wrapper=wrapper,
+            )
+        finally:
+            if wrapper is not None and getattr(wrapper, "_session_compaction_completed", False):
+                run_state._pending_session_write = None
         run_state._pending_session_write = None
     finally:
         run_state._session_write_in_progress = False

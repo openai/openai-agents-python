@@ -29,6 +29,7 @@ from agents.voice import (
     VoicePipelineConfig,
     VoiceWorkflowBase,
 )
+from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider
 from agents.voice.models.openai_stt import OpenAISTTModel
 from agents.voice.models.openai_tts import OpenAITTSModel
 from tests.testing_processor import (
@@ -149,6 +150,56 @@ def _export_payload(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     exporter = BackendSpanExporter(api_key="synthetic-placeholder")
     exporter.export([*fetch_traces(), *fetch_ordered_spans()])
     return http_client.post.call_args.kwargs["json"]["data"] if http_client.post.called else []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("include_audio", [False, True])
+@pytest.mark.parametrize("legacy", [False, True])
+async def test_released_positional_privacy_controls_exported_voice_payloads(
+    streamed: bool,
+    include_audio: bool,
+    legacy: bool,
+    speech_client: tuple[Any, ...],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, transcribe, speech, websocket = speech_client
+    provider = OpenAIVoiceModelProvider()
+    config = (
+        VoicePipelineConfig(provider, False, False, include_audio)
+        if legacy
+        else VoicePipelineConfig(provider, False, None, False, include_audio)
+    )
+    result = await _pipeline(client, config).run(await _input(streamed))
+    events = [event async for event in result.stream()]
+    assert result.total_output_text == _TEXT
+    assert (
+        b"".join(
+            cast(np.ndarray[Any, Any], event.data).tobytes()
+            for event in events
+            if event.type == "voice_stream_event_audio"
+        )
+        == _PCM.tobytes()
+    )
+    assert speech.call_args.kwargs["input"] == _TEXT
+    if streamed:
+        assert websocket.sent[1]["audio"] == _ENCODED
+        assert websocket.closed
+    else:
+        assert transcribe.call_args.kwargs["file"][1].getvalue().endswith(_PCM.tobytes())
+
+    voice_spans = [
+        item["span_data"]
+        for item in _export_payload(monkeypatch)
+        if item["object"] == "trace.span"
+        and item["span_data"]["type"] in {"transcription", "speech"}
+    ]
+    assert {span["type"] for span in voice_spans} == {"transcription", "speech"}
+    for kind in ("transcription", "speech"):
+        payload = json.dumps([span for span in voice_spans if span["type"] == kind])
+        assert (_ENCODED in payload) is include_audio
+        assert _TRANSCRIPT not in payload
+        assert _TEXT not in payload
 
 
 @pytest.mark.asyncio

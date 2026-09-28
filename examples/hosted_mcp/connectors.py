@@ -51,7 +51,8 @@ async def main(verbose: bool, stream: bool):
 
     if verbose:
         for item in run_result.new_items:
-            print(item)
+            # Print metadata only: items retain the agent's connector configuration.
+            print(f"Generated item: {item.type}")
 
 
 if __name__ == "__main__":

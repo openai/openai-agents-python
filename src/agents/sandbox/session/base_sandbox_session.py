@@ -836,6 +836,7 @@ class BaseSandboxSession(abc.ABC):
         path: Path | str,
         *,
         for_write: bool = False,
+        recursive_remove: bool = False,
     ) -> Path:
         """Validate an SDK file path against the remote sandbox filesystem before IO.
 
@@ -848,6 +849,7 @@ class BaseSandboxSession(abc.ABC):
         root = path_policy.sandbox_root()
         workspace_path = path_policy.normalize_sandbox_path(path, for_write=for_write)
         original_path = coerce_posix_path(path)
+        access_mode = "2" if recursive_remove else "1" if for_write else "0"
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
         extra_grant_args = tuple(
             arg
@@ -858,7 +860,7 @@ class BaseSandboxSession(abc.ABC):
             str(helper_path),
             root.as_posix(),
             workspace_path.as_posix(),
-            "1" if for_write else "0",
+            access_mode,
             *extra_grant_args,
         )
         result = await self.exec(*command, shell=False)
@@ -873,7 +875,7 @@ class BaseSandboxSession(abc.ABC):
                     "resolve_workspace_path",
                     root.as_posix(),
                     workspace_path.as_posix(),
-                    "1" if for_write else "0",
+                    access_mode,
                     *extra_grant_args,
                 ),
                 context={
@@ -914,7 +916,7 @@ class BaseSandboxSession(abc.ABC):
                 "resolve_workspace_path",
                 root.as_posix(),
                 workspace_path.as_posix(),
-                "1" if for_write else "0",
+                access_mode,
                 *extra_grant_args,
             ),
         )
@@ -994,6 +996,23 @@ class BaseSandboxSession(abc.ABC):
         :param data: A file-like object positioned at the start of the payload.
         :param user: Optional sandbox user to perform the write as.
         """
+
+    async def _write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Backend hook for apply_patch creation.
+
+        The default retains the provider's existing mkdir/write semantics. UnixLocal
+        overrides this hook to claim the leaf exclusively; other backends need a native
+        primitive before they can offer the same guarantee.
+        """
+        target = self.normalize_path(path)
+        await self.mkdir(target.parent, parents=True, user=user)
+        await self.write(target, data, user=user)
 
     async def _check_read_with_exec(
         self, path: Path | str, *, user: str | User | None = None
@@ -1189,6 +1208,8 @@ class BaseSandboxSession(abc.ABC):
 
         cmd: list[str] = ["rm"]
         if recursive:
+            if any(grant.read_only for grant in self.state.manifest.extra_path_grants):
+                await self._validate_remote_path_access(path, for_write=True, recursive_remove=True)
             cmd.append("-rf")
         cmd.extend(["--", sandbox_path_str(path)])
 

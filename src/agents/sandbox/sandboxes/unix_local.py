@@ -110,6 +110,12 @@ _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
 
 logger = logging.getLogger(__name__)
 
+_INCOMPLETE_CREATE_MESSAGE = (
+    "File creation failed after claiming the destination. The file may contain incomplete "
+    "contents. Inspect the destination before using update_file or removing it to retry; "
+    "retrying Add File without inspection is unsafe."
+)
+
 
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
     return {"mount_path": str(mount_path)}
@@ -1161,6 +1167,73 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         resolved = lexical.parent.resolve(strict=False) / lexical.name
         return self._files.authorize(resolved, for_write=for_write)
 
+    async def _write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        payload = coerce_write_payload(path=path, data=data)
+        # Resolve the parent the way the ordinary write path does, so a supported internal
+        # symlink such as "internal -> real" still works, then keep the leaf name
+        # unresolved so the file ops open it with O_NOFOLLOW and a symlink at the target
+        # name is rejected rather than followed.
+        requested = Path(path)
+        target = self.normalize_path(requested.parent, for_write=True) / requested.name
+        if user is not None:
+            await self._write_new_stream_with_exec(target, payload.stream, user=user)
+            return
+
+        try:
+            self._files.write_new(target, payload.stream)
+        except _unix_local_file_ops._IncompleteCreateError as e:
+            raise WorkspaceArchiveWriteError(
+                path=target,
+                cause=e,
+                retryable=False,
+                message=_INCOMPLETE_CREATE_MESSAGE,
+            ) from e
+        except FileExistsError:
+            raise
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=target, cause=e) from e
+
+    async def _write_new_stream_with_exec(
+        self,
+        path: Path,
+        stream: io.IOBase,
+        *,
+        user: str | User,
+    ) -> None:
+        payload = stream.read()
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        elif not isinstance(payload, bytes):
+            payload = bytes(payload)
+        try:
+            result = await self._run_file_operation_as_user(
+                "write_new", path, user=user, payload=payload
+            )
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=path, cause=e) from e
+        if result.returncode == _unix_local_file_ops._EXISTING_TARGET_EXIT_CODE:
+            raise FileExistsError(str(path))
+        if result.returncode == _unix_local_file_ops._INCOMPLETE_CREATE_EXIT_CODE:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                retryable=False,
+                message=_INCOMPLETE_CREATE_MESSAGE,
+            )
+        if result.returncode:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                context={
+                    "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    "operation": "write_new",
+                },
+            )
+
     async def _write_stream_with_exec(
         self,
         path: Path,
@@ -1190,14 +1263,14 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def _run_file_operation_as_user(
         self,
-        operation: Literal["ls", "write", "rename", "same_file"],
+        operation: Literal["ls", "write", "write_new", "rename", "same_file"],
         path: Path,
         *more_paths: Path,
         user: str | User,
         payload: bytes = b"",
     ) -> subprocess.CompletedProcess[bytes]:
         # Authorization is synchronous and captured for this operation before dispatch.
-        for_write = operation in ("write", "rename")
+        for_write = operation in ("write", "write_new", "rename")
         paths = [self._files.authorize(each, for_write=for_write) for each in (path, *more_paths)]
         command = self._prepare_exec_command(
             "python3",

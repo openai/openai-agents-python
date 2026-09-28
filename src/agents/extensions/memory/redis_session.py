@@ -467,14 +467,14 @@ class RedisSession(SessionABC):
             return key_type.decode("utf-8")
         return str(key_type)
 
-    async def _write_items_attempt(
+    async def _mutate_items_attempt(
         self,
         pipe: Any,
         keys: tuple[str, str, str],
-        serialized_items: list[str],
+        serialized_items: list[str] | None,
         completion_owned: asyncio.Event,
     ) -> _PipelineAttemptOutcome:
-        """Run one watched write attempt and finish its pipeline before returning."""
+        """Run one watched append or clear attempt and finish its pipeline."""
         committed = False
         retryable_watch_conflict = False
         operation_error: BaseException | None = None
@@ -521,8 +521,14 @@ class RedisSession(SessionABC):
                     raise ResponseError("WRONGTYPE session metadata key must contain a hash")
                 if messages_key_type not in ("none", "list"):
                     raise ResponseError("WRONGTYPE session messages key must contain a list")
+                # Legacy key names can overlap across session IDs. Check every
+                # key we will delete or expire under WATCH, before side effects.
+                if serialized_items is None or self._ttl is not None:
+                    counter_key_type = self._key_type_name(await pipe.type(self._counter_key))
+                    if counter_key_type not in ("none", "string"):
+                        raise ResponseError("WRONGTYPE session counter key must contain a string")
 
-                if self._ttl is None:
+                if serialized_items is None or self._ttl is None:
                     now = str(int(time.time()))
                     expiration_time_ms = None
                 else:
@@ -539,14 +545,18 @@ class RedisSession(SessionABC):
                         raise ValueError("ttl is outside Redis's supported expiration range")
 
                 pipe.multi()
-                pipe.hset(self._session_key, "session_id", self.session_id)
-                pipe.hsetnx(self._session_key, "created_at", now)
-                batch_response_index = len(pipe.command_stack)
-                pipe.rpush(self._messages_key, *serialized_items)
-                pipe.hset(self._session_key, "updated_at", now)
-                if expiration_time_ms is not None:
-                    for key in keys:
-                        pipe.pexpireat(key, expiration_time_ms)
+                if serialized_items is None:
+                    batch_response_index = len(pipe.command_stack)
+                    pipe.delete(*keys)
+                else:
+                    pipe.hset(self._session_key, "session_id", self.session_id)
+                    pipe.hsetnx(self._session_key, "created_at", now)
+                    batch_response_index = len(pipe.command_stack)
+                    pipe.rpush(self._messages_key, *serialized_items)
+                    pipe.hset(self._session_key, "updated_at", now)
+                    if expiration_time_ms is not None:
+                        for key in keys:
+                            pipe.pexpireat(key, expiration_time_ms)
 
                 pipe.raise_first_error = raise_first_error_and_mark
                 exec_response_position = len(pipe.command_stack) + 1
@@ -584,17 +594,17 @@ class RedisSession(SessionABC):
             settled=settled,
         )
 
-    async def _write_items(
+    async def _mutate_items(
         self,
-        serialized_items: list[str],
+        serialized_items: list[str] | None,
     ) -> None:
-        """Validate key types and atomically write one batch with optimistic locking."""
+        """Atomically append a batch, or clear for None, after validating key types."""
         keys = (self._session_key, self._messages_key, self._counter_key)
         while True:
             pipe = self._redis.pipeline()
             completion_owned = asyncio.Event()
             attempt = asyncio.create_task(
-                self._write_items_attempt(pipe, keys, serialized_items, completion_owned)
+                self._mutate_items_attempt(pipe, keys, serialized_items, completion_owned)
             )
             outcome, cancellation = await _await_pipeline_attempt(attempt, completion_owned)
 
@@ -685,7 +695,7 @@ class RedisSession(SessionABC):
                 serialized = await self._serialize_item(item)
                 serialized_items.append(serialized)
 
-            await self._write_items(serialized_items)
+            await self._mutate_items(serialized_items)
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
@@ -718,18 +728,18 @@ class RedisSession(SessionABC):
                 continue
 
     async def clear_session(self) -> None:
-        """Clear all items for this session."""
+        """Clear this session, rejecting keys occupied by another Redis data type.
+
+        A conflicting session ID can share a legacy key with another session.
+        In that case, raises Redis ResponseError without deleting any keys.
+        """
         async with self._lock:
             self._check_not_closed()
             await _await_mutation(self._clear_session_locked())
 
     async def _clear_session_locked(self) -> None:
         """Delete all session keys while the caller retains the session lock."""
-        await self._redis.delete(
-            self._session_key,
-            self._messages_key,
-            self._counter_key,
-        )
+        await self._mutate_items(None)
 
     async def close(self) -> None:
         """Close the Redis connection.

@@ -26,6 +26,14 @@ _TRAVERSE_FLAGS = (
 )
 
 
+_EXISTING_TARGET_EXIT_CODE = 13
+_INCOMPLETE_CREATE_EXIT_CODE = 14
+
+
+class _IncompleteCreateError(OSError):
+    """The destination was claimed, but writing its contents did not complete."""
+
+
 class _FileOps:
     """Operate on canonical absolute paths already authorized by the owning session."""
 
@@ -117,6 +125,34 @@ class _FileOps:
             raise
         with out:
             shutil.copyfileobj(stream, out)
+
+    def write_new(self, path: Path, stream: io.IOBase) -> None:
+        """Create a file that must not already exist.
+
+        O_EXCL fails with EEXIST when the name is taken by anything, including a directory
+        or a dangling symlink, and it claims the name in the same syscall that creates the
+        file, so a concurrent creator either loses the race or keeps its own content.
+        """
+        with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
+            fd = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o666,
+                dir_fd=parent_fd,
+            )
+        try:
+            try:
+                out = os.fdopen(fd, "wb")
+            except BaseException:
+                os.close(fd)
+                raise
+            with out:
+                shutil.copyfileobj(stream, out)
+        except OSError as exc:
+            # Do not unlink the name: another workspace operation may have replaced it.
+            # Keep filesystem compatibility (no hard-link staging requirement) and let
+            # the caller inspect and recover the partial result explicitly.
+            raise _IncompleteCreateError("File creation did not complete") from exc
 
     def mkdir(self, path: Path, *, parents: bool) -> None:
         with self.parent(path, for_write=True, create_parents=parents) as (parent_fd, name):
@@ -256,6 +292,15 @@ def _main() -> None:
     if operation == "write":
         (path,) = paths
         files.write(path, cast(io.IOBase, sys.stdin.buffer))
+    elif operation == "write_new":
+        (path,) = paths
+        try:
+            files.write_new(path, cast(io.IOBase, sys.stdin.buffer))
+        except FileExistsError:
+            # A distinct status keeps "already exists" separable from a real write failure.
+            sys.exit(_EXISTING_TARGET_EXIT_CODE)
+        except _IncompleteCreateError:
+            sys.exit(_INCOMPLETE_CREATE_EXIT_CODE)
     elif operation == "ls":
         (path,) = paths
         print(json.dumps(files.listing(path), ensure_ascii=True))
