@@ -6,13 +6,17 @@ import time
 import pytest
 from openai.types.responses import ResponseCompletedEvent
 
-from agents import Agent, Runner
+from agents import Agent, ComputerProvider, ComputerTool, GuardrailFunctionOutput, Runner
+from agents.decorators import tool
 from agents.guardrail import input_guardrail
 from agents.models.multi_provider import MultiProvider
+from agents.result import RunResultStreaming
 from agents.stream_events import RawResponsesStreamEvent
 from agents.testing import ScriptedModel
 
+from .test_computer_tool_lifecycle import FakeComputer
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+from .testing_processor import fetch_events
 
 
 class SlowCompleteScriptedModel(ScriptedModel):
@@ -328,3 +332,131 @@ async def test_falsy_input_guardrail_exception_is_surfaced_after_stream() -> Non
     with pytest.raises(FalsyRuntimeError, match="falsy guardrail boom"):
         async for _ in result.stream_events():
             pass
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_pending_parallel_input_guardrail_finishes_cleanup() -> None:
+    guardrail_started = asyncio.Event()
+    tool_started = asyncio.Event()
+    disposed: list[FakeComputer] = []
+
+    @input_guardrail
+    async def slow_guardrail(context, agent, input):
+        guardrail_started.set()
+        await asyncio.Event().wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @tool
+    async def slow_tool() -> str:
+        await guardrail_started.wait()
+        tool_started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    computer_tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=lambda *, run_context: FakeComputer(),
+            dispose=lambda *, run_context, computer: disposed.append(computer),
+        )
+    )
+    agent = Agent(
+        name="A",
+        model=ScriptedModel([[get_function_tool_call("slow_tool", "{}", "call_1")]]),
+        tools=[slow_tool, computer_tool],
+        input_guardrails=[slow_guardrail],
+    )
+    result = Runner.run_streamed(agent, input="hi")
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=2)
+        result.cancel()
+        await asyncio.wait_for(consumer, timeout=2)
+        assert len(disposed) == 1
+        events = fetch_events()
+        assert events.count("trace_start") == events.count("trace_end") == 1
+        assert events.count("span_start") == events.count("span_end")
+    finally:
+        result.cancel()
+        assert result.run_loop_task is not None
+        await asyncio.gather(consumer, result.run_loop_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_target", ["guardrail", "run_loop"])
+async def test_consumer_cancellation_at_terminal_wait_propagates(
+    monkeypatch: pytest.MonkeyPatch, wait_target: str
+) -> None:
+    wait_started = asyncio.Event()
+    guardrail_started = asyncio.Event()
+    disposal_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    @input_guardrail
+    async def slow_guardrail(context, agent, input):
+        guardrail_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            child_cancelled.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def dispose(**kwargs) -> None:
+        disposal_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            child_cancelled.set()
+
+    computer_tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=lambda *, run_context: FakeComputer(), dispose=dispose
+        )
+    )
+    result = Runner.run_streamed(
+        Agent(
+            name="A",
+            model=ScriptedModel([[get_text_message("done")]]),
+            input_guardrails=[slow_guardrail] if wait_target == "guardrail" else [],
+            tools=[computer_tool] if wait_target == "run_loop" else [],
+        ),
+        input="hi",
+    )
+    original_wait = RunResultStreaming._await_task_safely
+
+    async def observe_wait(self, task) -> None:
+        target = self._input_guardrails_task if wait_target == "guardrail" else self.run_loop_task
+        if self is result and task is target and task is not None and not task.done():
+            wait_started.set()
+        await original_wait(self, task)
+
+    # Observe entry to the terminal wait without changing its behavior. Public events do not
+    # expose this boundary, and the consumer must already be suspended here before cancellation.
+    monkeypatch.setattr(RunResultStreaming, "_await_task_safely", observe_wait)
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        child_started = guardrail_started if wait_target == "guardrail" else disposal_started
+        await asyncio.wait_for(child_started.wait(), timeout=2)
+        await asyncio.wait_for(wait_started.wait(), timeout=2)
+        assert result.final_output == "done"
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer, timeout=2)
+        await asyncio.wait_for(child_cancelled.wait(), timeout=2)
+        if wait_target == "guardrail":
+            events = fetch_events()
+            assert events.count("trace_start") == events.count("trace_end") == 1
+            assert events.count("span_start") == events.count("span_end")
+    finally:
+        result.cancel()
+        assert result.run_loop_task is not None
+        await asyncio.gather(consumer, result.run_loop_task, return_exceptions=True)
