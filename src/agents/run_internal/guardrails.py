@@ -226,8 +226,10 @@ async def run_output_guardrails(
 
 async def input_guardrail_tripwire_triggered_for_stream(
     streamed_result: RunResultStreaming,
+    *,
+    ignore_cancelled: bool = False,
 ) -> bool:
-    """Return True if any input guardrail triggered during a streamed run."""
+    """Wait for input verdicts, optionally tolerating child cancellation during final cleanup."""
     task = streamed_result._input_guardrails_task
     if task is None:
         return False
@@ -239,7 +241,7 @@ async def input_guardrail_tripwire_triggered_for_stream(
         except asyncio.CancelledError:
             task.cancel()
             raise
-        if not task.cancelled():
+        if not ignore_cancelled or not task.cancelled():
             task.result()
 
     return any(

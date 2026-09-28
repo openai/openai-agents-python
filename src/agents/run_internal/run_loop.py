@@ -2047,7 +2047,9 @@ async def start_streaming(
         _sync_conversation_tracking_from_tracker()
         if streamed_result._input_guardrails_task:
             try:
-                triggered = await input_guardrail_tripwire_triggered_for_stream(streamed_result)
+                triggered = await input_guardrail_tripwire_triggered_for_stream(
+                    streamed_result, ignore_cancelled=True
+                )
                 if triggered:
                     first_trigger = next(
                         (
