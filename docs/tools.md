@@ -525,6 +525,8 @@ For variadic parameters, an annotation describes each collected value. The SDK t
 
 The SDK ignores `Field(description=...)` in the annotation of a variadic parameter (`*args` or `**kwargs`). To describe the collected parameter, use a parameter entry in the function docstring or a string in `Annotated`, for example `*scores: Annotated[int, "Exam scores", Field(ge=0, le=100)]`. When docstring parsing is enabled and both sources provide a description, the docstring description takes precedence.
 
+For `**kwargs`, use `@tool(strict_mode=False)` and supply the keyword values in the nested object named after the parameter. For example, a tool with `**scores: int` receives `{"scores": {"exam": 90}}`.
+
 Annotate scalar positional values as `*args: T`. If each positional value is itself a homogeneous tuple, use `*args: tuple[T, ...]`; the SDK rejects fixed-length tuple annotations such as `*args: tuple[int, str]` because one fixed tuple shape cannot describe a variadic sequence of positional values.
 
 ```python
