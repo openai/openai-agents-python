@@ -105,7 +105,7 @@ In final-candidate mode, when the caller provides a dedicated checkout or worktr
 
 - Resolve and record the checkout root, current branch, `HEAD`, and clean status before auditing. Do not switch to a different checkout that happens to share the same Git object database.
 - Require `TARGET=HEAD` to resolve to the checked-out commit. Treat detached HEAD, a mismatched release branch, uncommitted release-owned files, or unrelated changed paths as candidate inconsistency.
-- Read `pyproject.toml`, `uv.lock`, and `tests/fixtures/released_api_contract.json` from that checkout. Verify the intended version, editable `openai-agents` lock entry, contract baseline, and contract `baseline_commit` against the release branch and commit parent.
+- Read `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, and `tests/fixtures/released_api_contract.json` from that checkout. Verify the intended version, editable `openai-agents` lock entry, root Release Please manifest version, contract baseline, and contract `baseline_commit` against the release branch and commit parent.
 - Inspect the exact commit diff and confirm that the materialized release commit owns only its expected release manifest when the invoking workflow defines one.
 - Keep the checkout path as local evidence for the caller, but do not put local paths into copy-ready release text.
 

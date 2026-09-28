@@ -19,7 +19,7 @@ Compare the diff with the released BASE contract. Use `minor` as the minimum for
 - a breaking change to a non-beta public API, protocol, configuration, environment, or durable serialized boundary;
 - a major user-facing feature addition that warrants a minor release under repository policy.
 
-Use `patch` otherwise. For a final candidate, verify the intended version against the branch name, `pyproject.toml`, `uv.lock`, and built package metadata when relevant. For planning mode, do not interpret unchanged version metadata as a declared patch candidate.
+Use `patch` otherwise. For a final candidate, verify the intended version against the branch name, `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, and built package metadata when relevant. For planning mode, do not interpret unchanged version metadata as a declared patch candidate.
 
 Capture:
 

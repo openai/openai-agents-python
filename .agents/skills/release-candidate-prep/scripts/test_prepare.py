@@ -57,6 +57,9 @@ class ReleaseRepository:
 
     def _write_fixture_files(self) -> None:
         (self.repo / "tests/fixtures").mkdir(parents=True)
+        (self.repo / ".release-please-manifest.json").write_text(
+            json.dumps({".": "0.19.4"}, indent=2) + "\n", encoding="utf-8"
+        )
         (self.repo / "pyproject.toml").write_text(
             '[project]\nname = "openai-agents"\nversion = "0.19.4"\n',
             encoding="utf-8",
@@ -249,6 +252,19 @@ class PreparationTests(unittest.TestCase):
             self.assertEqual(candidate.base_commit, fixture.base_commit)
             self.assertEqual(candidate.branch, "release/v0.20.0")
             self.assertEqual(set(candidate.changed_paths), prepare.RELEASE_PATHS)
+            self.assertEqual(
+                set(candidate.changed_paths),
+                {
+                    ".release-please-manifest.json",
+                    "pyproject.toml",
+                    "uv.lock",
+                    "tests/fixtures/released_api_contract.json",
+                },
+            )
+            self.assertEqual(
+                json.loads((candidate.worktree / ".release-please-manifest.json").read_text()),
+                {".": "0.20.0"},
+            )
             self.assertEqual(
                 run(release_input.worktree, "git", "branch", "--show-current").stdout.strip(),
                 "release/v0.20.0",
