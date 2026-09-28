@@ -410,7 +410,10 @@ async def test_approval_settlement_preserves_response_storage_mode(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
-async def test_detached_repark_advances_response_storage_metadata(streamed: bool) -> None:
+@pytest.mark.parametrize("disable_guardrails", [False, True])
+async def test_detached_repark_advances_response_storage_metadata(
+    streamed: bool, disable_guardrails: bool
+) -> None:
     from agents import Agent, ModelSettings, RunConfig, Runner, StopAtTools
     from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 
@@ -453,6 +456,8 @@ async def test_detached_repark_advances_response_storage_metadata(streamed: bool
     first = await run("go", True, True)
     state = await _serialized_round_trip(first, agent)
     state.approve(state.get_interruptions()[0])
+    if disable_guardrails:
+        agent.output_guardrails = []
     second = await run(state, False, False)
     state = await _serialized_round_trip(second, agent)
     state.approve(state.get_interruptions()[0])

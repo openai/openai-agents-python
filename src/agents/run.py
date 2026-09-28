@@ -2103,6 +2103,10 @@ class AgentRunner:
                                 run_state._current_step = None
                             return _finalize_result(result)
                         elif isinstance(turn_result.next_step, NextStepInterruption):
+                            if run_state is not None:
+                                # Held registration must see the fresh response's turn,
+                                # including detached resumes without output guardrails.
+                                run_state._current_turn = current_turn
                             if session_persistence_enabled and not input_guardrails_triggered(
                                 _attempt_input_guardrail_results()
                             ):
