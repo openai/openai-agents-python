@@ -4301,8 +4301,9 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
     state.approve(first.interruptions[0])
 
     observed_counts: list[int] = []
-    run_loop_any = cast(Any, run_loop)
-    real_save_resumed = run_loop_any.save_resumed_turn_items
+    from agents.run_internal import session_persistence
+
+    real_save_resumed = session_persistence.save_resumed_turn_items
 
     async def save_wrapper(
         *,
@@ -4336,7 +4337,7 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         )
         return int(result)
 
-    monkeypatch.setattr(run_loop_any, "save_resumed_turn_items", save_wrapper)
+    monkeypatch.setattr(session_persistence, "save_resumed_turn_items", save_wrapper)
 
     resumed = Runner.run_streamed(agent, state, session=session)
     await consume_stream(resumed)

@@ -145,6 +145,7 @@ from .items import (
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     ensure_input_item_format,
+    ensure_nested_history_run_item_occurrence_key,
     normalize_resumed_input,
     prepare_model_input_items,
     reconcile_nested_history_owned_input_after_rewrite,
@@ -180,6 +181,7 @@ from .session_persistence import (
     defer_interrupted_session_write,
     discard_held_current_response,
     extend_held_session_write,
+    persist_resumed_turn,
     persist_session_items_for_guardrail_trip,
     prepare_compaction_model_input,
     prepare_input_with_session,
@@ -191,7 +193,6 @@ from .session_persistence import (
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
-    settle_held_batch_for_emptied_turn,
     take_held_session_write,
     update_run_state_after_resume,
 )
@@ -1183,6 +1184,35 @@ async def start_streaming(
                 store=store_setting,
             )
 
+        async def _persist_resumed_items(
+            turn_result: SingleStepResult, *, defer_settlement: bool = False
+        ) -> None:
+            if session is not None and not await _should_persist_stream_items(
+                session=session,
+                server_conversation_tracker=server_conversation_tracker,
+                streamed_result=streamed_result,
+            ):
+                take_held_session_write(run_state)
+                return
+            streamed_result._current_turn_persisted_item_count = await persist_resumed_turn(
+                run_state=run_state,
+                session=session,
+                items=turn_session_items,
+                defer_settlement=defer_settlement,
+                handoff_input_filtered=turn_result.handoff_input_filtered,
+                filtered_context_items=turn_result.pre_step_items,
+                current_response_items=resumed_response_boundary.items,
+                persisted_count=streamed_result._current_turn_persisted_item_count,
+                response_id=turn_result.model_response.response_id,
+                reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
+                store=store_setting,
+                wrapper=streamed_result.context_wrapper,
+            )
+            if run_state is not None:
+                run_state._current_turn_persisted_item_count = (
+                    streamed_result._current_turn_persisted_item_count
+                )
+
         async def _save_stream_items_with_count(
             items: list[RunItem], response_id: str | None, store_setting: bool | None
         ) -> None:
@@ -1346,6 +1376,8 @@ async def start_streaming(
                         run_state._last_processed_response,
                         run_state,
                     )
+                    for item in resumed_response_boundary.items:
+                        ensure_nested_history_run_item_occurrence_key(item)
                     blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                         run_state_generated_items=resumed_response_boundary.generated_start,
                         run_state_session_items=resumed_response_boundary.session_start,
@@ -1449,70 +1481,14 @@ async def start_streaming(
                                 *accepted_tool_output_guardrail_results,
                                 *turn_result.tool_output_guardrail_results,
                             ]
-                        # A resume can interrupt again (a partial approval of a
-                        # multi-approval response). If the gate still defers, the
-                        # resolved items join the held batch; a detached re-park folds
-                        # them the same way. An emptied resolved turn discards the
-                        # batch instead: a call written without its output poisons the
-                        # Session exactly as the orphaned output does. Mirrors the
-                        # non-streaming path.
-                        if session is None:
-                            extend_held_session_write(
-                                run_state,
-                                run_items=turn_session_items,
-                                run_items_are_the_session_view=True,
-                                handoff_input_filtered=turn_result.handoff_input_filtered,
-                                filtered_context_items=turn_result.pre_step_items,
-                                reasoning_item_id_policy=(
-                                    streamed_result._reasoning_item_id_policy
-                                ),
-                            )
-                            reinterruption_items: list[RunItem] = []
-                        elif _should_defer_interrupted_session_items(
-                            current_agent,
-                            run_config,
-                        ):
-                            defer_interrupted_session_write(
-                                run_state,
-                                session,
-                                run_items=turn_session_items,
-                                reasoning_item_id_policy=(
-                                    streamed_result._reasoning_item_id_policy
-                                ),
-                                response_id=turn_result.model_response.response_id,
-                                store=store_setting,
-                            )
-                            reinterruption_items = []
-                        elif turn_session_items:
-                            reinterruption_items = list(turn_session_items)
-                        else:
-                            # An emptied resolved turn settles what the session view
-                            # left the batch: filtered outputs are gone with their
-                            # calls, carried prior-turn pairs still land.
-                            streamed_result._current_turn_persisted_item_count = (
-                                await settle_held_batch_for_emptied_turn(
-                                    run_state,
-                                    session,
-                                    handoff_input_filtered=turn_result.handoff_input_filtered,
-                                    filtered_context_items=turn_result.pre_step_items,
-                                    persisted_count=(
-                                        streamed_result._current_turn_persisted_item_count
-                                    ),
-                                    response_id=turn_result.model_response.response_id,
-                                    reasoning_item_id_policy=(
-                                        streamed_result._reasoning_item_id_policy
-                                    ),
-                                    store=store_setting,
-                                    wrapper=streamed_result.context_wrapper,
-                                )
-                            )
-                            reinterruption_items = []
-                        await _finalize_streamed_interruption(
-                            streamed_result=streamed_result,
-                            save_items=_save_resumed_items,
-                            items=reinterruption_items,
-                            response_id=turn_result.model_response.response_id,
-                            store_setting=store_setting,
+                        await _persist_resumed_items(
+                            turn_result,
+                            defer_settlement=_should_defer_interrupted_session_items(
+                                current_agent, run_config
+                            ),
+                        )
+                        _complete_stream_interruption(
+                            streamed_result,
                             interruptions=approvals_from_step(turn_result.next_step),
                             processed_response=run_state._last_processed_response,
                         )
@@ -1532,49 +1508,7 @@ async def start_streaming(
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
-                        # A detached exit folds the resolved session view into the
-                        # held batch, and the fold drops the batch's copies of this
-                        # turn's outputs so the view decides what rides to the
-                        # reattach.
-                        if session is None:
-                            extend_held_session_write(
-                                run_state,
-                                run_items=turn_session_items,
-                                run_items_are_the_session_view=True,
-                                handoff_input_filtered=turn_result.handoff_input_filtered,
-                                filtered_context_items=turn_result.pre_step_items,
-                                reasoning_item_id_policy=(
-                                    streamed_result._reasoning_item_id_policy
-                                ),
-                            )
-                        elif not turn_session_items:
-                            # An emptied resolved turn settles what the session view
-                            # left the batch: filtered outputs are gone with their
-                            # calls, carried prior-turn pairs still land.
-                            streamed_result._current_turn_persisted_item_count = (
-                                await settle_held_batch_for_emptied_turn(
-                                    run_state,
-                                    session,
-                                    handoff_input_filtered=turn_result.handoff_input_filtered,
-                                    filtered_context_items=turn_result.pre_step_items,
-                                    persisted_count=(
-                                        streamed_result._current_turn_persisted_item_count
-                                    ),
-                                    response_id=turn_result.model_response.response_id,
-                                    reasoning_item_id_policy=(
-                                        streamed_result._reasoning_item_id_policy
-                                    ),
-                                    store=store_setting,
-                                    wrapper=streamed_result.context_wrapper,
-                                )
-                            )
-                        await _save_resumed_items(
-                            list(turn_session_items) if turn_session_items else [],
-                            turn_result.model_response.response_id,
-                            store_setting,
-                            handoff_input_filtered=turn_result.handoff_input_filtered,
-                            filtered_context_items=list(turn_result.pre_step_items),
-                        )
+                        await _persist_resumed_items(turn_result)
                         if current_span is not None:
                             current_span.finish(reset_current=True)
                         current_span = None
@@ -1623,49 +1557,7 @@ async def start_streaming(
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
-                        # A detached exit folds the resolved session view into the
-                        # held batch, and the fold drops the batch's copies of this
-                        # turn's outputs so the view decides what rides to the
-                        # reattach.
-                        if session is None:
-                            extend_held_session_write(
-                                run_state,
-                                run_items=turn_session_items,
-                                run_items_are_the_session_view=True,
-                                handoff_input_filtered=turn_result.handoff_input_filtered,
-                                filtered_context_items=turn_result.pre_step_items,
-                                reasoning_item_id_policy=(
-                                    streamed_result._reasoning_item_id_policy
-                                ),
-                            )
-                        elif not turn_session_items:
-                            # An emptied resolved turn settles what the session view
-                            # left the batch: filtered outputs are gone with their
-                            # calls, carried prior-turn pairs still land.
-                            streamed_result._current_turn_persisted_item_count = (
-                                await settle_held_batch_for_emptied_turn(
-                                    run_state,
-                                    session,
-                                    handoff_input_filtered=turn_result.handoff_input_filtered,
-                                    filtered_context_items=turn_result.pre_step_items,
-                                    persisted_count=(
-                                        streamed_result._current_turn_persisted_item_count
-                                    ),
-                                    response_id=turn_result.model_response.response_id,
-                                    reasoning_item_id_policy=(
-                                        streamed_result._reasoning_item_id_policy
-                                    ),
-                                    store=store_setting,
-                                    wrapper=streamed_result.context_wrapper,
-                                )
-                            )
-                        await _save_resumed_items(
-                            list(turn_session_items) if turn_session_items else [],
-                            turn_result.model_response.response_id,
-                            store_setting,
-                            handoff_input_filtered=turn_result.handoff_input_filtered,
-                            filtered_context_items=list(turn_result.pre_step_items),
-                        )
+                        await _persist_resumed_items(turn_result)
                         run_state._current_step = NextStepRunAgain()
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
                             streamed_result
@@ -2175,7 +2067,6 @@ async def start_streaming(
                             run_items=turn_session_items,
                             run_items_are_the_session_view=True,
                             handoff_input_filtered=turn_result.handoff_input_filtered,
-                            filtered_context_items=turn_result.pre_step_items,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
                         )
                     elif parked_items_deferred and await _should_persist_stream_items(

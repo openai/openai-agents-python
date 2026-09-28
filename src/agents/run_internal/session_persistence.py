@@ -10,7 +10,7 @@ import copy
 import hashlib
 import inspect
 import json
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -86,7 +86,7 @@ __all__ = [
     "defer_interrupted_session_write",
     "extend_held_session_write",
     "take_held_session_write",
-    "settle_held_batch_for_emptied_turn",
+    "persist_resumed_turn",
     "resume_pending_session_write",
     "update_run_state_after_resume",
     "rewind_session_items",
@@ -963,31 +963,63 @@ async def save_resumed_turn_items(
     return persisted_count + saved_count
 
 
-async def settle_held_batch_for_emptied_turn(
+async def persist_resumed_turn(
+    *,
     run_state: RunState | None,
     session: Session | None,
-    *,
+    items: list[RunItem],
     persisted_count: int,
     response_id: str | None,
+    defer_settlement: bool = False,
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     handoff_input_filtered: bool = False,
     filtered_context_items: Sequence[RunItem] | None = None,
+    current_response_items: Sequence[RunItem] = (),
 ) -> int:
-    """Settle what an emptied resolved turn's session view left in the held batch.
+    """Fold, defer, or settle a resumed turn's authoritative Session view.
 
-    A handoff ``input_filter`` can drop every resolved item, and ``new_items`` is the
-    session-history axis by contract: an output the commit boundary folded this turn
-    is dropped with its call before this settle sees the batch, so a filtered pair
-    stays out of the Session. What still settles is carried prior-turn history (a
-    detached carry riding a checkpoint), which a later turn's filter is not entitled
-    to remove, under the same pairing rules as every other settle.
+    Detached turns retain the view for reattachment. A gated re-interruption keeps
+    deferring its write. Every other attached exit settles through the canonical
+    append path, even when a filter emptied the turn: earlier accepted history can
+    still remain in the held batch.
     """
+    if handoff_input_filtered:
+        # Only survivors of this response can retain its held payload. An earlier
+        # response may contain identical text, including when a filter copies items.
+        current_keys = {
+            nested_history_run_item_occurrence_key(item) for item in current_response_items
+        } - {None}
+        filtered_context_items = [
+            item
+            for item in filtered_context_items or ()
+            if nested_history_run_item_occurrence_key(item) in current_keys
+        ]
+    if session is None:
+        extend_held_session_write(
+            run_state,
+            run_items=items,
+            run_items_are_the_session_view=True,
+            handoff_input_filtered=handoff_input_filtered,
+            filtered_context_items=filtered_context_items,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+        )
+        return persisted_count
+    if defer_settlement and run_state is not None:
+        defer_interrupted_session_write(
+            run_state,
+            session,
+            run_items=items,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+            response_id=response_id,
+            store=store,
+        )
+        return persisted_count
     return await save_resumed_turn_items(
         run_state=run_state,
         session=session,
-        items=[],
+        items=items,
         claim_held=True,
         handoff_input_filtered=handoff_input_filtered,
         filtered_context_items=filtered_context_items,
@@ -1152,12 +1184,17 @@ def held_session_items_for_save(
                 if (value := run_item_to_input_item(item, policy)) is not None
             ],
         ]
-        retained = {_held_view_fingerprint(item) for item in view}
-        current = [
-            item
-            for item in current
-            if _held_pair_identity(item) is not None or _held_view_fingerprint(item) in retained
-        ]
+        retained = Counter(_held_view_fingerprint(item) for item in view)
+        kept = []
+        for item in current:
+            if _held_pair_identity(item) is not None:
+                kept.append(item)
+                continue
+            fingerprint = _held_view_fingerprint(item)
+            if retained[fingerprint]:
+                kept.append(item)
+                retained[fingerprint] -= 1
+        current = kept
     return [*prior, *current]
 
 

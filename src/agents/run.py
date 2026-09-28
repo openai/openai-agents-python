@@ -107,6 +107,7 @@ from .run_internal.error_handlers import (
 )
 from .run_internal.items import (
     copy_input_items,
+    ensure_nested_history_run_item_occurrence_key,
     normalize_resumed_input,
     reconcile_nested_history_owned_input_after_rewrite,
 )
@@ -143,15 +144,14 @@ from .run_internal.session_persistence import (
     defer_interrupted_session_write,
     discard_held_current_response,
     extend_held_session_write,
+    persist_resumed_turn,
     persist_session_items_for_guardrail_trip,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     resume_pending_session_write,
     resumed_turn_items,
     save_result_to_session,
-    save_resumed_turn_items,
     session_items_for_turn,
-    settle_held_batch_for_emptied_turn,
     take_held_session_write,
     update_run_state_after_resume,
 )
@@ -1105,6 +1105,8 @@ class AgentRunner:
                                 run_state._last_processed_response,
                                 run_state,
                             )
+                            for item in resumed_response_boundary.items:
+                                ensure_nested_history_run_item_occurrence_key(item)
                             blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                                 nonstreamed_session_items=(resumed_response_boundary.session_start),
                                 run_state_generated_items=(
@@ -1181,84 +1183,28 @@ class AgentRunner:
                                 # below, which claims the held batch itself.
                                 and not isinstance(turn_result.next_step, NextStepFinalOutput)
                             ):
-                                if not session_persistence_enabled:
-                                    # A detached resume's save is a no-op, so the resolved
-                                    # items fold into the standing held batch and settle
-                                    # together at the reattach.
-                                    extend_held_session_write(
-                                        run_state,
-                                        run_items=turn_session_items,
-                                        run_items_are_the_session_view=True,
-                                        handoff_input_filtered=(turn_result.handoff_input_filtered),
+                                run_state._current_turn_persisted_item_count = (
+                                    # Keep the count returned by the shared persistence operation.
+                                    await persist_resumed_turn(
+                                        run_state=run_state,
+                                        session=session if session_persistence_enabled else None,
+                                        items=turn_session_items,
+                                        defer_settlement=(
+                                            isinstance(turn_result.next_step, NextStepInterruption)
+                                            and _should_defer_interrupted_session_items(
+                                                current_agent, run_config
+                                            )
+                                        ),
+                                        handoff_input_filtered=turn_result.handoff_input_filtered,
                                         filtered_context_items=turn_result.pre_step_items,
-                                        reasoning_item_id_policy=(
-                                            run_state._reasoning_item_id_policy
-                                        ),
-                                    )
-                                elif isinstance(
-                                    turn_result.next_step, NextStepInterruption
-                                ) and _should_defer_interrupted_session_items(
-                                    current_agent,
-                                    run_config,
-                                ):
-                                    # The re-park keeps deferring: the resolved items join
-                                    # the held batch instead of reaching the Session.
-                                    defer_interrupted_session_write(
-                                        run_state,
-                                        session,
-                                        run_items=turn_session_items,
-                                        reasoning_item_id_policy=(
-                                            run_state._reasoning_item_id_policy
-                                        ),
+                                        current_response_items=resumed_response_boundary.items,
+                                        persisted_count=run_state._current_turn_persisted_item_count,
                                         response_id=turn_result.model_response.response_id,
+                                        reasoning_item_id_policy=run_state._reasoning_item_id_policy,
                                         store=store_setting,
+                                        wrapper=context_wrapper,
                                     )
-                                elif turn_session_items:
-                                    run_state._current_turn_persisted_item_count = (
-                                        await save_resumed_turn_items(
-                                            run_state=run_state,
-                                            session=session,
-                                            items=turn_session_items,
-                                            claim_held=True,
-                                            handoff_input_filtered=(
-                                                turn_result.handoff_input_filtered
-                                            ),
-                                            filtered_context_items=turn_result.pre_step_items,
-                                            persisted_count=(
-                                                run_state._current_turn_persisted_item_count
-                                            ),
-                                            response_id=turn_result.model_response.response_id,
-                                            reasoning_item_id_policy=(
-                                                run_state._reasoning_item_id_policy
-                                            ),
-                                            store=store_setting,
-                                            wrapper=context_wrapper,
-                                        )
-                                    )
-                                else:
-                                    # An emptied resolved turn settles what the session
-                                    # view left the batch: outputs the filter removed
-                                    # this turn dropped with their calls at the fold
-                                    # boundary, and carried prior-turn pairs still land.
-                                    run_state._current_turn_persisted_item_count = (
-                                        await settle_held_batch_for_emptied_turn(
-                                            run_state,
-                                            session,
-                                            handoff_input_filtered=(
-                                                turn_result.handoff_input_filtered
-                                            ),
-                                            filtered_context_items=turn_result.pre_step_items,
-                                            persisted_count=(
-                                                run_state._current_turn_persisted_item_count
-                                            ),
-                                            response_id=(turn_result.model_response.response_id),
-                                            reasoning_item_id_policy=(
-                                                run_state._reasoning_item_id_policy
-                                            ),
-                                            store=store_setting,
-                                            wrapper=context_wrapper,
-                                        )
-                                    )
+                                )
 
                             # After the resumed turn, treat subsequent turns as fresh so
                             # counters and input saving behave normally.
@@ -2216,7 +2162,6 @@ class AgentRunner:
                                     run_items=session_items_for_turn(turn_result),
                                     run_items_are_the_session_view=True,
                                     handoff_input_filtered=turn_result.handoff_input_filtered,
-                                    filtered_context_items=turn_result.pre_step_items,
                                     reasoning_item_id_policy=(run_state._reasoning_item_id_policy),
                                 )
                             append_model_response_if_new(

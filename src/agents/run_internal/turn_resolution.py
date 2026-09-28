@@ -2632,6 +2632,13 @@ async def resolve_interrupted_turn(
     def _checkpoint_new_items() -> None:
         if run_state is not None:
             run_state._generated_items = [*original_pre_step_items, *new_items]
+            # A retry skips checkpointed results, including hosted approval responses.
+            # Retain them in the withheld batch before later callbacks can fail.
+            extend_held_session_write(
+                run_state,
+                run_items=new_items,
+                reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            )
         _register_tool_call_items(context_wrapper, new_items)
 
     _checkpoint_new_items()
