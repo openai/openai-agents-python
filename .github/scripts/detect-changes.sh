@@ -76,7 +76,7 @@ fi
 
 case "$mode" in
   code)
-    pattern='^(src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish|repo-skills)\.yml$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
+    pattern='^(src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish|repo-skills|release-please)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
   docs)
     pattern='^(docs/|mkdocs\.yml$|uv\.lock$|\.github/workflows/docs\.yml$)'

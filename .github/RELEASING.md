@@ -2,6 +2,39 @@
 
 Release tags are created manually by authorized maintainers. Merging a release pull request does not create a tag.
 
+## Prepare the release pull request
+
+`.github/workflows/release-please.yml` maintains a draft release pull request after pushes to `main`. Maintainers can also run the workflow manually on `main`. Release Please uses conventional commit messages to propose the next version and release notes, following the `openai-python` configuration. Review the proposed version, especially for breaking changes before 1.0.
+
+The bot updates `pyproject.toml`, the editable `openai-agents` version in `uv.lock`, the source-checkout fallback in `src/agents/version.py`, `.release-please-manifest.json`, and `CHANGELOG.md`. Installed packages continue to read their version from package metadata. The configuration selects the project's lockfile entry by package name, so dependency versions remain unchanged and lockfile regeneration does not remove a required marker comment. The TOML selector uses `name.value` because the pinned Release Please updater wraps parsed values with source-position metadata; verify that selector when upgrading the action.
+
+Release Please does not regenerate the public API snapshot. Before marking the release PR ready for review:
+
+1. Check out the bot's release PR branch in a clean checkout and bring it up to date with `main`. Review the complete diff, including the proposed version and changelog.
+2. Set `RELEASE_VERSION` to the proposed `project.version` and regenerate the snapshot with the existing commands:
+
+   ```bash
+   RELEASE_VERSION="<version>"
+   make sync
+   make update-released-api-contract VERSION="$RELEASE_VERSION"
+   make check-released-api-contract VERSION="$RELEASE_VERSION"
+   ```
+
+   The generator records the checked-out source commit and freezes the API surface for the proposed version. Review the generated `tests/fixtures/released_api_contract.json` diff, then commit and push it to the release PR branch. Do not merely replace its version string: new exports and signatures must be captured too. If the bot or another maintainer updates the candidate's source or version, regenerate and review the snapshot again before merging.
+3. Run the required verification and wait for CI on the final candidate. The initial bot PR may fail the snapshot-version test until step 2 is complete. Mark the PR ready for review only after the snapshot and metadata agree.
+
+The standalone `$release-candidate-prep` skill still prepares a manual three-file candidate; it does not complete a bot PR. For this automated PR route, follow the steps above. If releasing through the manual route, also synchronize `.release-please-manifest.json` and the changelog in the reviewed release PR so the next automated proposal starts from the version actually released.
+
+### Temporary GitHub Actions authentication
+
+The workflow uses the repository's `GITHUB_TOKEN`, appearing as `github-actions[bot]`, with Contents, Issues, and Pull requests write permissions only on the release PR job. It runs only for `openai/openai-agents-python` on `main` and does not check out or execute release PR code.
+
+An administrator must allow GitHub Actions to create pull requests under Settings > Actions > General. Existing organization rules may additionally restrict bot branch writes; verify that the job can open and update a release PR without weakening repository protections. Under GitHub's current behavior, pull-request workflows created by `GITHUB_TOKEN` require a user with write access to select **Approve workflows to run**. Approve checks when prompted and require all checks on the final PR revision before merging. See [GitHub's workflow-trigger documentation](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow).
+
+`skip-github-release: true` is intentional: a GitHub Release created with `GITHUB_TOKEN` would not trigger `publish.yml`. An authorized maintainer must create the tag and publish the GitHub Release using the procedure below.
+
+For a later switch to the `openai-sdks` App, provision the `OPENAI_SDKS_APP_CLIENT_ID` variable and `OPENAI_SDKS_APP_PRIVATE_KEY` secret in a protected, main-only `release` environment. Switch authentication in a separately reviewed workflow change after installation and credentials are verified. Keep the existing `pypi` environment and trusted-publishing configuration.
+
 ## Required release review
 
 Before merging a release pull request, obtain at least one approving review from a code owner listed in `.github/CODEOWNERS`, resolve review conversations, and wait for all required checks to pass. The author cannot approve their own pull request. Changes after approval require a fresh code-owner review; the most recent reviewable push must also be approved by someone other than its pusher.
@@ -39,3 +72,4 @@ The shared release policy requires code-owner approval before merging the releas
    If the tag already exists, stop and investigate. Do not overwrite, delete, or move an existing release tag.
 3. Publish a GitHub Release using that existing tag and the reviewed release notes. This starts `.github/workflows/publish.yml`.
 4. After the build succeeds, a designated reviewer confirms the release tag and commit and approves the `pypi` deployment. When Prevent self-review is enabled, another designated reviewer must approve.
+5. After publishing the matching GitHub Release, remove `autorelease: pending` from the merged release PR and add `autorelease: tagged`. Release Please's automatic release step normally manages these labels; in this PR-only setup, a pending merged release can block the next proposal. Do not mark a release tagged before its matching tag and GitHub Release exist. Retry a failed package publication through the existing publishing workflow; do not move the tag or merge another release PR to retry the same version.

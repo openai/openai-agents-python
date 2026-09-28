@@ -1,0 +1,33 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {}
+  },
+  "release-type": "python",
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "draft-pull-request": true,
+  "pull-request-title-pattern": "release: ${version}",
+  "pull-request-header": "Automated release PR. Before marking ready for review, regenerate tests/fixtures/released_api_contract.json, review the release notes, and run the required checks. See .github/RELEASING.md. Tags and GitHub Releases are published manually.",
+  "extra-files": [
+    {
+      "type": "toml",
+      "path": "uv.lock",
+      "jsonpath": "$.package[?(@.name.value=='openai-agents')].version"
+    }
+  ],
+  "changelog-sections": [
+    { "type": "feat", "section": "Features" },
+    { "type": "fix", "section": "Bug Fixes" },
+    { "type": "perf", "section": "Performance Improvements" },
+    { "type": "revert", "section": "Reverts" },
+    { "type": "chore", "section": "Chores" },
+    { "type": "docs", "section": "Documentation" },
+    { "type": "refactor", "section": "Refactors" },
+    { "type": "build", "section": "Build System" },
+    { "type": "test", "section": "Tests", "hidden": true },
+    { "type": "ci", "section": "Continuous Integration", "hidden": true }
+  ]
+}
