@@ -238,6 +238,30 @@ def test_public_mcp_server_constructors_forward_guardrail_configuration():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "escaped_name"),
+    [
+        ("alpha\nFORGED\x1b[31m, trailing", "'alpha\\nFORGED\\x1b[31m, trailing'"),
+        ("alpha\rFORGED\u2028\u202e", "'alpha\\rFORGED\\u2028\\u202e'"),
+    ],
+)
+async def test_agent_duplicate_mcp_tool_names_escape_diagnostics(tool_name, escaped_name):
+    servers = [FakeMCPServer(server_name="server_1"), FakeMCPServer(server_name="server_2")]
+    for server in servers:
+        server.add_tool(tool_name, {})
+    agent = Agent(name="test_agent", mcp_servers=servers)
+
+    with pytest.raises(UserError) as exc_info:
+        await agent.get_all_tools(RunContextWrapper(context=None))
+
+    message = str(exc_info.value)
+    assert message.startswith(f"Duplicate tool names found across MCP servers: {escaped_name}. ")
+    assert "include_server_in_tool_names=True" in message
+    assert not any(control in message for control in ("\n", "\r", "\x1b", "\u2028", "\u202e"))
+    assert all(server.tool_calls == [] for server in servers)
+
+
+@pytest.mark.asyncio
 async def test_get_all_function_tools_duplicate_error_is_deterministic():
     server1 = FakeMCPServer(server_name="server_1")
     server1.add_tool("zeta", {})
@@ -254,7 +278,7 @@ async def test_get_all_function_tools_duplicate_error_is_deterministic():
         await MCPUtil.get_all_function_tools([server1, server2], False, run_context, agent)
 
     assert str(exc_info.value) == (
-        "Duplicate tool names found across MCP servers: alpha, zeta. "
+        "Duplicate tool names found across MCP servers: 'alpha', 'zeta'. "
         "Pass `include_server_in_tool_names=True` to "
         "`MCPUtil.get_all_function_tools()` or set "
         "`mcp_config={'include_server_in_tool_names': True}` on the "
@@ -292,7 +316,7 @@ async def test_get_all_function_tools_duplicate_error_without_hint_when_prefixed
                 include_server_in_tool_names=True,
             )
 
-    assert str(exc_info.value) == "Duplicate tool names found across MCP servers: mcp_same__tool"
+    assert str(exc_info.value) == "Duplicate tool names found across MCP servers: 'mcp_same__tool'"
 
 
 @pytest.mark.asyncio

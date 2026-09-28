@@ -307,7 +307,7 @@ class MCPUtil:
                 if duplicate_tool_names:
                     raise UserError(
                         "Duplicate tool names found across MCP servers: "
-                        f"{', '.join(duplicate_tool_names)}"
+                        f"{', '.join(repr(name) for name in duplicate_tool_names)}"
                     )
                 tool_names.update(server_tool_names)
                 tools.extend(function_tools)
@@ -328,7 +328,7 @@ class MCPUtil:
             if duplicate_tool_names:
                 raise UserError(
                     "Duplicate tool names found across MCP servers: "
-                    f"{', '.join(duplicate_tool_names)}. "
+                    f"{', '.join(repr(name) for name in duplicate_tool_names)}. "
                     "Pass `include_server_in_tool_names=True` to "
                     "`MCPUtil.get_all_function_tools()` or set "
                     "`mcp_config={'include_server_in_tool_names': True}` on the "
