@@ -37,7 +37,7 @@ def test_release_metadata_tracks_only_the_editable_project() -> None:
     ]
     assert config["include-v-in-tag"] is True
     assert config["include-component-in-tag"] is False
-    assert config["draft-pull-request"] is True
+    assert config["draft-pull-request"] is False
 
 
 def test_release_bot_does_not_execute_pr_code_or_publish() -> None:

@@ -8,9 +8,9 @@
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
   "bump-patch-for-minor-pre-major": false,
-  "draft-pull-request": true,
+  "draft-pull-request": false,
   "pull-request-title-pattern": "release: ${version}",
-  "pull-request-header": "Automated release PR. Before marking ready for review, regenerate tests/fixtures/released_api_contract.json, review the release notes, and run the required checks. See .github/RELEASING.md. Tags and GitHub Releases are published manually.",
+  "pull-request-header": "Automated release PR. Before merging, regenerate tests/fixtures/released_api_contract.json, review the release notes, and run the required checks. See .github/RELEASING.md. Tags and GitHub Releases are published manually.",
   "extra-files": [
     {
       "type": "toml",

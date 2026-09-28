@@ -4,11 +4,11 @@ Release tags are created manually by authorized maintainers. Merging a release p
 
 ## Prepare the release pull request
 
-`.github/workflows/release-please.yml` maintains a draft release pull request after pushes to `main`. Maintainers can also run the workflow manually on `main`. Release Please uses conventional commit messages to propose the next version and release notes, following the `openai-python` configuration. Review the proposed version, especially for breaking changes before 1.0.
+`.github/workflows/release-please.yml` maintains a release pull request ready for review after pushes to `main`. Maintainers can also run the workflow manually on `main`. Release Please uses conventional commit messages to propose the next version and release notes, following the `openai-python` configuration. Review the proposed version, especially for breaking changes before 1.0.
 
 The bot updates `pyproject.toml`, the editable `openai-agents` version in `uv.lock`, the source-checkout fallback in `src/agents/version.py`, `.release-please-manifest.json`, and `CHANGELOG.md`. Installed packages continue to read their version from package metadata. The configuration selects the project's lockfile entry by package name, so dependency versions remain unchanged and lockfile regeneration does not remove a required marker comment. The TOML selector uses `name.value` because the pinned Release Please updater wraps parsed values with source-position metadata; verify that selector when upgrading the action.
 
-Release Please does not regenerate the public API snapshot. Before marking the release PR ready for review:
+Release Please does not regenerate the public API snapshot. Before merging the release PR:
 
 1. Check out the bot's release PR branch in a clean checkout and bring it up to date with `main`. Review the complete diff, including the proposed version and changelog.
 2. Set `RELEASE_VERSION` to the proposed `project.version` and regenerate the snapshot with the existing commands:
@@ -21,7 +21,7 @@ Release Please does not regenerate the public API snapshot. Before marking the r
    ```
 
    The generator records the checked-out source commit and freezes the API surface for the proposed version. Review the generated `tests/fixtures/released_api_contract.json` diff, then commit and push it to the release PR branch using the maintainer’s own GitHub credentials. This push triggers the repository’s normal pull-request CI for the completed candidate. Do not merely replace its version string: new exports and signatures must be captured too. If the bot or another maintainer updates the candidate's source or version, regenerate and review the snapshot again before merging.
-3. Run the required verification and wait for CI on the final candidate. The initial bot PR may fail the snapshot-version test until step 2 is complete. Mark the PR ready for review only after the snapshot and metadata agree.
+3. Run the required verification and wait for CI on the final candidate. The initial bot PR may fail the snapshot-version test until step 2 is complete. Merge the PR only after the snapshot and metadata agree and the required checks and code-owner review pass.
 
 ### Standalone manual release
 
