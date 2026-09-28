@@ -133,8 +133,12 @@ class TextOutput:
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("output_kind", ["text", "model", "dataclass"])
 async def test_result_str_escapes_terminal_controls(streaming, output_kind):
-    payload = "Hello\x1b[2J\x1b]0;title\x07\x08\x00\x7f\x9b31m\x9d0;title\x9c"
-    escaped = r"Hello\x1b[2J\x1b]0;title\x07\x08\x00\x7f\x9b31m\x9d0;title\x9c"
+    payload = (
+        "Hello\x1b[2J\x1b]0;title\x07\x08\x00\x7f\x9b31m\x9d0;title\x9c\x0b\x0c\x1c\x1d\x1e\x85"
+    )
+    escaped = (
+        r"Hello\x1b[2J\x1b]0;title\x07\x08\x00\x7f\x9b31m\x9d0;title\x9c\x0b\x0c\x1c\x1d\x1e\x85"
+    )
     model = ScriptedModel()
     if output_kind == "model":
         output_type = Foo
@@ -162,6 +166,7 @@ async def test_result_str_escapes_terminal_controls(streaming, output_kind):
         # JSON already escapes C0 controls; the diagnostic printer must also escape C1.
         assert r"\u001b[2J" in rendered
         assert r"\x9b31m\x9d0;title\x9c" in rendered
+        assert r"\x85" in rendered
     elif output_kind == "dataclass":
         assert result.final_output.text == payload
         assert escaped in rendered

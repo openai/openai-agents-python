@@ -9,6 +9,8 @@ if TYPE_CHECKING:
 
 
 def _indent(text: str, indent_level: int) -> str:
+    # Normalize ordinary CRLF breaks before escaping controls that splitlines consumes.
+    text = _escape_terminal_controls(text.replace("\r\n", "\n"))
     indent_string = "  " * indent_level
     return "\n".join(f"{indent_string}{line}" for line in text.splitlines())
 
