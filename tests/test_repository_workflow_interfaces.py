@@ -5,6 +5,7 @@ import re
 import runpy
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -208,7 +209,7 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
         check["working-directory"] == steps[package_index]["working-directory"] == "release-source"
     )
     assert check["shell"] == "bash"
-    assert check["env"] == {"OPENAI_API_KEY": "fake-for-tests", "UV_FROZEN": "1"}
+    assert check["env"] == {"OPENAI_API_KEY": "fake-for-tests", "UV_LOCKED": "1"}
     assert "if" not in build and "continue-on-error" not in build
     for step in steps[check_index:]:
         assert "if" not in step and "continue-on-error" not in step
@@ -248,6 +249,53 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
             log.read_text(encoding="utf-8").splitlines()
             == expected[: expected.index(failed_check) + 1]
         )
+
+
+def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("The publish workflow requires uv.")
+    workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    check = next(
+        step
+        for step in workflow["jobs"]["build"]["steps"]
+        if step["name"] == "Check release source"
+    )
+    dependency = tmp_path / "dependency"
+    dependency.mkdir()
+    (dependency / "pyproject.toml").write_text(
+        '[project]\nname = "fixture-dependency"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    project = (
+        '[project]\nname = "release-fixture"\nversion = "0.1.0"\n'
+        'requires-python = ">=3.10"\ndependencies = []\n'
+        '[tool.uv.sources]\nfixture-dependency = { path = "dependency" }\n'
+    )
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(project, encoding="utf-8")
+    env = {
+        "PATH": os.defpath,
+        "UV_PYTHON": sys.executable,
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+    }
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    command = [uv, "--offline", "--no-config"]
+    subprocess.run(command + ["lock"], cwd=tmp_path, env=env, check=True, timeout=15)
+    lockfile = tmp_path / "uv.lock"
+    original_lock = lockfile.read_bytes()
+    # Exercise synchronization without building or installing either fixture package.
+    sync = command + ["sync", "--no-install-project", "--no-install-package", "fixture-dependency"]
+    env.update(check["env"])
+    subprocess.run(sync, cwd=tmp_path, env=env, check=True, timeout=15)
+    pyproject.write_text(
+        project.replace("dependencies = []", 'dependencies = ["fixture-dependency"]'),
+        encoding="utf-8",
+    )
+    result = subprocess.run(sync, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode != 0
+    assert "lockfile" in result.stderr and "needs to be updated" in result.stderr
+    assert lockfile.read_bytes() == original_lock
 
 
 def test_pypi_job_only_publishes_the_build_artifact() -> None:
