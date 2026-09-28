@@ -149,6 +149,7 @@ from .run_internal.session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     resume_pending_session_write,
+    resumed_response_store,
     resumed_turn_items,
     save_result_to_session,
     session_items_for_turn,
@@ -1133,6 +1134,10 @@ class AgentRunner:
                                 ),
                                 run_state=run_state,
                                 error_handlers=error_handlers,
+                            )
+
+                            store_setting = resumed_response_store(
+                                run_state, turn_result.model_response.response_id, store_setting
                             )
 
                             if run_state._last_processed_response is not None:
@@ -2160,6 +2165,8 @@ class AgentRunner:
                                 extend_held_session_write(
                                     run_state,
                                     run_items=session_items_for_turn(turn_result),
+                                    response_id=turn_result.model_response.response_id,
+                                    store=store_setting,
                                     run_items_are_the_session_view=True,
                                     handoff_input_filtered=turn_result.handoff_input_filtered,
                                     reasoning_item_id_policy=(run_state._reasoning_item_id_policy),

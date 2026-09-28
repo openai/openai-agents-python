@@ -289,49 +289,6 @@ async def test_the_settled_count_matches_what_the_append_actually_wrote() -> Non
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("parked_store", [None, False, True])
-async def test_a_re_park_keeps_the_storage_setting_the_response_was_produced_under(
-    parked_store: bool | None,
-) -> None:
-    # The batch belongs to the parked response, and the settle resolves that
-    # response's compaction mode from this value. Presence decides, not truthiness: a
-    # park under the ordinary ``store=None`` records a real setting, and a
-    # re-interruption under a different one must not overwrite it.
-    from agents.run_internal.session_persistence import defer_interrupted_session_write
-
-    class _Session:
-        session_id = "s1"
-
-    state = object.__new__(RunState)
-    state._pending_session_write = {
-        "session_id": "s1",
-        "items": [
-            {"type": "function_call", "call_id": "call_PARKED", "name": "t", "arguments": "{}"}
-        ],
-        "before": None,
-        "persisted_count": 1,
-        "held": True,
-        "response_id": "resp_parked",
-        "store": parked_store,
-    }
-    state._current_turn_persisted_item_count = 0
-    state._reasoning_item_id_policy = None
-
-    defer_interrupted_session_write(
-        state,
-        _Session(),  # type: ignore[arg-type]
-        run_items=[],
-        reasoning_item_id_policy=None,
-        response_id="resp_reinterrupted",
-        store=not parked_store,
-    )
-
-    assert state._pending_session_write is not None
-    assert state._pending_session_write["store"] is parked_store
-    assert state._pending_session_write["response_id"] == "resp_parked"
-
-
-@pytest.mark.asyncio
 async def test_a_detached_re_park_folds_under_the_batch_registration_policy() -> None:
     # A Conversations-origin batch was converted preserving server reasoning ids. The
     # detached re-park cannot see the backend, so it must fold under the policy the

@@ -963,6 +963,16 @@ async def save_resumed_turn_items(
     return persisted_count + saved_count
 
 
+def resumed_response_store(
+    run_state: RunState | None, response_id: str | None, store: bool | None
+) -> bool | None:
+    """Resolve response-owned storage before settlement or redaction claims its batch."""
+    pending = run_state._pending_session_write if run_state is not None else None
+    if pending is not None and pending.get("held") and pending.get("response_id") == response_id:
+        return pending.get("store", store)
+    return store
+
+
 async def persist_resumed_turn(
     *,
     run_state: RunState | None,
@@ -1281,6 +1291,14 @@ def defer_interrupted_session_write(
     )
     if session_id is None:
         return
+    # Storage belongs to the response, not the later run resolving approvals.
+    # A fresh parked response advances the frontier; extensions retain its setting.
+    if (
+        pending is not None
+        and pending.get("current_response", {}).get("turn") == run_state._current_turn
+    ):
+        response_id = pending.get("response_id", response_id)
+        store = pending.get("store", store)
     record: _PendingSessionWrite = {
         "session_id": session_id,
         "items": copy.deepcopy(items),
@@ -1289,17 +1307,8 @@ def defer_interrupted_session_write(
             run_state._current_turn_persisted_item_count + len(converted_run_items)
         ),
         "held": True,
-        # The response the withheld batch belongs to, so the settle can run the same
-        # compaction bookkeeping the ordinary persistence path runs for it. An extend
-        # keeps the original response: the batch is that response's write, and the
-        # settle resolves its compaction mode from that response's own storage setting.
-        # Presence decides, not truthiness: a park under the ordinary ``store=None``
-        # records a real value, and letting a re-interruption's setting overwrite it
-        # would resolve the original response's compaction mode from the wrong turn.
-        "response_id": pending["response_id"]
-        if (pending is not None and "response_id" in pending)
-        else response_id,
-        "store": pending["store"] if (pending is not None and "store" in pending) else store,
+        "response_id": response_id,
+        "store": store,
         "reasoning_item_id_policy": reasoning_item_id_policy,
     }
     record["current_response"] = {"turn": run_state._current_turn, "start": len(prior)}
@@ -1311,6 +1320,8 @@ def extend_held_session_write(
     *,
     run_items: Sequence[RunItem],
     reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    response_id: str | None = None,
+    store: bool | None = None,
     run_items_are_the_session_view: bool = False,
     handoff_input_filtered: bool = False,
     filtered_context_items: Sequence[RunItem] | None = None,
@@ -1333,6 +1344,8 @@ def extend_held_session_write(
         None,
         run_items=run_items,
         reasoning_item_id_policy=reasoning_item_id_policy,
+        response_id=response_id,
+        store=store,
         run_items_are_the_session_view=run_items_are_the_session_view,
         handoff_input_filtered=handoff_input_filtered,
         filtered_context_items=filtered_context_items,

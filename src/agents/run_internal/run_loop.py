@@ -188,6 +188,7 @@ from .session_persistence import (
     reconcile_nested_history_owned_session_item_refs,
     record_compaction_model_response,
     resume_pending_session_write,
+    resumed_response_store,
     resumed_turn_items,
     rewind_session_items,
     save_result_to_session,
@@ -1456,9 +1457,11 @@ async def start_streaming(
                     stream_step_items_to_queue(
                         list(turn_session_items), streamed_result._event_queue
                     )
-                    store_setting = current_agent.model_settings.resolve(
-                        run_config.model_settings
-                    ).store
+                    store_setting = resumed_response_store(
+                        run_state,
+                        turn_result.model_response.response_id,
+                        current_agent.model_settings.resolve(run_config.model_settings).store,
+                    )
 
                     # The non-streaming resume path extends its run-wide lists before finalizing
                     # but skips a resumed turn that loops back to the model, so a guardrail that
@@ -2065,6 +2068,8 @@ async def start_streaming(
                         extend_held_session_write(
                             run_state,
                             run_items=turn_session_items,
+                            response_id=turn_result.model_response.response_id,
+                            store=store_setting,
                             run_items_are_the_session_view=True,
                             handoff_input_filtered=turn_result.handoff_input_filtered,
                             reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),

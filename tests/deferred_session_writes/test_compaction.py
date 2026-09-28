@@ -327,3 +327,174 @@ async def test_the_entry_settle_defers_with_the_recorded_store() -> None:
     await resume_pending_session_write(state, session)  # type: ignore[arg-type]
 
     assert session.compactions == [{"deferred": "resp_parked", "store": True}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("completion", ["continue", "terminal", "blocked"])
+@pytest.mark.parametrize(
+    "parked_store,resumed_store", [(False, True), (True, False), (None, False)]
+)
+async def test_approval_settlement_preserves_response_storage_mode(
+    streamed: bool, completion: str, parked_store: bool | None, resumed_store: bool
+) -> None:
+    from agents import Agent, ModelSettings, RunConfig, Runner, StopAtTools
+    from agents.exceptions import OutputGuardrailTripwireTriggered
+    from agents.memory import OpenAIResponsesCompactionSession
+    from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+
+    from .helpers import always_fine, always_trips, write_thing
+
+    observed: list[tuple[str, str]] = []
+
+    def should_compact(context: dict[str, Any]) -> bool:
+        observed.append((context["response_id"], context["compaction_mode"]))
+        return False
+
+    session = OpenAIResponsesCompactionSession(
+        "test", underlying_session=SimpleListSession(), should_trigger_compaction=should_compact
+    )
+    expected_mode = "input" if parked_store is False else "previous_response_id"
+
+    def next_response(call: Any) -> ModelStep:
+        # The original response must settle before another model request starts.
+        assert observed == [("resp_parked", expected_mode)]
+        return ModelStep(output=[assistant_message("done")], response_id="resp_new")
+
+    agent = Agent(
+        name="storage mode",
+        tools=[write_thing],
+        output_guardrails=[always_fine],
+        tool_use_behavior=StopAtTools(
+            stop_at_tool_names=["finish" if completion == "continue" else "write_thing"]
+        ),
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[function_call("write_thing", {"query": "x"}, call_id="call_PARKED")],
+                    response_id="resp_parked",
+                ),
+                ModelStep.respond(next_response),
+            ]
+        ),
+    )
+    initial_config = RunConfig(model_settings=ModelSettings(store=parked_store))
+    if streamed:
+        first = Runner.run_streamed(agent, "go", session=session, run_config=initial_config)
+        async for _ in first.stream_events():
+            pass
+    else:
+        first = await Runner.run(agent, "go", session=session, run_config=initial_config)
+    state = await _serialized_round_trip(first, agent)
+    state.approve(state.get_interruptions()[0])
+    resumed_config = RunConfig(model_settings=ModelSettings(store=resumed_store))
+    if completion == "blocked":
+        agent.output_guardrails = [always_trips]
+
+    async def resume() -> None:
+        if streamed:
+            resumed = Runner.run_streamed(agent, state, session=session, run_config=resumed_config)
+            async for _ in resumed.stream_events():
+                pass
+        else:
+            await Runner.run(agent, state, session=session, run_config=resumed_config)
+
+    if completion == "blocked":
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await resume()
+    else:
+        await resume()
+    assert observed[0] == ("resp_parked", expected_mode)
+    assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_detached_repark_advances_response_storage_metadata(streamed: bool) -> None:
+    from agents import Agent, ModelSettings, RunConfig, Runner, StopAtTools
+    from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
+
+    from .helpers import always_fine, write_other, write_thing
+
+    session = _CompactionRecordingSession()
+    agent = Agent(
+        name="new response frontier",
+        tools=[write_thing, write_other],
+        output_guardrails=[always_fine],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["finish"]),
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[function_call("write_thing", {"query": "a"}, call_id="call_A")],
+                    response_id="resp_a",
+                ),
+                ModelStep(
+                    output=[function_call("write_other", {"query": "b"}, call_id="call_B")],
+                    response_id="resp_b",
+                ),
+                ModelStep(output=[assistant_message("done")], response_id="resp_c"),
+            ]
+        ),
+    )
+
+    async def run(run_input: Any, attached: bool, store: bool) -> Any:
+        config = RunConfig(model_settings=ModelSettings(store=store))
+        if streamed:
+            result = Runner.run_streamed(
+                agent, run_input, session=session if attached else None, run_config=config
+            )
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(
+            agent, run_input, session=session if attached else None, run_config=config
+        )
+
+    first = await run("go", True, True)
+    state = await _serialized_round_trip(first, agent)
+    state.approve(state.get_interruptions()[0])
+    second = await run(state, False, False)
+    state = await _serialized_round_trip(second, agent)
+    state.approve(state.get_interruptions()[0])
+    await run(state, True, True)
+
+    assert session.compactions == [
+        {"deferred": "resp_b", "store": False},
+        {"response_id": "resp_c", "force": False, "store": True},
+    ]
+    assert set(_call_ids(await session.get_items())) == {"call_A", "call_B"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("parked_store", [None, False, True])
+async def test_partial_approval_repark_keeps_response_storage_setting(
+    streamed: bool, parked_store: bool | None
+) -> None:
+    from agents import ModelSettings, RunConfig, Runner
+
+    session = _CompactionRecordingSession()
+    agent = _make_multi_approval_agent()
+
+    async def run(run_input: Any, store: bool | None) -> Any:
+        config = RunConfig(model_settings=ModelSettings(store=store))
+        if streamed:
+            result = Runner.run_streamed(agent, run_input, session=session, run_config=config)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, run_input, session=session, run_config=config)
+
+    first = await run("go", parked_store)
+    state = await _serialized_round_trip(first, agent)
+    state.approve(state.get_interruptions()[0])
+    second = await run(state, not parked_store)
+    assert len(second.interruptions) == 1
+    assert session.compactions == []
+    state = await _serialized_round_trip(second, agent)
+    state.approve(state.get_interruptions()[0])
+    await run(state, not parked_store)
+    assert session.compactions[0] == {
+        "deferred": first.raw_responses[-1].response_id,
+        "store": parked_store,
+    }
