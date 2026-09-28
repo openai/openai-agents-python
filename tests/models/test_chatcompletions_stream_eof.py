@@ -11,6 +11,7 @@ from agents import Agent, ModelSettings, RunConfig, Runner
 from agents.decorators import tool
 from agents.exceptions import ModelBehaviorError
 from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from tests.testing_processor import fetch_ordered_spans
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.allow_call_model_methods]
 
@@ -90,7 +91,9 @@ async def test_official_stream_rejects_eof_before_terminal_choice(
                 "gpt-4o-mini", client, buffer_streamed_tool_calls=buffered
             ),
         )
-        result = Runner.run_streamed(agent, "Answer", run_config=RunConfig(tracing_disabled=True))
+        result = Runner.run_streamed(
+            agent, "Answer", run_config=RunConfig(trace_include_sensitive_data=False)
+        )
         raw_types = []
         with pytest.raises(ModelBehaviorError, match="before receiving a finish_reason"):
             async for event in result.stream_events():
@@ -102,6 +105,10 @@ async def test_official_stream_rejects_eof_before_terminal_choice(
     assert result.final_output is None
     assert calls == []
     assert http_response.is_closed
+    generation = next(span for span in fetch_ordered_spans() if span.span_data.type == "generation")
+    assert generation.span_data.usage is not None
+    assert generation.span_data.usage["requests"] == 1
+    assert generation.span_data.usage["total_tokens"] == 0
 
 
 @pytest.mark.parametrize("buffered", [False, True])

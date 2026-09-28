@@ -1193,6 +1193,8 @@ class ChatCmplStreamHandler:
         if require_finish_reason and not saw_finish_reason:
             if usage is not None:
                 response.usage = cls._build_response_usage(usage)
+            else:
+                _mark_request_completed_without_usage(response)
             if preserve_raw_usage and raw_usage is not None:
                 _attach_raw_usage_snapshot(response, raw_usage)
             raise ModelBehaviorError(
