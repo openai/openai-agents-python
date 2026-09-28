@@ -768,6 +768,7 @@ class TestOpenAIResponsesCompactionSession:
             "openai/gpt-4.1",
             "openai/openai/gpt-5.6-terra",
             "openai/o3",
+            "openai/ft:gpt-4.1:org:proj:id",
         ],
     )
     async def test_run_compaction_input_mode_without_response_id(self, model: str) -> None:
