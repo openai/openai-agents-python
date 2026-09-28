@@ -1881,6 +1881,10 @@ class DockerSandboxClient(BaseSandboxClient[DockerSandboxClientOptions]):
         if labels:
             create_kwargs["labels"] = labels
         if manifest is not None:
+            if self._removal_service is not None:
+                # The trusted daemon creates a missing workspace before bind_new's
+                # strict canonicalization, including for replacement containers.
+                create_kwargs["working_dir"] = manifest.root
             docker_mounts = _build_docker_volume_mounts(manifest, session_id=session_id)
             if docker_mounts:
                 create_kwargs["mounts"] = docker_mounts
