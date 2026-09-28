@@ -51,6 +51,7 @@ def test_local_temporal_runner_selection(
 
 
 @pytest.mark.parametrize("mode", ["auto", "AUTO", "manual"])
+@pytest.mark.skipif(sys.platform == "win32", reason="The example requires the Unix-only backend")
 @pytest.mark.asyncio
 async def test_local_temporal_entrypoint_refuses_auto_mode(
     monkeypatch: pytest.MonkeyPatch, mode: str
