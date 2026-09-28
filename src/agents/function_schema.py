@@ -316,15 +316,6 @@ def _extract_description_from_metadata(metadata: tuple[Any, ...]) -> str | None:
     return None
 
 
-def _extract_field_info_from_metadata(metadata: tuple[Any, ...]) -> FieldInfo | None:
-    """Returns the first FieldInfo in Annotated metadata, or None."""
-
-    for item in metadata:
-        if isinstance(item, FieldInfo):
-            return item
-    return None
-
-
 def function_schema(
     func: Callable[..., Any],
     docstring_style: DocstringStyle | None = None,
@@ -434,12 +425,18 @@ def function_schema(
         # If a docstring param description exists, use it
         field_description = param_descs.get(name, None)
 
+        # Let Pydantic combine all Field entries and retain other Annotated metadata,
+        # including constrained type aliases and validators, in its original order.
+        field_info_from_annotated = (
+            FieldInfo.from_annotation(type_hints_with_extras[name])
+            if param_metadata.get(name)
+            else None
+        )
         value_ann = ann
         if param.kind in (param.VAR_POSITIONAL, param.VAR_KEYWORD):
-            field_info = _extract_field_info_from_metadata(param_metadata.get(name, ()))
-            if field_info is not None and field_info.metadata:
+            if field_info_from_annotated is not None and field_info_from_annotated.metadata:
                 # Constraints apply to each value, not the collected container or its defaults.
-                value_ann = Annotated[(ann, *cast(Any, field_info).metadata)]
+                value_ann = Annotated[(ann, *cast(Any, field_info_from_annotated).metadata)]
 
         # Handle different parameter kinds
         if param.kind == param.VAR_POSITIONAL:
@@ -493,9 +490,6 @@ def function_schema(
 
         else:
             # Normal parameter
-            metadata = param_metadata.get(name, ())
-            field_info_from_annotated = _extract_field_info_from_metadata(metadata)
-
             if field_info_from_annotated is not None:
                 merged = FieldInfo.merge_field_infos(
                     field_info_from_annotated,
@@ -504,7 +498,17 @@ def function_schema(
                 if default is not inspect._empty and not isinstance(default, FieldInfo):
                     merged = FieldInfo.merge_field_infos(merged, default=default)
                 elif isinstance(default, FieldInfo):
-                    merged = FieldInfo.merge_field_infos(merged, default)
+                    merged = FieldInfo.from_annotated_attribute(
+                        cast(Any, Annotated[ann, merged]), default
+                    )
+                    if not any(
+                        isinstance(item, FieldInfo) for item in param_metadata.get(name, ())
+                    ):
+                        # Without an Annotated Field, descriptions retain the same precedence
+                        # as a plain annotation with a Field default below.
+                        merged = FieldInfo.merge_field_infos(
+                            merged, description=field_description or default.description
+                        )
                 fields[name] = (ann, merged)
             elif default is inspect._empty:
                 # Required field

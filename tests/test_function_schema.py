@@ -3,13 +3,15 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 
 import pytest
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AfterValidator, BaseModel, Field, PositiveInt, TypeAdapter, ValidationError
 from pydantic.json_schema import PydanticJsonSchemaWarning
 from typing_extensions import TypedDict
 
-from agents import RunContextWrapper, function_tool
+from agents import Agent, RunConfig, RunContextWrapper, Runner, function_tool
+from agents.decorators import tool
 from agents.exceptions import ModelBehaviorError, UserError
 from agents.function_schema import function_schema, generate_func_documentation
+from agents.testing import ScriptedModel, function_call
 
 
 def no_args_function():
@@ -1432,3 +1434,157 @@ def test_to_call_args_allows_kwargs_key_matching_var_positional_param() -> None:
     args, kwargs_dict = fs.to_call_args(parsed)
 
     assert _kwargs_var_positional_name(*args, **kwargs_dict) == ((1,), {"rest": 5})
+
+
+@pytest.mark.parametrize(
+    "annotation, invalid_value, bounds",
+    [
+        (PositiveInt, -1, {"exclusiveMinimum": 0}),
+        (Annotated[int, Field(ge=0), Field(le=10)], 20, {"minimum": 0, "maximum": 10}),
+    ],
+)
+@pytest.mark.parametrize("kind", ["ordinary", "positional", "keyword"])
+@pytest.mark.asyncio
+async def test_annotated_constraints_reject_arguments_before_tool_execution(
+    annotation, invalid_value, bounds, kind
+):
+    invocations = []
+
+    if kind == "ordinary":
+
+        def update_ordinary(ctx: Annotated[RunContextWrapper[None], "Context"], quantity):
+            invocations.append(quantity)
+            return str(quantity)
+
+        update_inventory = update_ordinary
+        valid_payload = {"quantity": 5}
+        invalid_payload = {"quantity": invalid_value}
+    elif kind == "positional":
+
+        def update_positional(*quantity):
+            invocations.extend(quantity)
+            return str(quantity[0])
+
+        update_inventory = update_positional
+        valid_payload = {"quantity": [5]}
+        invalid_payload = {"quantity": [invalid_value]}
+    else:
+
+        def update_keyword(**quantity):
+            invocations.extend(quantity.values())
+            return str(quantity["value"])
+
+        update_inventory = update_keyword
+        valid_payload = {"quantity": {"value": 5}}
+        invalid_payload = {"quantity": {"value": invalid_value}}
+
+    update_inventory.__annotations__["quantity"] = annotation
+    decorated = tool(
+        update_inventory,
+        name_override="update_inventory",
+        strict_mode=kind != "keyword",
+        failure_error_function=None,
+    )
+    value_schema = decorated.params_json_schema["properties"]["quantity"]
+    if kind != "ordinary":
+        value_schema = value_schema["items" if kind == "positional" else "additionalProperties"]
+    assert value_schema["type"] == "integer"
+    for key, value in bounds.items():
+        assert value_schema[key] == value
+
+    with pytest.raises(ValidationError):
+        TypeAdapter(annotation).validate_python(invalid_value)
+
+    async def run(payload):
+        agent = Agent(
+            name="inventory",
+            tools=[decorated],
+            model=ScriptedModel([[function_call("update_inventory", payload, call_id="call-1")]]),
+            tool_use_behavior="stop_on_first_tool",
+        )
+        return await Runner.run(
+            agent, "Update inventory", run_config=RunConfig(tracing_disabled=True)
+        )
+
+    with pytest.raises(ModelBehaviorError, match="Invalid JSON input for tool"):
+        await run(invalid_payload)
+    assert invocations == []
+
+    result = await run(valid_payload)
+    assert result.final_output == "5"
+    assert invocations == [5]
+
+
+@pytest.mark.parametrize("default", [0, Field(default=0)])
+def test_annotated_metadata_preserves_validator_order(default):
+    def add_one(value: int) -> int:
+        return value + 1
+
+    def double(value: int) -> int:
+        return value * 2
+
+    def func(
+        value: Annotated[
+            int, AfterValidator(add_one), Field(ge=0), AfterValidator(double)
+        ] = default,
+    ):
+        return value
+
+    fs = function_schema(func)
+    parsed = fs.params_pydantic_model.model_validate({"value": 2})
+    args, kwargs = fs.to_call_args(parsed)
+    assert func(*args, **kwargs) == 6
+
+
+def test_annotated_fields_preserve_description_and_default_precedence():
+    def func(
+        quantity: Annotated[
+            int,
+            Field(default=1, ge=0, description="First field"),
+            Field(le=10, description="Second field"),
+            "Annotated description",
+        ] = 5,
+    ):
+        """Update inventory.
+
+        Args:
+            quantity: Docstring description.
+        """
+        return quantity
+
+    for use_docstring_info, expected_description in (
+        (True, "Docstring description."),
+        (False, "Annotated description"),
+    ):
+        fs = function_schema(func, use_docstring_info=use_docstring_info)
+        quantity = fs.params_json_schema["properties"]["quantity"]
+        assert quantity["minimum"] == 0
+        assert quantity["maximum"] == 10
+        assert quantity["description"] == expected_description
+        assert quantity["default"] == 5
+        assert fs.params_pydantic_model().quantity == 5
+
+
+def test_annotated_description_overrides_field_default_description():
+    def func(
+        quantity: Annotated[int, "Annotated description"] = Field(
+            default=5, ge=0, description="Default description"
+        ),
+    ):
+        """Update inventory.
+
+        Args:
+            quantity: Docstring description.
+        """
+        return quantity
+
+    for use_docstring_info, expected_description in (
+        (True, "Docstring description."),
+        (False, "Annotated description"),
+    ):
+        fs = function_schema(func, use_docstring_info=use_docstring_info)
+        quantity = fs.params_json_schema["properties"]["quantity"]
+        assert quantity["description"] == expected_description
+        assert quantity["minimum"] == 0
+        assert quantity["default"] == 5
+        assert fs.params_pydantic_model().quantity == 5
