@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import sys
 from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
@@ -194,14 +195,18 @@ def test_workflow_separates_candidate_execution_and_secrets() -> None:
     assert jobs["readiness"]["if"].startswith("always()")
 
 
+@pytest.mark.parametrize("scenario", ["valid", "unexpected-file", "renamed", "stale-controller"])
 def test_discovery_uses_complete_release_manifest(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, context: dict[str, Any]
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, context: dict[str, Any], scenario: str
 ) -> None:
     monkeypatch.chdir(tmp_path)
     event = tmp_path / "event.json"
     event.write_text("{}")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
     monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
+    monkeypatch.setenv(
+        "GITHUB_SHA", "d" * 40 if scenario == "stale-controller" else context["source"]
+    )
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
     pr = {
         "number": 1,
@@ -215,6 +220,16 @@ def test_discovery_uses_complete_release_manifest(
         },
     }
     changed = [{"filename": "pyproject.toml", "status": "modified"}]
+    if scenario == "unexpected-file":
+        changed.append({"filename": "src/agents/run.py", "status": "modified"})
+    elif scenario == "renamed":
+        changed.append(
+            {
+                "filename": "CHANGELOG.md",
+                "previous_filename": ".github/CODEOWNERS",
+                "status": "renamed",
+            }
+        )
 
     def fake_api(path: str) -> Any:
         if path.startswith("pulls?"):
@@ -235,11 +250,19 @@ def test_discovery_uses_complete_release_manifest(
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
     monkeypatch.setattr(automation, "content", Mock(return_value='{".": "0.23.0"}'))
-    automation.discover()
-    assert json.loads((tmp_path / "candidate.json").read_text()) == context
-    changed.append({"filename": "src/agents/run.py", "status": "modified"})
-    with pytest.raises(ValueError, match="outside the release manifest"):
+    if scenario == "valid":
         automation.discover()
+        assert json.loads((tmp_path / "candidate.json").read_text()) == context
+    else:
+        message = (
+            "Candidate or main changed"
+            if scenario == "stale-controller"
+            else "outside the release manifest"
+        )
+        with pytest.raises(ValueError, match=message):
+            automation.discover()
+        assert not (tmp_path / "candidate.json").exists()
+        assert not (tmp_path / "output").exists()
 
 
 def test_unrelated_test_completion_does_not_start_release(
@@ -333,3 +356,59 @@ def test_readiness_gate_passes_ordinary_pr_without_ai(
     monkeypatch.setattr(automation, "repo_api", request)
     automation.gate()
     request.assert_not_called()
+
+
+def test_candidate_artifacts_are_attempt_scoped() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    uploads = []
+    downloads = []
+    for job in workflow["jobs"].values():
+        for step in job["steps"]:
+            action = step.get("uses", "").split("@")[0]
+            if action == "actions/upload-artifact":
+                uploads.append(step["with"]["name"])
+            elif action == "actions/download-artifact":
+                downloads.append(step["with"]["name"])
+    assert len(uploads) == len(set(uploads)) == 4
+    assert set(downloads) == set(uploads)
+    assert all(name.endswith("-${{ github.run_attempt }}") for name in uploads)
+    first = {name.replace("${{ github.run_attempt }}", "1") for name in uploads}
+    second = {name.replace("${{ github.run_attempt }}", "2") for name in uploads}
+    assert first.isdisjoint(second)
+
+
+def test_publishing_notes_preserves_maintainer_content_on_retry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"release": {"id": 7, "tag_name": "v0.23.0"}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_REPOSITORY", automation.REPO)
+    monkeypatch.setenv("RELEASE_SHA", "a" * 40)
+    monkeypatch.setattr(sys, "argv", ["release_automation.py", "publish-notes"])
+    reviewed = Mock(return_value="First assessment")
+    monkeypatch.setattr(automation, "published_review", reviewed)
+    release = {"id": 7, "body": "Maintainer introduction"}
+
+    def fake_api(path: str, data: dict[str, Any] | None = None, *, method: str = "GET") -> Any:
+        assert path == "releases/7"
+        if method == "PATCH":
+            assert data is not None
+            release.update(data)
+        return release
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    automation.main()
+    release["body"] += "\n\nMaintainer correction after the generated notes"
+    reviewed.return_value = "Updated assessment"
+    automation.main()
+    expected = (
+        "Maintainer introduction\n\n<!-- agents-release-review:start -->\n"
+        "Updated assessment\n<!-- agents-release-review:end -->\n\n"
+        "Maintainer correction after the generated notes"
+    )
+    assert release["body"] == expected
+    automation.main()
+    assert release["body"] == expected

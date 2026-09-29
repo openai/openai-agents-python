@@ -36,7 +36,7 @@ jobs:
       - if: steps.candidate.outputs.candidate == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: candidate-input
+          name: candidate-input-${{ github.run_attempt }}
           path: candidate.json
           retention-days: 1
 
@@ -68,7 +68,7 @@ jobs:
           make check-prospective-released-api-contract
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: generated-contract
+          name: generated-contract-${{ github.run_attempt }}
           path: tests/fixtures/released_api_contract.json
           retention-days: 1
 
@@ -87,11 +87,11 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: candidate-input
+          name: candidate-input-${{ github.run_attempt }}
           path: input
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: generated-contract
+          name: generated-contract-${{ github.run_attempt }}
           path: generated
       - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
         id: app
@@ -110,7 +110,7 @@ jobs:
           python .github/scripts/release_automation.py write-contract --file generated/released_api_contract.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: candidate-final
+          name: candidate-final-${{ github.run_attempt }}
           path: candidate.json
           retention-days: 1
 
@@ -130,14 +130,14 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: candidate-final
+          name: candidate-final-${{ github.run_attempt }}
       - id: collect
         env:
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/release_automation.py collect
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: release-evidence
+          name: release-evidence-${{ github.run_attempt }}
           path: documentation-prs.json
           retention-days: 1
 
@@ -164,10 +164,10 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: candidate-final
+          name: candidate-final-${{ github.run_attempt }}
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: release-evidence
+          name: release-evidence-${{ github.run_attempt }}
       - name: Require review credentials
         env:
           HAS_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
@@ -201,7 +201,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          name: candidate-final
+          name: candidate-final-${{ github.run_attempt }}
       - name: Record the exact candidate verdict
         env:
           GH_TOKEN: ${{ github.token }}

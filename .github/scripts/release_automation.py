@@ -122,7 +122,7 @@ def discover() -> None:
     context = {
         "pr": pr["number"],
         "head": sha(pr["head"]["sha"]),
-        "source": sha(repo_api("git/ref/heads/main")["object"]["sha"]),
+        "source": sha(os.environ["GITHUB_SHA"]),
     }
     current(context)
     # A candidate must contain current main, with only release-owned files changed.
@@ -131,7 +131,7 @@ def discover() -> None:
         raise ValueError("Release candidate is behind main; rerun Release Please")
     changed = comparison["files"]
     if len(changed) >= 300 or any(
-        f["filename"] not in FILES or f["status"] == "removed" for f in changed
+        f["filename"] not in FILES or f["status"] in {"removed", "renamed"} for f in changed
     ):
         raise ValueError("Candidate changes files outside the release manifest")
     manifest = json.loads(content(".release-please-manifest.json", context["head"]))
@@ -386,8 +386,22 @@ def main() -> None:
         notes = published_review(event["release"]["tag_name"], os.environ["RELEASE_SHA"])
         if args.command == "publish-notes":
             release = repo_api(f"releases/{int(event['release']['id'])}")
-            marker = "\n\n<!-- agents-release-review -->\n"
-            body = (release.get("body") or "").split(marker)[0] + marker + notes
+            start = "<!-- agents-release-review:start -->"
+            end = "<!-- agents-release-review:end -->"
+            if start in notes or end in notes:
+                raise ValueError("Review notes contain reserved section markers")
+            body = release.get("body") or ""
+            section = start + "\n" + notes + "\n" + end
+            if start not in body and end not in body:
+                body += "\n\n" + section
+            else:
+                if body.count(start) != 1 or body.count(end) != 1:
+                    raise ValueError("Ambiguous release-notes section; preserve manual content")
+                before, _, remainder = body.partition(start)
+                _, closing, after = remainder.partition(end)
+                if not closing:
+                    raise ValueError("Unclosed release-notes section; preserve manual content")
+                body = before + section + after
             repo_api(f"releases/{int(release['id'])}", {"body": body}, method="PATCH")
     else:
         context = json.loads(args.context.read_text())
