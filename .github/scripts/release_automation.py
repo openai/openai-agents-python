@@ -302,7 +302,7 @@ def human_approved(pr_number: int, head: str, check_id: int) -> bool:
             and f"Approve release assessment {check_id}" in (review["body"] or "").splitlines()
         ):
             permission = repo_api(f"collaborators/{login}/permission")
-            if permission["user"]["permissions"]["push"]:
+            if permission["permission"] in {"write", "admin"}:
                 return True
     return False
 

@@ -444,6 +444,12 @@ def test_malformed_model_output_finishes_check(
     "scenario",
     [
         "approved",
+        "admin",
+        "maintain",
+        "custom-write",
+        "triage",
+        "custom-read",
+        "none",
         "missing",
         "generic",
         "previous-assessment",
@@ -516,11 +522,24 @@ def test_readiness_requires_explicit_current_human_approval(
         if path.startswith("pulls/1/reviews?"):
             return reviews
         if path.endswith("/permission"):
-            return {"user": {"permissions": {"push": scenario != "read-only"}}}
+            permission, role = {
+                "admin": ("admin", "admin"),
+                "maintain": ("write", "maintain"),
+                "custom-write": ("write", "release-manager"),
+                "read-only": ("read", "read"),
+                "triage": ("read", "triage"),
+                "custom-read": ("read", "release-observer"),
+                "none": ("none", "none"),
+            }.get(scenario, ("write", "write"))
+            return {
+                "permission": permission,
+                "role_name": role,
+                "user": {"login": "maintainer", "type": "User"},
+            }
         raise AssertionError(path)
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
-    if scenario == "approved":
+    if scenario in {"approved", "admin", "maintain", "custom-write"}:
         automation.gate()
     else:
         with pytest.raises(ValueError, match="human approval is missing"):
@@ -607,7 +626,11 @@ def test_publisher_rechecks_revoked_approval_after_environment_wait(
         if path.startswith("pulls/1/reviews?"):
             return [review]
         if path.endswith("/permission"):
-            return {"user": {"permissions": {"push": True}}}
+            return {
+                "permission": "write",
+                "role_name": "maintain",
+                "user": {"login": "maintainer", "type": "User"},
+            }
         raise AssertionError(path)
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
