@@ -8510,7 +8510,36 @@
 <span class="normal"><a href="#__codelineno-0-2764">2764</a></span>
 <span class="normal"><a href="#__codelineno-0-2765">2765</a></span>
 <span class="normal"><a href="#__codelineno-0-2766">2766</a></span>
-<span class="normal"><a href="#__codelineno-0-2767">2767</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-1145"><a id="__codelineno-0-1145" name="__codelineno-0-1145"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">resolve_interrupted_turn</span><span class="p">(</span>
+<span class="normal"><a href="#__codelineno-0-2767">2767</a></span>
+<span class="normal"><a href="#__codelineno-0-2768">2768</a></span>
+<span class="normal"><a href="#__codelineno-0-2769">2769</a></span>
+<span class="normal"><a href="#__codelineno-0-2770">2770</a></span>
+<span class="normal"><a href="#__codelineno-0-2771">2771</a></span>
+<span class="normal"><a href="#__codelineno-0-2772">2772</a></span>
+<span class="normal"><a href="#__codelineno-0-2773">2773</a></span>
+<span class="normal"><a href="#__codelineno-0-2774">2774</a></span>
+<span class="normal"><a href="#__codelineno-0-2775">2775</a></span>
+<span class="normal"><a href="#__codelineno-0-2776">2776</a></span>
+<span class="normal"><a href="#__codelineno-0-2777">2777</a></span>
+<span class="normal"><a href="#__codelineno-0-2778">2778</a></span>
+<span class="normal"><a href="#__codelineno-0-2779">2779</a></span>
+<span class="normal"><a href="#__codelineno-0-2780">2780</a></span>
+<span class="normal"><a href="#__codelineno-0-2781">2781</a></span>
+<span class="normal"><a href="#__codelineno-0-2782">2782</a></span>
+<span class="normal"><a href="#__codelineno-0-2783">2783</a></span>
+<span class="normal"><a href="#__codelineno-0-2784">2784</a></span>
+<span class="normal"><a href="#__codelineno-0-2785">2785</a></span>
+<span class="normal"><a href="#__codelineno-0-2786">2786</a></span>
+<span class="normal"><a href="#__codelineno-0-2787">2787</a></span>
+<span class="normal"><a href="#__codelineno-0-2788">2788</a></span>
+<span class="normal"><a href="#__codelineno-0-2789">2789</a></span>
+<span class="normal"><a href="#__codelineno-0-2790">2790</a></span>
+<span class="normal"><a href="#__codelineno-0-2791">2791</a></span>
+<span class="normal"><a href="#__codelineno-0-2792">2792</a></span>
+<span class="normal"><a href="#__codelineno-0-2793">2793</a></span>
+<span class="normal"><a href="#__codelineno-0-2794">2794</a></span>
+<span class="normal"><a href="#__codelineno-0-2795">2795</a></span>
+<span class="normal"><a href="#__codelineno-0-2796">2796</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-1145"><a id="__codelineno-0-1145" name="__codelineno-0-1145"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">resolve_interrupted_turn</span><span class="p">(</span>
 </span><span id="__span-0-1146"><a id="__codelineno-0-1146" name="__codelineno-0-1146"></a>    <span class="o">*</span><span class="p">,</span>
 </span><span id="__span-0-1147"><a id="__codelineno-0-1147" name="__codelineno-0-1147"></a>    <span class="n">bindings</span><span class="p">:</span> <span class="n">AgentBindings</span><span class="p">[</span><span class="n">TContext</span><span class="p">],</span>
 </span><span id="__span-0-1148"><a id="__codelineno-0-1148" name="__codelineno-0-1148"></a>    <span class="n">original_input</span><span class="p">:</span> <span class="nb">str</span> <span class="o">|</span> <span class="nb">list</span><span class="p">[</span><span class="n">TResponseInputItem</span><span class="p">],</span>
@@ -10107,32 +10136,61 @@
 </span><span id="__span-0-2739"><a id="__codelineno-0-2739" name="__codelineno-0-2739"></a>            <span class="p">)</span>
 </span><span id="__span-0-2740"><a id="__codelineno-0-2740" name="__codelineno-0-2740"></a>        <span class="p">)</span>
 </span><span id="__span-0-2741"><a id="__codelineno-0-2741" name="__codelineno-0-2741"></a>
-</span><span id="__span-0-2742"><a id="__codelineno-0-2742" name="__codelineno-0-2742"></a>    <span class="n">tool_final_output</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_maybe_finalize_from_tool_results</span><span class="p">(</span>
-</span><span id="__span-0-2743"><a id="__codelineno-0-2743" name="__codelineno-0-2743"></a>        <span class="n">public_agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2744"><a id="__codelineno-0-2744" name="__codelineno-0-2744"></a>        <span class="n">original_input</span><span class="o">=</span><span class="n">original_input</span><span class="p">,</span>
-</span><span id="__span-0-2745"><a id="__codelineno-0-2745" name="__codelineno-0-2745"></a>        <span class="n">new_response</span><span class="o">=</span><span class="n">new_response</span><span class="p">,</span>
-</span><span id="__span-0-2746"><a id="__codelineno-0-2746" name="__codelineno-0-2746"></a>        <span class="n">pre_step_items</span><span class="o">=</span><span class="n">pre_step_items</span><span class="p">,</span>
-</span><span id="__span-0-2747"><a id="__codelineno-0-2747" name="__codelineno-0-2747"></a>        <span class="n">new_step_items</span><span class="o">=</span><span class="n">new_items</span><span class="p">,</span>
-</span><span id="__span-0-2748"><a id="__codelineno-0-2748" name="__codelineno-0-2748"></a>        <span class="n">function_results</span><span class="o">=</span><span class="n">function_results</span><span class="p">,</span>
-</span><span id="__span-0-2749"><a id="__codelineno-0-2749" name="__codelineno-0-2749"></a>        <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2750"><a id="__codelineno-0-2750" name="__codelineno-0-2750"></a>        <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2751"><a id="__codelineno-0-2751" name="__codelineno-0-2751"></a>        <span class="n">tool_input_guardrail_results</span><span class="o">=</span><span class="n">tool_input_guardrail_results</span><span class="p">,</span>
-</span><span id="__span-0-2752"><a id="__codelineno-0-2752" name="__codelineno-0-2752"></a>        <span class="n">tool_output_guardrail_results</span><span class="o">=</span><span class="n">tool_output_guardrail_results</span><span class="p">,</span>
-</span><span id="__span-0-2753"><a id="__codelineno-0-2753" name="__codelineno-0-2753"></a>    <span class="p">)</span>
-</span><span id="__span-0-2754"><a id="__codelineno-0-2754" name="__codelineno-0-2754"></a>    <span class="k">if</span> <span class="n">tool_final_output</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2755"><a id="__codelineno-0-2755" name="__codelineno-0-2755"></a>        <span class="k">return</span> <span class="n">_commit_missing_state</span><span class="p">(</span><span class="n">tool_final_output</span><span class="p">)</span>
-</span><span id="__span-0-2756"><a id="__codelineno-0-2756" name="__codelineno-0-2756"></a>
-</span><span id="__span-0-2757"><a id="__codelineno-0-2757" name="__codelineno-0-2757"></a>    <span class="k">return</span> <span class="n">_commit_missing_state</span><span class="p">(</span>
-</span><span id="__span-0-2758"><a id="__codelineno-0-2758" name="__codelineno-0-2758"></a>        <span class="n">SingleStepResult</span><span class="p">(</span>
-</span><span id="__span-0-2759"><a id="__codelineno-0-2759" name="__codelineno-0-2759"></a>            <span class="n">original_input</span><span class="o">=</span><span class="n">original_input</span><span class="p">,</span>
-</span><span id="__span-0-2760"><a id="__codelineno-0-2760" name="__codelineno-0-2760"></a>            <span class="n">model_response</span><span class="o">=</span><span class="n">new_response</span><span class="p">,</span>
-</span><span id="__span-0-2761"><a id="__codelineno-0-2761" name="__codelineno-0-2761"></a>            <span class="n">pre_step_items</span><span class="o">=</span><span class="n">pre_step_items</span><span class="p">,</span>
-</span><span id="__span-0-2762"><a id="__codelineno-0-2762" name="__codelineno-0-2762"></a>            <span class="n">new_step_items</span><span class="o">=</span><span class="n">new_items</span><span class="p">,</span>
-</span><span id="__span-0-2763"><a id="__codelineno-0-2763" name="__codelineno-0-2763"></a>            <span class="n">next_step</span><span class="o">=</span><span class="n">NextStepRunAgain</span><span class="p">(),</span>
-</span><span id="__span-0-2764"><a id="__codelineno-0-2764" name="__codelineno-0-2764"></a>            <span class="n">tool_input_guardrail_results</span><span class="o">=</span><span class="n">tool_input_guardrail_results</span><span class="p">,</span>
-</span><span id="__span-0-2765"><a id="__codelineno-0-2765" name="__codelineno-0-2765"></a>            <span class="n">tool_output_guardrail_results</span><span class="o">=</span><span class="n">tool_output_guardrail_results</span><span class="p">,</span>
-</span><span id="__span-0-2766"><a id="__codelineno-0-2766" name="__codelineno-0-2766"></a>        <span class="p">)</span>
-</span><span id="__span-0-2767"><a id="__codelineno-0-2767" name="__codelineno-0-2767"></a>    <span class="p">)</span>
+</span><span id="__span-0-2742"><a id="__codelineno-0-2742" name="__codelineno-0-2742"></a>    <span class="c1"># Completed siblings are deliberately skipped during resumed execution, but their</span>
+</span><span id="__span-0-2743"><a id="__codelineno-0-2743" name="__codelineno-0-2743"></a>    <span class="c1"># results still participate in the interrupted turn&#39;s final-output decision.</span>
+</span><span id="__span-0-2744"><a id="__codelineno-0-2744" name="__codelineno-0-2744"></a>    <span class="n">results_by_call_id</span> <span class="o">=</span> <span class="p">{</span>
+</span><span id="__span-0-2745"><a id="__codelineno-0-2745" name="__codelineno-0-2745"></a>        <span class="n">extract_tool_call_id</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run_item</span><span class="o">.</span><span class="n">raw_item</span><span class="p">):</span> <span class="n">result</span>
+</span><span id="__span-0-2746"><a id="__codelineno-0-2746" name="__codelineno-0-2746"></a>        <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">function_results</span>
+</span><span id="__span-0-2747"><a id="__codelineno-0-2747" name="__codelineno-0-2747"></a>        <span class="k">if</span> <span class="n">result</span><span class="o">.</span><span class="n">run_item</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-0-2748"><a id="__codelineno-0-2748" name="__codelineno-0-2748"></a>    <span class="p">}</span>
+</span><span id="__span-0-2749"><a id="__codelineno-0-2749" name="__codelineno-0-2749"></a>    <span class="n">completed_outputs</span> <span class="o">=</span> <span class="p">{</span>
+</span><span id="__span-0-2750"><a id="__codelineno-0-2750" name="__codelineno-0-2750"></a>        <span class="n">item</span><span class="o">.</span><span class="n">call_id</span><span class="p">:</span> <span class="n">item</span>
+</span><span id="__span-0-2751"><a id="__codelineno-0-2751" name="__codelineno-0-2751"></a>        <span class="k">for</span> <span class="n">item</span> <span class="ow">in</span> <span class="p">[</span><span class="o">*</span><span class="n">original_pre_step_items</span><span class="p">,</span> <span class="o">*</span><span class="n">new_items</span><span class="p">]</span>
+</span><span id="__span-0-2752"><a id="__codelineno-0-2752" name="__codelineno-0-2752"></a>        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">item</span><span class="p">,</span> <span class="n">ToolCallOutputItem</span><span class="p">)</span>
+</span><span id="__span-0-2753"><a id="__codelineno-0-2753" name="__codelineno-0-2753"></a>        <span class="ow">and</span> <span class="n">get_mapping_or_attr</span><span class="p">(</span><span class="n">item</span><span class="o">.</span><span class="n">raw_item</span><span class="p">,</span> <span class="s2">&quot;type&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="s2">&quot;function_call_output&quot;</span>
+</span><span id="__span-0-2754"><a id="__codelineno-0-2754" name="__codelineno-0-2754"></a>    <span class="p">}</span>
+</span><span id="__span-0-2755"><a id="__codelineno-0-2755" name="__codelineno-0-2755"></a>    <span class="n">turn_function_results</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2756"><a id="__codelineno-0-2756" name="__codelineno-0-2756"></a>    <span class="k">for</span> <span class="n">run</span> <span class="ow">in</span> <span class="nb">sorted</span><span class="p">(</span>
+</span><span id="__span-0-2757"><a id="__codelineno-0-2757" name="__codelineno-0-2757"></a>        <span class="n">selectable_function_runs</span><span class="p">,</span>
+</span><span id="__span-0-2758"><a id="__codelineno-0-2758" name="__codelineno-0-2758"></a>        <span class="n">key</span><span class="o">=</span><span class="k">lambda</span> <span class="n">run</span><span class="p">:</span> <span class="n">call_positions</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">run</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">call_id</span><span class="p">,</span> <span class="nb">len</span><span class="p">(</span><span class="n">call_positions</span><span class="p">)),</span>
+</span><span id="__span-0-2759"><a id="__codelineno-0-2759" name="__codelineno-0-2759"></a>    <span class="p">):</span>
+</span><span id="__span-0-2760"><a id="__codelineno-0-2760" name="__codelineno-0-2760"></a>        <span class="n">call_id</span> <span class="o">=</span> <span class="n">run</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">call_id</span>
+</span><span id="__span-0-2761"><a id="__codelineno-0-2761" name="__codelineno-0-2761"></a>        <span class="n">result</span> <span class="o">=</span> <span class="n">results_by_call_id</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">call_id</span><span class="p">)</span>
+</span><span id="__span-0-2762"><a id="__codelineno-0-2762" name="__codelineno-0-2762"></a>        <span class="k">if</span> <span class="n">result</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2763"><a id="__codelineno-0-2763" name="__codelineno-0-2763"></a>            <span class="n">turn_function_results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">result</span><span class="p">)</span>
+</span><span id="__span-0-2764"><a id="__codelineno-0-2764" name="__codelineno-0-2764"></a>        <span class="k">elif</span> <span class="p">(</span><span class="n">output_item</span> <span class="o">:=</span> <span class="n">completed_outputs</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">call_id</span><span class="p">))</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2765"><a id="__codelineno-0-2765" name="__codelineno-0-2765"></a>            <span class="n">turn_function_results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2766"><a id="__codelineno-0-2766" name="__codelineno-0-2766"></a>                <span class="n">FunctionToolResult</span><span class="p">(</span>
+</span><span id="__span-0-2767"><a id="__codelineno-0-2767" name="__codelineno-0-2767"></a>                    <span class="n">tool</span><span class="o">=</span><span class="n">run</span><span class="o">.</span><span class="n">function_tool</span><span class="p">,</span> <span class="n">output</span><span class="o">=</span><span class="n">output_item</span><span class="o">.</span><span class="n">output</span><span class="p">,</span> <span class="n">run_item</span><span class="o">=</span><span class="n">output_item</span>
+</span><span id="__span-0-2768"><a id="__codelineno-0-2768" name="__codelineno-0-2768"></a>                <span class="p">)</span>
+</span><span id="__span-0-2769"><a id="__codelineno-0-2769" name="__codelineno-0-2769"></a>            <span class="p">)</span>
+</span><span id="__span-0-2770"><a id="__codelineno-0-2770" name="__codelineno-0-2770"></a>
+</span><span id="__span-0-2771"><a id="__codelineno-0-2771" name="__codelineno-0-2771"></a>    <span class="n">tool_final_output</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_maybe_finalize_from_tool_results</span><span class="p">(</span>
+</span><span id="__span-0-2772"><a id="__codelineno-0-2772" name="__codelineno-0-2772"></a>        <span class="n">public_agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2773"><a id="__codelineno-0-2773" name="__codelineno-0-2773"></a>        <span class="n">original_input</span><span class="o">=</span><span class="n">original_input</span><span class="p">,</span>
+</span><span id="__span-0-2774"><a id="__codelineno-0-2774" name="__codelineno-0-2774"></a>        <span class="n">new_response</span><span class="o">=</span><span class="n">new_response</span><span class="p">,</span>
+</span><span id="__span-0-2775"><a id="__codelineno-0-2775" name="__codelineno-0-2775"></a>        <span class="n">pre_step_items</span><span class="o">=</span><span class="n">pre_step_items</span><span class="p">,</span>
+</span><span id="__span-0-2776"><a id="__codelineno-0-2776" name="__codelineno-0-2776"></a>        <span class="n">new_step_items</span><span class="o">=</span><span class="n">new_items</span><span class="p">,</span>
+</span><span id="__span-0-2777"><a id="__codelineno-0-2777" name="__codelineno-0-2777"></a>        <span class="n">function_results</span><span class="o">=</span><span class="n">turn_function_results</span><span class="p">,</span>
+</span><span id="__span-0-2778"><a id="__codelineno-0-2778" name="__codelineno-0-2778"></a>        <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2779"><a id="__codelineno-0-2779" name="__codelineno-0-2779"></a>        <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2780"><a id="__codelineno-0-2780" name="__codelineno-0-2780"></a>        <span class="n">tool_input_guardrail_results</span><span class="o">=</span><span class="n">tool_input_guardrail_results</span><span class="p">,</span>
+</span><span id="__span-0-2781"><a id="__codelineno-0-2781" name="__codelineno-0-2781"></a>        <span class="n">tool_output_guardrail_results</span><span class="o">=</span><span class="n">tool_output_guardrail_results</span><span class="p">,</span>
+</span><span id="__span-0-2782"><a id="__codelineno-0-2782" name="__codelineno-0-2782"></a>    <span class="p">)</span>
+</span><span id="__span-0-2783"><a id="__codelineno-0-2783" name="__codelineno-0-2783"></a>    <span class="k">if</span> <span class="n">tool_final_output</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2784"><a id="__codelineno-0-2784" name="__codelineno-0-2784"></a>        <span class="k">return</span> <span class="n">_commit_missing_state</span><span class="p">(</span><span class="n">tool_final_output</span><span class="p">)</span>
+</span><span id="__span-0-2785"><a id="__codelineno-0-2785" name="__codelineno-0-2785"></a>
+</span><span id="__span-0-2786"><a id="__codelineno-0-2786" name="__codelineno-0-2786"></a>    <span class="k">return</span> <span class="n">_commit_missing_state</span><span class="p">(</span>
+</span><span id="__span-0-2787"><a id="__codelineno-0-2787" name="__codelineno-0-2787"></a>        <span class="n">SingleStepResult</span><span class="p">(</span>
+</span><span id="__span-0-2788"><a id="__codelineno-0-2788" name="__codelineno-0-2788"></a>            <span class="n">original_input</span><span class="o">=</span><span class="n">original_input</span><span class="p">,</span>
+</span><span id="__span-0-2789"><a id="__codelineno-0-2789" name="__codelineno-0-2789"></a>            <span class="n">model_response</span><span class="o">=</span><span class="n">new_response</span><span class="p">,</span>
+</span><span id="__span-0-2790"><a id="__codelineno-0-2790" name="__codelineno-0-2790"></a>            <span class="n">pre_step_items</span><span class="o">=</span><span class="n">pre_step_items</span><span class="p">,</span>
+</span><span id="__span-0-2791"><a id="__codelineno-0-2791" name="__codelineno-0-2791"></a>            <span class="n">new_step_items</span><span class="o">=</span><span class="n">new_items</span><span class="p">,</span>
+</span><span id="__span-0-2792"><a id="__codelineno-0-2792" name="__codelineno-0-2792"></a>            <span class="n">next_step</span><span class="o">=</span><span class="n">NextStepRunAgain</span><span class="p">(),</span>
+</span><span id="__span-0-2793"><a id="__codelineno-0-2793" name="__codelineno-0-2793"></a>            <span class="n">tool_input_guardrail_results</span><span class="o">=</span><span class="n">tool_input_guardrail_results</span><span class="p">,</span>
+</span><span id="__span-0-2794"><a id="__codelineno-0-2794" name="__codelineno-0-2794"></a>            <span class="n">tool_output_guardrail_results</span><span class="o">=</span><span class="n">tool_output_guardrail_results</span><span class="p">,</span>
+</span><span id="__span-0-2795"><a id="__codelineno-0-2795" name="__codelineno-0-2795"></a>        <span class="p">)</span>
+</span><span id="__span-0-2796"><a id="__codelineno-0-2796" name="__codelineno-0-2796"></a>    <span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
