@@ -124,7 +124,11 @@ def test_failed_review_records_failure_without_details(
 
     def fake_api(path: str, data: dict[str, Any] | None = None, *, method: str = "GET") -> Any:
         if method == "GET":
-            return {"head_sha": context["head"], "external_id": "123"}
+            return {
+                "head_sha": context["head"],
+                "external_id": "123",
+                "app": {"id": automation.CHECK_APP_ID},
+            }
         assert data is not None
         calls.append(data)
         return None
@@ -195,7 +199,9 @@ def test_workflow_separates_candidate_execution_and_secrets() -> None:
     assert jobs["readiness"]["if"].startswith("always()")
 
 
-@pytest.mark.parametrize("scenario", ["valid", "unexpected-file", "renamed", "stale-controller"])
+@pytest.mark.parametrize(
+    "scenario", ["valid", "foreign-check", "unexpected-file", "renamed", "stale-controller"]
+)
 def test_discovery_uses_complete_release_manifest(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, context: dict[str, Any], scenario: str
 ) -> None:
@@ -245,12 +251,18 @@ def test_discovery_uses_complete_release_manifest(
         if path == f"commits/{context['base_tag']}":
             return {"sha": context["base"]}
         if "/check-runs?" in path:
-            return {"check_runs": []}
+            return {
+                "check_runs": [
+                    {"name": automation.CHECK, "app": {"id": 15368}, "conclusion": "success"}
+                ]
+                if scenario == "foreign-check"
+                else []
+            }
         raise AssertionError(path)
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
     monkeypatch.setattr(automation, "content", Mock(return_value='{".": "0.23.0"}'))
-    if scenario == "valid":
+    if scenario in {"valid", "foreign-check"}:
         automation.discover()
         assert json.loads((tmp_path / "candidate.json").read_text()) == context
     else:
@@ -289,7 +301,10 @@ def test_unrelated_test_completion_does_not_start_release(
     assert (tmp_path / "output").read_text() == "candidate=false\n"
 
 
-def test_publication_requires_trusted_completed_run(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("issuer", [3705508, 15368])
+def test_publication_requires_trusted_completed_run(
+    monkeypatch: pytest.MonkeyPatch, issuer: int
+) -> None:
     monkeypatch.setattr(
         automation,
         "pages",
@@ -327,7 +342,7 @@ def test_publication_requires_trusted_completed_run(monkeypatch: pytest.MonkeyPa
                         "id": 1234,
                         "name": automation.CHECK,
                         "conclusion": "success",
-                        "app": {"slug": "github-actions"},
+                        "app": {"id": issuer, "slug": "openai-sdks"},
                         "external_id": "123",
                         "output": {"summary": "Reviewed notes"},
                     }
@@ -338,6 +353,11 @@ def test_publication_requires_trusted_completed_run(monkeypatch: pytest.MonkeyPa
         raise AssertionError(path)
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
+    if issuer != automation.CHECK_APP_ID:
+        with pytest.raises(ValueError, match="No successful trusted"):
+            automation.published_review("v0.23.0", "b" * 40)
+        automation.human_approved.assert_not_called()
+        return
     assert automation.published_review("v0.23.0", "b" * 40) == "Reviewed notes"
     automation.human_approved.return_value = False
     with pytest.raises(ValueError, match="No successful trusted"):
@@ -430,7 +450,16 @@ def test_malformed_model_output_finishes_check(
     monkeypatch.setenv("REVIEW_CHECK_ID", "10")
     monkeypatch.setenv("REVIEW_RESULT", "{")
     monkeypatch.setattr(sys, "argv", ["release_automation.py", "report"])
-    api = Mock(side_effect=[{"head_sha": context["head"], "external_id": "123"}, None])
+    api = Mock(
+        side_effect=[
+            {
+                "head_sha": context["head"],
+                "external_id": "123",
+                "app": {"id": automation.CHECK_APP_ID},
+            },
+            None,
+        ]
+    )
     monkeypatch.setattr(automation, "repo_api", api)
     with pytest.raises(ValueError, match="not green"):
         automation.main()
@@ -444,6 +473,7 @@ def test_malformed_model_output_finishes_check(
     "scenario",
     [
         "approved",
+        "foreign-check",
         "admin",
         "maintain",
         "custom-write",
@@ -510,7 +540,10 @@ def test_readiness_requires_explicit_current_human_approval(
                     {
                         "id": 1234,
                         "name": automation.CHECK,
-                        "app": {"slug": "github-actions"},
+                        "app": {
+                            "id": 15368 if scenario == "foreign-check" else automation.CHECK_APP_ID,
+                            "slug": "openai-sdks",
+                        },
                         "status": "completed",
                         "conclusion": "success",
                         "external_id": "123",
@@ -610,7 +643,7 @@ def test_publisher_rechecks_revoked_approval_after_environment_wait(
                         "id": 1234,
                         "name": automation.CHECK,
                         "conclusion": "success",
-                        "app": {"slug": "github-actions"},
+                        "app": {"id": automation.CHECK_APP_ID, "slug": "openai-sdks"},
                         "external_id": "123",
                         "output": {"summary": "Assessment"},
                     }
@@ -638,3 +671,52 @@ def test_publisher_rechecks_revoked_approval_after_environment_wait(
     review["state"] = "DISMISSED"
     with pytest.raises(ValueError, match="No successful trusted"):
         automation.main()  # Final publishing step must fail after approval is revoked.
+
+
+def test_assessment_writers_use_protected_scoped_app_tokens() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    for name in ("evidence", "readiness"):
+        job = workflow["jobs"][name]
+        assert job["environment"] == "release"
+        assert job["permissions"] == {"contents": "read"}
+        app = next(step for step in job["steps"] if step.get("id") == "app")
+        assert app["uses"].startswith("actions/create-github-app-token@")
+        assert app["with"] == {
+            "app-id": "${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}",
+            "private-key": "${{ secrets.OPENAI_SDKS_APP_PRIVATE_KEY }}",
+            "owner": "openai",
+            "repositories": "openai-agents-python",
+            "permission-contents": "read",
+            "permission-pull-requests": "read",
+            "permission-checks": "write",
+        }
+        writer = next(step for step in job["steps"] if "run" in step)
+        assert writer["env"]["GH_TOKEN"] == "${{ steps.app.outputs.token }}"
+        checkout = next(
+            step for step in job["steps"] if step.get("uses", "").startswith("actions/checkout@")
+        )
+        assert checkout["with"]["ref"] == "${{ github.sha }}"
+        assert checkout["with"]["persist-credentials"] == "false"
+    assert all(
+        job.get("permissions", {}).get("checks") != "write" for job in workflow["jobs"].values()
+    )
+
+
+def test_report_cannot_finalize_another_apps_check(
+    monkeypatch: pytest.MonkeyPatch, context: dict[str, Any], report: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setattr(automation, "current", Mock())
+    api = Mock(
+        return_value={
+            "head_sha": context["head"],
+            "external_id": "123",
+            "app": {"id": 15368},
+        }
+    )
+    monkeypatch.setattr(automation, "repo_api", api)
+    with pytest.raises(ValueError, match="Check identity mismatch"):
+        automation.report_result(context, report, 10)
+    api.assert_called_once_with("check-runs/10")

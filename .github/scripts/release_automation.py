@@ -15,6 +15,7 @@ from typing import Any
 REPO = "openai/openai-agents-python"
 BRANCH = "release-please--branches--main"
 CHECK = "Release assessment"
+CHECK_APP_ID = 3705508  # openai-sdks; never trust the shared github-actions identity.
 CONTRACT = "tests/fixtures/released_api_contract.json"
 FILES = {
     CONTRACT,
@@ -144,7 +145,7 @@ def discover() -> None:
         f"commits/{context['head']}/check-runs?check_name=Release%20assessment&per_page=100"
     )["check_runs"]
     if any(
-        c["name"] == CHECK and c["app"]["slug"] == "github-actions" and c["conclusion"] == "success"
+        c["name"] == CHECK and c["app"]["id"] == CHECK_APP_ID and c["conclusion"] == "success"
         for c in checks
     ):
         output("candidate", "false")
@@ -272,7 +273,11 @@ def report_result(context: dict[str, Any], report: dict[str, Any] | None, check_
                 "before retrying; security details belong in the private reporting channel."
             )
     check = repo_api(f"check-runs/{check_id}")
-    if check["head_sha"] != context["head"] or check["external_id"] != os.environ["GITHUB_RUN_ID"]:
+    if (
+        check["app"]["id"] != CHECK_APP_ID
+        or check["head_sha"] != context["head"]
+        or check["external_id"] != os.environ["GITHUB_RUN_ID"]
+    ):
         raise ValueError("Check identity mismatch")
     repo_api(
         f"check-runs/{check_id}",
@@ -332,12 +337,9 @@ def published_review(tag: str, release_sha: str) -> str:
     checks = repo_api(f"commits/{head}/check-runs?check_name=Release%20assessment&per_page=100")[
         "check_runs"
     ]
+    checks = [c for c in checks if c["name"] == CHECK and c["app"]["id"] == CHECK_APP_ID]
     for check in sorted(checks, key=lambda check: check["id"], reverse=True)[:1]:
-        if (
-            check["name"] != CHECK
-            or check["conclusion"] != "success"
-            or check["app"]["slug"] != "github-actions"
-        ):
+        if check["conclusion"] != "success":
             continue
         run_id = check.get("external_id", "")
         if not run_id.isdigit():
@@ -365,7 +367,7 @@ def gate() -> None:
         checks = repo_api(
             f"commits/{head}/check-runs?check_name=Release%20assessment&per_page=100"
         )["check_runs"]
-        checks = [c for c in checks if c["name"] == CHECK and c["app"]["slug"] == "github-actions"]
+        checks = [c for c in checks if c["name"] == CHECK and c["app"]["id"] == CHECK_APP_ID]
         if checks:
             check = max(checks, key=lambda c: c["id"])
             if check["status"] == "completed":
