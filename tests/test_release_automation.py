@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 from pathlib import Path
@@ -91,10 +92,22 @@ def test_unchanged_contract_is_noop(
     monkeypatch.setattr(automation, "current", Mock())
     contract = tmp_path / "contract.json"
     contract.write_text(json.dumps({"baseline": "v0.23.0", "baseline_commit": "a" * 40}))
-    monkeypatch.setattr(automation, "content", Mock(return_value=contract.read_text()))
+    # GitHub omits inline Contents data for the real >1 MB contract fixture.
+    blob_sha = "e" * 40
+    reads = Mock(
+        side_effect=[
+            {"type": "file", "encoding": "none", "content": "", "sha": blob_sha},
+            {"encoding": "base64", "content": base64.b64encode(contract.read_bytes()).decode()},
+        ]
+    )
+    monkeypatch.setattr(automation, "repo_api", reads)
     write = Mock()
     monkeypatch.setattr(automation, "api", write)
     automation.write_contract(context, contract)
+    assert [call.args[0] for call in reads.call_args_list] == [
+        f"contents/{automation.CONTRACT}?ref={context['head']}",
+        f"git/blobs/{blob_sha}",
+    ]
     write.assert_not_called()
 
 
@@ -113,6 +126,7 @@ def test_failed_review_records_failure_without_details(
             return {"head_sha": context["head"], "external_id": "123"}
         assert data is not None
         calls.append(data)
+        return None
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
     report["verdict"] = "blocked" if failure == "blocked" else "green"
@@ -156,7 +170,18 @@ def test_workflow_separates_candidate_execution_and_secrets() -> None:
         (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
     )
     jobs = workflow["jobs"]
+    assert jobs["discover"]["permissions"]["checks"] == "read"
     assert "pull_request_target" not in workflow["on"]
+    assert set(workflow["on"]) == {"workflow_run"}
+    assert "cache-mode" not in workflow
+    assert all("cache-mode" not in job for job in jobs.values())
+    for job_name in ("contract", "review"):
+        checkout = next(
+            step
+            for step in jobs[job_name]["steps"]
+            if "needs." in step.get("with", {}).get("ref", "")
+        )
+        assert checkout["with"]["ref"].endswith(".outputs.commit_sha }}")
     assert jobs["contract"]["permissions"] == {"contents": "read"}
     assert "secrets." not in json.dumps(jobs["contract"])
     assert jobs["update"]["environment"] == "release"
@@ -176,7 +201,7 @@ def test_discovery_uses_complete_release_manifest(
     event = tmp_path / "event.json"
     event.write_text("{}")
     monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
-    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_dispatch")
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "workflow_run")
     monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
     pr = {
         "number": 1,

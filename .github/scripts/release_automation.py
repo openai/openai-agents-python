@@ -92,9 +92,13 @@ def current(context: dict[str, Any]) -> dict[str, Any]:
 
 def content(path: str, ref: str) -> str:
     item = repo_api(f"contents/{path}?ref={sha(ref)}")
-    if item["type"] != "file" or item["encoding"] != "base64":
+    if item["type"] != "file":
         raise ValueError("Expected a repository file")
-    return base64.b64decode(item["content"]).decode()
+    # Contents omits inline bytes above 1 MB; Git blobs preserve the exact ref's identity.
+    blob = repo_api(f"git/blobs/{sha(item['sha'])}")
+    if blob["encoding"] != "base64":
+        raise ValueError("Expected a base64 Git blob")
+    return base64.b64decode(blob["content"]).decode()
 
 
 def discover() -> None:
@@ -139,7 +143,7 @@ def discover() -> None:
     checks = repo_api(
         f"commits/{context['head']}/check-runs?check_name=Release%20assessment&per_page=100"
     )["check_runs"]
-    if os.environ["GITHUB_EVENT_NAME"] != "workflow_dispatch" and any(
+    if any(
         c["name"] == CHECK and c["app"]["slug"] == "github-actions" and c["conclusion"] == "success"
         for c in checks
     ):
@@ -317,7 +321,7 @@ def published_review(tag: str, release_sha: str) -> str:
             run["path"] == WORKFLOW
             and run["head_branch"] == "main"
             and run["conclusion"] == "success"
-            and run["event"] in {"workflow_run", "workflow_dispatch"}
+            and run["event"] == "workflow_run"
         ):
             return check["output"]["summary"]
     raise ValueError("No successful trusted release assessment exists for the candidate")
@@ -340,7 +344,7 @@ def gate() -> None:
             if check["status"] == "completed":
                 if check["conclusion"] != "success":
                     raise ValueError(
-                        "Release assessment failed; dispatch Release Candidate after correction"
+                        "Release assessment failed; rerun Release Candidate after correction"
                     )
                 run_id = check.get("external_id", "")
                 if not run_id.isdigit():
