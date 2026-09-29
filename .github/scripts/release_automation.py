@@ -397,6 +397,7 @@ def latest_assessment(
     for run in runs:
         if (
             run["path"] != WORKFLOW
+            or run.get("display_title") != "Release Candidate eligible"
             or run["head_branch"] != "main"
             or run["event"] != "workflow_run"
             or run["repository"]["full_name"] != REPO

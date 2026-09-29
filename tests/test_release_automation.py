@@ -27,6 +27,7 @@ def trusted_run() -> dict[str, Any]:
         "id": 123,
         "created_at": "2026-09-28T01:00:00Z",
         "path": automation.WORKFLOW,
+        "display_title": "Release Candidate eligible",
         "head_branch": "main",
         "head_sha": "b" * 40,
         "status": "completed",
@@ -1135,3 +1136,96 @@ def test_history_pagination_consumes_shared_request_budget(monkeypatch: pytest.M
     with pytest.raises(ValueError, match="request cap reached"):
         automation.action_rows("actions/runs/123/jobs?filter=all", "jobs", 10000, request_limit=2)
     assert api.call_count == 2
+
+
+def test_eligibility_marker_uses_only_trigger_identity() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    assert " ".join(workflow["run-name"].split()) == (
+        "${{ github.event.workflow_run.head_repository.full_name == github.repository && "
+        "(github.event.workflow_run.name == 'Release Please' || "
+        "(github.event.workflow_run.name == 'Tests' && "
+        "github.event.workflow_run.head_branch == 'release-please--branches--main')) && "
+        "'Release Candidate eligible' || 'Release Candidate unrelated' }}"
+    )
+
+
+@pytest.mark.parametrize("consumer", ["gate", "publish"])
+@pytest.mark.parametrize("tampered", [False, True])
+def test_unrelated_runs_do_not_spend_candidate_history_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, consumer: str, tampered: bool
+) -> None:
+    pr = {
+        "number": 1,
+        "created_at": "2026-09-28T00:00:00Z",
+        "merged_at": "2026-09-29",
+        "merge_commit_sha": "b" * 40,
+        "base": {"ref": "main"},
+        "head": {"ref": automation.BRANCH, "sha": "a" * 40, "repo": {"full_name": automation.REPO}},
+    }
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": pr}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setattr(automation.time, "sleep", lambda _: None)
+    genuine = trusted_run()
+    unrelated = [
+        {**genuine, "id": i, "display_title": "Release Candidate unrelated"}
+        for i in range(200, 297)
+    ]
+    # Metadata without a trusted eligibility marker cannot produce new authority.
+    legacy = {k: v for k, v in genuine.items() if k != "display_title"}
+    legacy["id"] = 400
+    jobs_read = []
+
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
+        if path.startswith("commits/") and "/pulls?" in path:
+            return [pr]
+        if path.startswith("git/commits/"):
+            return {"tree": {"sha": "c" * 40}}
+        if path.startswith("actions/workflows/"):
+            return {"total_count": 99, "workflow_runs": unrelated + [legacy, genuine]}
+        if "/jobs?filter=all" in path:
+            jobs_read.append(path)
+            assert path == "actions/runs/123/jobs?filter=all&per_page=100&page=1"
+            jobs = identity_jobs()
+            jobs["jobs"] += identity_jobs(1235)["jobs"]
+            jobs["total_count"] = 2
+            return jobs
+        if path == "check-runs/1235":
+            return {
+                "id": 1235,
+                "name": automation.CHECK,
+                "head_sha": "a" * 40,
+                "app": {"id": 15368},
+                "conclusion": "success",
+                "external_id": "123",
+                "output": {"summary": "Altered" if tampered else "Assessment"},
+            }
+        if path == "actions/runs/123":
+            return genuine
+        if path == "actions/runs/123/attempts/2/jobs?per_page=100":
+            jobs = receipt_jobs()
+            jobs["jobs"][0]["name"] = jobs["jobs"][0]["name"].replace("/1234/", "/1235/")
+            return jobs
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    approved = Mock(return_value=True)
+    monkeypatch.setattr(automation, "human_approved", approved)
+
+    def consume() -> Any:
+        return (
+            automation.gate()
+            if consumer == "gate"
+            else automation.published_review("v0.23.0", "b" * 40)
+        )
+
+    if tampered:
+        with pytest.raises(ValueError):
+            consume()
+        approved.assert_not_called()
+    else:
+        consume()
+        approved.assert_called_once_with(1, "a" * 40, 1235)
+    assert len(jobs_read) == 1

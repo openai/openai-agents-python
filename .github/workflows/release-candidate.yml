@@ -1,4 +1,11 @@
 name: Release Candidate
+# Record trigger eligibility in native run metadata, before any jobs execute.
+run-name: >-
+  ${{ github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.name == 'Release Please' ||
+       (github.event.workflow_run.name == 'Tests' &&
+        github.event.workflow_run.head_branch == 'release-please--branches--main')) &&
+      'Release Candidate eligible' || 'Release Candidate unrelated' }}
 
 on:
   workflow_run:
