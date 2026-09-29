@@ -1000,3 +1000,138 @@ def test_collect_rejects_run_older_than_pr(
     with pytest.raises(ValueError, match="predates"):
         automation.collect(context)
     assert api.call_count == 1
+
+
+@pytest.mark.parametrize("change", ["unchanged", "new-attempt", "active"])
+def test_gate_reuses_only_completed_attempt_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, change: str
+) -> None:
+    pr = {
+        "number": 1,
+        "created_at": "2026-09-28T00:00:00Z",
+        "head": {"ref": automation.BRANCH, "sha": "a" * 40, "repo": {"full_name": automation.REPO}},
+    }
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": pr}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setattr(automation.time, "sleep", lambda _: None)
+    counts = {"polls": 0, "jobs": 0}
+    approved_ids = []
+
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
+        if path.startswith("actions/workflows/"):
+            counts["polls"] += 1
+            run = trusted_run()
+            if change == "new-attempt" and counts["polls"] > 1:
+                run["run_attempt"] = 3
+            if change == "active":
+                run["status"] = "in_progress"
+            return {
+                "total_count": 12,
+                "workflow_runs": [run] + [{**trusted_run(), "id": i} for i in range(124, 135)],
+            }
+        if "/jobs?filter=all" in path:
+            counts["jobs"] += 1
+            if "/123/" not in path:
+                return {"total_count": 0, "jobs": []}
+            return identity_jobs(1235 if change != "unchanged" and counts["polls"] > 1 else 1234)
+        if path.startswith("check-runs/"):
+            return {"id": int(path.split("/")[1]), "external_id": "123"}
+        raise AssertionError(path)
+
+    def approval(pr: int, head: str, check_id: int) -> bool:
+        approved_ids.append(check_id)
+        # The old assessment is approved only after the second poll.
+        return counts["polls"] > 1 and check_id == 1234
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    monkeypatch.setattr(automation, "trusted_assessment", Mock(return_value=True))
+    monkeypatch.setattr(automation, "human_approved", approval)
+    if change == "unchanged":
+        automation.gate()
+        assert counts == {"polls": 2, "jobs": 12}
+        assert approved_ids == [1234, 1234]
+    else:
+        with pytest.raises(ValueError, match="human approval is missing"):
+            automation.gate()
+        assert approved_ids == [1234] + [1235] * 84
+        assert counts["jobs"] == (13 if change == "new-attempt" else 96)
+
+
+@pytest.mark.parametrize("consumer", ["gate", "publish"])
+@pytest.mark.parametrize("within_cap", [True, False])
+def test_assessment_lookup_request_cap_rejects_partial_history(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, consumer: str, within_cap: bool
+) -> None:
+    pr = {
+        "number": 1,
+        "created_at": "2026-09-28T00:00:00Z",
+        "merged_at": "2026-09-29",
+        "merge_commit_sha": "b" * 40,
+        "base": {"ref": "main"},
+        "head": {"ref": automation.BRANCH, "sha": "a" * 40, "repo": {"full_name": automation.REPO}},
+    }
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": pr}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    # One listing plus 96 job reads plus 3 authentication reads fits exactly.
+    runs = [{**trusted_run(), "id": i} for i in range(123, 219 if within_cap else 220)]
+    counts = {"lookup": 0, "jobs": 0}
+    check = {
+        "id": 1234,
+        "name": automation.CHECK,
+        "head_sha": "a" * 40,
+        "app": {"id": 15368},
+        "conclusion": "success",
+        "external_id": "123",
+        "output": {"summary": "Assessment"},
+    }
+
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
+        if path.startswith("git/commits/"):
+            return {"tree": {"sha": "c" * 40}}
+        if path.startswith("commits/") and "/pulls?" in path:
+            return [pr]
+        counts["lookup"] += 1
+        if path.startswith("actions/workflows/"):
+            return {"total_count": len(runs), "workflow_runs": runs}
+        if "/jobs?filter=all" in path:
+            counts["jobs"] += 1
+            # A valid older identity is visible immediately, but cannot bypass the cap.
+            return identity_jobs() if "/123/" in path else {"total_count": 0, "jobs": []}
+        if path == "check-runs/1234":
+            return check
+        if path == "actions/runs/123":
+            return trusted_run()
+        if path == "actions/runs/123/attempts/2/jobs?per_page=100":
+            return receipt_jobs()
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    approval = Mock(return_value=True)
+    monkeypatch.setattr(automation, "human_approved", approval)
+
+    def consume() -> Any:
+        return (
+            automation.gate()
+            if consumer == "gate"
+            else automation.published_review("v0.23.0", "b" * 40)
+        )
+
+    if within_cap:
+        consume()
+        assert counts == {"lookup": 100, "jobs": 96}
+        approval.assert_called_once_with(1, "a" * 40, 1234)
+    else:
+        with pytest.raises(ValueError, match="request cap reached.*fresh release PR"):
+            consume()
+        assert counts == {"lookup": 97, "jobs": 96}
+        approval.assert_not_called()
+
+
+def test_history_pagination_consumes_shared_request_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    api = Mock(return_value={"total_count": 250, "jobs": [{}] * 100})
+    monkeypatch.setattr(automation, "repo_api", api)
+    with pytest.raises(ValueError, match="request cap reached"):
+        automation.action_rows("actions/runs/123/jobs?filter=all", "jobs", 10000, request_limit=2)
+    assert api.call_count == 2

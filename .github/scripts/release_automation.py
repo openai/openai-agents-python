@@ -355,28 +355,44 @@ def assessment_receipt(head: str, check_id: int, summary: str) -> str:
     return f"{sha(head)}/{check_id}/{hashlib.sha256(summary.encode()).hexdigest()}"
 
 
-def action_rows(path: str, key: str, limit: int) -> list[Any]:
+def action_rows(
+    path: str, key: str, limit: int, *, request_limit: int = 100
+) -> tuple[list[Any], int]:
     """Read bounded native history completely or reject it, never truncate identity."""
     rows: list[Any] = []
     for page in range(1, limit // 100 + 1):
+        if page > request_limit:
+            raise ValueError(
+                "Assessment lookup request cap reached; close the old release PR and run "
+                "Release Please to create a fresh release PR and assessment"
+            )
         listing = repo_api(f"{path}&per_page=100&page={page}")
         if listing["total_count"] >= limit:
             raise ValueError("Actions history limit reached; assessment identity is incomplete")
         batch = listing[key]
         rows.extend(batch)
         if len(batch) < 100:
-            return rows
+            return rows, page
     raise ValueError("Actions history limit reached; assessment identity is incomplete")
 
 
-def latest_assessment(pr: dict[str, Any], head: str) -> dict[str, Any] | None:
+def latest_assessment(
+    pr: dict[str, Any],
+    head: str,
+    completed_jobs: dict[int, tuple[int, list[Any]]] | None = None,
+) -> dict[str, Any] | None:
     """Select native assessment identity before validating any mutable check fields."""
-    runs = action_rows(
+    # Reserve three requests for the selected check, run, and receipt validation.
+    # Source/tree checks and human approval reads are outside this lookup budget.
+    requests_left = 100 - 3
+    runs, used = action_rows(
         "actions/workflows/release-candidate.yml/runs?branch=main&event=workflow_run"
         f"&created={quote('>=' + pr['created_at'], safe='')}",
         "workflow_runs",
         1000,
+        request_limit=requests_left,
     )
+    requests_left -= used
     newest: tuple[int, dict[str, Any]] | None = None
     for run in runs:
         if (
@@ -389,7 +405,19 @@ def latest_assessment(pr: dict[str, Any], head: str) -> dict[str, Any] | None:
         ):
             continue
         # Include prior attempts: starting a rerun must not erase a newer identity.
-        jobs = action_rows(f"actions/runs/{run['id']}/jobs?filter=all", "jobs", 10000)
+        cached = completed_jobs.get(run["id"]) if completed_jobs is not None else None
+        if run["status"] == "completed" and cached and cached[0] == run["run_attempt"]:
+            jobs = cached[1]
+        else:
+            jobs, used = action_rows(
+                f"actions/runs/{run['id']}/jobs?filter=all",
+                "jobs",
+                10000,
+                request_limit=requests_left,
+            )
+            requests_left -= used
+            if completed_jobs is not None and run["status"] == "completed":
+                completed_jobs[run["id"]] = (run["run_attempt"], jobs)
         for job in jobs:
             match = re.fullmatch(
                 r"Release assessment identity ([0-9a-f]{40})/([0-9]+)", job["name"]
@@ -493,8 +521,11 @@ def gate() -> None:
         print("Ordinary PR: release assessment is not applicable.")
         return
     head = sha(pr["head"]["sha"])
+    # Only native job history of completed attempts is stable. Runs, payloads and
+    # human decisions are always fetched again; no cache crosses this invocation.
+    completed_jobs: dict[int, tuple[int, list[Any]]] = {}
     for _ in range(85):
-        check = latest_assessment(pr, head)
+        check = latest_assessment(pr, head, completed_jobs)
         if check is not None and human_approved(pr["number"], head, check["id"]):
             return
         time.sleep(20)
