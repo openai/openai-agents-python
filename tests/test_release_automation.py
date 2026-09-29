@@ -842,6 +842,8 @@ def test_green_report_emits_exact_payload_receipt(
 @pytest.mark.parametrize(
     ("consumer", "missing_at", "status"),
     [
+        ("gate", "external-id", 404),
+        ("publish", "external-id", 404),
         ("gate", "run", 404),
         ("publish", "run", 404),
         ("gate", "jobs", 404),
@@ -884,7 +886,16 @@ def test_missing_claimed_run_does_not_hide_genuine_assessment(
                 "synthetic private error detail",
             )
         if "/check-runs?" in path:
-            body: Any = {"check_runs": [{**check, "id": 1235, "external_id": "999"}, check]}
+            body: Any = {
+                "check_runs": [
+                    {
+                        **check,
+                        "id": 1235,
+                        "external_id": None if missing_at == "external-id" else "999",
+                    },
+                    check,
+                ]
+            }
         elif path in {"actions/runs/123", "actions/runs/999"}:
             body = trusted_run()
         elif path == "actions/runs/123/attempts/2/jobs?per_page=100":

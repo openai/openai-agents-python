@@ -365,7 +365,7 @@ def trusted_assessment(check: dict[str, Any], head: str) -> bool:
         return False
     run_id = check.get("external_id", "")
     summary = (check.get("output") or {}).get("summary")
-    if not run_id.isdigit() or not isinstance(summary, str):
+    if not isinstance(run_id, str) or not run_id.isdigit() or not isinstance(summary, str):
         return False
     run = repo_api(f"actions/runs/{run_id}", missing_ok=True)
     if run is None:
