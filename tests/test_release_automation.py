@@ -296,6 +296,7 @@ def test_publication_requires_trusted_completed_run(monkeypatch: pytest.MonkeyPa
         Mock(
             return_value=[
                 {
+                    "number": 1,
                     "merged_at": "2026-09-28",
                     "merge_commit_sha": "b" * 40,
                     "base": {"ref": "main"},
@@ -308,6 +309,7 @@ def test_publication_requires_trusted_completed_run(monkeypatch: pytest.MonkeyPa
             ]
         ),
     )
+    monkeypatch.setattr(automation, "human_approved", Mock(return_value=True))
     run = {
         "path": automation.WORKFLOW,
         "head_branch": "main",
@@ -337,6 +339,10 @@ def test_publication_requires_trusted_completed_run(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(automation, "repo_api", fake_api)
     assert automation.published_review("v0.23.0", "b" * 40) == "Reviewed notes"
+    automation.human_approved.return_value = False
+    with pytest.raises(ValueError, match="No successful trusted"):
+        automation.published_review("v0.23.0", "b" * 40)
+    automation.human_approved.return_value = True
     run["path"] = ".github/workflows/unrelated.yml"
     with pytest.raises(ValueError, match="No successful trusted"):
         automation.published_review("v0.23.0", "b" * 40)
@@ -412,3 +418,200 @@ def test_publishing_notes_preserves_maintainer_content_on_retry(
     assert release["body"] == expected
     automation.main()
     assert release["body"] == expected
+
+
+def test_malformed_model_output_finishes_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, context: dict[str, Any]
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    Path("candidate.json").write_text(json.dumps(context))
+    monkeypatch.setenv("GITHUB_REPOSITORY", automation.REPO)
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("REVIEW_CHECK_ID", "10")
+    monkeypatch.setenv("REVIEW_RESULT", "{")
+    monkeypatch.setattr(sys, "argv", ["release_automation.py", "report"])
+    api = Mock(side_effect=[{"head_sha": context["head"], "external_id": "123"}, None])
+    monkeypatch.setattr(automation, "repo_api", api)
+    with pytest.raises(ValueError, match="not green"):
+        automation.main()
+    assert api.call_args.args[0] == "check-runs/10"
+    assert api.call_args.kwargs == {"method": "PATCH"}
+    assert api.call_args.args[1]["status"] == "completed"
+    assert api.call_args.args[1]["conclusion"] == "failure"
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "approved",
+        "missing",
+        "generic",
+        "previous-assessment",
+        "stale-head",
+        "bot",
+        "read-only",
+        "dismissed",
+        "changes-requested",
+    ],
+)
+def test_readiness_requires_explicit_current_human_approval(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str
+) -> None:
+    event = tmp_path / "event.json"
+    event.write_text(
+        json.dumps(
+            {
+                "pull_request": {
+                    "number": 1,
+                    "head": {
+                        "ref": automation.BRANCH,
+                        "sha": "a" * 40,
+                        "repo": {"full_name": automation.REPO},
+                    },
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setattr(automation.time, "sleep", lambda _: None)
+    review: dict[str, Any] = {
+        "id": 90,
+        "state": "APPROVED",
+        "commit_id": "a" * 40,
+        "body": "Approve release assessment 1234",
+        "user": {"login": "maintainer", "type": "User"},
+    }
+    reviews = [review]
+    if scenario == "missing":
+        reviews = []
+    elif scenario == "generic":
+        review["body"] = "Looks good"
+    elif scenario == "previous-assessment":
+        review["body"] = "Approve release assessment 1233"
+    elif scenario == "stale-head":
+        review["commit_id"] = "b" * 40
+    elif scenario == "bot":
+        review["user"] = {"login": "automation[bot]", "type": "Bot"}
+    elif scenario == "dismissed":
+        review["state"] = "DISMISSED"
+    elif scenario == "changes-requested":
+        reviews.append({**review, "id": 91, "state": "CHANGES_REQUESTED"})
+
+    def fake_api(path: str) -> Any:
+        if "/check-runs?" in path:
+            return {
+                "check_runs": [
+                    {
+                        "id": 1234,
+                        "name": automation.CHECK,
+                        "app": {"slug": "github-actions"},
+                        "status": "completed",
+                        "conclusion": "success",
+                        "external_id": "123",
+                    }
+                ]
+            }
+        if path == "actions/runs/123":
+            return {"path": automation.WORKFLOW, "head_branch": "main", "conclusion": "success"}
+        if path.startswith("pulls/1/reviews?"):
+            return reviews
+        if path.endswith("/permission"):
+            return {"user": {"permissions": {"push": scenario != "read-only"}}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    if scenario == "approved":
+        automation.gate()
+    else:
+        with pytest.raises(ValueError, match="human approval is missing"):
+            automation.gate()
+
+
+def test_publisher_rechecks_revoked_approval_after_environment_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/publish.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    publish = workflow["jobs"]["publish"]
+    assert publish["environment"]["name"] == "pypi"
+    validation, upload = publish["steps"][-2:]
+    assert validation["run"].endswith("release_automation.py verify-publication")
+    assert validation["if"] == "vars.RELEASE_AUTOMATION_ENABLED == 'true'"
+    assert "continue-on-error" not in validation
+    assert upload["uses"].startswith("pypa/gh-action-pypi-publish@")
+    assert "if" not in upload  # Normal success gating must stop upload on validation failure.
+    assert "continue-on-error" not in publish
+    checkout = publish["steps"][-3]
+    assert checkout["with"]["ref"] == "refs/heads/main"
+    assert checkout["with"]["persist-credentials"] == "false"
+    assert checkout["with"]["path"] == "control"
+    assert publish["permissions"] == {
+        "id-token": "write",
+        "contents": "read",
+        "pull-requests": "read",
+        "checks": "read",
+        "actions": "read",
+    }
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"release": {"tag_name": "v0.23.0"}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_REPOSITORY", automation.REPO)
+    monkeypatch.setenv("RELEASE_SHA", "b" * 40)
+    monkeypatch.setattr(sys, "argv", ["release_automation.py", "verify-publication"])
+    review = {
+        "id": 90,
+        "state": "APPROVED",
+        "commit_id": "a" * 40,
+        "body": "Approve release assessment 1234",
+        "user": {"login": "maintainer", "type": "User"},
+    }
+
+    def fake_api(path: str) -> Any:
+        if path.startswith("commits/") and "/pulls?" in path:
+            return [
+                {
+                    "number": 1,
+                    "merged_at": "2026-09-28",
+                    "merge_commit_sha": "b" * 40,
+                    "base": {"ref": "main"},
+                    "head": {
+                        "ref": automation.BRANCH,
+                        "sha": "a" * 40,
+                        "repo": {"full_name": automation.REPO},
+                    },
+                }
+            ]
+        if path.startswith("git/commits/"):
+            return {"tree": {"sha": "c" * 40}}
+        if "/check-runs?" in path:
+            return {
+                "check_runs": [
+                    {
+                        "id": 1234,
+                        "name": automation.CHECK,
+                        "conclusion": "success",
+                        "app": {"slug": "github-actions"},
+                        "external_id": "123",
+                        "output": {"summary": "Assessment"},
+                    }
+                ]
+            }
+        if path == "actions/runs/123":
+            return {
+                "path": automation.WORKFLOW,
+                "head_branch": "main",
+                "conclusion": "success",
+                "event": "workflow_run",
+            }
+        if path.startswith("pulls/1/reviews?"):
+            return [review]
+        if path.endswith("/permission"):
+            return {"user": {"permissions": {"push": True}}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    automation.main()  # Initial checks succeed before the build and deployment wait.
+    review["state"] = "DISMISSED"
+    with pytest.raises(ValueError, match="No successful trusted"):
+        automation.main()  # Final publishing step must fail after approval is revoked.

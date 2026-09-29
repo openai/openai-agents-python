@@ -258,7 +258,13 @@ def report_result(context: dict[str, Any], report: dict[str, Any] | None, check_
     if report is not None:
         if report["verdict"] == "green":
             conclusion = "success"
-            summary = report["key_changes"] + "\n\n" + report["report"]
+            summary = (
+                f"AI draft. A maintainer must approve this candidate with a GitHub PR review "
+                f"containing the exact line: Approve release assessment {check_id}\n\n"
+                + report["key_changes"]
+                + "\n\n"
+                + report["report"]
+            )
         else:
             # Do not post potentially undisclosed vulnerability details on a public PR.
             summary = (
@@ -279,6 +285,26 @@ def report_result(context: dict[str, Any], report: dict[str, Any] | None, check_
     )
     if conclusion != "success":
         raise ValueError("Release readiness is not green")
+
+
+def human_approved(pr_number: int, head: str, check_id: int) -> bool:
+    """Require an explicit, still-current maintainer review of this assessment."""
+    reviews = pages(f"pulls/{pr_number}/reviews")
+    latest: dict[str, Any] = {}
+    for review in sorted(reviews, key=lambda review: review["id"]):
+        if review["state"] in {"APPROVED", "CHANGES_REQUESTED", "DISMISSED"}:
+            latest[review["user"]["login"]] = review
+    for login, review in latest.items():
+        if (
+            review["state"] == "APPROVED"
+            and review["user"]["type"] == "User"
+            and review["commit_id"] == head
+            and f"Approve release assessment {check_id}" in (review["body"] or "").splitlines()
+        ):
+            permission = repo_api(f"collaborators/{login}/permission")
+            if permission["user"]["permissions"]["push"]:
+                return True
+    return False
 
 
 def published_review(tag: str, release_sha: str) -> str:
@@ -323,7 +349,8 @@ def published_review(tag: str, release_sha: str) -> str:
             and run["conclusion"] == "success"
             and run["event"] == "workflow_run"
         ):
-            return check["output"]["summary"]
+            if human_approved(candidates[0]["number"], head, check["id"]):
+                return check["output"]["summary"]
     raise ValueError("No successful trusted release assessment exists for the candidate")
 
 
@@ -352,10 +379,14 @@ def gate() -> None:
                 run = repo_api(f"actions/runs/{run_id}")
                 if run["path"] != WORKFLOW or run["head_branch"] != "main":
                     raise ValueError("Release assessment came from another workflow")
-                if run["conclusion"] == "success":
+                if run["conclusion"] == "success" and human_approved(
+                    pr["number"], head, check["id"]
+                ):
                     return
         time.sleep(20)
-    raise ValueError("Release assessment is not complete; rerun this check after preparation")
+    raise ValueError(
+        "Release assessment or human approval is missing; approve and rerun this check"
+    )
 
 
 def main() -> None:
@@ -412,9 +443,14 @@ def main() -> None:
         elif args.command == "collect":
             collect(context)
         else:
-            report = (
-                json.loads(os.environ["REVIEW_RESULT"]) if os.environ.get("REVIEW_RESULT") else None
-            )
+            try:
+                report = (
+                    json.loads(os.environ["REVIEW_RESULT"])
+                    if os.environ.get("REVIEW_RESULT")
+                    else None
+                )
+            except json.JSONDecodeError:
+                report = None
             report_result(context, report, int(os.environ["REVIEW_CHECK_ID"]))
 
 

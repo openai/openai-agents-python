@@ -14,6 +14,7 @@ jobs:
     permissions:
       contents: read
       checks: read
+      pull-requests: read
       actions: read
     steps:
       - if: github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository

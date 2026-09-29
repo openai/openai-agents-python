@@ -132,6 +132,10 @@ jobs:
       url: https://pypi.org/p/openai-agents
     permissions:
       id-token: write
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
     runs-on: ubuntu-latest
     steps:
       - name: Download distributions
@@ -140,6 +144,20 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: dist/
           merge-multiple: true
+      - name: Checkout approval validator from main
+        if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Revalidate human approval after deployment wait
+        if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: python3 -I control/.github/scripts/release_automation.py verify-publication
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
 
