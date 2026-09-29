@@ -16,17 +16,26 @@ jobs:
   release-pr:
     if: github.repository == 'openai/openai-agents-python' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+    environment: release
+    permissions: {}
     steps:
+      - name: Create repository-scoped release token
+        id: app
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        with:
+          app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.OPENAI_SDKS_APP_PRIVATE_KEY }}
+          owner: openai
+          repositories: openai-agents-python
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
       - name: Update the release pull request
         uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ steps.app.outputs.token }}
           target-branch: main
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
-          # Keep manual publication: GITHUB_TOKEN release events do not start publish.yml.
-          skip-github-release: true
+          # Enable only after credentials, tag creation rules, and required readiness check are configured.
+          skip-github-release: ${{ vars.RELEASE_AUTOMATION_ENABLED != 'true' }}

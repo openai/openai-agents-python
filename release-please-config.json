@@ -10,7 +10,7 @@
   "bump-patch-for-minor-pre-major": false,
   "draft-pull-request": false,
   "pull-request-title-pattern": "release: ${version}",
-  "pull-request-header": "Automated release PR. Before merging, regenerate tests/fixtures/released_api_contract.json, review the release notes, and run the required checks. See .github/RELEASING.md. Tags and GitHub Releases are published manually.",
+  "pull-request-header": "Automated release candidate. Actions freezes the API contract and performs release-readiness review. Merge only after required checks and code-owner approval. See .github/RELEASING.md.",
   "extra-files": [
     {
       "type": "toml",
@@ -19,7 +19,13 @@
     }
   ],
   "changelog-sections": [
-    { "type": "feat", "section": "Features" },
-    { "type": "fix", "section": "Bug Fixes" }
+    {
+      "type": "feat",
+      "section": "Features"
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes"
+    }
   ]
 }

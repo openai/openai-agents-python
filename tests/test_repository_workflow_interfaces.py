@@ -216,7 +216,11 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
     for job in (checks, build, jobs["publish"]):
         assert "if" not in job and "continue-on-error" not in job
         for step in job["steps"]:
-            assert "if" not in step and "continue-on-error" not in step
+            assert "continue-on-error" not in step
+            if step.get("name") == "Verify automated candidate review":
+                assert step["if"] == "vars.RELEASE_AUTOMATION_ENABLED == 'true'"
+            else:
+                assert "if" not in step
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -308,7 +312,13 @@ def test_release_build_is_isolated_from_test_execution() -> None:
     build = workflow["jobs"]["build"]
     # Separate GitHub-hosted jobs provide fresh runners, not just new directories.
     assert checks["runs-on"] == build["runs-on"] == "ubuntu-latest"
-    assert checks["permissions"] == build["permissions"] == {"contents": "read"}
+    assert build["permissions"] == {"contents": "read"}
+    assert checks["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+        "checks": "read",
+        "actions": "read",
+    }
     assert "outputs" not in checks
     assert build["needs"] == "checks"
     for job in (checks, build):
