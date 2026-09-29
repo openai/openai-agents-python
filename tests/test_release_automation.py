@@ -272,7 +272,7 @@ def test_discovery_uses_complete_release_manifest(
             }
         )
 
-    def fake_api(path: str) -> Any:
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
         if path.startswith("pulls?"):
             return [pr]
         if path == "pulls/1":
@@ -362,7 +362,7 @@ def test_publication_requires_trusted_completed_run(
     monkeypatch.setattr(automation, "human_approved", Mock(return_value=True))
     run = trusted_run()
 
-    def fake_api(path: str) -> Any:
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
         if path.startswith("git/commits/"):
             return {"tree": {"sha": "c" * 40}}
         if "/check-runs?" in path:
@@ -582,7 +582,7 @@ def test_readiness_requires_explicit_current_human_approval(
     elif scenario == "changes-requested":
         reviews.append({**review, "id": 91, "state": "CHANGES_REQUESTED"})
 
-    def fake_api(path: str) -> Any:
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
         if "/check-runs?" in path:
             return {
                 "check_runs": [
@@ -695,7 +695,7 @@ def test_publisher_rechecks_revoked_approval_after_environment_wait(
         "user": {"login": "maintainer", "type": "User"},
     }
 
-    def fake_api(path: str) -> Any:
+    def fake_api(path: str, *, missing_ok: bool = False) -> Any:
         if path.startswith("commits/") and "/pulls?" in path:
             return [
                 {
@@ -837,3 +837,98 @@ def test_green_report_emits_exact_payload_receipt(
     assert report["key_changes"] in summary and report["report"] in summary
     digest = hashlib.sha256(summary.encode()).hexdigest()
     assert (tmp_path / "output").read_text() == f"receipt={context['head']}/10/{digest}\n"
+
+
+@pytest.mark.parametrize(
+    ("consumer", "missing_at", "status"),
+    [
+        ("gate", "run", 404),
+        ("publish", "run", 404),
+        ("gate", "jobs", 404),
+        ("publish", "jobs", 404),
+        ("publish", "run", 401),
+        ("publish", "run", 403),
+        ("publish", "run", 429),
+        ("publish", "jobs", 500),
+    ],
+)
+def test_missing_claimed_run_does_not_hide_genuine_assessment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, consumer: str, missing_at: str, status: int
+) -> None:
+    event = tmp_path / "event.json"
+    head = {"ref": automation.BRANCH, "sha": "a" * 40, "repo": {"full_name": automation.REPO}}
+    event.write_text(json.dumps({"pull_request": {"number": 1, "head": head}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    check = {
+        "id": 1234,
+        "name": automation.CHECK,
+        "head_sha": "a" * 40,
+        "conclusion": "success",
+        "app": {"id": 15368},
+        "external_id": "123",
+        "output": {"summary": "Assessment"},
+    }
+    visited: list[str] = []
+
+    def run(command: list[str], **kwargs: Any) -> Any:
+        path = command[2].removeprefix(f"repos/{automation.REPO}/")
+        visited.append(path)
+        missing = "actions/runs/999"
+        if missing_at == "jobs":
+            missing += "/attempts/2/jobs?per_page=100"
+        if path == missing:
+            return automation.subprocess.CompletedProcess(
+                command,
+                1,
+                f"HTTP/2.0 {status} Error\nContent-Type: application/json\n\n{{}}",
+                "synthetic private error detail",
+            )
+        if "/check-runs?" in path:
+            body: Any = {"check_runs": [{**check, "id": 1235, "external_id": "999"}, check]}
+        elif path in {"actions/runs/123", "actions/runs/999"}:
+            body = trusted_run()
+        elif path == "actions/runs/123/attempts/2/jobs?per_page=100":
+            body = receipt_jobs()
+        elif path.startswith("commits/") and "/pulls?" in path:
+            body = [
+                {
+                    "number": 1,
+                    "merged_at": "2026-09-29",
+                    "merge_commit_sha": "b" * 40,
+                    "base": {"ref": "main"},
+                    "head": head,
+                }
+            ]
+        elif path.startswith("git/commits/"):
+            body = {"tree": {"sha": "c" * 40}}
+        elif path.startswith("pulls/1/reviews?"):
+            body = [
+                {
+                    "id": 90,
+                    "state": "APPROVED",
+                    "commit_id": "a" * 40,
+                    "body": "Approve release assessment 1234",
+                    "user": {"login": "maintainer", "type": "User"},
+                }
+            ]
+        elif path == "collaborators/maintainer/permission":
+            body = {"permission": "write"}
+        else:
+            raise AssertionError(path)
+        prefix = (
+            "HTTP/2.0 200 OK\nContent-Type: application/json\n\n" if "--include" in command else ""
+        )
+        return automation.subprocess.CompletedProcess(command, 0, prefix + json.dumps(body), "")
+
+    monkeypatch.setattr(automation.subprocess, "run", run)
+    if status == 404:
+        if consumer == "gate":
+            automation.gate()
+        else:
+            assert automation.published_review("v0.23.0", "b" * 40) == "Assessment"
+        assert "actions/runs/123/attempts/2/jobs?per_page=100" in visited
+    else:
+        with pytest.raises(RuntimeError, match="GitHub API operation failed") as error:
+            automation.published_review("v0.23.0", "b" * 40)
+        assert "synthetic private" not in str(error.value)
+        assert "actions/runs/123" not in visited

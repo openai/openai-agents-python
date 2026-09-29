@@ -30,8 +30,16 @@ FILES = {
 WORKFLOW = ".github/workflows/release-candidate.yml"
 
 
-def api(endpoint: str, data: dict[str, Any] | None = None, *, method: str = "GET") -> Any:
+def api(
+    endpoint: str,
+    data: dict[str, Any] | None = None,
+    *,
+    method: str = "GET",
+    missing_ok: bool = False,
+) -> Any:
     command = ["gh", "api", endpoint, "--method", method]
+    if missing_ok:
+        command.append("--include")
     if data is not None:
         command += ["--input", "-"]
     result = subprocess.run(
@@ -41,13 +49,26 @@ def api(endpoint: str, data: dict[str, Any] | None = None, *, method: str = "GET
         text=True,
     )
     if result.returncode:
+        if missing_ok and re.match(r"HTTP/\S+ 404(?: |\n)", result.stdout):
+            return None
         # API failures can contain request material. Do not echo credentials or payloads.
         raise RuntimeError(f"GitHub API operation failed: {method} {endpoint.split('?')[0]}")
-    return json.loads(result.stdout) if result.stdout.strip() else None
+    body = result.stdout
+    if missing_ok:
+        _, separator, body = body.partition("\n\n")
+        if not separator:
+            raise RuntimeError("GitHub API response headers are missing")
+    return json.loads(body) if body.strip() else None
 
 
-def repo_api(path: str, data: dict[str, Any] | None = None, *, method: str = "GET") -> Any:
-    return api(f"repos/{REPO}/{path}", data, method=method)
+def repo_api(
+    path: str,
+    data: dict[str, Any] | None = None,
+    *,
+    method: str = "GET",
+    missing_ok: bool = False,
+) -> Any:
+    return api(f"repos/{REPO}/{path}", data, method=method, missing_ok=missing_ok)
 
 
 def pages(path: str) -> list[Any]:
@@ -346,7 +367,9 @@ def trusted_assessment(check: dict[str, Any], head: str) -> bool:
     summary = (check.get("output") or {}).get("summary")
     if not run_id.isdigit() or not isinstance(summary, str):
         return False
-    run = repo_api(f"actions/runs/{run_id}")
+    run = repo_api(f"actions/runs/{run_id}", missing_ok=True)
+    if run is None:
+        return False
     if (
         run["path"] != WORKFLOW
         or run["head_branch"] != "main"
@@ -358,9 +381,13 @@ def trusted_assessment(check: dict[str, Any], head: str) -> bool:
     ):
         return False
     # Query actual jobs in the current attempt, never a check's claimed URL or name.
-    jobs = repo_api(f"actions/runs/{run_id}/attempts/{int(run['run_attempt'])}/jobs?per_page=100")[
-        "jobs"
-    ]
+    listing = repo_api(
+        f"actions/runs/{run_id}/attempts/{int(run['run_attempt'])}/jobs?per_page=100",
+        missing_ok=True,
+    )
+    if listing is None:  # The run may have been deleted after the first lookup.
+        return False
+    jobs = listing["jobs"]
     if len(jobs) >= 100:
         raise ValueError("Unexpected job count; assessment identity would be incomplete")
     expected = "Release assessment receipt " + assessment_receipt(head, check["id"], summary)
