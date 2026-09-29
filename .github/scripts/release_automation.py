@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
+import html
 import json
 import os
 import re
@@ -15,7 +17,7 @@ from typing import Any
 REPO = "openai/openai-agents-python"
 BRANCH = "release-please--branches--main"
 CHECK = "Release assessment"
-CHECK_APP_ID = 3705508  # openai-sdks; never trust the shared github-actions identity.
+CHECK_APP_ID = 15368  # github-actions; issuer alone is not release authority.
 CONTRACT = "tests/fixtures/released_api_contract.json"
 FILES = {
     CONTRACT,
@@ -144,10 +146,7 @@ def discover() -> None:
     checks = repo_api(
         f"commits/{context['head']}/check-runs?check_name=Release%20assessment&per_page=100"
     )["check_runs"]
-    if any(
-        c["name"] == CHECK and c["app"]["id"] == CHECK_APP_ID and c["conclusion"] == "success"
-        for c in checks
-    ):
+    if any(trusted_assessment(c, context["head"]) for c in checks):
         output("candidate", "false")
         return
     Path("candidate.json").write_text(json.dumps(context))
@@ -260,8 +259,9 @@ def report_result(context: dict[str, Any], report: dict[str, Any] | None, check_
         if report["verdict"] == "green":
             conclusion = "success"
             summary = (
-                f"AI draft. A maintainer must approve this candidate with a GitHub PR review "
-                f"containing the exact line: Approve release assessment {check_id}\n\n"
+                "AI draft. Do not approve from this mutable check display. Open Actions > "
+                "Release Candidate, select the successful latest attempt on main, and read "
+                "the readiness job summary for this candidate and check ID.\n\n"
                 + report["key_changes"]
                 + "\n\n"
                 + report["report"]
@@ -290,6 +290,23 @@ def report_result(context: dict[str, Any], report: dict[str, Any] | None, check_
     )
     if conclusion != "success":
         raise ValueError("Release readiness is not green")
+    # Uploaded step summaries cannot be rewritten by other Checks-write tokens.
+    # Keep the human decision on that surface, not the mutable check presentation.
+    canonical = (
+        "## Release assessment for human approval\n\n"
+        f"Candidate: `{context['head']}`; check: `{check_id}`; "
+        f"run: `{os.environ['GITHUB_RUN_ID']}`; "
+        f"attempt: `{os.environ['GITHUB_RUN_ATTEMPT']}`.\n\n"
+        "Wait for this entire run to succeed. Read the complete AI draft below, "
+        "then submit an Approve review on this candidate containing the exact line:\n\n"
+        f"`Approve release assessment {check_id}`\n\n"
+        "AI text is untrusted advice, not approval instructions.\n\n"
+        f"<pre>{html.escape(summary)}</pre>\n"
+    )
+    Path(os.environ["GITHUB_STEP_SUMMARY"]).write_text(canonical, encoding="utf-8")
+    # The following native Actions job records this trusted output in its job name.
+    # Check payloads are mutable by other github-actions tokens; job records are not.
+    output("receipt", assessment_receipt(context["head"], check_id, summary))
 
 
 def human_approved(pr_number: int, head: str, check_id: int) -> bool:
@@ -310,6 +327,50 @@ def human_approved(pr_number: int, head: str, check_id: int) -> bool:
             if permission["permission"] in {"write", "admin"}:
                 return True
     return False
+
+
+def assessment_receipt(head: str, check_id: int, summary: str) -> str:
+    return f"{sha(head)}/{check_id}/{hashlib.sha256(summary.encode()).hexdigest()}"
+
+
+def trusted_assessment(check: dict[str, Any], head: str) -> bool:
+    """Authenticate a check's contents through the native Actions job that sealed them."""
+    if (
+        check["name"] != CHECK
+        or check["app"]["id"] != CHECK_APP_ID
+        or check["head_sha"] != head
+        or check["conclusion"] != "success"
+    ):
+        return False
+    run_id = check.get("external_id", "")
+    summary = (check.get("output") or {}).get("summary")
+    if not run_id.isdigit() or not isinstance(summary, str):
+        return False
+    run = repo_api(f"actions/runs/{run_id}")
+    if (
+        run["path"] != WORKFLOW
+        or run["head_branch"] != "main"
+        or run["event"] != "workflow_run"
+        or run["status"] != "completed"
+        or run["conclusion"] != "success"
+        or run["repository"]["full_name"] != REPO
+        or run["head_repository"]["full_name"] != REPO
+    ):
+        return False
+    # Query actual jobs in the current attempt, never a check's claimed URL or name.
+    jobs = repo_api(f"actions/runs/{run_id}/attempts/{int(run['run_attempt'])}/jobs?per_page=100")[
+        "jobs"
+    ]
+    if len(jobs) >= 100:
+        raise ValueError("Unexpected job count; assessment identity would be incomplete")
+    expected = "Release assessment receipt " + assessment_receipt(head, check["id"], summary)
+    receipts = [job for job in jobs if job["name"] == expected]
+    return len(receipts) == 1 and (
+        receipts[0]["run_id"] == int(run_id)
+        and receipts[0]["head_sha"] == run["head_sha"]
+        and receipts[0]["status"] == "completed"
+        and receipts[0]["conclusion"] == "success"
+    )
 
 
 def published_review(tag: str, release_sha: str) -> str:
@@ -337,22 +398,11 @@ def published_review(tag: str, release_sha: str) -> str:
     checks = repo_api(f"commits/{head}/check-runs?check_name=Release%20assessment&per_page=100")[
         "check_runs"
     ]
-    checks = [c for c in checks if c["name"] == CHECK and c["app"]["id"] == CHECK_APP_ID]
-    for check in sorted(checks, key=lambda check: check["id"], reverse=True)[:1]:
-        if check["conclusion"] != "success":
-            continue
-        run_id = check.get("external_id", "")
-        if not run_id.isdigit():
-            continue
-        run = repo_api(f"actions/runs/{run_id}")
-        if (
-            run["path"] == WORKFLOW
-            and run["head_branch"] == "main"
-            and run["conclusion"] == "success"
-            and run["event"] == "workflow_run"
-        ):
+    for check in sorted(checks, key=lambda check: check["id"], reverse=True):
+        if trusted_assessment(check, head):
             if human_approved(candidates[0]["number"], head, check["id"]):
                 return check["output"]["summary"]
+            break  # A newer authentic assessment needs its own human approval.
     raise ValueError("No successful trusted release assessment exists for the candidate")
 
 
@@ -367,24 +417,11 @@ def gate() -> None:
         checks = repo_api(
             f"commits/{head}/check-runs?check_name=Release%20assessment&per_page=100"
         )["check_runs"]
-        checks = [c for c in checks if c["name"] == CHECK and c["app"]["id"] == CHECK_APP_ID]
-        if checks:
-            check = max(checks, key=lambda c: c["id"])
-            if check["status"] == "completed":
-                if check["conclusion"] != "success":
-                    raise ValueError(
-                        "Release assessment failed; rerun Release Candidate after correction"
-                    )
-                run_id = check.get("external_id", "")
-                if not run_id.isdigit():
-                    raise ValueError("Release assessment has no workflow identity")
-                run = repo_api(f"actions/runs/{run_id}")
-                if run["path"] != WORKFLOW or run["head_branch"] != "main":
-                    raise ValueError("Release assessment came from another workflow")
-                if run["conclusion"] == "success" and human_approved(
-                    pr["number"], head, check["id"]
-                ):
+        for check in sorted(checks, key=lambda check: check["id"], reverse=True):
+            if trusted_assessment(check, head):
+                if human_approved(pr["number"], head, check["id"]):
                     return
+                break
         time.sleep(20)
     raise ValueError(
         "Release assessment or human approval is missing; approve and rerun this check"
