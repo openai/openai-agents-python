@@ -1,0 +1,30 @@
+name: Release Readiness
+on:
+  pull_request:
+    branches: [main]
+permissions: {}
+concurrency:
+  group: release-readiness-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  readiness:
+    name: Release readiness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
+      actions: read
+    steps:
+      - if: github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Require assessment only for the automated release PR
+        if: github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -I .github/scripts/release_automation.py gate

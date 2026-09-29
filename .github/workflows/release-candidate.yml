@@ -1,0 +1,228 @@
+name: Release Candidate
+
+on:
+  workflow_run:
+    workflows: [Release Please, Tests]
+    types: [completed]
+
+# workflow_run receives read-only default-branch cache access.
+# Retry through Release Please or rerun this workflow; do not add workflow_dispatch.
+permissions: {}
+concurrency:
+  group: release-candidate-main
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    if: github.repository == 'openai/openai-agents-python' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      candidate: ${{ steps.candidate.outputs.candidate }}
+      commit_sha: ${{ steps.candidate.outputs.head }}
+      version: ${{ steps.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/release_automation.py discover
+      - if: steps.candidate.outputs.candidate == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-input-${{ github.run_attempt }}
+          path: candidate.json
+          retention-days: 1
+
+  contract:
+    needs: discover
+    if: needs.discover.outputs.candidate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.discover.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+        with:
+          version: '0.11.14'
+          python-version: '3.14'
+          enable-cache: false
+      - name: Freeze and validate the candidate public API
+        env:
+          VERSION: ${{ needs.discover.outputs.version }}
+          UV_FROZEN: '1'
+        run: |
+          make sync
+          make update-released-api-contract VERSION="$VERSION"
+          make check-released-api-contract VERSION="$VERSION"
+          make check-prospective-released-api-contract
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: generated-contract-${{ github.run_attempt }}
+          path: tests/fixtures/released_api_contract.json
+          retention-days: 1
+
+  update:
+    needs: [discover, contract]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.update.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: candidate-input-${{ github.run_attempt }}
+          path: input
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: generated-contract-${{ github.run_attempt }}
+          path: generated
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        id: app
+        with:
+          app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.OPENAI_SDKS_APP_PRIVATE_KEY }}
+          owner: openai
+          repositories: openai-agents-python
+          permission-contents: write
+          permission-pull-requests: read
+      - id: update
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          cp input/candidate.json candidate.json
+          python .github/scripts/release_automation.py write-contract --file generated/released_api_contract.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-final-${{ github.run_attempt }}
+          path: candidate.json
+          retention-days: 1
+
+  evidence:
+    needs: update
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      check: ${{ steps.collect.outputs.check }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: candidate-final-${{ github.run_attempt }}
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        id: app
+        with:
+          app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.OPENAI_SDKS_APP_PRIVATE_KEY }}
+          owner: openai
+          repositories: openai-agents-python
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: write
+      - id: collect
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: python .github/scripts/release_automation.py collect
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: release-evidence-${{ github.run_attempt }}
+          path: documentation-prs.json
+          retention-days: 1
+
+  review:
+    needs: [update, evidence]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release-review
+    permissions:
+      contents: read
+    outputs:
+      result: ${{ steps.codex.outputs.final-message }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.update.outputs.commit_sha }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: candidate-final-${{ github.run_attempt }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: release-evidence-${{ github.run_attempt }}
+      - name: Require review credentials
+        env:
+          HAS_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: test "$HAS_KEY" = true
+      # Last step: no later process inherits the agent's runner state.
+      - uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
+        id: codex
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          codex-version: '0.158.0'
+          permission-profile: ':read-only'
+          safety-strategy: drop-sudo
+          codex-home: ${{ runner.temp }}/release-codex
+          allow-bot-users: openai-sdks[bot],github-actions[bot]
+          prompt-file: control/.github/release/review.md
+          output-schema-file: control/.github/release/review.schema.json
+          effort: high
+
+  readiness:
+    needs: [update, evidence, review]
+    if: always() && needs.evidence.outputs.check != ''
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: candidate-final-${{ github.run_attempt }}
+      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+        id: app
+        with:
+          app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.OPENAI_SDKS_APP_PRIVATE_KEY }}
+          owner: openai
+          repositories: openai-agents-python
+          permission-contents: read
+          permission-pull-requests: read
+          permission-checks: write
+      - name: Record the exact candidate verdict
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          REVIEW_RESULT: ${{ needs.review.outputs.result }}
+          REVIEW_CHECK_ID: ${{ needs.evidence.outputs.check }}
+        run: python .github/scripts/release_automation.py report

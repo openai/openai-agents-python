@@ -2739,13 +2739,42 @@ async def resolve_interrupted_turn(
             )
         )
 
+    # Completed siblings are deliberately skipped during resumed execution, but their
+    # results still participate in the interrupted turn's final-output decision.
+    results_by_call_id = {
+        extract_tool_call_id(result.run_item.raw_item): result
+        for result in function_results
+        if result.run_item is not None
+    }
+    completed_outputs = {
+        item.call_id: item
+        for item in [*original_pre_step_items, *new_items]
+        if isinstance(item, ToolCallOutputItem)
+        and get_mapping_or_attr(item.raw_item, "type") == "function_call_output"
+    }
+    turn_function_results = []
+    for run in sorted(
+        selectable_function_runs,
+        key=lambda run: call_positions.get(run.tool_call.call_id, len(call_positions)),
+    ):
+        call_id = run.tool_call.call_id
+        result = results_by_call_id.get(call_id)
+        if result is not None:
+            turn_function_results.append(result)
+        elif (output_item := completed_outputs.get(call_id)) is not None:
+            turn_function_results.append(
+                FunctionToolResult(
+                    tool=run.function_tool, output=output_item.output, run_item=output_item
+                )
+            )
+
     tool_final_output = await _maybe_finalize_from_tool_results(
         public_agent=public_agent,
         original_input=original_input,
         new_response=new_response,
         pre_step_items=pre_step_items,
         new_step_items=new_items,
-        function_results=function_results,
+        function_results=turn_function_results,
         hooks=hooks,
         context_wrapper=context_wrapper,
         tool_input_guardrail_results=tool_input_guardrail_results,

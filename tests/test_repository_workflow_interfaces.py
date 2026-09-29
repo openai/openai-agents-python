@@ -216,7 +216,15 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
     for job in (checks, build, jobs["publish"]):
         assert "if" not in job and "continue-on-error" not in job
         for step in job["steps"]:
-            assert "if" not in step and "continue-on-error" not in step
+            assert "continue-on-error" not in step
+            if step.get("name") in {
+                "Verify automated candidate review",
+                "Checkout approval validator from main",
+                "Revalidate human approval after deployment wait",
+            }:
+                assert step["if"] == "vars.RELEASE_AUTOMATION_ENABLED == 'true'"
+            else:
+                assert "if" not in step
 
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -308,7 +316,13 @@ def test_release_build_is_isolated_from_test_execution() -> None:
     build = workflow["jobs"]["build"]
     # Separate GitHub-hosted jobs provide fresh runners, not just new directories.
     assert checks["runs-on"] == build["runs-on"] == "ubuntu-latest"
-    assert checks["permissions"] == build["permissions"] == {"contents": "read"}
+    assert build["permissions"] == {"contents": "read"}
+    assert checks["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+        "checks": "read",
+        "actions": "read",
+    }
     assert "outputs" not in checks
     assert build["needs"] == "checks"
     for job in (checks, build):
@@ -334,11 +348,15 @@ def test_pypi_job_only_publishes_the_build_artifact() -> None:
     assert "needs: build" in publish
     assert "name: pypi" in publish
     assert "id-token: write" in publish
-    assert "run:" not in publish
+    assert (
+        "run: python3 -I control/.github/scripts/release_automation.py verify-publication"
+        in publish
+    )
     actions = re.findall(r"uses: ([^\s]+)", publish)
-    assert len(actions) == 2
+    assert len(actions) == 3
     assert actions[0].startswith("actions/download-artifact@")
-    assert actions[1].startswith("pypa/gh-action-pypi-publish@")
+    assert actions[1].startswith("actions/checkout@")
+    assert actions[2].startswith("pypa/gh-action-pypi-publish@")
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in actions)
     assert "artifact-ids: ${{ needs.build.outputs.artifact-id }}" in publish
     assert "artifact-id: ${{ steps.upload.outputs.artifact-id }}" in _workflow_job(

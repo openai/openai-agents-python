@@ -5,7 +5,7 @@ description: Prepare a local Python SDK release candidate in a dedicated worktre
 
 # Release Candidate Preparation
 
-Use this skill only when the user explicitly invokes `$release-candidate-prep` and supplies a release version without a leading `v`, for example `VERSION=0.20.1`. This skill replaces the removed GitHub Actions release-PR creator with a reviewed local workflow.
+Use this skill only when the user explicitly invokes `$release-candidate-prep` and supplies a release version without a leading `v`, for example `VERSION=0.20.1`. This skill is the manual fallback for the GitHub Actions release workflow. Ordinary bot releases use `.github/workflows/release-candidate.yml`; do not invoke this local worktree procedure inside Actions.
 
 ## Non-negotiable boundaries
 

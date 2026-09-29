@@ -288,9 +288,9 @@ class OpenAIChatCompletionsModel(Model):
             usage = (
                 Usage(
                     requests=1,
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
-                    total_tokens=response.usage.total_tokens,
+                    input_tokens=response.usage.prompt_tokens or 0,
+                    output_tokens=response.usage.completion_tokens or 0,
+                    total_tokens=response.usage.total_tokens or 0,
                     # BeforeValidator in Usage normalizes these from Chat Completions types
                     input_tokens_details=response.usage.prompt_tokens_details,  # type: ignore[arg-type]
                     output_tokens_details=response.usage.completion_tokens_details,  # type: ignore[arg-type]
