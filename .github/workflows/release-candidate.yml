@@ -122,6 +122,7 @@ jobs:
       contents: read
       pull-requests: read
       checks: write
+      actions: read
     outputs:
       check: ${{ steps.collect.outputs.check }}
     steps:
@@ -143,6 +144,7 @@ jobs:
           retention-days: 1
 
   review:
+    name: Release assessment identity ${{ needs.update.outputs.commit_sha }}/${{ needs.evidence.outputs.check }}
     needs: [update, evidence]
     runs-on: ubuntu-latest
     timeout-minutes: 30

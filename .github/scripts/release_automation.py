@@ -13,6 +13,7 @@ import subprocess
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 REPO = "openai/openai-agents-python"
 BRANCH = "release-please--branches--main"
@@ -164,10 +165,7 @@ def discover() -> None:
     context["base_tag"] = latest["tag_name"]
     version(context["base_tag"].removeprefix("v"))
     context["base"] = sha(repo_api(f"commits/{context['base_tag']}")["sha"])
-    checks = repo_api(
-        f"commits/{context['head']}/check-runs?check_name=Release%20assessment&per_page=100"
-    )["check_runs"]
-    if any(trusted_assessment(c, context["head"]) for c in checks):
+    if latest_assessment(pr, context["head"]) is not None:
         output("candidate", "false")
         return
     Path("candidate.json").write_text(json.dumps(context))
@@ -218,7 +216,10 @@ def write_contract(context: dict[str, Any], path: Path) -> None:
 
 
 def collect(context: dict[str, Any]) -> None:
-    current(context)
+    pr = current(context)
+    run = repo_api(f"actions/runs/{int(os.environ['GITHUB_RUN_ID'])}")
+    if run["created_at"] < pr["created_at"]:
+        raise ValueError("Run predates the release PR; retry through Release Please")
     # Only data is collected. The review job must not install or execute candidate code.
     docs = []
     for pr in pages("pulls?state=open&base=main"):
@@ -354,6 +355,63 @@ def assessment_receipt(head: str, check_id: int, summary: str) -> str:
     return f"{sha(head)}/{check_id}/{hashlib.sha256(summary.encode()).hexdigest()}"
 
 
+def action_rows(path: str, key: str, limit: int) -> list[Any]:
+    """Read bounded native history completely or reject it, never truncate identity."""
+    rows: list[Any] = []
+    for page in range(1, limit // 100 + 1):
+        listing = repo_api(f"{path}&per_page=100&page={page}")
+        if listing["total_count"] >= limit:
+            raise ValueError("Actions history limit reached; assessment identity is incomplete")
+        batch = listing[key]
+        rows.extend(batch)
+        if len(batch) < 100:
+            return rows
+    raise ValueError("Actions history limit reached; assessment identity is incomplete")
+
+
+def latest_assessment(pr: dict[str, Any], head: str) -> dict[str, Any] | None:
+    """Select native assessment identity before validating any mutable check fields."""
+    runs = action_rows(
+        "actions/workflows/release-candidate.yml/runs?branch=main&event=workflow_run"
+        f"&created={quote('>=' + pr['created_at'], safe='')}",
+        "workflow_runs",
+        1000,
+    )
+    newest: tuple[int, dict[str, Any]] | None = None
+    for run in runs:
+        if (
+            run["path"] != WORKFLOW
+            or run["head_branch"] != "main"
+            or run["event"] != "workflow_run"
+            or run["repository"]["full_name"] != REPO
+            or run["head_repository"]["full_name"] != REPO
+            or run["created_at"] < pr["created_at"]
+        ):
+            continue
+        # Include prior attempts: starting a rerun must not erase a newer identity.
+        jobs = action_rows(f"actions/runs/{run['id']}/jobs?filter=all", "jobs", 10000)
+        for job in jobs:
+            match = re.fullmatch(
+                r"Release assessment identity ([0-9a-f]{40})/([0-9]+)", job["name"]
+            )
+            if (
+                match
+                and match[1] == head
+                and job["run_id"] == run["id"]
+                and job["head_sha"] == run["head_sha"]
+            ):
+                check_id = int(match[2])
+                if newest is None or check_id > newest[0]:
+                    newest = (check_id, run)
+    if newest is None:
+        return None
+    check_id, run = newest
+    check = repo_api(f"check-runs/{check_id}", missing_ok=True)
+    if check is None or check.get("external_id") != str(run["id"]):
+        return None
+    return check if trusted_assessment(check, head) else None
+
+
 def trusted_assessment(check: dict[str, Any], head: str) -> bool:
     """Authenticate a check's contents through the native Actions job that sealed them."""
     if (
@@ -422,14 +480,9 @@ def published_review(tag: str, release_sha: str) -> str:
         != repo_api(f"git/commits/{release_sha}")["tree"]["sha"]
     ):
         raise ValueError("Published tree differs from the reviewed candidate; re-prepare release")
-    checks = repo_api(f"commits/{head}/check-runs?check_name=Release%20assessment&per_page=100")[
-        "check_runs"
-    ]
-    for check in sorted(checks, key=lambda check: check["id"], reverse=True):
-        if trusted_assessment(check, head):
-            if human_approved(candidates[0]["number"], head, check["id"]):
-                return check["output"]["summary"]
-            break  # A newer authentic assessment needs its own human approval.
+    check = latest_assessment(candidates[0], head)
+    if check is not None and human_approved(candidates[0]["number"], head, check["id"]):
+        return check["output"]["summary"]
     raise ValueError("No successful trusted release assessment exists for the candidate")
 
 
@@ -441,14 +494,9 @@ def gate() -> None:
         return
     head = sha(pr["head"]["sha"])
     for _ in range(85):
-        checks = repo_api(
-            f"commits/{head}/check-runs?check_name=Release%20assessment&per_page=100"
-        )["check_runs"]
-        for check in sorted(checks, key=lambda check: check["id"], reverse=True):
-            if trusted_assessment(check, head):
-                if human_approved(pr["number"], head, check["id"]):
-                    return
-                break
+        check = latest_assessment(pr, head)
+        if check is not None and human_approved(pr["number"], head, check["id"]):
+            return
         time.sleep(20)
     raise ValueError(
         "Release assessment or human approval is missing; approve and rerun this check"
