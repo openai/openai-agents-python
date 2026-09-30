@@ -437,6 +437,86 @@ def test_readiness_gate_passes_ordinary_pr_without_ai(
     request.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("scenario", "error"),
+    [
+        ("ordinary", None),
+        ("assessed-release", None),
+        ("unreviewed-tree", "Queued tree differs"),
+        ("missing-candidate", "requires one open"),
+        ("missing-assessment", "assessment or human approval is missing"),
+        ("revoked-approval", "assessment or human approval is missing"),
+    ],
+)
+def test_readiness_gate_checks_queued_release_tree(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str, error: str | None
+) -> None:
+    main_head, group_head, candidate_head = "b" * 40, "c" * 40, "a" * 40
+    pr = {
+        "number": 1,
+        "head": {
+            "ref": automation.BRANCH,
+            "sha": candidate_head,
+            "repo": {"full_name": automation.REPO},
+        },
+    }
+    event = tmp_path / "event.json"
+    # An earlier queued release may already be in the synthetic base.
+    event.write_text(json.dumps({"merge_group": {"head_sha": group_head, "base_sha": "d" * 40}}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setattr(automation.time, "sleep", lambda _: None)
+
+    def fake_api(path: str) -> Any:
+        if path == "git/ref/heads/main":
+            return {"object": {"sha": main_head}}
+        for commit, blob in [(main_head, "e" * 40), (group_head, "f" * 40)]:
+            if path == f"contents/.release-please-manifest.json?ref={commit}":
+                return {"type": "file", "sha": blob}
+            if path == f"git/blobs/{blob}":
+                version = "0.23.0" if commit == group_head and scenario != "ordinary" else "0.22.3"
+                return {
+                    "encoding": "base64",
+                    "content": base64.b64encode(json.dumps({".": version}).encode()).decode(),
+                }
+        if path == f"pulls?state=open&base=main&head=openai:{automation.BRANCH}":
+            return [] if scenario == "missing-candidate" else [pr]
+        if path == f"git/commits/{candidate_head}":
+            return {"tree": {"sha": "1" * 40}}
+        if path == f"git/commits/{group_head}":
+            return {"tree": {"sha": ("2" if scenario == "unreviewed-tree" else "1") * 40}}
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", fake_api)
+    assessment = Mock(return_value=None if scenario == "missing-assessment" else {"id": 1234})
+    approval = Mock(return_value=scenario != "revoked-approval")
+    monkeypatch.setattr(automation, "latest_assessment", assessment)
+    monkeypatch.setattr(automation, "human_approved", approval)
+    if error:
+        with pytest.raises(ValueError, match=error):
+            automation.gate()
+    else:
+        automation.gate()
+    if scenario in {"ordinary", "unreviewed-tree", "missing-candidate"}:
+        assessment.assert_not_called()
+        approval.assert_not_called()
+    elif scenario == "assessed-release":
+        assert assessment.call_args.args[:2] == (pr, candidate_head)
+        approval.assert_called_once_with(1, candidate_head, 1234)
+
+
+def test_readiness_workflow_validates_merge_groups_with_trusted_code() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/release-readiness.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    assert workflow["on"]["merge_group"]["types"] == ["checks_requested"]
+    checkout, gate = workflow["jobs"]["readiness"]["steps"]
+    assert checkout["with"]["ref"] == "refs/heads/main"
+    assert checkout["with"]["persist-credentials"] == "false"
+    for step in (checkout, gate):
+        assert step["if"].startswith("github.event_name == 'merge_group' || (")
+    assert gate["run"] == "python -I .github/scripts/release_automation.py gate"
+
+
 def test_candidate_artifacts_are_attempt_scoped() -> None:
     workflow = yaml.load(
         (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
@@ -1149,6 +1229,22 @@ def test_eligibility_marker_uses_only_trigger_identity() -> None:
         "github.event.workflow_run.head_branch == 'release-please--branches--main')) && "
         "'Release Candidate eligible' || 'Release Candidate unrelated' }}"
     )
+
+
+def test_candidate_queue_isolates_unrelated_events_before_jobs_start() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    # Job-level filtering is too late to prevent pending workflow replacement.
+    group = " ".join(workflow["concurrency"]["group"].split())
+    assert group == (
+        "${{ github.event.workflow_run.head_repository.full_name == github.repository && "
+        "(github.event.workflow_run.name == 'Release Please' || "
+        "(github.event.workflow_run.name == 'Tests' && "
+        "github.event.workflow_run.head_branch == 'release-please--branches--main')) && "
+        "'release-candidate-main' || format('release-candidate-unrelated-{0}', github.run_id) }}"
+    )
+    assert workflow["concurrency"]["cancel-in-progress"] == "false"
 
 
 @pytest.mark.parametrize("consumer", ["gate", "publish"])

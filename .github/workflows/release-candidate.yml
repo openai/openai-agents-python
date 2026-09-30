@@ -16,7 +16,13 @@ on:
 # Retry through Release Please or rerun this workflow; do not add workflow_dispatch.
 permissions: {}
 concurrency:
-  group: release-candidate-main
+  # Unrelated test completions must not replace a pending release candidate.
+  group: >-
+    ${{ github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.name == 'Release Please' ||
+         (github.event.workflow_run.name == 'Tests' &&
+          github.event.workflow_run.head_branch == 'release-please--branches--main')) &&
+        'release-candidate-main' || format('release-candidate-unrelated-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
@@ -60,7 +66,7 @@ jobs:
         with:
           ref: ${{ needs.discover.outputs.commit_sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: '0.11.14'
           python-version: '3.14'
@@ -101,7 +107,7 @@ jobs:
         with:
           name: generated-contract-${{ github.run_attempt }}
           path: generated
-      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         id: app
         with:
           app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
@@ -185,6 +191,8 @@ jobs:
       # Last step: no later process inherits the agent's runner state.
       - uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
         id: codex
+        # Leave time for cancellation and runner log finalization before the job deadline.
+        timeout-minutes: 25
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           codex-version: '0.158.0'
