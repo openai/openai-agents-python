@@ -122,6 +122,62 @@ async def _run_chat_completions_model_with_custom_base_url(
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ((None, 5, 12), (0, 5, 12)),
+        ((7, None, 12), (7, 0, 12)),
+        ((7, 5, None), (7, 5, 0)),
+        ((None, None, None), (0, 0, 0)),
+        ((7, 5, 12), (7, 5, 12)),
+        (None, (0, 0, 0)),
+    ],
+    ids=["null-input", "null-output", "null-total", "all-null", "valid", "no-usage"],
+)
+async def test_runner_normalizes_nullable_chat_usage(
+    counts: tuple[int | None, int | None, int | None] | None,
+    expected: tuple[int, int, int],
+) -> None:
+    usage = (
+        {
+            "prompt_tokens": counts[0],
+            "completion_tokens": counts[1],
+            "total_tokens": counts[2],
+            "prompt_tokens_details": {"cached_tokens": 3},
+            "completion_tokens_details": {"reasoning_tokens": 2},
+        }
+        if counts is not None
+        else None
+    )
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        payload = _minimal_chat_completion("Hello").model_dump()
+        payload["usage"] = usage
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.example/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        agent = Agent(
+            name="test",
+            model=OpenAIChatCompletionsModel(model="fake", openai_client=client),
+            model_settings=ModelSettings(preserve_raw_usage=True),
+        )
+        result = await Runner.run(agent, "hi")
+
+    assert result.final_output == "Hello"
+    normalized = result.context_wrapper.usage
+    assert normalized.requests == 1
+    assert (normalized.input_tokens, normalized.output_tokens, normalized.total_tokens) == expected
+    assert normalized.input_tokens_details.cached_tokens == (3 if counts is not None else 0)
+    assert normalized.output_tokens_details.reasoning_tokens == (2 if counts is not None else 0)
+    assert result.raw_responses[0].raw_usage == usage
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 async def test_falsy_reasoning_is_forwarded() -> None:
     class FalsyReasoning(Reasoning):
         def __bool__(self) -> bool:

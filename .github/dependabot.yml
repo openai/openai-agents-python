@@ -14,6 +14,8 @@ updates:
   # The root pyproject.toml and uv.lock cover runtime, extras, and development tools.
   - package-ecosystem: "uv"
     directory: "/"
+    # Raise published minimum versions as well as updating the lockfile.
+    versioning-strategy: increase
     schedule:
       interval: "weekly"
     cooldown:
