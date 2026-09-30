@@ -37,7 +37,7 @@ jobs:
         run: ./.github/scripts/detect-changes.sh docs-deploy
       - name: Setup uv
         if: steps.docs-deploy.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
