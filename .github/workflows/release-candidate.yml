@@ -60,7 +60,7 @@ jobs:
         with:
           ref: ${{ needs.discover.outputs.commit_sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           version: '0.11.14'
           python-version: '3.14'
@@ -101,7 +101,7 @@ jobs:
         with:
           name: generated-contract-${{ github.run_attempt }}
           path: generated
-      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         id: app
         with:
           app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
