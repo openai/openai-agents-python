@@ -51,7 +51,10 @@ def _extra_metadata_error(
             "the extra under [project.optional-dependencies]."
         )
 
-    distribution_name = canonicalize_name(dependency_module)
+    # The Vercel sandbox distribution retains the shared `vercel` import namespace.
+    distribution_name = canonicalize_name(
+        "vercel-sandbox" if dependency_module == "vercel" else dependency_module
+    )
     declared_distributions = _distributions_declared_by_extra(requirement_strings, extra)
     if distribution_name not in declared_distributions:
         return (
@@ -157,6 +160,27 @@ def test_extra_metadata_provenance_ignores_base_and_transitive_requirements() ->
         "'cryptography' for policy dependency module 'cryptography'. Add it to "
         "[project.optional-dependencies].encrypt; transitive or base-environment availability "
         "does not satisfy this check."
+    )
+
+
+def test_extra_metadata_provenance_uses_vercel_sandbox_distribution() -> None:
+    assert (
+        _extra_metadata_error(
+            extra="vercel",
+            dependency_module="vercel",
+            provided_extras=["vercel"],
+            requirement_strings=["vercel-sandbox>=0.7.0,<0.8; extra == 'vercel'"],
+        )
+        is None
+    )
+    assert (
+        _extra_metadata_error(
+            extra="vercel",
+            dependency_module="vercel",
+            provided_extras=["vercel"],
+            requirement_strings=["vercel>=0.5.6; extra == 'vercel'"],
+        )
+        is not None
     )
 
 
