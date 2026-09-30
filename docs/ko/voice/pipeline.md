@@ -136,6 +136,7 @@ config = VoicePipelineConfig(
 애플리케이션이 [`StreamedAudioResult.stream()`][agents.voice.result.StreamedAudioResult.stream] 값을 소비하는 동안 치명적인 파이프라인 오류가 발생합니다. 그 외에는 정상적으로 실행이 완료되었지만 음성-텍스트 전사 세션을 종료하지 못하는 경우, 스트림은 무기한 기다리는 대신 해당 종료 오류를 발생시킵니다. 턴이 이미 실패한 상태에서 전사 세션 종료도 실패하면 스트림은 원래 턴 오류를 기본 오류로 유지합니다.
 
 ```python
+
 result = await pipeline.run(input)
 
 async for event in result.stream():

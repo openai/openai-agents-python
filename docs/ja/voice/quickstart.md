@@ -98,7 +98,6 @@ agent = Agent(
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
-
 pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
 ```
 
@@ -124,6 +123,7 @@ player.start()
 async for event in result.stream():
     if event.type == "voice_stream_event_audio":
         player.write(event.data)
+
 ```
 
 ## 全体の統合 {#put-it-all-together}

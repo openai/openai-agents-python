@@ -53,7 +53,9 @@ from agents.testing import ScriptedModel, assistant_message
 
 @pytest.mark.asyncio
 async def test_fixed_response() -> None:
-    model = ScriptedModel([[assistant_message("Paris is the capital of France.")]])
+    model = ScriptedModel(
+        [[assistant_message("Paris is the capital of France.")]]
+    )
     agent = Agent(name="Geography assistant", model=model)
 
     result = await Runner.run(
@@ -106,7 +108,10 @@ async def test_tool_workflow() -> None:
     assert result.final_output == "It is sunny in Tokyo."
     assert len(model.calls) == 2
     assert model.last_call is not None
-    assert any(item.get("type") == "function_call_output" for item in model.last_call.input)
+    assert any(
+        item.get("type") == "function_call_output"
+        for item in model.last_call.input
+    )
     model.assert_complete()
 ```
 
@@ -464,7 +469,9 @@ async def test_voice_pipeline() -> None:
     pcm = pcm16_samples([0, 100, -100, 0])
     tts = ScriptedTTSModel([TTSResult([pcm])])
     pipeline = VoicePipeline(
-        workflow=SingleAgentVoiceWorkflow(Agent(name="Voice assistant", model=model)),
+        workflow=SingleAgentVoiceWorkflow(
+            Agent(name="Voice assistant", model=model)
+        ),
         stt_model=stt,
         tts_model=tts,
         config={"tracing_disabled": True, "tts_settings": {"buffer_size": 1}},

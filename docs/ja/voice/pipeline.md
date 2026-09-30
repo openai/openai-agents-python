@@ -136,6 +136,7 @@ config = VoicePipelineConfig(
 パイプラインを終了させるエラーは、アプリケーションが [`StreamedAudioResult.stream()`][agents.voice.result.StreamedAudioResult.stream] を処理している間に送出されます。それ以外は正常に完了した実行後に音声テキスト変換の文字起こしセッションをクローズできなかった場合、ストリームは無期限に待機するのではなく、そのクローズエラーを送出します。ターンがすでに失敗しており、文字起こしセッションのクローズにも失敗した場合、ストリームは元のターンエラーを主要なエラーとして保持します。
 
 ```python
+
 result = await pipeline.run(input)
 
 async for event in result.stream():
