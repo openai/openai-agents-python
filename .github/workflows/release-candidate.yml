@@ -185,6 +185,8 @@ jobs:
       # Last step: no later process inherits the agent's runner state.
       - uses: openai/codex-action@86365089eb2b84e0a8fb0717b304f8bdcb13b20e
         id: codex
+        # Leave time for cancellation and runner log finalization before the job deadline.
+        timeout-minutes: 25
         with:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
           codex-version: '0.158.0'
