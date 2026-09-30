@@ -24,7 +24,6 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
-import httpx
 import httpx2
 from pydantic import BaseModel, TypeAdapter, field_serializer, field_validator
 from vercel import sandbox as vercel_sandbox
@@ -98,9 +97,6 @@ DEFAULT_VERCEL_SANDBOX_TIMEOUT_MS = 270_000
 _NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
 
 _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
-    httpx.ReadError,
-    httpx.NetworkError,
-    httpx.ProtocolError,
     httpx2.ReadError,
     httpx2.NetworkError,
     httpx2.ProtocolError,

@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
-import httpx
+import httpx2 as httpx
 import pytest
 from pydantic import BaseModel, PrivateAttr
 

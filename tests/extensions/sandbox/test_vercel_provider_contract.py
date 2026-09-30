@@ -63,7 +63,7 @@ def provider_wire(monkeypatch):
     import json
     from types import SimpleNamespace
 
-    import httpx
+    import httpx2 as httpx
     from vercel.sandbox import SandboxClient
 
     wire = SimpleNamespace(
@@ -403,7 +403,7 @@ async def test_installed_provider_failed_delete_keeps_cleanup_retryable(provider
 async def test_installed_provider_closes_unadopted_reconnect_client(provider_wire, failure):
     import asyncio
 
-    import httpx
+    import httpx2 as httpx
 
     from agents.extensions.sandbox.vercel import VercelSandboxClientOptions
 
