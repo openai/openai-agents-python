@@ -1151,6 +1151,22 @@ def test_eligibility_marker_uses_only_trigger_identity() -> None:
     )
 
 
+def test_candidate_queue_isolates_unrelated_events_before_jobs_start() -> None:
+    workflow = yaml.load(
+        (ROOT / ".github/workflows/release-candidate.yml").read_text(), Loader=yaml.BaseLoader
+    )
+    # Job-level filtering is too late to prevent pending workflow replacement.
+    group = " ".join(workflow["concurrency"]["group"].split())
+    assert group == (
+        "${{ github.event.workflow_run.head_repository.full_name == github.repository && "
+        "(github.event.workflow_run.name == 'Release Please' || "
+        "(github.event.workflow_run.name == 'Tests' && "
+        "github.event.workflow_run.head_branch == 'release-please--branches--main')) && "
+        "'release-candidate-main' || format('release-candidate-unrelated-{0}', github.run_id) }}"
+    )
+    assert workflow["concurrency"]["cancel-in-progress"] == "false"
+
+
 @pytest.mark.parametrize("consumer", ["gate", "publish"])
 @pytest.mark.parametrize("tampered", [False, True])
 def test_unrelated_runs_do_not_spend_candidate_history_budget(
