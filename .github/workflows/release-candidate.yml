@@ -16,7 +16,13 @@ on:
 # Retry through Release Please or rerun this workflow; do not add workflow_dispatch.
 permissions: {}
 concurrency:
-  group: release-candidate-main
+  # Unrelated test completions must not replace a pending release candidate.
+  group: >-
+    ${{ github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.name == 'Release Please' ||
+         (github.event.workflow_run.name == 'Tests' &&
+          github.event.workflow_run.head_branch == 'release-please--branches--main')) &&
+        'release-candidate-main' || format('release-candidate-unrelated-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
