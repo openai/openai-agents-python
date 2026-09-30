@@ -2852,7 +2852,7 @@ requires-dist = [
     { name = "pygments", marker = "extra == 'e2b'", specifier = ">=2.20.0" },
     { name = "pygments", marker = "extra == 'modal'", specifier = ">=2.20.0" },
     { name = "pygments", marker = "extra == 'temporal'", specifier = ">=2.20.0" },
-    { name = "pyjwt", specifier = ">=2.13.0" },
+    { name = "pyjwt", specifier = ">=2.15.0" },
     { name = "pymongo", marker = "extra == 'mongodb'", specifier = ">=4.14" },
     { name = "python-multipart", specifier = ">=0.0.31" },
     { name = "redis", marker = "extra == 'redis'", specifier = ">=7" },
