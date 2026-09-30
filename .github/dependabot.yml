@@ -38,6 +38,15 @@ updates:
       - "dependencies"
   - package-ecosystem: "github-actions"
     directory: "/"
+    # CodeQL init and analyze must use the same version in each workflow.
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action*"
+      codeql-security:
+        applies-to: security-updates
+        patterns:
+          - "github/codeql-action*"
     schedule:
       interval: "monthly"
     cooldown:
