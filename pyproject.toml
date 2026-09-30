@@ -83,7 +83,7 @@ modal = [
     "pygments>=2.20.0",
 ]
 runloop = ["runloop_api_client>=1.16.0,<2.0.0"]
-vercel = ["vercel>=0.5.6,<0.12", "cbor2>=5.9.0"]
+vercel = ["vercel-sandbox>=0.7.0,<0.8", "cbor2>=5.9.0"]
 s3 = ["boto3>=1.34"]
 temporal = [
     "temporalio==1.26.0",

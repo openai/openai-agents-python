@@ -2,7 +2,7 @@
 Vercel sandbox (https://vercel.com) implementation.
 
 This module provides a Vercel-backed sandbox client/session implementation backed by
-`vercel.sandbox.AsyncSandbox`.
+`vercel.sandbox.SandboxClient`.
 
 The `vercel` dependency is optional, so package-level exports should guard imports of this
 module. Within this module, Vercel SDK imports are normal so users with the extra installed get
@@ -25,7 +25,8 @@ from typing import Any, Literal, cast
 from urllib.parse import urlsplit
 
 import httpx
-from pydantic import TypeAdapter, field_serializer, field_validator
+import httpx2
+from pydantic import BaseModel, TypeAdapter, field_serializer, field_validator
 from vercel import sandbox as vercel_sandbox
 
 from ....sandbox._mount_security import (
@@ -74,10 +75,10 @@ from ....sandbox.util.retry import (
 )
 from ....sandbox.util.tar_utils import UnsafeTarMemberError, validate_tarfile
 from ....sandbox.workspace_paths import coerce_posix_path, posix_path_as_path, sandbox_path_str
+from ._network_policy import NetworkPolicy
+from ._provider import DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S, ProviderSandbox as AsyncSandbox
 
-AsyncSandbox = vercel_sandbox.AsyncSandbox
-NetworkPolicy = vercel_sandbox.NetworkPolicy
-Resources = vercel_sandbox.Resources
+Resources = vercel_sandbox.SandboxResources
 SandboxStatus = vercel_sandbox.SandboxStatus
 SnapshotSource = vercel_sandbox.SnapshotSource
 
@@ -94,23 +95,20 @@ _REDACTED_MOUNT_FAILURE_CAUSE_TYPE = "redacted"
 DEFAULT_VERCEL_WORKSPACE_ROOT = "/vercel/sandbox"
 _DEFAULT_MANIFEST_ROOT = cast(str, Manifest.model_fields["root"].default)
 DEFAULT_VERCEL_SANDBOX_TIMEOUT_MS = 270_000
-DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S = 45.0
 _NETWORK_POLICY_ADAPTER: TypeAdapter[NetworkPolicy] = TypeAdapter(NetworkPolicy)
 
 _VERCEL_TRANSIENT_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
     httpx.ReadError,
     httpx.NetworkError,
     httpx.ProtocolError,
-)
-_VERCEL_RETRYABLE_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
-    vercel_sandbox.SandboxRateLimitError,
-    vercel_sandbox.SandboxServerError,
+    httpx2.ReadError,
+    httpx2.NetworkError,
+    httpx2.ProtocolError,
 )
 _VERCEL_NON_RETRYABLE_PROVIDER_ERRORS: tuple[type[BaseException], ...] = (
-    vercel_sandbox.SandboxAuthError,
-    vercel_sandbox.SandboxNotFoundError,
-    vercel_sandbox.SandboxPermissionError,
-    vercel_sandbox.SandboxValidationError,
+    vercel_sandbox.SandboxCredentialsError,
+    vercel_sandbox.SandboxInvalidHandleError,
+    vercel_sandbox.SandboxPathNotFoundError,
 )
 _VERCEL_HTTP_STATUS_RETRYABLE: dict[int, bool] = {
     400: False,
@@ -135,8 +133,6 @@ _VERCEL_TRANSIENT_SANDBOX_STATUSES: frozenset[str] = frozenset({"pending"})
 
 
 def _vercel_provider_retryability(exc: BaseException) -> bool | None:
-    if exception_chain_contains_type(exc, _VERCEL_RETRYABLE_PROVIDER_ERRORS):
-        return True
     if exception_chain_contains_type(exc, _VERCEL_NON_RETRYABLE_PROVIDER_ERRORS):
         return False
     if exception_chain_contains_type(exc, _VERCEL_TRANSIENT_TRANSPORT_ERRORS):
@@ -229,6 +225,8 @@ def _validate_network_policy(value: object) -> NetworkPolicy | None:
     if value is None:
         return None
 
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
     return _NETWORK_POLICY_ADAPTER.validate_python(value)
 
 
@@ -406,7 +404,12 @@ def _manifest_without_vercel_s3_credentials(manifest: Manifest) -> Manifest:
 
 
 class VercelSandboxClientOptions(BaseSandboxClientOptions):
-    """Client options for the Vercel sandbox backend."""
+    """Client options for the Vercel sandbox backend.
+
+    ``interactive`` remains accepted for existing callers and saved state. Vercel
+    now manages external interactive shells independently of sandbox creation;
+    this option does not enable PTY support in the Agents SDK backend.
+    """
 
     type: Literal["vercel"] = "vercel"
     project_id: str | None = None
@@ -481,6 +484,7 @@ class VercelSandboxSessionState(SandboxSessionState):
     snapshot_expiration_ms: int | None = None
     network_policy: NetworkPolicy | None = None
     s3_mounts_non_resumable: bool = False
+    sandbox_name: str | None = None
 
     def _sanitize_persisted_provider_identity(
         self,
@@ -490,6 +494,7 @@ class VercelSandboxSessionState(SandboxSessionState):
     ) -> None:
         if mount_authority_redacted or self.s3_mounts_non_resumable:
             data["sandbox_id"] = ""
+            data["sandbox_name"] = None
             data["workspace_root_ready"] = False
 
     @field_serializer("manifest")
@@ -1063,6 +1068,7 @@ class VercelSandboxSession(BaseSandboxSession):
         )
         self._sandbox = sandbox
         self.state.sandbox_id = sandbox.sandbox_id
+        self.state.sandbox_name = sandbox.sandbox_name
         return sandbox
 
     async def _close_sandbox_client(self) -> None:
@@ -1078,6 +1084,7 @@ class VercelSandboxSession(BaseSandboxSession):
         sandbox = self._sandbox
         if sandbox is None:
             return
+        # Retain the owned transport if stop fails so delete/aclose can retry.
         await sandbox.stop(blocking=True)
         await self._close_sandbox_client()
         self._sandbox = None
@@ -1262,7 +1269,7 @@ class VercelSandboxSession(BaseSandboxSession):
                         # A close failure is primary only after a successful read.
                         if completed:
                             raise
-            except vercel_sandbox.SandboxNotFoundError:
+            except vercel_sandbox.SandboxPathNotFoundError:
                 raise WorkspaceReadNotFoundError(path=path) from None
             except Exception as error:
                 raise WorkspaceArchiveReadError(
@@ -1685,6 +1692,7 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
             try:
                 sandbox = await AsyncSandbox.get(
                     sandbox_id=state.sandbox_id,
+                    sandbox_name=state.sandbox_name,
                     token=resolved_token,
                     project_id=resolved_project_id,
                     team_id=resolved_team_id,
