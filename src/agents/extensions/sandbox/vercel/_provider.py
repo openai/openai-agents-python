@@ -147,10 +147,12 @@ class ProviderSandbox:
                     finally:
                         await sandbox.destroy()
             except (Exception, asyncio.CancelledError):
+                # Best-effort cleanup must not replace the original failure or cancellation.
                 pass
             try:
                 await client.aclose()
             except (Exception, asyncio.CancelledError):
+                # Best-effort cleanup must not replace the original failure or cancellation.
                 pass
             raise
 
@@ -175,6 +177,7 @@ class ProviderSandbox:
             try:
                 await client.aclose()
             except (Exception, asyncio.CancelledError):
+                # Best-effort cleanup must not replace the original failure or cancellation.
                 pass
             raise
 

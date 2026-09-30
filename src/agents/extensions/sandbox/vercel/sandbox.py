@@ -1708,17 +1708,17 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
                         timeout=DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S,
                     )
                     reconnected = True
-                else:
-                    # Cannot reach RUNNING from here (STOPPING, STOPPED, FAILED,
-                    # ABORTED, SNAPSHOTTING). Drop the handle and recreate below.
-                    await sandbox.client.aclose()
-                    sandbox = None
-            except asyncio.TimeoutError:
-                if sandbox is not None:
-                    await sandbox.client.aclose()
-                    sandbox = None
             except Exception:
-                sandbox = None
+                # Failed reconnects use the existing fresh-sandbox fallback below.
+                pass
+            finally:
+                if sandbox is not None and not reconnected:
+                    try:
+                        await sandbox.client.aclose()
+                    except Exception:
+                        # Best-effort close preserves reconnect cancellation or fallback.
+                        pass
+                    sandbox = None
 
         inner = VercelSandboxSession.from_state(state, sandbox=sandbox, token=resolved_token)
         if sandbox is None:

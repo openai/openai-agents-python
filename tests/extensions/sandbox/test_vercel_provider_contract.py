@@ -73,6 +73,9 @@ def provider_wire(monkeypatch):
         next_id=0,
         block_create=False,
         stop_failures=0,
+        refresh_error=None,
+        block_refresh=False,
+        refreshing=asyncio.Event(),
         allocated=asyncio.Event(),
         release=asyncio.Event(),
     )
@@ -114,7 +117,15 @@ def provider_wire(monkeypatch):
                 await wire.release.wait()
             return httpx.Response(200, json=response(state))
         if path.startswith("v2/sandboxes/sessions/"):
-            session_id, operation = path.removeprefix("v2/sandboxes/sessions/").split("/", 1)
+            session_id, _, operation = path.removeprefix("v2/sandboxes/sessions/").partition("/")
+            if not operation:
+                wire.refreshing.set()
+                if wire.block_refresh:
+                    await wire.release.wait()
+                if wire.refresh_error is not None:
+                    raise wire.refresh_error
+                state = next(s for s in wire.sandboxes.values() if s["id"] == session_id)
+                return httpx.Response(200, json=response(state))
             if operation == "stop":
                 if wire.stop_failures:
                     wire.stop_failures -= 1
@@ -384,4 +395,46 @@ async def test_installed_provider_failed_delete_keeps_cleanup_retryable(provider
 
     await client.delete(session)
     assert provider_wire.sandboxes == {}
+    assert all(transport.is_closed for transport in provider_wire.clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["provider", "timeout", "cancelled"])
+async def test_installed_provider_closes_unadopted_reconnect_client(provider_wire, failure):
+    import asyncio
+
+    import httpx
+
+    from agents.extensions.sandbox.vercel import VercelSandboxClientOptions
+
+    client = _agents_client()
+    session = await client.create(options=VercelSandboxClientOptions())
+    payload = client.serialize_session_state(session.state)
+    original_name = session.state.sandbox_name
+    provider_wire.sandboxes[original_name]["status"] = "pending"
+    if failure == "cancelled":
+        provider_wire.block_refresh = True
+    else:
+        provider_wire.refresh_error = (
+            httpx.ConnectError("synthetic polling failure")
+            if failure == "provider"
+            else asyncio.TimeoutError()
+        )
+    task = asyncio.create_task(client.resume(client.deserialize_session_state(payload)))
+    await provider_wire.refreshing.wait()
+    if failure == "cancelled":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert provider_wire.next_id == 1
+    else:
+        resumed = await task
+        assert resumed.state.sandbox_id == "session-2"
+        assert resumed.state.workspace_root_ready is False
+        assert not provider_wire.clients[-1].is_closed
+        await client.delete(resumed)
+    assert provider_wire.clients[1].is_closed
+    assert not provider_wire.clients[0].is_closed
+    assert original_name in provider_wire.sandboxes
+    await client.delete(session)
     assert all(transport.is_closed for transport in provider_wire.clients)
