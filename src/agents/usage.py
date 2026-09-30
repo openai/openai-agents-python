@@ -298,7 +298,9 @@ class Usage:
         # when synthesizing an entry from only the top-level fields).
         if other.request_usage_entries:
             self.request_usage_entries.extend(copy.deepcopy(other.request_usage_entries))
-        elif other.requests == 1 and other.total_tokens > 0:
+        elif other.requests == 1 and (
+            other.input_tokens > 0 or other.output_tokens > 0 or other.total_tokens > 0
+        ):
             # Otherwise, if the other Usage represents a single request with tokens, record it.
             input_details = other.input_tokens_details or _make_input_tokens_details()
             output_details = other.output_tokens_details or OutputTokensDetails(reasoning_tokens=0)

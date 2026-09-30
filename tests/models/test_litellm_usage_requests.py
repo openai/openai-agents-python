@@ -98,3 +98,11 @@ async def test_runner_normalizes_nullable_litellm_usage(
     assert normalized.input_tokens_details.cached_tokens == 3
     assert normalized.output_tokens_details.reasoning_tokens == 2
     assert (usage.prompt_tokens, usage.completion_tokens, usage.total_tokens) == counts
+    if expected == (0, 0, 0):
+        assert normalized.request_usage_entries == []
+    else:
+        assert len(normalized.request_usage_entries) == 1
+        entry = normalized.request_usage_entries[0]
+        assert (entry.input_tokens, entry.output_tokens, entry.total_tokens) == expected
+        assert entry.input_tokens_details.cached_tokens == 3
+        assert entry.output_tokens_details.reasoning_tokens == 2

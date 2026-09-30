@@ -380,6 +380,14 @@ async def test_any_llm_runner_normalizes_nullable_usage(
     assert normalized.input_tokens_details.cached_tokens == (3 if counts is not None else 0)
     assert normalized.output_tokens_details.reasoning_tokens == (2 if counts is not None else 0)
     assert result.raw_responses[0].raw_usage == usage
+    if expected == (0, 0, 0):
+        assert normalized.request_usage_entries == []
+    else:
+        assert len(normalized.request_usage_entries) == 1
+        entry = normalized.request_usage_entries[0]
+        assert (entry.input_tokens, entry.output_tokens, entry.total_tokens) == expected
+        assert entry.input_tokens_details.cached_tokens == 3
+        assert entry.output_tokens_details.reasoning_tokens == 2
 
 
 @pytest.mark.allow_call_model_methods
