@@ -4245,7 +4245,7 @@ wheels = [
 
 [[package]]
 name = "textual"
-version = "8.2.3"
+version = "8.2.8"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markdown-it-py", extra = ["linkify"] },
@@ -4255,9 +4255,9 @@ dependencies = [
     { name = "rich" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/cf/2f/d44f0f12b3ddb1f0b88f7775652e99c6b5a43fd733badf4ce064bdbfef4a/textual-8.2.3.tar.gz", hash = "sha256:beea7b86b03b03558a2224f0cc35252e60ef8b0c4353b117b2f40972902d976a", size = 1848738, upload-time = "2026-04-05T09:12:45.338Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/00/21/39a76b01bd5eea82a04baaca7580e105d8c59450df03998345bb2cfb307b/textual-8.2.8.tar.gz", hash = "sha256:3f106a9fbc73e39dd266c9712432087de78a6d644084c7c241d6a25c3169115b", size = 1860502, upload-time = "2026-06-30T06:51:24.495Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0e/28/a81d6ce9f4804818bd1231a9a6e4d56ea84ebbe8385c49591444f0234fa2/textual-8.2.3-py3-none-any.whl", hash = "sha256:5008ac581bebf1f6fa0520404261844a231e5715fdbddd10ca73916a3af48ca2", size = 724231, upload-time = "2026-04-05T09:12:48.747Z" },
+    { url = "https://files.pythonhosted.org/packages/fb/be/35261223d9416a0751cdff1c7b4a6f881387218a12d439fe22fefebc8c04/textual-8.2.8-py3-none-any.whl", hash = "sha256:267375fd402dc8d981457212efa71f0e3365fd17bba144ba9bb3ed7563cb374a", size = 731418, upload-time = "2026-06-30T06:51:26.364Z" },
 ]
 
 [[package]]
@@ -4596,6 +4596,7 @@ dependencies = [
     { name = "vercel-internal-core" },
     { name = "vercel-oidc" },
 ]
+sdist = { url = "https://files.pythonhosted.org/packages/28/f7/3427e75b63056f77ed3fd5986818a1b521d86c2c8704d2e929cedcbf70aa/vercel_sandbox-0.7.0.tar.gz", hash = "sha256:07d703790d0141dc75e0962baf35d666a6961bc1de913749137267a2550c81e2", size = 80326, upload-time = "2026-09-23T16:46:22.354Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/39/6d/372055569df9db7c1f5663bf128b914e70ab96f3b480fd9cf9c1be2c5aff/vercel_sandbox-0.7.0-py3-none-any.whl", hash = "sha256:f7eb897a1a5092fe8c38319ce803033b1a9ced8f414564a43a668432f91ffcd9", size = 91791, upload-time = "2026-09-23T16:46:21.169Z" },
 ]
