@@ -517,7 +517,31 @@ def published_review(tag: str, release_sha: str) -> str:
 
 def gate() -> None:
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-    pr = event["pull_request"]
+    if "merge_group" in event:
+        group_head = sha(event["merge_group"]["head_sha"])
+        main_head = sha(repo_api("git/ref/heads/main")["object"]["sha"])
+        # Compare with main, not a synthetic base that may contain a queued release.
+        manifest = ".release-please-manifest.json"
+        if (
+            json.loads(content(manifest, group_head))["."]
+            == json.loads(content(manifest, main_head))["."]
+        ):
+            print("Ordinary merge group: release assessment is not applicable.")
+            return
+        prs = repo_api(f"pulls?state=open&base=main&head=openai:{BRANCH}")
+        if len(prs) != 1:
+            raise ValueError("Queued release requires one open automated release candidate")
+        pr = prs[0]
+        candidate_head = sha(pr["head"]["sha"])
+        if (
+            repo_api(f"git/commits/{group_head}")["tree"]["sha"]
+            != repo_api(f"git/commits/{candidate_head}")["tree"]["sha"]
+        ):
+            raise ValueError(
+                "Queued tree differs from the release candidate; re-prepare and requeue the release"
+            )
+    else:
+        pr = event["pull_request"]
     if pr["head"]["ref"] != BRANCH or pr["head"]["repo"]["full_name"] != REPO:
         print("Ordinary PR: release assessment is not applicable.")
         return
