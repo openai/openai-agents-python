@@ -242,17 +242,13 @@ jobs:
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping MCP v1 compatibility tests for non-code changes."
 
-  packaged-contract:
+  packaged-contract-310:
+    name: packaged-contract (3.10)
     needs: prospective-release-contract
+    if: needs.prospective-release-contract.outputs.run == 'true'
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version:
-          - "3.10"
-          - "3.14"
     env:
-      OPENAI_AGENTS_INTEGRATION_PYTHON: ${{ matrix.python-version }}
+      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.10"
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
@@ -267,7 +263,44 @@ jobs:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.10"
+      - name: Download prospective release contract
+        if: steps.changes.outputs.run == 'true'
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: prospective-release-contract
+          path: .tmp
+      - name: Run packaged and prospective compatibility contracts
+        if: steps.changes.outputs.run == 'true'
+        env:
+          OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT: ${{ github.workspace }}/.tmp/prospective_released_api_contract.json
+        run: make integration-tests-prospective-contract
+      - name: Skip packaged compatibility contracts
+        if: steps.changes.outputs.run != 'true'
+        run: echo "Skipping packaged compatibility contracts for non-code changes."
+
+  packaged-contract-314:
+    name: packaged-contract (3.14)
+    needs: prospective-release-contract
+    if: needs.prospective-release-contract.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    env:
+      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.14"
+      OPENAI_API_KEY: fake-for-tests
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Detect code changes
+        id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
+      - name: Setup uv
+        if: steps.changes.outputs.run == 'true'
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: true
+          prune-cache: true
+          python-version: "3.14"
       - name: Download prospective release contract
         if: steps.changes.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -285,6 +318,7 @@ jobs:
 
   packaged-contract-windows:
     needs: prospective-release-contract
+    if: needs.prospective-release-contract.outputs.run == 'true'
     runs-on: windows-latest
     timeout-minutes: 15
     env:
@@ -322,6 +356,8 @@ jobs:
         run: echo "Skipping Windows prospective contract smoke test for non-code changes."
 
   prospective-release-contract:
+    outputs:
+      run: ${{ steps.changes.outputs.run }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
