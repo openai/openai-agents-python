@@ -73,6 +73,8 @@ def provider_wire(monkeypatch):
         next_id=0,
         block_create=False,
         stop_failures=0,
+        block_stop=False,
+        stopping=asyncio.Event(),
         refresh_error=None,
         block_refresh=False,
         refreshing=asyncio.Event(),
@@ -127,12 +129,15 @@ def provider_wire(monkeypatch):
                 state = next(s for s in wire.sandboxes.values() if s["id"] == session_id)
                 return httpx.Response(200, json=response(state))
             if operation == "stop":
+                state = next(s for s in wire.sandboxes.values() if s["id"] == session_id)
+                wire.stopping.set()
+                if wire.block_stop:
+                    await wire.release.wait()
                 if wire.stop_failures:
                     wire.stop_failures -= 1
                     return httpx.Response(
                         503, json={"error": {"code": "unavailable", "message": "synthetic"}}
                     )
-                state = next(s for s in wire.sandboxes.values() if s["id"] == session_id)
                 state["status"] = "stopped"
                 return httpx.Response(200, json=response(state))
             if operation == "snapshot":
@@ -253,7 +258,8 @@ async def test_installed_provider_wire_options_output_resume_and_cleanup(
     # Close this second transport without disposing the shared execution.
     await resumed._inner._close_sandbox_client()
     await client.delete(session)
-    assert provider_wire.sandboxes == {}
+    assert all(s["status"] == "stopped" for s in provider_wire.sandboxes.values())
+    assert not any(r.method == "DELETE" for r in provider_wire.requests)
     assert all(transport.is_closed for transport in provider_wire.clients)
 
 
@@ -288,7 +294,8 @@ async def test_installed_provider_cancelled_creation_cleans_allocation(provider_
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert provider_wire.sandboxes == {}
+    assert all(s["status"] == "stopped" for s in provider_wire.sandboxes.values())
+    assert not any(r.method == "DELETE" for r in provider_wire.requests)
     assert all(transport.is_closed for transport in provider_wire.clients)
 
 
@@ -343,7 +350,8 @@ async def test_installed_provider_resumes_legacy_id_without_name(provider_wire):
     assert resumed.state.workspace_root_ready is True
     assert provider_wire.next_id == 0
     await client.delete(resumed)
-    assert provider_wire.sandboxes == {}
+    assert all(s["status"] == "stopped" for s in provider_wire.sandboxes.values())
+    assert not any(r.method == "DELETE" for r in provider_wire.requests)
 
 
 @pytest.mark.asyncio
@@ -394,7 +402,8 @@ async def test_installed_provider_failed_delete_keeps_cleanup_retryable(provider
     assert not provider_wire.clients[0].is_closed
 
     await client.delete(session)
-    assert provider_wire.sandboxes == {}
+    assert all(s["status"] == "stopped" for s in provider_wire.sandboxes.values())
+    assert not any(r.method == "DELETE" for r in provider_wire.requests)
     assert all(transport.is_closed for transport in provider_wire.clients)
 
 
@@ -437,4 +446,64 @@ async def test_installed_provider_closes_unadopted_reconnect_client(provider_wir
     assert not provider_wire.clients[0].is_closed
     assert original_name in provider_wire.sandboxes
     await client.delete(session)
+    assert all(transport.is_closed for transport in provider_wire.clients)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "next_status", ["running", "stopping", "stopped", "failed", "aborted", "snapshotting"]
+)
+async def test_installed_provider_pending_reconnect_observes_transition(provider_wire, next_status):
+    import asyncio
+
+    from agents.extensions.sandbox.vercel import VercelSandboxClientOptions
+
+    client = _agents_client()
+    session = await client.create(options=VercelSandboxClientOptions())
+    session.state.workspace_root_ready = True
+    payload = client.serialize_session_state(session.state)
+    original = provider_wire.sandboxes[session.state.sandbox_name]
+    original["status"] = "pending"
+    provider_wire.block_refresh = True
+    task = asyncio.create_task(client.resume(client.deserialize_session_state(payload)))
+    await asyncio.wait_for(provider_wire.refreshing.wait(), timeout=5)
+    original["status"] = next_status
+    provider_wire.release.set()
+    # A terminal transition must not consume the 45-second reconnect deadline.
+    resumed = await asyncio.wait_for(task, timeout=5)
+    if next_status == "running":
+        assert resumed.state.sandbox_id == session.state.sandbox_id
+        assert resumed.state.workspace_root_ready is True
+        assert provider_wire.next_id == 1
+    else:
+        assert resumed.state.sandbox_id != session.state.sandbox_id
+        assert resumed.state.workspace_root_ready is False
+        assert provider_wire.next_id == 2
+        assert provider_wire.clients[1].is_closed
+    await client.delete(resumed)
+    await client.delete(session)
+    assert all(transport.is_closed for transport in provider_wire.clients)
+
+
+@pytest.mark.asyncio
+async def test_installed_provider_cleanup_preserves_concurrent_replacement(provider_wire):
+    import asyncio
+
+    from agents.extensions.sandbox.vercel import VercelSandboxClientOptions
+
+    client = _agents_client()
+    session = await client.create(options=VercelSandboxClientOptions())
+    name = session.state.sandbox_name
+    original = provider_wire.sandboxes[name]
+    provider_wire.block_stop = True
+    task = asyncio.create_task(client.delete(session))
+    await asyncio.wait_for(provider_wire.stopping.wait(), timeout=5)
+    replacement = {"name": name, "id": "replacement-session", "status": "running"}
+    provider_wire.sandboxes[name] = replacement
+    provider_wire.release.set()
+    await asyncio.wait_for(task, timeout=5)
+    assert original["status"] == "stopped"
+    assert provider_wire.sandboxes[name] == replacement
+    assert replacement["status"] == "running"
+    assert not any(r.method == "DELETE" for r in provider_wire.requests)
     assert all(transport.is_closed for transport in provider_wire.clients)

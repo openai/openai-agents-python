@@ -1645,6 +1645,12 @@ class VercelSandboxClient(BaseSandboxClient[VercelSandboxClientOptions]):
 
     @redact_mount_error_data
     async def delete(self, session: SandboxSession) -> SandboxSession:
+        """Stop the session's execution and close its provider connection.
+
+        The named Vercel resource remains because deleting by name could delete
+        a replacement execution. Owners can explicitly destroy that resource
+        through Vercel when they have exclusive ownership.
+        """
         inner = session._inner
         if not isinstance(inner, VercelSandboxSession):
             raise TypeError("VercelSandboxClient.delete expects a VercelSandboxSession")

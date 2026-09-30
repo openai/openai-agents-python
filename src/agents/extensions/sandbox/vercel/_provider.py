@@ -141,11 +141,8 @@ class ProviderSandbox:
             try:
                 if sandbox is None:
                     sandbox = await client.get_sandbox(name=name)
-                if sandbox is not None:
-                    try:
-                        await sandbox.stop()
-                    finally:
-                        await sandbox.destroy()
+                if sandbox is not None and sandbox.current_session is not None:
+                    await sandbox.current_session.stop()
             except (Exception, asyncio.CancelledError):
                 # Best-effort cleanup must not replace the original failure or cancellation.
                 pass
@@ -187,6 +184,18 @@ class ProviderSandbox:
     async def wait_for_status(self, status: SandboxStatus, *, timeout: float) -> None:
         async def wait() -> None:
             while self.status != status:
+                current_status = self.status
+                if current_status in {
+                    SandboxStatus.STOPPING,
+                    SandboxStatus.STOPPED,
+                    SandboxStatus.FAILED,
+                    SandboxStatus.ABORTED,
+                    SandboxStatus.SNAPSHOTTING,
+                }:
+                    raise SandboxTerminalStateError(
+                        "Sandbox execution cannot reach the requested status",
+                        status=current_status,
+                    )
                 await asyncio.sleep(0.5)
                 await self.refresh()
 
@@ -194,11 +203,8 @@ class ProviderSandbox:
 
     async def stop(self, *, blocking: bool = False) -> None:
         await self._session.stop()
-        # Check the current identity before deleting this Agents-owned name.
-        # A replacement already present at lookup belongs to another owner.
-        self._sandbox = await self.client.get_sandbox(name=self.sandbox_name)
-        if self._sandbox.current_session_id == self.sandbox_id:
-            await self._sandbox.destroy()
+        # Named-resource deletion cannot be conditional on this execution ID.
+        # Retain the name so cleanup cannot delete a concurrent replacement.
 
     async def run_command(
         self,
