@@ -370,9 +370,9 @@ def _response_usage_to_usage(response_usage: Any) -> Usage:
 
     return Usage(
         requests=request_count,
-        input_tokens=response_usage.input_tokens,
-        output_tokens=response_usage.output_tokens,
-        total_tokens=response_usage.total_tokens,
+        input_tokens=response_usage.input_tokens or 0,
+        output_tokens=response_usage.output_tokens or 0,
+        total_tokens=response_usage.total_tokens or 0,
         input_tokens_details=response_usage.input_tokens_details,
         output_tokens_details=response_usage.output_tokens_details,
     )

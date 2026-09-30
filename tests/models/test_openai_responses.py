@@ -56,7 +56,75 @@ from agents.models.openai_responses import (
 from agents.retry import ModelRetryAdviceRequest
 from agents.usage import Usage
 from tests.model_test_helpers import get_response_obj
+from tests.test_responses import get_text_message
 from tests.testing_processor import fetch_ordered_spans
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ((None, 5, 12), (0, 5, 12)),
+        ((7, None, 12), (7, 0, 12)),
+        ((7, 5, None), (7, 5, 0)),
+        ((None, None, None), (0, 0, 0)),
+        ((0, 0, 0), (0, 0, 0)),
+        ((7, 5, 12), (7, 5, 12)),
+    ],
+    ids=["null-input", "null-output", "null-total", "all-null", "zero", "valid"],
+)
+async def test_runner_normalizes_nullable_responses_usage(
+    stream: bool,
+    counts: tuple[int | None, int | None, int | None],
+    expected: tuple[int, int, int],
+) -> None:
+    usage = {
+        "input_tokens": counts[0],
+        "output_tokens": counts[1],
+        "total_tokens": counts[2],
+        "input_tokens_details": {"cached_tokens": 3},
+        "output_tokens_details": {"reasoning_tokens": 2},
+    }
+
+    # Exercise provider parsing and usage conversion instead of a normalized scripted model.
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        payload = get_response_obj([get_text_message("Hello")]).model_dump()
+        payload["usage"] = usage
+        if stream:
+            event = {"type": "response.completed", "response": payload, "sequence_number": 0}
+            return httpx2.Response(
+                200,
+                content=f"event: response.completed\ndata: {json.dumps(event)}\n\n",
+                headers={"content-type": "text/event-stream"},
+            )
+        return httpx2.Response(200, json=payload)
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.example/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        agent = Agent(
+            name="test",
+            model=OpenAIResponsesModel(model="fake", openai_client=client),
+            model_settings=ModelSettings(preserve_raw_usage=True),
+        )
+        if stream:
+            result = Runner.run_streamed(agent, "hi")
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "hi")
+
+    assert result.final_output == "Hello"
+    normalized = result.context_wrapper.usage
+    assert normalized.requests == 1
+    assert (normalized.input_tokens, normalized.output_tokens, normalized.total_tokens) == expected
+    assert normalized.input_tokens_details.cached_tokens == 3
+    assert normalized.output_tokens_details.reasoning_tokens == 2
+    assert result.raw_responses[0].raw_usage == usage
 
 
 async def _run_responses_model_with_custom_base_url(
