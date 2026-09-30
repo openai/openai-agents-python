@@ -154,7 +154,7 @@ jobs:
     name: Release assessment identity ${{ needs.update.outputs.commit_sha }}/${{ needs.evidence.outputs.check }}
     needs: [update, evidence]
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 30
     environment: release-review
     permissions:
       contents: read
@@ -194,7 +194,7 @@ jobs:
           allow-bot-users: openai-sdks[bot],github-actions[bot]
           prompt-file: control/.github/release/review.md
           output-schema-file: control/.github/release/review.schema.json
-          effort: high
+          effort: medium
 
   readiness:
     needs: [update, evidence, review]
