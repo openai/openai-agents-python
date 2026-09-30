@@ -253,7 +253,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "preserves independent apply_patch approval scopes, and binds function-tool approval "
         "decisions to their owning agent, and retains compaction metadata for pending "
         "Session writes, including acknowledgement and model-exchange evidence for "
-        "compaction retry."
+        "compaction retry, and records named Vercel sandboxes alongside exact execution IDs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)

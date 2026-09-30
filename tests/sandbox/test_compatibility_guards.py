@@ -756,6 +756,7 @@ def test_optional_sandbox_client_options_positional_field_order_is_stable(
                 "snapshot_expiration_ms",
                 "network_policy",
                 "s3_mounts_non_resumable",
+                "sandbox_name",
             ),
         ),
     ],
