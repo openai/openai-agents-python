@@ -237,9 +237,7 @@ The session also adds each response's usage to the shared [`RunContextWrapper.us
 from agents.realtime import RealtimeModelUsageEvent
 
 async for event in session:
-    if event.type == "raw_model_event" and isinstance(
-        event.data, RealtimeModelUsageEvent
-    ):
+    if event.type == "raw_model_event" and isinstance(event.data, RealtimeModelUsageEvent):
         response_usage = event.data.usage
         print("Response tokens:", response_usage.total_tokens)
         print("Input modalities:", event.data.input_tokens_details)

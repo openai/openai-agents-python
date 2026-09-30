@@ -125,9 +125,7 @@ set_default_openai_harness("your-harness-id")
 ```python
 from agents import OpenAIAgentRegistrationConfig, set_default_openai_agent_registration
 
-set_default_openai_agent_registration(
-    OpenAIAgentRegistrationConfig(harness_id="your-harness-id")
-)
+set_default_openai_agent_registration(OpenAIAgentRegistrationConfig(harness_id="your-harness-id"))
 ```
 
 如果未设置 SDK 默认值，使用 SDK OpenAI 后端的提供商会回退到 `OPENAI_AGENT_HARNESS_ID` 环境变量。配置 harness ID 后，SDK 会将其作为 `agent_harness_id` 添加到追踪元数据中，除非 `RunConfig.trace_metadata` 中已存在该键。
@@ -151,7 +149,9 @@ from agents import (
     set_tracing_export_api_key,
 )
 
-custom_client = AsyncOpenAI(base_url="https://your-openai-compatible-endpoint.example/v1", api_key="provider-key")
+custom_client = AsyncOpenAI(
+    base_url="https://your-openai-compatible-endpoint.example/v1", api_key="provider-key"
+)
 set_default_openai_client(custom_client, use_for_tracing=False)
 
 set_tracing_export_api_key("sk-tracing")
@@ -221,7 +221,7 @@ enable_verbose_stdout_logging()
 ```python
 import logging
 
-logger = logging.getLogger("openai.agents") # or openai.agents.tracing for the Tracing logger
+logger = logging.getLogger("openai.agents")  # or openai.agents.tracing for the Tracing logger
 
 # To make all logs show up
 logger.setLevel(logging.DEBUG)

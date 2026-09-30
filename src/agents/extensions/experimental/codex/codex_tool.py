@@ -1362,7 +1362,7 @@ def _enforce_span_data_budget(data: dict[str, Any], max_chars: int | None) -> di
 
     ordered_keys = [key for key in trim_keys if key in values]
     min_budget = 1
-    budgets = {key: 0 for key in values}
+    budgets = dict.fromkeys(values, 0)
     if available >= len(values):
         for key in values:
             budgets[key] = min_budget

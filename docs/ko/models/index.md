@@ -71,7 +71,7 @@ my_agent = Agent(
     # If OPENAI_DEFAULT_MODEL=gpt-5.6-sol is set, passing only model_settings works.
     # It's also fine to pass a GPT-5 model name explicitly:
     model="gpt-5.6-sol",
-    model_settings=ModelSettings(reasoning=Reasoning(effort="high"), verbosity="low")
+    model_settings=ModelSettings(reasoning=Reasoning(effort="high"), verbosity="low"),
 )
 ```
 
@@ -275,6 +275,7 @@ from agents.decorators import tool
 from agents.extensions.experimental.hosted_multi_agent import get_hosted_agent_metadata
 from agents.tool_context import ToolContext
 
+
 @tool
 def lookup_document(ctx: ToolContext[Any], section: str) -> str:
     metadata = get_hosted_agent_metadata(ctx)
@@ -336,7 +337,7 @@ set_tracing_disabled(disabled=True)
 client = AsyncOpenAI(api_key="Api_Key", base_url="Base URL of Provider")
 model = OpenAIChatCompletionsModel(model="Model_Name", openai_client=client)
 
-agent= Agent(name="Helping Agent", instructions="You are a Helping Agent", model=model)
+agent = Agent(name="Helping Agent", instructions="You are a Helping Agent", model=model)
 ```
 
 !!! note
@@ -363,15 +364,14 @@ from agents import Agent, Runner, AsyncOpenAI, OpenAIChatCompletionsModel
 spanish_agent = Agent(
     name="Spanish agent",
     instructions="You only speak Spanish.",
-    model="gpt-5-mini", # (1)!
+    model="gpt-5-mini",  # (1)!
 )
 
 english_agent = Agent(
     name="English agent",
     instructions="You only speak English",
-    model=OpenAIChatCompletionsModel( # (2)!
-        model="gpt-5-nano",
-        openai_client=AsyncOpenAI()
+    model=OpenAIChatCompletionsModel(  # (2)!
+        model="gpt-5-nano", openai_client=AsyncOpenAI()
     ),
 )
 
@@ -381,6 +381,7 @@ triage_agent = Agent(
     handoffs=[spanish_agent, english_agent],
     model="gpt-5.6-sol",
 )
+
 
 async def main():
     result = await Runner.run(triage_agent, input="Hola, ¿cómo estás?")

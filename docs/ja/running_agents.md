@@ -13,6 +13,7 @@ search:
 ```python
 from agents import Agent, Runner
 
+
 async def main():
     agent = Agent(name="Assistant", instructions="You are a helpful assistant")
 
@@ -312,6 +313,7 @@ result = Runner.run_sync(
 ```python
 from agents import Agent, Runner, trace
 
+
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
@@ -335,6 +337,7 @@ async def main():
 
 ```python
 from agents import Agent, Runner, SQLiteSession, trace
+
 
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
@@ -380,6 +383,7 @@ from openai import AsyncOpenAI
 
 client = AsyncOpenAI()
 
+
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
@@ -399,6 +403,7 @@ async def main():
 
 ```python
 from agents import Agent, Runner
+
 
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
@@ -450,10 +455,12 @@ async def main():
 from agents import Agent, Runner, RunConfig
 from agents.run import CallModelData, ModelInputData
 
+
 def drop_old_messages(data: CallModelData[None]) -> ModelInputData:
     # Keep only the last 5 items and preserve existing instructions.
     trimmed = data.model_data.input[-5:]
     return ModelInputData(input=trimmed, instructions=data.model_data.instructions)
+
 
 agent = Agent(name="Assistant", instructions="Answer concisely.")
 result = Runner.run_sync(

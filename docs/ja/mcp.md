@@ -112,6 +112,7 @@ import asyncio
 
 from agents import Agent, HostedMCPTool, Runner
 
+
 async def main() -> None:
     agent = Agent(
         name="Assistant",
@@ -133,6 +134,7 @@ async def main() -> None:
         "Which language is the repository openai/openai-agents-python written in?",
     )
     print(result.final_output)
+
 
 asyncio.run(main())
 ```
@@ -162,10 +164,12 @@ from agents import MCPToolApprovalFunctionResult, MCPToolApprovalRequest
 
 SAFE_TOOLS = {"read_wiki_structure", "read_wiki_contents", "ask_question"}
 
+
 def approve_tool(request: MCPToolApprovalRequest) -> MCPToolApprovalFunctionResult:
     if request.data.name in SAFE_TOOLS:
         return {"approve": True}
     return {"approve": False, "reason": "Escalate to a human reviewer"}
+
 
 agent = Agent(
     name="Assistant",
@@ -217,6 +221,7 @@ from agents import Agent, Runner
 from agents.mcp import MCPServerStreamableHttp
 from agents.model_settings import ModelSettings
 
+
 async def main() -> None:
     token = os.environ["MCP_SERVER_TOKEN"]
     async with MCPServerStreamableHttp(
@@ -238,6 +243,7 @@ async def main() -> None:
 
         result = await Runner.run(agent, "Add 7 and 22.")
         print(result.final_output)
+
 
 asyncio.run(main())
 ```
@@ -312,7 +318,6 @@ MCP の実行結果でコンテンツブロックが使用される場合、SDK 
 MCP サーバーが SSE 対応 HTTP トランスポートを実装している場合は、[`MCPServerSse`][agents.mcp.server.MCPServerSse] をインスタンス化します。トランスポートを除き、API は Streamable HTTP サーバーと同一です。
 
 ```python
-
 from agents import Agent, Runner
 from agents.model_settings import ModelSettings
 from agents.mcp import MCPServerSse
@@ -438,10 +443,12 @@ from agents.mcp import MCPServerStdio, ToolFilterContext
 
 samples_dir = Path("/path/to/files")
 
+
 async def context_aware_filter(context: ToolFilterContext, tool) -> bool:
     if context.agent.name == "Code Reviewer" and tool.name.startswith("danger_"):
         return False
     return True
+
 
 async with MCPServerStdio(
     params={

@@ -31,6 +31,7 @@ from cryptography.fernet import Fernet
 from agents import Agent, Runner, SQLiteSession
 from agents.extensions.memory import EncryptedSession
 
+
 async def main():
     agent = Agent("Assistant")
     encryption_key = Fernet.generate_key().decode("ascii")
@@ -41,13 +42,14 @@ async def main():
             session_id="user-123",
             underlying_session=underlying_session,
             encryption_key=encryption_key,
-            ttl=600  # 10 minutes
+            ttl=600,  # 10 minutes
         )
 
         result = await Runner.run(agent, "Hello", session=session)
         print(result.final_output)
     finally:
         underlying_session.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -77,7 +79,7 @@ session = EncryptedSession(
     session_id="user-123",
     underlying_session=underlying_session,
     encryption_key=encryption_key,
-    ttl=600
+    ttl=600,
 )
 ```
 
@@ -95,7 +97,7 @@ session = EncryptedSession(
     session_id="user-123",
     underlying_session=underlying_session,
     encryption_key=encryption_key,
-    ttl=3600  # 1 hour in seconds
+    ttl=3600,  # 1 hour in seconds
 )
 
 # Items expire after 1 day
@@ -103,7 +105,7 @@ session = EncryptedSession(
     session_id="user-123",
     underlying_session=underlying_session,
     encryption_key=encryption_key,
-    ttl=86400  # 24 hours in seconds
+    ttl=86400,  # 24 hours in seconds
 )
 ```
 
@@ -123,9 +125,7 @@ encryption_key = os.environ["SESSION_ENCRYPTION_KEY"]
 underlying = SQLiteSession("user-123", "conversations.db")
 
 session = EncryptedSession(
-    session_id="user-123",
-    underlying_session=underlying,
-    encryption_key=encryption_key
+    session_id="user-123", underlying_session=underlying, encryption_key=encryption_key
 )
 ```
 
@@ -146,15 +146,11 @@ encryption_key = os.environ["SESSION_ENCRYPTION_KEY"]
 
 # Create encrypted SQLAlchemy session
 underlying = SQLAlchemySession.from_url(
-    "user-123",
-    url="postgresql+asyncpg://user:pass@localhost/db",
-    create_tables=True
+    "user-123", url="postgresql+asyncpg://user:pass@localhost/db", create_tables=True
 )
 
 session = EncryptedSession(
-    session_id="user-123",
-    underlying_session=underlying,
-    encryption_key=encryption_key
+    session_id="user-123", underlying_session=underlying, encryption_key=encryption_key
 )
 ```
 

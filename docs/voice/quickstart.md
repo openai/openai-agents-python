@@ -94,6 +94,7 @@ We'll set up a simple voice pipeline, using [`SingleAgentVoiceWorkflow`][agents.
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
+
 pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
 ```
 
@@ -119,7 +120,6 @@ player.start()
 async for event in result.stream():
     if event.type == "voice_stream_event_audio":
         player.write(event.data)
-
 ```
 
 ## Put it all together

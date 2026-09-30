@@ -9,6 +9,7 @@ You can run agents via the [`Runner`][agents.run.Runner] class. You have 3 optio
 ```python
 from agents import Agent, Runner
 
+
 async def main():
     agent = Agent(name="Assistant", instructions="You are a helpful assistant")
 
@@ -308,6 +309,7 @@ You can manually manage conversation history using the [`RunResultBase.to_input_
 ```python
 from agents import Agent, Runner, trace
 
+
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
@@ -331,6 +333,7 @@ For a simpler approach, you can use [Sessions](sessions/index.md) to automatical
 
 ```python
 from agents import Agent, Runner, SQLiteSession, trace
+
 
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
@@ -376,6 +379,7 @@ from openai import AsyncOpenAI
 
 client = AsyncOpenAI()
 
+
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
 
@@ -395,6 +399,7 @@ Another option is **response chaining**, where each turn links explicitly to the
 
 ```python
 from agents import Agent, Runner
+
 
 async def main():
     agent = Agent(name="Assistant", instructions="Reply very concisely.")
@@ -445,10 +450,12 @@ The return value must be a [`ModelInputData`][agents.run.ModelInputData] object.
 from agents import Agent, Runner, RunConfig
 from agents.run import CallModelData, ModelInputData
 
+
 def drop_old_messages(data: CallModelData[None]) -> ModelInputData:
     # Keep only the last 5 items and preserve existing instructions.
     trimmed = data.model_data.input[-5:]
     return ModelInputData(input=trimmed, instructions=data.model_data.instructions)
+
 
 agent = Agent(name="Assistant", instructions="Answer concisely.")
 result = Runner.run_sync(

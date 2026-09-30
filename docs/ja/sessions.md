@@ -23,27 +23,15 @@ agent = Agent(
 session = SQLiteSession("conversation_123")
 
 # First turn
-result = await Runner.run(
-    agent,
-    "What city is the Golden Gate Bridge in?",
-    session=session
-)
+result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
 print(result.final_output)  # "San Francisco"
 
 # Second turn - agent automatically remembers previous context
-result = await Runner.run(
-    agent,
-    "What state is it in?",
-    session=session
-)
+result = await Runner.run(agent, "What state is it in?", session=session)
 print(result.final_output)  # "California"
 
 # Also works with synchronous runner
-result = Runner.run_sync(
-    agent,
-    "What's the population?",
-    session=session
-)
+result = Runner.run_sync(agent, "What's the population?", session=session)
 print(result.final_output)  # "Approximately 39 million"
 ```
 
@@ -72,10 +60,7 @@ session = SQLiteSession("user_123", "conversations.db")
 items = await session.get_items()
 
 # Add new items to a session
-new_items = [
-    {"role": "user", "content": "Hello"},
-    {"role": "assistant", "content": "Hi there!"}
-]
+new_items = [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi there!"}]
 await session.add_items(new_items)
 
 # Remove and return the most recent item
@@ -97,11 +82,7 @@ agent = Agent(name="Assistant")
 session = SQLiteSession("correction_example")
 
 # Initial conversation
-result = await Runner.run(
-    agent,
-    "What's 2 + 2?",
-    session=session
-)
+result = await Runner.run(agent, "What's 2 + 2?", session=session)
 print(f"Agent: {result.final_output}")
 
 # User wants to correct their question
@@ -109,11 +90,7 @@ assistant_item = await session.pop_item()  # Remove agent's response
 user_item = await session.pop_item()  # Remove user's question
 
 # Ask a corrected question
-result = await Runner.run(
-    agent,
-    "What's 2 + 3?",
-    session=session
-)
+result = await Runner.run(agent, "What's 2 + 3?", session=session)
 print(f"Agent: {result.final_output}")
 ```
 
@@ -157,11 +134,7 @@ session = SQLiteSession("user_123")
 session = SQLiteSession("user_123", "conversations.db")
 
 # Use the session
-result = await Runner.run(
-    agent,
-    "Hello",
-    session=session
-)
+result = await Runner.run(agent, "Hello", session=session)
 ```
 
 ### 複数セッション
@@ -175,16 +148,8 @@ agent = Agent(name="Assistant")
 session_1 = SQLiteSession("user_123", "conversations.db")
 session_2 = SQLiteSession("user_456", "conversations.db")
 
-result1 = await Runner.run(
-    agent,
-    "Hello",
-    session=session_1
-)
-result2 = await Runner.run(
-    agent,
-    "Hello",
-    session=session_2
-)
+result1 = await Runner.run(agent, "Hello", session=session_1)
+result2 = await Runner.run(agent, "Hello", session=session_2)
 ```
 
 ### SQLAlchemy ベースのセッション
@@ -200,6 +165,7 @@ import asyncio
 from agents import Agent, Runner
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 
+
 async def main():
     agent = Agent("Assistant")
     session = SQLAlchemySession.from_url(
@@ -209,6 +175,7 @@ async def main():
     )
 
     result = await Runner.run(agent, "Hello", session=session)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -223,6 +190,7 @@ import asyncio
 from agents import Agent, Runner
 from agents.extensions.memory.sqlalchemy_session import SQLAlchemySession
 from sqlalchemy.ext.asyncio import create_async_engine
+
 
 async def main():
     # In your application, you would use your existing engine
@@ -240,6 +208,7 @@ async def main():
 
     await engine.dispose()
 
+
 if __name__ == "__main__":
     asyncio.run(main())
 ```
@@ -256,6 +225,7 @@ if __name__ == "__main__":
 import asyncio
 from agents import Agent, Runner
 from agents.extensions.memory import EncryptedSession, SQLAlchemySession
+
 
 async def main():
     # Create underlying session (works with any SessionABC implementation)
@@ -276,6 +246,7 @@ async def main():
     agent = Agent("Assistant")
     result = await Runner.run(agent, "Hello", session=session)
     print(result.final_output)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -305,6 +276,7 @@ from agents.memory.session import SessionABC
 from agents.items import TResponseInputItem
 from typing import List
 
+
 class MyCustomSession(SessionABC):
     """Custom session implementation following the Session protocol."""
 
@@ -332,13 +304,10 @@ class MyCustomSession(SessionABC):
         # Your implementation here
         pass
 
+
 # Use your custom session
 agent = Agent(name="Assistant")
-result = await Runner.run(
-    agent,
-    "Hello",
-    session=MyCustomSession("my_session")
-)
+result = await Runner.run(agent, "Hello", session=MyCustomSession("my_session"))
 ```
 
 ## セッション管理
@@ -372,16 +341,8 @@ billing_agent = Agent(name="Billing")
 session = SQLiteSession("user_123")
 
 # Both agents will see the same conversation history
-result1 = await Runner.run(
-    support_agent,
-    "Help me with my account",
-    session=session
-)
-result2 = await Runner.run(
-    billing_agent,
-    "What are my charges?",
-    session=session
-)
+result1 = await Runner.run(support_agent, "Help me with my account", session=session)
+result2 = await Runner.run(billing_agent, "What are my charges?", session=session)
 ```
 
 ## 完全な例
@@ -409,33 +370,21 @@ async def main():
     # First turn
     print("First turn:")
     print("User: What city is the Golden Gate Bridge in?")
-    result = await Runner.run(
-        agent,
-        "What city is the Golden Gate Bridge in?",
-        session=session
-    )
+    result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
     print(f"Assistant: {result.final_output}")
     print()
 
     # Second turn - the agent will remember the previous conversation
     print("Second turn:")
     print("User: What state is it in?")
-    result = await Runner.run(
-        agent,
-        "What state is it in?",
-        session=session
-    )
+    result = await Runner.run(agent, "What state is it in?", session=session)
     print(f"Assistant: {result.final_output}")
     print()
 
     # Third turn - continuing the conversation
     print("Third turn:")
     print("User: What's the population of that state?")
-    result = await Runner.run(
-        agent,
-        "What's the population of that state?",
-        session=session
-    )
+    result = await Runner.run(agent, "What's the population of that state?", session=session)
     print(f"Assistant: {result.final_output}")
     print()
 

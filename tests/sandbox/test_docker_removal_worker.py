@@ -125,9 +125,11 @@ def test_worker_pins_external_mount_device_but_requires_private_workspace(
     monkeypatch.setattr(
         worker_code.os,
         "stat",
-        lambda path, **kwargs: SimpleNamespace(st_dev=1)
-        if path == "/"
-        else metadata[20 if path == "/workspace" else 21],
+        lambda path, **kwargs: (
+            SimpleNamespace(st_dev=1)
+            if path == "/"
+            else metadata[20 if path == "/workspace" else 21]
+        ),
     )
     monkeypatch.setattr(worker_code.os, "open", Mock(side_effect=[20, 21]))
     monkeypatch.setattr(worker_code.os, "fstat", metadata.__getitem__)

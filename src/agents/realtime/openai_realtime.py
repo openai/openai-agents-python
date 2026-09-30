@@ -371,11 +371,13 @@ class _ResponseCreateSequencer:
         while True:
             async with self._condition:
                 await self._condition.wait_for(
-                    lambda: request_version not in self._pending_request_versions
-                    or (
-                        not self._ongoing_response
-                        and self._response_control == "free"
-                        and self._next_pending_request_version() == request_version
+                    lambda: (
+                        request_version not in self._pending_request_versions
+                        or (
+                            not self._ongoing_response
+                            and self._response_control == "free"
+                            and self._next_pending_request_version() == request_version
+                        )
                     )
                 )
                 if request_version not in self._pending_request_versions:

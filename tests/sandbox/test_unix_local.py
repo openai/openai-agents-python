@@ -56,6 +56,46 @@ class _RecordingUnixLocalSession(UnixLocalSandboxSession):
 
 
 @pytest.mark.asyncio
+async def test_unix_local_start_cancellation_waits_for_workspace_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    session = await client.create(manifest=Manifest(root=str(workspace)))
+    started = threading.Event()
+    release = threading.Event()
+    mkdir = Path.mkdir
+
+    def slow_mkdir(path: Path, *args: object, **kwargs: object) -> None:
+        if path == workspace:
+            started.set()
+            assert release.wait(timeout=5)
+        mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", slow_mkdir)
+    task = asyncio.create_task(session.start())
+    try:
+        while not started.is_set():
+            if task.done():
+                await task
+                pytest.fail("start did not create the workspace")
+            await asyncio.sleep(0.005)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert not workspace.exists()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert workspace.is_dir()
+        assert not await session.running()
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await session.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("exclude_first", [False, True])
 async def test_unix_local_snapshot_round_trips_hardlinks(
     tmp_path: Path, exclude_first: bool

@@ -10,9 +10,7 @@ from .conftest import (
 
 
 def test_remove_ambient_proxy_environment_clears_proxy_variables() -> None:
-    environment = {
-        variable: "socks5h://127.0.0.1:1234" for variable in _PROXY_ENVIRONMENT_VARIABLES
-    }
+    environment = dict.fromkeys(_PROXY_ENVIRONMENT_VARIABLES, "socks5h://127.0.0.1:1234")
     environment["UNRELATED"] = "preserved"
 
     _remove_ambient_proxy_environment(environment)

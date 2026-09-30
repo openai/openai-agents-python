@@ -56,8 +56,11 @@ agent = Agent(
     ],
 )
 
+
 async def main():
-    result = await Runner.run(agent, "Find recent images and supporting text about the Golden Gate Bridge at sunset.")
+    result = await Runner.run(
+        agent, "Find recent images and supporting text about the Golden Gate Bridge at sunset."
+    )
     print(result.final_output)
 ```
 
@@ -286,7 +289,10 @@ from agents.editor import ApplyPatchResult, ApplyPatchOperation, ApplyPatchEdito
 class NoopComputer(AsyncComputer):
     environment = "browser"
     dimensions = (1024, 768)
-    async def screenshot(self): return ""
+
+    async def screenshot(self):
+        return ""
+
     async def click(self, x, y, button): ...
     async def double_click(self, x, y): ...
     async def scroll(self, x, y, scroll_x, scroll_y): ...
@@ -298,9 +304,14 @@ class NoopComputer(AsyncComputer):
 
 
 class NoopEditor(ApplyPatchEditor):
-    async def create_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
-    async def update_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
-    async def delete_file(self, op: ApplyPatchOperation): return ApplyPatchResult(status="completed")
+    async def create_file(self, op: ApplyPatchOperation):
+        return ApplyPatchResult(status="completed")
+
+    async def update_file(self, op: ApplyPatchOperation):
+        return ApplyPatchResult(status="completed")
+
+    async def delete_file(self, op: ApplyPatchOperation):
+        return ApplyPatchResult(status="completed")
 
 
 async def run_shell(request):
@@ -347,6 +358,7 @@ class Location(TypedDict):
     lat: float
     long: float
 
+
 @tool  # (1)!
 async def fetch_weather(location: Location) -> str:
     # (2)!
@@ -382,7 +394,6 @@ for tool in agent.tools:
         print(tool.description)
         print(json.dumps(tool.params_json_schema, indent=2))
         print()
-
 ```
 
 1.  You can use any Python types as arguments to your functions, and the function can be sync or async.
@@ -485,7 +496,6 @@ from pydantic import BaseModel
 from agents import RunContextWrapper, FunctionTool
 
 
-
 def do_some_work(data: str) -> str:
     return "done"
 
@@ -534,14 +544,18 @@ from typing import Annotated
 from pydantic import Field
 from agents.decorators import tool
 
+
 # Default-based form
 @tool
 def score_a(score: int = Field(..., ge=0, le=100, description="Score from 0 to 100")) -> str:
     return f"Score recorded: {score}"
 
+
 # Annotated form
 @tool
-def score_b(score: Annotated[int, Field(..., ge=0, le=100, description="Score from 0 to 100")]) -> str:
+def score_b(
+    score: Annotated[int, Field(..., ge=0, le=100, description="Score from 0 to 100")],
+) -> str:
     return f"Score recorded: {score}"
 ```
 
@@ -613,21 +627,24 @@ from agents import RunContextWrapper
 from agents.decorators import tool
 from typing import Any
 
+
 def my_custom_error_function(context: RunContextWrapper[Any], error: Exception) -> str:
     """A custom function to provide a user-friendly error message."""
     print(f"A tool call failed with the following error: {error}")
     return "An internal server error occurred. Please try again later."
 
+
 @tool(failure_error_function=my_custom_error_function)
 def get_user_profile(user_id: str) -> str:
     """Fetches a user profile from a mock API.
-     This function demonstrates a 'flaky' or failing API call.
+    This function demonstrates a 'flaky' or failing API call.
     """
     if user_id == "user_123":
         return "User profile for user_123 successfully retrieved."
     else:
-        raise ValueError(f"Could not retrieve profile for user_id: {user_id}. API returned an error.")
-
+        raise ValueError(
+            f"Could not retrieve profile for user_id: {user_id}. API returned an error."
+        )
 ```
 
 If you are manually creating a `FunctionTool` object, then you must handle errors inside the `on_invoke_tool` function.
@@ -669,6 +686,7 @@ orchestrator_agent = Agent(
     ],
 )
 
+
 async def main():
     result = await Runner.run(orchestrator_agent, input="Say 'Hello, how are you?' in Spanish.")
     print(result.final_output)
@@ -694,12 +712,7 @@ async def run_my_agent() -> str:
 
     agent = Agent(name="My agent", instructions="...")
 
-    result = await Runner.run(
-        agent,
-        input="...",
-        max_turns=5,
-        run_config=...
-    )
+    result = await Runner.run(agent, input="...", max_turns=5, run_config=...)
 
     return str(result.final_output)
 ```
@@ -804,12 +817,15 @@ import asyncio
 from agents import Agent, AgentBase, Runner, RunContextWrapper
 from pydantic import BaseModel
 
+
 class LanguageContext(BaseModel):
     language_preference: str = "french_spanish"
+
 
 def french_enabled(ctx: RunContextWrapper[LanguageContext], agent: AgentBase) -> bool:
     """Enable French for French+Spanish preference."""
     return ctx.context.language_preference == "french_spanish"
+
 
 # Create specialized agents
 spanish_agent = Agent(
@@ -844,10 +860,12 @@ orchestrator = Agent(
     ],
 )
 
+
 async def main():
     context = LanguageContext(language_preference="french_spanish")
     result = await Runner.run(orchestrator, "How are you?", context=context)
     print(result.final_output)
+
 
 asyncio.run(main())
 ```

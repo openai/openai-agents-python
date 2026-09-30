@@ -559,7 +559,8 @@ def build_agent(model: str) -> SandboxAgent[None]:
                 "repo": LocalDir(src=HOST_REPO_DIR),
             }
         ),
-        capabilities=Capabilities.default() + [
+        capabilities=Capabilities.default()
+        + [
             Skills(
                 lazy_from=LocalDirLazySkillSource(
                     # This is a host path read by the SDK process.

@@ -241,9 +241,7 @@ await session.model.send_event(
 from agents.realtime import RealtimeModelUsageEvent
 
 async for event in session:
-    if event.type == "raw_model_event" and isinstance(
-        event.data, RealtimeModelUsageEvent
-    ):
+    if event.type == "raw_model_event" and isinstance(event.data, RealtimeModelUsageEvent):
         response_usage = event.data.usage
         print("Response tokens:", response_usage.total_tokens)
         print("Input modalities:", event.data.input_tokens_details)

@@ -1443,8 +1443,9 @@ class CloudflareSandboxSession(BaseSandboxSession):
             return False
 
     @retry_async(
-        retry_if=lambda exc, self: isinstance(exc, aiohttp.ClientError)
-        or _is_transient_workspace_error(exc)
+        retry_if=lambda exc, self: (
+            isinstance(exc, aiohttp.ClientError) or _is_transient_workspace_error(exc)
+        )
     )
     async def _persist_workspace_via_http(self) -> io.IOBase:
         root = self._workspace_root_path()
@@ -1485,8 +1486,9 @@ class CloudflareSandboxSession(BaseSandboxSession):
             raise WorkspaceArchiveReadError(path=root, cause=e) from e
 
     @retry_async(
-        retry_if=lambda exc, self, data: isinstance(exc, aiohttp.ClientError)
-        or _is_transient_workspace_error(exc)
+        retry_if=lambda exc, self, data: (
+            isinstance(exc, aiohttp.ClientError) or _is_transient_workspace_error(exc)
+        )
     )
     async def _hydrate_workspace_via_http(self, data: io.IOBase) -> None:
         root = self._workspace_root_path()

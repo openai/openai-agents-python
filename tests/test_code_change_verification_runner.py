@@ -99,8 +99,9 @@ class _Run:
 
     def ready(self, step: str) -> None:
         _await(
-            lambda: (self.root / f"{step}.started").exists()
-            and (self.root / f"{step}.child").exists()
+            lambda: (
+                (self.root / f"{step}.started").exists() and (self.root / f"{step}.child").exists()
+            )
         )
 
     def release(self, step: str, status: int = 0) -> None:

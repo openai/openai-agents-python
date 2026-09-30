@@ -52,10 +52,12 @@ SDK는 OpenAI 모델에 기본적으로 Responses API를 사용하지만, 여기
 from agents import Agent
 from agents.decorators import tool
 
+
 @tool
 def get_weather(city: str) -> str:
     """returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
+
 
 agent = Agent(
     name="Haiku agent",
@@ -103,6 +105,7 @@ from dataclasses import dataclass
 
 from agents import Agent, GenerateDynamicPromptData, Runner
 
+
 @dataclass
 class PromptContext:
     prompt_id: str
@@ -135,9 +138,11 @@ result = await Runner.run(
 ```python
 from dataclasses import dataclass
 
+
 @dataclass
 class Purchase:
     id: str
+
 
 @dataclass
 class UserContext:
@@ -148,6 +153,7 @@ class UserContext:
     async def fetch_purchases(self) -> list[Purchase]:
         # implement your logic here
         return []
+
 
 agent = Agent[UserContext](
     ...,
@@ -167,6 +173,7 @@ class CalendarEvent(BaseModel):
     name: str
     date: str
     participants: list[str]
+
 
 agent = Agent(
     name="Calendar extractor",
@@ -212,7 +219,7 @@ customer_facing_agent = Agent(
         refund_agent.as_tool(
             tool_name="refund_expert",
             tool_description="Handles refund questions and requests.",
-        )
+        ),
     ],
 )
 ```
@@ -245,9 +252,8 @@ triage_agent = Agent(
 ```python
 from agents import Agent, RunContextWrapper
 
-def dynamic_instructions(
-    context: RunContextWrapper[UserContext], agent: Agent[UserContext]
-) -> str:
+
+def dynamic_instructions(context: RunContextWrapper[UserContext], agent: Agent[UserContext]) -> str:
     return f"The user's name is {context.context.name}. Help them with their questions."
 
 
@@ -338,16 +344,18 @@ OpenAI Responses 도구 검색을 사용할 때는 이름이 지정된 도구 �
 from agents import Agent, ModelSettings
 from agents.decorators import tool
 
+
 @tool
 def get_weather(city: str) -> str:
     """Returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
 
+
 agent = Agent(
     name="Weather Agent",
     instructions="Retrieve weather details.",
     tools=[get_weather],
-    model_settings=ModelSettings(tool_choice="get_weather")
+    model_settings=ModelSettings(tool_choice="get_weather"),
 )
 ```
 
@@ -362,16 +370,18 @@ agent = Agent(
 from agents import Agent
 from agents.decorators import tool
 
+
 @tool
 def get_weather(city: str) -> str:
     """Returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
 
+
 agent = Agent(
     name="Weather Agent",
     instructions="Retrieve weather details.",
     tools=[get_weather],
-    tool_use_behavior="stop_on_first_tool"
+    tool_use_behavior="stop_on_first_tool",
 )
 ```
 
@@ -382,21 +392,24 @@ from agents import Agent
 from agents.agent import StopAtTools
 from agents.decorators import tool
 
+
 @tool
 def get_weather(city: str) -> str:
     """Returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
+
 
 @tool
 def sum_numbers(a: int, b: int) -> int:
     """Adds two numbers."""
     return a + b
 
+
 agent = Agent(
     name="Stop At Stock Agent",
     instructions="Get weather or sum numbers.",
     tools=[get_weather, sum_numbers],
-    tool_use_behavior=StopAtTools(stop_at_tool_names=["get_weather"])
+    tool_use_behavior=StopAtTools(stop_at_tool_names=["get_weather"]),
 )
 ```
 
@@ -408,32 +421,30 @@ from agents.agent import ToolsToFinalOutputResult
 from agents.decorators import tool
 from typing import List, Any
 
+
 @tool
 def get_weather(city: str) -> str:
     """Returns weather info for the specified city."""
     return f"The weather in {city} is sunny"
 
+
 def custom_tool_handler(
-    context: RunContextWrapper[Any],
-    tool_results: List[FunctionToolResult]
+    context: RunContextWrapper[Any], tool_results: List[FunctionToolResult]
 ) -> ToolsToFinalOutputResult:
     """Processes tool results to decide final output."""
     for result in tool_results:
         if result.output and "sunny" in result.output:
             return ToolsToFinalOutputResult(
-                is_final_output=True,
-                final_output=f"Final weather: {result.output}"
+                is_final_output=True, final_output=f"Final weather: {result.output}"
             )
-    return ToolsToFinalOutputResult(
-        is_final_output=False,
-        final_output=None
-    )
+    return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
 
 agent = Agent(
     name="Weather Agent",
     instructions="Retrieve weather details.",
     tools=[get_weather],
-    tool_use_behavior=custom_tool_handler
+    tool_use_behavior=custom_tool_handler,
 )
 ```
 

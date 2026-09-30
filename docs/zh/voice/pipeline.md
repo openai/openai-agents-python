@@ -136,7 +136,6 @@ config = VoicePipelineConfig(
 应用使用 [`StreamedAudioResult.stream()`][agents.voice.result.StreamedAudioResult.stream] 时会引发终止性管线错误。如果语音转文本的转录会话在其他方面均正常的运行结束后未能关闭，流会引发该关闭错误，而不是无限期等待。如果轮次已经失败，并且关闭转录会话也失败，流会保留原始轮次错误作为主要错误。
 
 ```python
-
 result = await pipeline.run(input)
 
 async for event in result.stream():

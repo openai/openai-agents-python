@@ -86,7 +86,9 @@ from agents.sandbox.sandboxes import UnixLocalSandboxClient
 agent = SandboxAgent(
     name="Workspace Assistant",
     instructions="Inspect the sandbox workspace before answering.",
-    default_manifest=Manifest(entries={"repo": GitRepo(repo="openai/openai-agents-python", ref="main")}),
+    default_manifest=Manifest(
+        entries={"repo": GitRepo(repo="openai/openai-agents-python", ref="main")}
+    ),
 )
 
 result = Runner.run_sync(
@@ -105,8 +107,11 @@ Use a [`RealtimeAgent`](https://openai.github.io/openai-agents-python/realtime/q
 import asyncio
 from agents.realtime import RealtimeAgent, RealtimeRunner
 
+
 async def main() -> None:
-    agent = RealtimeAgent(name="Assistant", instructions="You are a helpful voice assistant. Keep responses short.")
+    agent = RealtimeAgent(
+        name="Assistant", instructions="You are a helpful voice assistant. Keep responses short."
+    )
     runner = RealtimeRunner(starting_agent=agent)
     session = await runner.run()
 
@@ -120,6 +125,7 @@ async def main() -> None:
                 print(event.item)
             elif event.type == "agent_end":
                 break
+
 
 if __name__ == "__main__":
     asyncio.run(main())

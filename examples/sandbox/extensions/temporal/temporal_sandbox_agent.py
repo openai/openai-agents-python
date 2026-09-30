@@ -498,7 +498,7 @@ class AgentWorkflow:
 
         while not self._done:
             await workflow.wait_condition(
-                lambda: (len(self._pending_messages) > 0 or self._pause_requested or self._done),
+                lambda: len(self._pending_messages) > 0 or self._pause_requested or self._done,
             )
 
             if self._pause_requested:

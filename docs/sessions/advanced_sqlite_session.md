@@ -24,28 +24,18 @@ agent = Agent(
 
 # Create an advanced session
 session = AdvancedSQLiteSession(
-    session_id="conversation_123",
-    db_path="conversations.db",
-    create_tables=True
+    session_id="conversation_123", db_path="conversations.db", create_tables=True
 )
 
 # First conversation turn
-result = await Runner.run(
-    agent,
-    "What city is the Golden Gate Bridge in?",
-    session=session
-)
+result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
 print(result.final_output)  # "San Francisco"
 
 # IMPORTANT: Store usage data
 await session.store_run_usage(result)
 
 # Continue conversation
-result = await Runner.run(
-    agent,
-    "What state is it in?",
-    session=session
-)
+result = await Runner.run(agent, "What state is it in?", session=session)
 print(result.final_output)  # "California"
 await session.store_run_usage(result)
 ```
@@ -58,24 +48,19 @@ from agents.extensions.memory import AdvancedSQLiteSession
 # Basic initialization
 session = AdvancedSQLiteSession(
     session_id="my_conversation",
-    create_tables=True  # Auto-create advanced tables
+    create_tables=True,  # Auto-create advanced tables
 )
 
 # With persistent storage
 session = AdvancedSQLiteSession(
-    session_id="user_123",
-    db_path="conversations.db",
-    create_tables=True
+    session_id="user_123", db_path="conversations.db", create_tables=True
 )
 
 # With custom logger
 import logging
+
 logger = logging.getLogger("my_app")
-session = AdvancedSQLiteSession(
-    session_id="session_456",
-    create_tables=True,
-    logger=logger
-)
+session = AdvancedSQLiteSession(session_id="session_456", create_tables=True, logger=logger)
 ```
 
 ### Parameters
@@ -122,9 +107,9 @@ branch_usage = await session.get_session_usage(branch_id="main")
 turn_usage = await session.get_turn_usage()
 for turn_data in turn_usage:
     print(f"Turn {turn_data['user_turn_number']}: {turn_data['total_tokens']} tokens")
-    if turn_data['input_tokens_details']:
+    if turn_data["input_tokens_details"]:
         print(f"  Input details: {turn_data['input_tokens_details']}")
-    if turn_data['output_tokens_details']:
+    if turn_data["output_tokens_details"]:
         print(f"  Output details: {turn_data['output_tokens_details']}")
 
 # Get usage for specific turn
@@ -149,16 +134,10 @@ branch_id = await session.create_branch_from_turn(2)
 print(f"Created branch: {branch_id}")
 
 # Create a branch with custom name
-branch_id = await session.create_branch_from_turn(
-    2, 
-    branch_name="alternative_path"
-)
+branch_id = await session.create_branch_from_turn(2, branch_name="alternative_path")
 
 # Create branch by searching for content
-branch_id = await session.create_branch_from_content(
-    "weather", 
-    branch_name="weather_focus"
-)
+branch_id = await session.create_branch_from_content("weather", branch_name="weather_focus")
 ```
 
 Branch IDs are unique for the lifetime of a session ID. Deleting a branch or clearing the session removes its conversation data but does not make previously used branch IDs available again; use a new name when creating another branch.
@@ -170,7 +149,9 @@ Branch IDs are unique for the lifetime of a session ID. Deleting a branch or cle
 branches = await session.list_branches()
 for branch in branches:
     current = " (current)" if branch["is_current"] else ""
-    print(f"{branch['branch_id']}: {branch['user_turns']} turns, {branch['message_count']} messages{current}")
+    print(
+        f"{branch['branch_id']}: {branch['user_turns']} turns, {branch['message_count']} messages{current}"
+    )
 
 # Switch between branches
 await session.switch_to_branch("main")
@@ -194,22 +175,14 @@ await session.store_run_usage(result)
 branch_id = await session.create_branch_from_turn(2, "weather_focus")
 
 # Continue in new branch with different question
-result = await Runner.run(
-    agent, 
-    "What are the main tourist attractions in Paris?", 
-    session=session
-)
+result = await Runner.run(agent, "What are the main tourist attractions in Paris?", session=session)
 await session.store_run_usage(result)
 
 # Switch back to main branch
 await session.switch_to_branch("main")
 
 # Continue original conversation
-result = await Runner.run(
-    agent, 
-    "How expensive is it to visit?", 
-    session=session
-)
+result = await Runner.run(agent, "How expensive is it to visit?", session=session)
 await session.store_run_usage(result)
 ```
 

@@ -39,7 +39,7 @@ def to_provider(policy: NetworkPolicy | None) -> provider.NetworkPolicy | None:
     assert isinstance(policy, NetworkPolicyCustom)
     allow: dict[str, tuple[provider.NetworkPolicyRule, ...]]
     if isinstance(policy.allow, list):
-        allow = {domain: () for domain in policy.allow}
+        allow = dict.fromkeys(policy.allow, ())
     else:
         allow = {
             domain: tuple(

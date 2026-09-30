@@ -50,8 +50,10 @@ triage_agent = Agent(name="Triage agent", handoffs=[billing_agent, handoff(refun
 ```python
 from agents import Agent, handoff, RunContextWrapper
 
+
 def on_handoff(ctx: RunContextWrapper[None]):
     print("Handoff called")
+
 
 agent = Agent(name="My agent")
 
@@ -72,11 +74,14 @@ from pydantic import BaseModel
 
 from agents import Agent, handoff, RunContextWrapper
 
+
 class EscalationData(BaseModel):
     reason: str
 
+
 async def on_handoff(ctx: RunContextWrapper[None], input_data: EscalationData):
     print(f"Escalation agent called with reason: {input_data.reason}")
+
 
 agent = Agent(name="Escalation agent")
 
@@ -144,7 +149,7 @@ agent = Agent(name="FAQ agent")
 
 handoff_obj = handoff(
     agent=agent,
-    input_filter=handoff_filters.remove_all_tools, # (1)!
+    input_filter=handoff_filters.remove_all_tools,  # (1)!
 )
 ```
 

@@ -1797,7 +1797,7 @@ class RealtimeSession(RealtimeModelListener):
             else:
                 await self._model.send_event_if(
                     feedback_event,
-                    lambda: (output_response_generation == self._latest_output_response_generation),
+                    lambda: output_response_generation == self._latest_output_response_generation,
                 )
 
             return True
