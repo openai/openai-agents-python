@@ -4,6 +4,7 @@
     ".": {}
   },
   "release-type": "python",
+  "always-update": true,
   "include-v-in-tag": true,
   "include-component-in-tag": false,
   "bump-minor-pre-major": true,
