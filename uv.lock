@@ -2863,7 +2863,7 @@ requires-dist = [
     { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.33.0" },
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
-    { name = "urllib3", specifier = ">=2.7.0" },
+    { name = "urllib3", specifier = ">=2.8.0" },
     { name = "vercel-sandbox", marker = "extra == 'vercel'", specifier = ">=0.7.0,<0.8" },
     { name = "websockets", specifier = ">=15.0,<17" },
     { name = "websockets", marker = "extra == 'realtime'", specifier = ">=15.0,<17" },
