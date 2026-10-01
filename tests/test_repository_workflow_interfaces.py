@@ -218,9 +218,9 @@ def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) ->
         for step in job["steps"]:
             assert "continue-on-error" not in step
             if step.get("name") in {
-                "Verify automated candidate review",
+                "Verify human-reviewed release candidate",
                 "Checkout approval validator from main",
-                "Revalidate human approval after deployment wait",
+                "Revalidate human approval before upload",
             }:
                 assert step["if"] == "vars.RELEASE_AUTOMATION_ENABLED == 'true'"
             else:
@@ -320,8 +320,6 @@ def test_release_build_is_isolated_from_test_execution() -> None:
     assert checks["permissions"] == {
         "contents": "read",
         "pull-requests": "read",
-        "checks": "read",
-        "actions": "read",
     }
     assert "outputs" not in checks
     assert build["needs"] == "checks"

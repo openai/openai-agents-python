@@ -2,6 +2,8 @@ name: Release Readiness
 on:
   pull_request:
     branches: [main]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
   merge_group:
     types: [checks_requested]
 permissions: {}
@@ -12,12 +14,10 @@ jobs:
   readiness:
     name: Release readiness
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 5
     permissions:
       contents: read
-      checks: read
       pull-requests: read
-      actions: read
     steps:
       - if: github.event_name == 'merge_group' || (github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
