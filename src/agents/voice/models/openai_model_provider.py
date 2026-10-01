@@ -28,7 +28,7 @@ def shared_http_client() -> httpx2.AsyncClient:
     return _http_client
 
 
-DEFAULT_STT_MODEL = "gpt-4o-transcribe"
+DEFAULT_STT_MODEL = "gpt-transcribe"
 DEFAULT_TTS_MODEL = "gpt-4o-mini-tts"
 
 
