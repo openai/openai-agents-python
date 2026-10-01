@@ -9335,6 +9335,47 @@ class TestRunStateSerializationEdgeCases:
         assert restored_session_state.snapshot.base_path == Path("/tmp/snapshots")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("sandbox_name", [None, "agents-synthetic-name"])
+    async def test_run_state_round_trip_preserves_vercel_execution_identity(self, sandbox_name):
+        pytest.importorskip("vercel.sandbox")
+        from agents.extensions.sandbox.vercel import (
+            VercelSandboxClient,
+            VercelSandboxSessionState,
+        )
+        from agents.sandbox.snapshot import NoopSnapshot
+
+        agent = Agent(name="TestAgent")
+        state = make_state(agent, context=RunContextWrapper(context={}))
+        client = VercelSandboxClient(token="synthetic-token")
+        session_state = VercelSandboxSessionState(
+            sandbox_id="synthetic-execution-id",
+            sandbox_name=sandbox_name,
+            manifest=Manifest(),
+            snapshot=NoopSnapshot(id="synthetic"),
+        )
+        payload = client.serialize_session_state(session_state)
+        if sandbox_name is None:
+            payload.pop("sandbox_name")  # Released saved state does not have this field.
+        state._sandbox = {
+            "backend_id": "vercel",
+            "current_agent_key": agent.name,
+            "current_agent_name": agent.name,
+            "session_state": payload,
+            "sessions_by_agent": {
+                agent.name: {"agent_name": agent.name, "session_state": payload},
+            },
+        }
+        serialized = state.to_json()
+        if sandbox_name is None:
+            serialized["$schemaVersion"] = "1.17"
+        restored = await RunState.from_json(agent, serialized)
+        assert restored._sandbox is not None
+        restored_payload = cast(dict[str, object], restored._sandbox["session_state"])
+        restored_session = client.deserialize_session_state(restored_payload)
+        assert restored_session.sandbox_id == "synthetic-execution-id"
+        assert restored_session.sandbox_name == sandbox_name
+
+    @pytest.mark.asyncio
     async def test_run_state_sanitizes_raw_mount_credentials_without_provider_imports(self):
         agent = Agent(name="TestAgent")
         context: RunContextWrapper[dict[str, str]] = RunContextWrapper(context={})

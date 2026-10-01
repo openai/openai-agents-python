@@ -1580,7 +1580,7 @@ async def test_streamed_finalizer_failure_follows_both_data_policies(
 
     error = RuntimeError("SECRET_STREAM_FINALIZER_ERROR")
 
-    async def fail_finalizer(_result: Any) -> bool:
+    async def fail_finalizer(_result: Any, *, ignore_cancelled: bool = False) -> bool:
         raise error
 
     monkeypatch.setattr(

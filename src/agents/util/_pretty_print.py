@@ -1,3 +1,4 @@
+import re
 from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
@@ -8,8 +9,15 @@ if TYPE_CHECKING:
 
 
 def _indent(text: str, indent_level: int) -> str:
+    # Normalize ordinary CRLF breaks before escaping controls that splitlines consumes.
+    text = _escape_terminal_controls(text.replace("\r\n", "\n"))
     indent_string = "  " * indent_level
     return "\n".join(f"{indent_string}{line}" for line in text.splitlines())
+
+
+def _escape_terminal_controls(text: str) -> str:
+    """Escape C0, DEL, and C1 controls, preserving tabs and diagnostic line breaks."""
+    return re.sub(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", lambda m: f"\\x{ord(m[0]):02x}", text)
 
 
 def _final_output_str(result: "RunResultBase") -> str:
@@ -36,7 +44,7 @@ def pretty_print_result(result: "RunResult") -> str:
     output += f"\n- {len(result.output_guardrail_results)} output guardrail result(s)"
     output += "\n(See `RunResult` for more details)"
 
-    return output
+    return _escape_terminal_controls(output)
 
 
 def pretty_print_run_error_details(result: "RunErrorDetails") -> str:
@@ -68,4 +76,4 @@ def pretty_print_run_result_streaming(result: "RunResultStreaming") -> str:
     output += f"\n- {len(result.input_guardrail_results)} input guardrail result(s)"
     output += f"\n- {len(result.output_guardrail_results)} output guardrail result(s)"
     output += "\n(See `RunResultStreaming` for more details)"
-    return output
+    return _escape_terminal_controls(output)

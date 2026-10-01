@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from typing import Any, TypeGuard, cast
+from urllib.parse import unquote
 
 from openai import NOT_GIVEN
 
@@ -415,7 +416,8 @@ def resolve_ref(*, root: dict[str, object], ref: str) -> object:
     if not ref.startswith("#/"):
         raise ValueError(f"Unexpected $ref format {ref!r}; Does not start with #/")
 
-    path = ref[2:].split("/")
+    # Decode the URI fragment before interpreting JSON Pointer separators and escapes.
+    path = unquote(ref[2:], errors="strict").split("/")
     resolved = root
     for raw_key in path:
         key = raw_key.replace("~1", "/").replace("~0", "~")

@@ -7,6 +7,7 @@ if sys.platform == "win32":  # pragma: no cover
     )
 
 import asyncio
+import copy
 import errno
 import fcntl
 import inspect
@@ -28,7 +29,7 @@ from collections.abc import Collection, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal, cast
 
 from ...logger import log_tool_action_warning
@@ -110,6 +111,12 @@ _HOST_ENVIRONMENT_ALLOWLIST = frozenset(
 
 logger = logging.getLogger(__name__)
 
+_INCOMPLETE_CREATE_MESSAGE = (
+    "File creation failed after claiming the destination. The file may contain incomplete "
+    "contents. Inspect the destination before using update_file or removing it to retry; "
+    "retrying Add File without inspection is unsafe."
+)
+
 
 def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
     return {"mount_path": str(mount_path)}
@@ -118,6 +125,97 @@ def _mount_path_diagnostic_extra(mount_path: Path) -> dict[str, object]:
 def _close_fd_quietly(fd: int) -> None:
     with suppress(OSError):
         os.close(fd)
+
+
+# Symlink hops followed while proving that a rebased target stays under the root. Linux
+# gives up after 40 (ELOOP); a workspace that needs more is not worth restoring.
+_MAX_SYMLINK_HOPS = 40
+
+
+def _symlink_target_stays_under(
+    members: Mapping[str, tarfile.TarInfo], *, link_name: str, target: str
+) -> bool:
+    """Whether a rebased, link-relative target provably resolves under the workspace root.
+
+    The rebase keeps the components after the root verbatim, so ``a/link/../tmp`` is only
+    inside the workspace if ``a/link`` resolves inside it: with ``a/link -> ..`` it names
+    ``/tmp`` once restored, while the strict extractor's lexical check accepts the relative
+    form. The walk applies ``..`` to a link's target the way the kernel does and only
+    follows the archive's own relative links, which restore verbatim; a hop through a
+    link whose target is absolute proves nothing about the restored tree (on the live tree
+    it may happen to lead back inside), so it fails the proof, as do leaving the root and
+    exceeding the hop budget.
+
+    Every other component must be established by the snapshot itself: it has to exist in
+    the archive and be a directory unless it is the last one, which must be a regular file
+    or directory. ``hydrate_workspace`` extracts
+    into an existing root, so a component the snapshot does not create may already be a
+    symlink in the destination and send the restored link elsewhere; only snapshot-owned
+    components are protected by the extractor's destination checks. A target that cannot
+    be proven contained keeps its absolute form, which hydrate refuses as it always has.
+    """
+
+    pending = list(reversed((*PurePosixPath(link_name).parent.parts, *PurePosixPath(target).parts)))
+    resolved: list[str] = []
+    hops = 0
+    while pending:
+        part = pending.pop()
+        if part in ("", "."):
+            continue
+        if part == "..":
+            if not resolved:
+                return False
+            resolved.pop()
+            continue
+        rel_name = "/".join([*resolved, part])
+        candidate = members.get(rel_name)
+        if candidate is None:
+            return False
+        if candidate.issym():
+            hops += 1
+            link_target = candidate.linkname
+            if hops > _MAX_SYMLINK_HOPS or link_target.startswith("/"):
+                return False
+            pending.extend(reversed(PurePosixPath(link_target).parts))
+            continue
+        if pending:
+            if not candidate.isdir():
+                return False
+        elif not (candidate.isdir() or candidate.isreg()):
+            return False
+        resolved.append(part)
+    return True
+
+
+def _rebase_symlink_target(linkname: str, *, link_name: str, roots: tuple[Path, ...]) -> str:
+    """Rewrite an absolute symlink target under the workspace root as a link-relative one.
+
+    Only the root prefix is replaced; the remaining components are kept verbatim (no
+    normalization), because ``..`` after a symlink component is resolved by the kernel
+    against the link target, so ``<root>/current/../config`` with ``current -> releases/v1``
+    names ``releases/config`` and must stay ``current/../config``. Absolute targets outside
+    the workspace are returned unchanged. A leading ``//`` is collapsed to ``/`` (Linux
+    treats them alike).
+    """
+
+    target = "/" + linkname.lstrip("/")
+    for candidate_root in roots:
+        prefix = candidate_root.as_posix().rstrip("/")
+        if target == prefix:
+            rest = ""
+        elif target.startswith(prefix + "/"):
+            # Consume the whole separator run at the boundary (`<root>//a.txt`), keeping
+            # every later component, including `..`, untouched.
+            rest = target[len(prefix) :].lstrip("/")
+        else:
+            continue
+        # The link's own directory inside the archive holds no symlink components (the
+        # archive validator rejects members beneath a symlink), so climbing it is exact.
+        climb = "/".join([".."] * len(PurePosixPath(link_name).parent.parts))
+        if rest and climb:
+            return f"{climb}/{rest}"
+        return rest or climb or "."
+    return linkname
 
 
 def _restore_pty_child_signal_defaults() -> None:
@@ -215,7 +313,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     async def _prepare_backend_workspace(self) -> None:
         workspace = Path(self.state.manifest.root)
         try:
-            workspace.mkdir(parents=True, exist_ok=True)
+            await run_blocking_workspace_io(partial(workspace.mkdir, parents=True, exist_ok=True))
         except OSError as e:
             raise WorkspaceStartError(path=workspace, cause=e) from e
 
@@ -285,7 +383,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         self, *command: str | Path, timeout: float | None = None
     ) -> ExecResult:
         env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         command_parts = self._workspace_relative_command_parts(command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
             command_parts=command_parts,
@@ -338,7 +436,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
     ) -> PtyExecUpdate:
         _ = timeout
         env, cwd = await self._resolved_exec_context()
-        workspace_root = Path(cwd).resolve()
+        workspace_root = await asyncio.to_thread(Path(cwd).resolve)
         sanitized_command = self._prepare_exec_command(*command, shell=shell, user=user)
         command_parts = self._workspace_relative_command_parts(sanitized_command, workspace_root)
         process_cwd, command_parts = self._shell_workspace_process_context(
@@ -498,7 +596,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         env.update(await self.state.manifest.environment.resolve())
 
         workspace = Path(self.state.manifest.root)
-        if not workspace.exists():
+        if not await asyncio.to_thread(workspace.exists):
             raise WorkspaceRootNotFoundError(path=workspace)
 
         env["HOME"] = str(workspace)
@@ -1031,6 +1129,16 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=normalized, cause=e) from e
 
+    async def _remove_workspace_entry_on_resume(self, path: Path) -> None:
+        # Snapshot cleanup owns the entry, not the target of a stale symlink.
+        target = self.normalize_path(path.parent, for_write=True) / path.name
+        try:
+            await run_blocking_workspace_io(partial(self._files.rm, target, recursive=True))
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=target, cause=e) from e
+
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         return self._files.read_bounded(self.normalize_path(path), max_bytes)
 
@@ -1065,6 +1173,169 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        # A rename of the entry, descriptor-relative like every other file operation here,
+        # so the paths validated above are the ones acted on. `os.rename` never puts the
+        # source inside an existing directory the way `mv` does; it fails instead.
+        normalized_source = self._normalize_entry_path(source, for_write=True)
+        normalized_destination = self._normalize_entry_path(destination, for_write=True)
+        command = ("mv", "-f", "--", str(normalized_source), str(normalized_destination))
+        if user is not None:
+            try:
+                result = await self._run_file_operation_as_user(
+                    "rename", normalized_source, normalized_destination, user=user
+                )
+            except OSError as e:
+                raise ExecNonZeroError(
+                    ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
+                    command=command,
+                    cause=e,
+                ) from e
+            if result.returncode:
+                raise ExecNonZeroError(
+                    ExecResult(
+                        stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
+                    ),
+                    command=command,
+                )
+            return
+        try:
+            self._files.rename(normalized_source, normalized_destination)
+        except OSError as e:
+            raise ExecNonZeroError(
+                ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
+                command=command,
+                cause=e,
+            ) from e
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        follow_symlinks: bool = True,
+        user: str | User | None = None,
+    ) -> bool:
+        normalize = self.normalize_path if follow_symlinks else self._normalize_entry_path
+        normalized_left = normalize(left)
+        normalized_right = normalize(right)
+        command = ("test", str(normalized_left), "-ef", str(normalized_right))
+        if user is not None:
+            try:
+                result = await self._run_file_operation_as_user(
+                    "same_file",
+                    normalized_left,
+                    normalized_right,
+                    user=user,
+                    payload=b"1" if follow_symlinks else b"0",
+                )
+            except OSError as e:
+                raise ExecNonZeroError(
+                    ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
+                    command=command,
+                    cause=e,
+                ) from e
+            if result.returncode:
+                raise ExecNonZeroError(
+                    ExecResult(
+                        stdout=result.stdout, stderr=result.stderr, exit_code=result.returncode
+                    ),
+                    command=command,
+                )
+            return bool(json.loads(result.stdout))
+        try:
+            return self._files.same_file(
+                normalized_left, normalized_right, follow_symlinks=follow_symlinks
+            )
+        except OSError as e:
+            raise ExecNonZeroError(
+                ExecResult(stdout=b"", stderr=str(e).encode("utf-8"), exit_code=1),
+                command=command,
+                cause=e,
+            ) from e
+
+    def _normalize_entry_path(self, path: Path | str, *, for_write: bool = False) -> Path:
+        # Resolve and authorize the parent without following the leaf that rename/stat owns.
+        self._files.configure(self.state.manifest)
+        lexical = Path(path)
+        if not lexical.is_absolute():
+            lexical = self._workspace_path_policy().absolute_workspace_path(path)
+        resolved = lexical.parent.resolve(strict=False) / lexical.name
+        return self._files.authorize(resolved, for_write=for_write)
+
+    async def _write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        payload = coerce_write_payload(path=path, data=data)
+        # Resolve the parent the way the ordinary write path does, so a supported internal
+        # symlink such as "internal -> real" still works, then keep the leaf name
+        # unresolved so the file ops open it with O_NOFOLLOW and a symlink at the target
+        # name is rejected rather than followed.
+        requested = Path(path)
+        target = self.normalize_path(requested.parent, for_write=True) / requested.name
+        if user is not None:
+            await self._write_new_stream_with_exec(target, payload.stream, user=user)
+            return
+
+        try:
+            self._files.write_new(target, payload.stream)
+        except _unix_local_file_ops._IncompleteCreateError as e:
+            raise WorkspaceArchiveWriteError(
+                path=target,
+                cause=e,
+                retryable=False,
+                message=_INCOMPLETE_CREATE_MESSAGE,
+            ) from e
+        except FileExistsError:
+            raise
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=target, cause=e) from e
+
+    async def _write_new_stream_with_exec(
+        self,
+        path: Path,
+        stream: io.IOBase,
+        *,
+        user: str | User,
+    ) -> None:
+        payload = stream.read()
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        elif not isinstance(payload, bytes):
+            payload = bytes(payload)
+        try:
+            result = await self._run_file_operation_as_user(
+                "write_new", path, user=user, payload=payload
+            )
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=path, cause=e) from e
+        if result.returncode == _unix_local_file_ops._EXISTING_TARGET_EXIT_CODE:
+            raise FileExistsError(str(path))
+        if result.returncode == _unix_local_file_ops._INCOMPLETE_CREATE_EXIT_CODE:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                retryable=False,
+                message=_INCOMPLETE_CREATE_MESSAGE,
+            )
+        if result.returncode:
+            raise WorkspaceArchiveWriteError(
+                path=path,
+                context={
+                    "stderr": result.stderr.decode("utf-8", errors="replace"),
+                    "operation": "write_new",
+                },
+            )
+
     async def _write_stream_with_exec(
         self,
         path: Path,
@@ -1094,14 +1365,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def _run_file_operation_as_user(
         self,
-        operation: Literal["ls", "write"],
+        operation: Literal["ls", "write", "write_new", "rename", "same_file"],
         path: Path,
-        *,
+        *more_paths: Path,
         user: str | User,
         payload: bytes = b"",
     ) -> subprocess.CompletedProcess[bytes]:
         # Authorization is synchronous and captured for this operation before dispatch.
-        path = self._files.authorize(path, for_write=operation == "write")
+        for_write = operation in ("write", "write_new", "rename")
+        paths = [self._files.authorize(each, for_write=for_write) for each in (path, *more_paths)]
         command = self._prepare_exec_command(
             "python3",
             "-I",
@@ -1109,7 +1381,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             "-c",
             _USER_FILE_WORKER_SOURCE,
             operation,
-            str(path),
+            *(str(each) for each in paths),
             shell=False,
             user=user,
         )
@@ -1139,7 +1411,7 @@ class UnixLocalSandboxSession(BaseSandboxSession):
 
     async def persist_workspace(self) -> io.IOBase:
         root = Path(self.state.manifest.root)
-        if not root.exists():
+        if not await asyncio.to_thread(root.exists):
             raise WorkspaceArchiveReadError(
                 path=root, context={"reason": "workspace_root_not_found"}
             )
@@ -1148,6 +1420,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         buf = io.BytesIO()
 
         def _archive_workspace() -> None:
+            roots = (root, root.resolve(strict=False))
+            symlinks: list[tarfile.TarInfo] = []
             with tarfile.open(fileobj=buf, mode="w") as tar:
 
                 def filter_member(member: tarfile.TarInfo) -> tarfile.TarInfo | None:
@@ -1157,9 +1431,33 @@ class UnixLocalSandboxSession(BaseSandboxSession):
                     getattr(tar, "inodes").clear()  # noqa: B009 - Not exposed by typeshed.
                     if should_skip_tar_member(member.name, skip_rel_paths=skip, root_name=None):
                         return None
+                    if member.isfifo() or member.ischr() or member.isblk():
+                        return None
+                    if member.issym():
+                        symlinks.append(member)
+                        return None
                     return member
 
                 tar.add(root, arcname=".", filter=filter_member)
+                # Defer symlink headers until capture is complete. The live tree can change
+                # during tar.add, so only the captured topology can prove containment.
+                members = {
+                    PurePosixPath(member.name).as_posix(): member
+                    for member in [*tar.getmembers(), *symlinks]
+                }
+                for member in symlinks:
+                    # Keep the proof graph unchanged: a hop through an originally absolute
+                    # target must stay unprovable regardless of symlink emission order.
+                    archived_member = copy.copy(member)
+                    if member.linkname.startswith("/"):
+                        rebased = _rebase_symlink_target(
+                            member.linkname, link_name=member.name, roots=roots
+                        )
+                        if rebased != member.linkname and _symlink_target_stays_under(
+                            members, link_name=member.name, target=rebased
+                        ):
+                            archived_member.linkname = rebased
+                    tar.addfile(archived_member)
 
         try:
             await run_blocking_workspace_io(_archive_workspace)

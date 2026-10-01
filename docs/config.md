@@ -121,9 +121,7 @@ You can also pass the full registration object:
 ```python
 from agents import OpenAIAgentRegistrationConfig, set_default_openai_agent_registration
 
-set_default_openai_agent_registration(
-    OpenAIAgentRegistrationConfig(harness_id="your-harness-id")
-)
+set_default_openai_agent_registration(OpenAIAgentRegistrationConfig(harness_id="your-harness-id"))
 ```
 
 If no SDK default is set, providers that use the SDK's OpenAI backend fall back to the `OPENAI_AGENT_HARNESS_ID` environment variable. When a harness ID is configured, the SDK adds it to trace metadata as `agent_harness_id` unless that key is already present in `RunConfig.trace_metadata`.
@@ -147,7 +145,9 @@ from agents import (
     set_tracing_export_api_key,
 )
 
-custom_client = AsyncOpenAI(base_url="https://your-openai-compatible-endpoint.example/v1", api_key="provider-key")
+custom_client = AsyncOpenAI(
+    base_url="https://your-openai-compatible-endpoint.example/v1", api_key="provider-key"
+)
 set_default_openai_client(custom_client, use_for_tracing=False)
 
 set_tracing_export_api_key("sk-tracing")
@@ -217,7 +217,7 @@ Alternatively, you can customize the logs by adding handlers, filters, formatter
 ```python
 import logging
 
-logger = logging.getLogger("openai.agents") # or openai.agents.tracing for the Tracing logger
+logger = logging.getLogger("openai.agents")  # or openai.agents.tracing for the Tracing logger
 
 # To make all logs show up
 logger.setLevel(logging.DEBUG)

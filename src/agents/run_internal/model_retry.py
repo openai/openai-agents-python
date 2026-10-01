@@ -707,6 +707,7 @@ async def stream_response_with_retry(
 
     while True:
         emitted_retry_unsafe_event = False
+        event: TResponseStreamEvent | None = None
         stream: AsyncIterator[TResponseStreamEvent] | None = None
         stream_owner: asyncio.Task[None] | None = None
         deadline = asyncio.get_running_loop().time() + timeout if timeout is not None else None
@@ -817,11 +818,13 @@ async def stream_response_with_retry(
         except BaseException as error:
             if isinstance(error, ModelTimeoutError):
                 # The timed owner has already been cancelled and drained. Do not retain its
-                # task or result queues in the public timeout traceback frame.
+                # task, result queues, or previous event in the public timeout traceback frame.
                 stream = None
                 stream_owner = None
                 stream_requests = None
                 stream_results = None
+                event = None
+                result_value = None
             if stream_owner is None:
                 await _close_async_iterator_quietly(stream)
             if isinstance(error, asyncio.CancelledError | GeneratorExit):

@@ -1853,3 +1853,149 @@ def test_truncate_string_for_json_limit_handles_escape_heavy_input():
     assert truncated.endswith(exporter._OPENAI_TRACING_STRING_TRUNCATION_SUFFIX)
     assert exporter._value_json_size_bytes(truncated) <= max_bytes
     exporter.close()
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_backend_span_exporter_bounds_multipart_normalization_work(monkeypatch):
+    from openai import AsyncOpenAI
+
+    from agents import Agent, OpenAIChatCompletionsModel, Runner
+    from tests.testing_processor import fetch_ordered_spans
+
+    provider_messages: list[Any] = []
+
+    def provider_response(request: httpx2.Request) -> httpx2.Response:
+        provider_messages.append(json.loads(request.content)["messages"])
+        return httpx2.Response(
+            200,
+            json={
+                "id": "synthetic-completion",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "test-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {"role": "assistant", "content": "ok"},
+                    }
+                ],
+            },
+        )
+
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    original_size = exporter._value_json_size_bytes
+    work = 0
+    work_limit = 0
+
+    def counted_size(value: Any) -> int:
+        nonlocal work
+        size = original_size(value)
+        work += size
+        # Bound regression runtime as well as work; the old implementation fails
+        # after a small number of rescans instead of completing a quadratic run.
+        assert work <= work_limit
+        return size
+
+    monkeypatch.setattr(exporter, "_value_json_size_bytes", counted_size)
+    measured_work: list[int] = []
+    try:
+        async with AsyncOpenAI(
+            api_key="test_key",
+            http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(provider_response)),
+        ) as client:
+            agent = Agent(
+                name="multipart-test", model=OpenAIChatCompletionsModel("test-model", client)
+            )
+            for width in (1_000, 2_000):
+                parts = [{"type": "input_text", "text": "synthetic " * 20} for _ in range(width)]
+                result = await Runner.run(agent, [{"role": "user", "content": parts}])
+                assert result.final_output == "ok"
+                span = [s for s in fetch_ordered_spans() if s.span_data.type == "generation"][-1]
+                original = span.export()
+                assert original is not None
+                assert original["span_data"]["input"] == provider_messages[-1]
+                assert len(provider_messages[-1][0]["content"]) == width
+                work = 0
+                work_limit = 30 * original_size(provider_messages[-1])
+                exporter.export([span])
+                measured_work.append(work)
+                sent_input = received[-1]["span_data"]["input"]
+                assert (
+                    len(json.dumps(sent_input, ensure_ascii=False, separators=(",", ":")).encode())
+                    <= 100_000
+                )
+                assert sent_input[0]["role"] == "user"
+                assert isinstance(sent_input[0]["content"], list)
+                assert any(part.get("text") for part in sent_input[0]["content"])
+                assert span.export() == original
+            assert measured_work[1] <= 3 * measured_work[0]
+
+            # An ordinary trace still leaves the same processor after the large
+            # span, in a separate batch. Mock ingest makes the completion bounded.
+            received.clear()
+            work = 0
+            processor = BatchTraceProcessor(exporter, max_batch_size=1, schedule_delay=0.01)
+            normal = get_span(mock_processor())
+            processor.on_span_end(span)
+            processor.on_span_end(normal)
+            try:
+                processor.force_flush()
+                assert len(received) == 2
+                assert received[-1] == normal.export()
+                assert received[-2]["id"] == span.span_id
+                assert processor._queue.empty()
+            finally:
+                processor.shutdown(timeout=1)
+    finally:
+        exporter.close()
+
+
+def test_backend_span_exporter_bounds_wide_mapping_normalization_work(monkeypatch):
+    received: list[dict[str, Any]] = []
+    exporter = _exporter_capturing_posts(received)
+    original_size = exporter._value_json_size_bytes
+    measured_work: list[int] = []
+    work = 0
+    work_limit = 0
+
+    def counted_size(value: Any) -> int:
+        nonlocal work
+        size = original_size(value)
+        work += size
+        assert work <= work_limit
+        return size
+
+    monkeypatch.setattr(exporter, "_value_json_size_bytes", counted_size)
+    try:
+        for width in (1_000, 2_000):
+            # Public generation spans accept structured mappings; escaped Unicode
+            # keys exercise key/colon/comma accounting when entries are removed.
+            mapping = {f'{index}:"\\雪' + "k" * 120: "value" for index in range(width)}
+            span = SpanImpl(
+                trace_id="test_trace_id",
+                span_id="generation_span_id",
+                parent_id=None,
+                processor=mock_processor(),
+                span_data=GenerationSpanData(input=[mapping]),
+                tracing_api_key=None,
+            )
+            work = 0
+            work_limit = 30 * original_size(mapping)
+
+            exporter.export([span])
+            measured_work.append(work)
+            [sent] = received[-1]["span_data"]["input"]
+            assert 0 < len(sent) < width
+            assert list(sent) == list(mapping)[-len(sent) :]
+            assert set(sent.values()) == {""}
+            assert (
+                len(json.dumps([sent], ensure_ascii=False, separators=(",", ":")).encode())
+                <= 100_000
+            )
+            assert len(mapping) == width
+        assert measured_work[1] <= 3 * measured_work[0]
+    finally:
+        exporter.close()

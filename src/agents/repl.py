@@ -37,7 +37,8 @@ async def run_demo_loop(
     input_items: list[TResponseInputItem] = []
     while True:
         try:
-            user_input = input(" > ")
+            # Keep terminal input on the main thread so Ctrl+C interrupts it immediately.
+            user_input = input(" > ")  # noqa: ASYNC250
         except (EOFError, KeyboardInterrupt):
             print()
             break

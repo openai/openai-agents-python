@@ -1052,25 +1052,25 @@ class RunResultStreaming(RunResultBase):
                 registered_consumer_task.remove_done_callback(consumer_task_done)
             unregister_consumer()
             try:
-                if cancelled:
-                    # Cancellation should return promptly, so avoid waiting on long-running tasks.
-                    # Tasks have already been cancelled above.
-                    self._cleanup_tasks()
-                else:
-                    # Ensure main execution completes before cleanup to avoid race conditions
-                    # with session operations.
-                    await self._await_task_safely(self.run_loop_task)
-                    # Re-check for exceptions now that the run loop has fully settled.
-                    # _await_task_safely swallows exceptions; without this call, a run-loop
-                    # failure that races past the sentinel (e.g. early sandbox failures) would
-                    # be silently lost instead of surfaced via _stored_exception.
-                    self._check_errors()
-                    # Safely terminate all background tasks after main execution has finished.
-                    self._cleanup_tasks()
-
-                if not cancelled:
-                    await self._await_model_provider_cleanup()
-                    await self._run_sandbox_cleanup()
+                try:
+                    if cancelled:
+                        # Queue-wait cancellation should return without awaiting long-running tasks.
+                        # Tasks have already been cancelled above.
+                        self._cleanup_tasks()
+                    else:
+                        # Ensure main execution completes before cleanup to avoid race conditions
+                        # with session operations.
+                        await self._await_task_safely(self.run_loop_task)
+                        # Re-check for exceptions now that the run loop has fully settled.
+                        # _await_task_safely leaves errors to _check_errors(); without this call,
+                        # a run-loop failure racing past the sentinel would be silently lost.
+                        self._check_errors()
+                        # Safely terminate background tasks after main execution has finished.
+                        self._cleanup_tasks()
+                finally:
+                    if not cancelled:
+                        await self._await_model_provider_cleanup()
+                        await self._run_sandbox_cleanup()
             finally:
                 # Allow any pending callbacks (e.g., cancellation handlers) to enqueue their
                 # completion sentinels before we clear the queues for observability.
@@ -1173,20 +1173,20 @@ class RunResultStreaming(RunResultBase):
         return pretty_print_run_result_streaming(self)
 
     async def _await_task_safely(self, task: asyncio.Task[Any] | None) -> None:
-        """Await a task if present, ignoring cancellation and storing exceptions elsewhere.
+        """Wait for a task, leaving its cancellation and exceptions to _check_errors().
 
-        This ensures we do not lose late guardrail exceptions while not surfacing
-        CancelledError to callers of stream_events.
+        This ensures we do not lose late guardrail exceptions while not surfacing the task's
+        CancelledError to callers of stream_events. Consumer cancellation still propagates.
         """
         if task and not task.done():
             try:
-                await task
+                # Waiting directly would conflate child cancellation with consumer cancellation.
+                await asyncio.wait((task,))
             except asyncio.CancelledError:
-                # Task was cancelled (e.g., due to result.cancel()). Nothing to do here.
-                pass
-            except Exception:
-                # The exception will be surfaced via _check_errors() if needed.
-                pass
+                task.cancel()
+                # Preserve direct-await settlement before the consumer releases owned resources.
+                await asyncio.wait((task,))
+                raise
 
     def _drain_event_queue(self) -> None:
         """Remove any pending items from the event queue and mark them done."""

@@ -24,9 +24,12 @@ ROOT = Path(__file__).resolve().parents[4]
 VERSION_PATTERN = re.compile(r"\d+\.\d+(?:\.\d+)*(?:[A-Za-z0-9.-]+)?\Z")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 PROJECT_VERSION_PATTERN = re.compile(r'(?m)^version\s*=\s*"[^"]+"')
+SOURCE_VERSION_PATTERN = re.compile(r'(?m)^([ \t]*__version__[ \t]*=[ \t]*)"([^"]+)"[ \t]*$')
 RELEASE_PATHS = frozenset(
     {
+        ".release-please-manifest.json",
         "pyproject.toml",
+        "src/agents/version.py",
         "tests/fixtures/released_api_contract.json",
         "uv.lock",
     }
@@ -168,11 +171,27 @@ def replace_project_version_text(text: str, version: str) -> str:
 
 
 def replace_project_version(repo: Path, version: str) -> None:
-    """Update pyproject.toml while preserving all unrelated text."""
+    """Update package, source fallback, and manifest versions without changing dependencies."""
 
     path = repo / "pyproject.toml"
     text = path.read_text(encoding="utf-8")
     path.write_text(replace_project_version_text(text, version), encoding="utf-8")
+
+    manifest_path = repo / ".release-please-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["."] = version
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    source_path = repo / "src/agents/version.py"
+    source_text = source_path.read_text(encoding="utf-8")
+    updated, count = SOURCE_VERSION_PATTERN.subn(
+        lambda match: f'{match[1]}"{version}"', source_text
+    )
+    if count != 1:
+        raise ReleasePreparationError(
+            "Expected exactly one literal __version__ fallback in src/agents/version.py."
+        )
+    source_path.write_text(updated, encoding="utf-8")
 
 
 def _current_branch(repo: Path) -> str:
@@ -357,6 +376,14 @@ def _validate_prepared_files(repo: Path, version: str, base_commit: str) -> tupl
         raise ReleasePreparationError("pyproject.toml does not contain the requested version.")
     if _locked_project_version(repo) != version:
         raise ReleasePreparationError("uv.lock does not contain the requested project version.")
+    manifest = json.loads((repo / ".release-please-manifest.json").read_text(encoding="utf-8"))
+    if manifest.get(".") != version:
+        raise ReleasePreparationError("The Release Please manifest does not match the version.")
+    source_versions = SOURCE_VERSION_PATTERN.findall(
+        (repo / "src/agents/version.py").read_text(encoding="utf-8")
+    )
+    if len(source_versions) != 1 or source_versions[0][1] != version:
+        raise ReleasePreparationError("The source version fallback does not match the version.")
 
     contract = json.loads(
         (repo / "tests/fixtures/released_api_contract.json").read_text(encoding="utf-8")
@@ -434,7 +461,7 @@ def materialize(
     expected_source_head: str,
     worktree: Path,
 ) -> PreparedCandidate:
-    """Create the three-file candidate in the reviewed isolated worktree."""
+    """Create the five-file candidate in the reviewed isolated worktree."""
 
     expected_base = validate_commit(expected_base)
     expected_source_head = validate_commit(expected_source_head)
@@ -592,7 +619,7 @@ def main() -> int:
     print("Changed paths:")
     for path in candidate.changed_paths:
         print(f"- {path}")
-    print("Review the diff before staging the three release-owned files.")
+    print("Review the diff before staging the five release-owned files.")
     return 0
 
 

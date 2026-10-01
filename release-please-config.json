@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "packages": {
+    ".": {}
+  },
+  "release-type": "python",
+  "always-update": true,
+  "include-v-in-tag": true,
+  "include-component-in-tag": false,
+  "bump-minor-pre-major": true,
+  "bump-patch-for-minor-pre-major": false,
+  "draft-pull-request": false,
+  "pull-request-title-pattern": "release: ${version}",
+  "pull-request-header": "Automated release candidate. Actions freezes the API contract and performs release-readiness review. Merge only after required checks and code-owner approval. See .github/RELEASING.md.",
+  "extra-files": [
+    {
+      "type": "toml",
+      "path": "uv.lock",
+      "jsonpath": "$.package[?(@.name.value=='openai-agents')].version"
+    }
+  ],
+  "changelog-sections": [
+    {
+      "type": "feat",
+      "section": "Features"
+    },
+    {
+      "type": "fix",
+      "section": "Bug Fixes"
+    }
+  ]
+}

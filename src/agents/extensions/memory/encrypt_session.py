@@ -120,6 +120,11 @@ class EncryptedSession(SessionABC):
     encryption/decryption of stored items using Fernet encryption with
     per-session key derivation and automatic expiration of old data.
 
+    Only authenticated, unexpired encrypted envelopes are returned as history.
+    Plaintext records and incomplete envelopes are skipped, not migrated. To
+    import legacy history, the application must validate its source and explicitly
+    write trusted items through ``add_items``.
+
     When items expire (exceed TTL), they are silently skipped during retrieval.
     Expired records remain in the underlying store. By default, finding valid
     items may read the entire retained history. Set ``max_scan_items`` to bound
@@ -319,7 +324,7 @@ class EncryptedSession(SessionABC):
 
     def _unwrap(self, item: TResponseInputItem | EncryptedEnvelope) -> TResponseInputItem | None:
         if not _is_encrypted_envelope(item):
-            return cast(TResponseInputItem, item)
+            return None
 
         try:
             token = item["payload"].encode("utf-8")
@@ -420,7 +425,7 @@ class EncryptedSession(SessionABC):
         *,
         wrapper: RunContextWrapper[Any] | None = None,
     ) -> TResponseInputItem | None:
-        """Remove the latest readable item, skipping expired items.
+        """Remove the latest readable item, skipping expired or non-envelope items.
 
         With native ``SQLiteSession`` pops, authentication runs inside the SQLite
         transaction. An ``InvalidToken`` failure leaves the unauthenticated item's

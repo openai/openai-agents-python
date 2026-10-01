@@ -224,7 +224,7 @@ async def clear_workspace_dir_on_resume_pruned(
         try:
             child_rel = child.relative_to(root)
         except ValueError:
-            await session.rm(child, recursive=True)
+            await session._remove_workspace_entry_on_resume(child)
             continue
 
         if child_rel in skip_rel_paths:
@@ -236,10 +236,10 @@ async def clear_workspace_dir_on_resume_pruned(
                     skip_rel_paths=skip_rel_paths,
                 )
             else:
-                await session.rm(child, recursive=True)
+                await session._remove_workspace_entry_on_resume(child)
             continue
         # `parse_ls_la` filters "." and ".." already; remove everything else recursively.
-        await session.rm(child, recursive=True)
+        await session._remove_workspace_entry_on_resume(child)
 
 
 def _close_best_effort(stream: io.IOBase) -> None:

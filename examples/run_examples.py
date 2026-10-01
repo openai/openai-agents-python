@@ -80,6 +80,8 @@ DEFAULT_AUTO_SKIP = {
     "examples/sandbox/extensions/blaxel_runner.py",
     "examples/sandbox/extensions/cloudflare_runner.py",
     "examples/sandbox/extensions/daytona/usaspending_text2sql/setup_db.py",
+    # This local workflow gives model-selected shell commands access to the host.
+    "examples/sandbox/extensions/temporal/local_hello_workflow.py",
     "examples/sandbox/extensions/temporal/temporal_sandbox_agent.py",
     # Temporarily disabled due to credential issues.
     "examples/sandbox/extensions/vercel_runner.py",
@@ -236,11 +238,15 @@ def choose_loopback_port() -> int:
 
 
 def redis_url_host_port(url: str) -> tuple[str, int] | None:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"redis", "rediss"}:
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in {"redis", "rediss"}:
+            return None
+        host = parsed.hostname or "localhost"
+        port = parsed.port or 6379
+    except ValueError:
+        # Leave invalid configuration to the example without logging URL parser errors.
         return None
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 6379
     return host, port
 
 
@@ -356,11 +362,11 @@ def prepare_redis_for_example(
     redis_url = configured_url or DEFAULT_REDIS_URL
     if redis_url_is_local(redis_url) and redis_ping_url(redis_url):
         env["REDIS_URL"] = redis_url
-        return None, [f"Using existing Redis server at {redis_url}."]
+        return None, ["Using existing local Redis server."]
 
     if configured_url:
         env["REDIS_URL"] = redis_url
-        return None, [f"REDIS_URL is set but not reachable before example start: {redis_url}."]
+        return None, ["Using configured REDIS_URL; local preflight did not confirm availability."]
 
     server = start_temporary_redis_server()
     if server is None:

@@ -11,11 +11,202 @@ from unittest.mock import AsyncMock
 import pytest
 
 from agents.sandbox import Manifest, SandboxPathGrant
+from agents.sandbox.errors import ExecNonZeroError, WorkspaceArchiveWriteError
+from agents.sandbox.session import SandboxSession
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
 
 from . import _docker_removal_helpers as removal_helpers
 
 service = removal_helpers.service
+
+
+def _removal_session(
+    backend: str, manifest: Manifest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> SandboxSession:
+    module = pytest.importorskip("agents.sandbox.sandboxes.unix_local", exc_type=ImportError)
+    from agents.sandbox.snapshot import NoopSnapshot
+
+    from .test_runtime_helpers import _install_resolve_helper
+    from .test_snapshot import _ResumeTrackingSession
+
+    if backend == "local":
+        session = module.UnixLocalSandboxSession(
+            state=module.UnixLocalSandboxSessionState(
+                manifest=manifest, snapshot=NoopSnapshot(id="recursive-grants")
+            )
+        )
+    else:
+        session = _ResumeTrackingSession(workspace_root=Path(manifest.root))
+        session.state.manifest = manifest
+        # Execute the shipped resolver and real rm against disposable filesystem data.
+        monkeypatch.setattr(
+            session,
+            "_ensure_runtime_helper_installed",
+            AsyncMock(return_value=_install_resolve_helper(tmp_path)),
+        )
+        monkeypatch.setattr(session, "_validate_path_access", session._validate_remote_path_access)
+    return SandboxSession(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["local", "remote"])
+@pytest.mark.parametrize("alias", ["none", "ancestor", "grant"])
+async def test_recursive_remove_preserves_nested_read_only_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, alias: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    target = external / "tree"
+    protected = target / "protected"
+    protected.mkdir(parents=True)
+    sentinel = protected / "config"
+    sentinel.write_bytes(b"protected")
+    writable = target / "writable"
+    writable.mkdir()
+    sibling = writable / "data"
+    sibling.write_bytes(b"allowed")
+    grant_path = protected
+    remove_path = target
+    if alias == "ancestor":
+        link = workspace / "link"
+        link.symlink_to(external, target_is_directory=True)
+        remove_path = link / "tree"
+    elif alias == "grant":
+        grant_path = tmp_path / "protected-alias"
+        grant_path.symlink_to(protected, target_is_directory=True)
+    session = _removal_session(
+        backend,
+        Manifest(
+            root=str(workspace),
+            extra_path_grants=(
+                SandboxPathGrant(path=str(external)),
+                SandboxPathGrant(path=str(grant_path), read_only=True),
+            ),
+        ),
+        tmp_path,
+        monkeypatch,
+    )
+
+    with pytest.raises(WorkspaceArchiveWriteError) as direct:
+        await session.rm(sentinel)
+    assert direct.value.context["reason"] == "read_only_extra_path_grant"
+    with pytest.raises((WorkspaceArchiveWriteError, ExecNonZeroError)):
+        await session.rm(remove_path)
+    assert sentinel.read_bytes() == b"protected"
+    with pytest.raises(WorkspaceArchiveWriteError) as recursive:
+        await session.rm(remove_path, recursive=True)
+    assert recursive.value.context["reason"] == "read_only_extra_path_grant"
+    assert sentinel.read_bytes() == b"protected"
+    assert sibling.read_bytes() == b"allowed"
+
+    await session.rm(writable, recursive=True)
+    assert not writable.exists()
+    assert sentinel.read_bytes() == b"protected"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["local", "remote"])
+@pytest.mark.parametrize("precedence", ["workspace", "first-grant", "nested-writable"])
+async def test_recursive_remove_preserves_writable_precedence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: str, precedence: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    target = (workspace if precedence == "workspace" else external) / "tree"
+    child = target / "child"
+    child.mkdir(parents=True)
+    (child / "data").write_bytes(b"allowed")
+    grants = (
+        SandboxPathGrant(path=str(external)),
+        SandboxPathGrant(path=str(child), read_only=True),
+    )
+    if precedence == "first-grant":
+        grants = (SandboxPathGrant(path=str(child)), *grants)
+    elif precedence == "nested-writable":
+        grants = (
+            SandboxPathGrant(path=str(external), read_only=True),
+            SandboxPathGrant(path=str(target)),
+        )
+    session = _removal_session(
+        backend, Manifest(root=str(workspace), extra_path_grants=grants), tmp_path, monkeypatch
+    )
+
+    await session.rm(target, recursive=True)
+
+    assert not target.exists()
+    assert workspace.exists()
+
+
+@pytest.mark.asyncio
+async def test_remote_recursive_remove_unlinks_leaf_alias_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    protected = external / "protected"
+    protected.mkdir(parents=True)
+    sentinel = protected / "data"
+    sentinel.write_bytes(b"protected")
+    link = workspace / "link"
+    link.symlink_to(external, target_is_directory=True)
+    session = _removal_session(
+        "remote",
+        Manifest(
+            root=str(workspace),
+            extra_path_grants=(
+                SandboxPathGrant(path=str(external)),
+                SandboxPathGrant(path=str(protected), read_only=True),
+            ),
+        ),
+        tmp_path,
+        monkeypatch,
+    )
+
+    await session.rm(link, recursive=True)
+
+    assert not link.is_symlink()
+    assert sentinel.read_bytes() == b"protected"
+
+
+@pytest.mark.asyncio
+async def test_unix_local_recursive_remove_as_user_preserves_nested_grant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agents.sandbox.types import ExecResult
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    protected = external / "protected"
+    protected.mkdir(parents=True)
+    sentinel = protected / "data"
+    sentinel.write_bytes(b"protected")
+    session = _removal_session(
+        "local",
+        Manifest(
+            root=str(workspace),
+            extra_path_grants=(
+                SandboxPathGrant(path=str(external)),
+                SandboxPathGrant(path=str(protected), read_only=True),
+            ),
+        ),
+        tmp_path,
+        monkeypatch,
+    )
+    # Only the OS permission probe is simulated; use the real local deletion path.
+    permission_probe = AsyncMock(return_value=ExecResult(stdout=b"", stderr=b"", exit_code=0))
+    monkeypatch.setattr(session._inner, "exec", permission_probe)
+
+    with pytest.raises(WorkspaceArchiveWriteError) as error:
+        await session.rm(external, recursive=True, user="example-user")
+
+    assert error.value.context["reason"] == "read_only_extra_path_grant"
+    assert permission_probe.await_args is not None
+    assert permission_probe.await_args.kwargs["user"] == "example-user"
+    assert sentinel.read_bytes() == b"protected"
 
 
 @pytest.mark.asyncio

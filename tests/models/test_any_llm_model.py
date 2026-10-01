@@ -307,6 +307,91 @@ async def _empty_chat_stream() -> AsyncIterator[ChatCompletionChunk]:
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
+@pytest.mark.parametrize("api", ["chat_completions", "responses"])
+@pytest.mark.parametrize(
+    ("counts", "expected"),
+    [
+        ((None, 5, 12), (0, 5, 12)),
+        ((7, None, 12), (7, 0, 12)),
+        ((7, 5, None), (7, 5, 0)),
+        ((None, None, None), (0, 0, 0)),
+        ((7, 5, 12), (7, 5, 12)),
+        (None, (0, 0, 0)),
+    ],
+    ids=["null-input", "null-output", "null-total", "all-null", "valid", "no-usage"],
+)
+async def test_any_llm_runner_normalizes_nullable_usage(
+    monkeypatch: pytest.MonkeyPatch,
+    api: str,
+    counts: tuple[int | None, int | None, int | None] | None,
+    expected: tuple[int, int, int],
+) -> None:
+    usage = (
+        {
+            "prompt_tokens": counts[0],
+            "completion_tokens": counts[1],
+            "total_tokens": counts[2],
+            "prompt_tokens_details": {"cached_tokens": 3},
+            "completion_tokens_details": {"reasoning_tokens": 2},
+        }
+        if counts is not None
+        else None
+    )
+    # Provider SDK parsing can construct typed responses without validating null counts.
+    if api == "responses":
+        usage = (
+            {
+                "input_tokens": counts[0],
+                "output_tokens": counts[1],
+                "total_tokens": counts[2],
+                "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 0},
+                "output_tokens_details": {"reasoning_tokens": 2},
+            }
+            if counts is not None
+            else None
+        )
+        response = _response("Hello")
+        response.usage = ResponseUsage.model_construct(**usage) if usage is not None else None
+        if response.usage is not None:
+            response.usage.input_tokens_details = InputTokensDetails.model_validate(
+                {"cached_tokens": 3, "cache_write_tokens": 0}
+            )
+            response.usage.output_tokens_details = OutputTokensDetails(reasoning_tokens=2)
+        provider = FakeAnyLLMProvider(supports_responses=True, responses_response=response)
+    else:
+        chat = _chat_completion("Hello")
+        chat.usage = CompletionUsage.model_construct(**usage) if usage is not None else None
+        if chat.usage is not None:
+            chat.usage.prompt_tokens_details = PromptTokensDetails(cached_tokens=3)
+            chat.usage.completion_tokens_details = CompletionTokensDetails(reasoning_tokens=2)
+        provider = FakeAnyLLMProvider(supports_responses=False, chat_response=chat)
+    module, _ = _import_any_llm_module(monkeypatch, provider)
+    agent = Agent(
+        name="test",
+        model=module.AnyLLMModel(model="openai/fake", api=api),
+        model_settings=ModelSettings(preserve_raw_usage=True),
+    )
+    result = await Runner.run(agent, "hi")
+
+    assert result.final_output == "Hello"
+    normalized = result.context_wrapper.usage
+    assert normalized.requests == 1
+    assert (normalized.input_tokens, normalized.output_tokens, normalized.total_tokens) == expected
+    assert normalized.input_tokens_details.cached_tokens == (3 if counts is not None else 0)
+    assert normalized.output_tokens_details.reasoning_tokens == (2 if counts is not None else 0)
+    assert result.raw_responses[0].raw_usage == usage
+    if expected == (0, 0, 0):
+        assert normalized.request_usage_entries == []
+    else:
+        assert len(normalized.request_usage_entries) == 1
+        entry = normalized.request_usage_entries[0]
+        assert (entry.input_tokens, entry.output_tokens, entry.total_tokens) == expected
+        assert entry.input_tokens_details.cached_tokens == 3
+        assert entry.output_tokens_details.reasoning_tokens == 2
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
 @pytest.mark.parametrize("override_ua", [None, "test_user_agent"])
 async def test_user_agent_header_any_llm_chat(override_ua: str | None, monkeypatch) -> None:
     provider = FakeAnyLLMProvider(supports_responses=False, chat_response=_chat_completion("Hello"))

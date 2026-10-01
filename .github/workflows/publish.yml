@@ -12,7 +12,66 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  checks:
+    permissions:
+      contents: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+
+    steps:
+      # Tag rules and environment protection remain the release authorization boundary.
+      - name: Checkout release validator from main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Checkout release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          path: release-source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Setup Python for release validation
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.14"
+      - name: Validate release provenance
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: >-
+          python -I control/.github/scripts/verify_release.py
+          --repo release-source --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"
+      - name: Verify human-reviewed release candidate
+        if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: python -I control/.github/scripts/release_automation.py verify-publication
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        with:
+          version: "0.11.14"
+          enable-cache: false
+          python-version: "3.14"
+      - name: Check release source
+        working-directory: release-source
+        shell: bash
+        env:
+          OPENAI_API_KEY: fake-for-tests
+          UV_LOCKED: "1"
+        run: |
+          for python_version in 3.10 3.11 3.12 3.13 3.14; do
+            UV_PYTHON="$python_version" make sync tests
+          done
+          make typecheck
+
   build:
+    # Test processes and filesystem mutations stay on the checks runner.
+    needs: checks
     permissions:
       contents: read
     runs-on: ubuntu-latest
@@ -47,16 +106,11 @@ jobs:
           python -I control/.github/scripts/verify_release.py
           --repo release-source --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"
       - name: Setup uv
-        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: false
           python-version: "3.14"
-      - name: Install dependencies
-        working-directory: release-source
-        env:
-          OPENAI_API_KEY: fake-for-tests
-        run: make sync
       - name: Build package
         working-directory: release-source
         run: uv build
@@ -76,6 +130,8 @@ jobs:
       url: https://pypi.org/p/openai-agents
     permissions:
       id-token: write
+      contents: read
+      pull-requests: read
     runs-on: ubuntu-latest
     steps:
       - name: Download distributions
@@ -84,5 +140,38 @@ jobs:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: dist/
           merge-multiple: true
+      - name: Checkout approval validator from main
+        if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          path: control
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Revalidate human approval before upload
+        if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: python3 -I control/.github/scripts/release_automation.py verify-publication
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+
+  release-notes:
+    needs: checks
+    if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Append reviewed highlights and release assessment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: python -I .github/scripts/release_automation.py publish-notes

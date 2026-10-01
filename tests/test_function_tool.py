@@ -432,6 +432,100 @@ def test_manual_function_tool_normalizes_typeless_object_schemas():
     }
 
 
+@pytest.mark.parametrize(
+    ("definition_name", "ref"),
+    [
+        ("Value", "#/$defs/Value"),
+        ("A B", "#/$defs/A%20B"),
+        ("café", "#/$defs/caf%C3%A9"),
+        ("A%20B", "#/$defs/A%2520B"),
+        ("a/b", "#/$defs/a%7E1b"),
+        ("a~1b", "#/$defs/a%7E01b"),
+        ("A+B", "#/$defs/A+B"),
+        ("A+B", "#/$defs/A%2BB"),
+        ("Value", "#/%24defs%2FValue"),
+    ],
+)
+def test_function_tool_uri_fragment_preserves_schema_meaning(definition_name, ref):
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    schema = {
+        "type": "object",
+        "properties": {"value": {"$ref": ref, "description": "value"}},
+        "$defs": {definition_name: {"type": "string"}},
+    }
+    validator = Draft202012Validator(schema)
+    assert validator.is_valid({"value": "text"})
+    assert not validator.is_valid({"value": 1})
+
+    tool = FunctionTool(
+        name="test", description="test", params_json_schema=schema, on_invoke_tool=run_function
+    )
+
+    assert tool.params_json_schema["properties"]["value"] == {
+        "type": "string",
+        "description": "value",
+    }
+    strict_validator = Draft202012Validator(tool.params_json_schema)
+    assert strict_validator.is_valid({"value": "text"})
+    assert not strict_validator.is_valid({"value": 1})
+
+
+def test_function_tool_uri_fragment_does_not_select_literal_percent_name():
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    tool = FunctionTool(
+        name="test",
+        description="test",
+        params_json_schema={
+            "type": "object",
+            "properties": {"value": {"$ref": "#/$defs/A%20B", "description": "value"}},
+            "$defs": {"A B": {"type": "string"}, "A%20B": {"type": "integer"}},
+        },
+        on_invoke_tool=run_function,
+    )
+
+    validator = Draft202012Validator(tool.params_json_schema)
+    assert validator.is_valid({"value": "text"})
+    assert not validator.is_valid({"value": 1})
+
+
+def test_function_tool_uri_fragment_rejects_invalid_utf8():
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    with pytest.raises(UnicodeDecodeError):
+        FunctionTool(
+            name="test",
+            description="test",
+            params_json_schema={
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/%FF", "description": "value"}},
+                "$defs": {"\ufffd": {"type": "string"}},
+            },
+            on_invoke_tool=run_function,
+        )
+
+
+def test_function_tool_uri_fragment_rejects_nested_resource():
+    async def run_function(ctx: ToolContext[Any], args: str) -> str:
+        return args
+
+    with pytest.raises(UserError, match=r"nested `\$id` resource"):
+        FunctionTool(
+            name="test",
+            description="test",
+            params_json_schema={
+                "type": "object",
+                "properties": {"value": {"$ref": "#/$defs/A%20B", "description": "value"}},
+                "$defs": {"A B": {"$id": "https://example.test/nested", "type": "string"}},
+            },
+            on_invoke_tool=run_function,
+        )
+
+
 def test_manual_function_tool_rejects_root_union():
     async def run_function(ctx: ToolContext[Any], args: str) -> str:
         return args

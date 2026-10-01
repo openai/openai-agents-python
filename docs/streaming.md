@@ -19,6 +19,7 @@ import asyncio
 from openai.types.responses import ResponseTextDeltaEvent
 from agents import Agent, Runner
 
+
 async def main():
     agent = Agent(
         name="Joker",
@@ -102,6 +103,7 @@ import asyncio
 import random
 from agents import Agent, ItemHelpers, Runner
 from agents.decorators import tool
+
 
 @tool
 def how_many_jokes() -> int:

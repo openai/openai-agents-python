@@ -1,15 +1,88 @@
 # Tests for the OpenAI voice model provider (OpenAIVoiceModelProvider).
 
+import json
+from email.parser import BytesParser
+from email.policy import default
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import httpx2
+import numpy as np
 import openai
 import pytest
 
 from agents.exceptions import UserError
 from agents.models import _openai_shared
+from agents.voice import AudioInput, StreamedAudioInput, STTModelSettings
 from agents.voice.models import openai_model_provider
 from agents.voice.models.openai_model_provider import OpenAIVoiceModelProvider, shared_http_client
+from agents.voice.models.openai_stt import OpenAISTTTranscriptionSession
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [None, "gpt-4o-transcribe"])
+@pytest.mark.parametrize("language", [None, "fr"])
+async def test_voice_provider_transcription_model_and_language_on_wire(
+    model_name: str | None, language: str | None
+) -> None:
+    captured: dict[str, bytes] = {}
+
+    async def handle(request: httpx2.Request) -> httpx2.Response:
+        assert request.url.path == "/v1/audio/transcriptions"
+        message = BytesParser(policy=default).parsebytes(
+            f"Content-Type: {request.headers['content-type']}\r\n\r\n".encode()
+            + await request.aread()
+        )
+        for part in message.iter_parts():
+            captured[part.get_param("name", header="content-disposition")] = part.get_payload(
+                decode=True
+            )
+        return httpx2.Response(200, json={"text": "Bonjour"})
+
+    async with openai.AsyncOpenAI(
+        api_key="test-key",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handle)),
+    ) as client:
+        model = OpenAIVoiceModelProvider(openai_client=client).get_stt_model(model_name)
+        transcript = await model.transcribe(
+            AudioInput(buffer=np.zeros(240, dtype=np.int16)),
+            STTModelSettings(language=language, prompt="A greeting", temperature=0.2),
+            False,
+            False,
+        )
+
+    assert transcript == "Bonjour"
+    assert captured["model"] == (b"gpt-transcribe" if model_name is None else b"gpt-4o-transcribe")
+    assert captured["prompt"] == b"A greeting"
+    assert captured["temperature"] == b"0.2"
+    if language is None:
+        assert "language" not in captured
+        assert "languages[]" not in captured
+    elif model_name is None:
+        assert captured["languages[]"] == b"fr"
+        assert "language" not in captured
+    else:
+        assert captured["language"] == b"fr"
+        assert "languages[]" not in captured
+
+
+@pytest.mark.asyncio
+async def test_voice_provider_streamed_default_transcription_config() -> None:
+    async with openai.AsyncOpenAI(api_key="test-key") as client:
+        model = OpenAIVoiceModelProvider(openai_client=client).get_stt_model(None)
+        session = await model.create_session(
+            StreamedAudioInput(), STTModelSettings(language="fr"), False, False
+        )
+        assert isinstance(session, OpenAISTTTranscriptionSession)
+        websocket = AsyncMock()
+        session._websocket = websocket
+        await session._configure_session()
+        payload = json.loads(websocket.send.await_args.args[0])
+        assert payload["session"]["audio"]["input"]["transcription"] == {
+            "model": "gpt-transcribe",
+            "languages": ["fr"],
+        }
+        await session.close()
 
 
 @pytest.mark.parametrize(

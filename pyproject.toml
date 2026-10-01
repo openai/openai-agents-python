@@ -16,10 +16,10 @@ dependencies = [
     "mcp>=1.19.0, <3; python_version >= '3.10'",
     # Security floors for transitive runtime dependencies.
     "httpx2>=2.12.0",
-    "pyjwt>=2.13.0",
+    "pyjwt>=2.15.0",
     "python-multipart>=0.0.31",
     "starlette>=1.3.1",
-    "urllib3>=2.7.0",
+    "urllib3>=2.8.0",
 ]
 classifiers = [
     "Typing :: Typed",
@@ -49,7 +49,7 @@ any-llm = [
     "pygments>=2.20.0; python_version >= '3.11'",
 ]
 realtime = ["websockets>=15.0, <17"]
-sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
+sqlalchemy = ["SQLAlchemy[asyncio]>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0,<51"]
 redis = ["redis>=7"]
 dapr = [
@@ -83,10 +83,10 @@ modal = [
     "pygments>=2.20.0",
 ]
 runloop = ["runloop_api_client>=1.16.0,<2.0.0"]
-vercel = ["vercel>=0.5.6,<0.6", "cbor2>=5.9.0"]
+vercel = ["vercel-sandbox>=0.7.0,<0.8", "cbor2>=5.9.0"]
 s3 = ["boto3>=1.34"]
 temporal = [
-    "temporalio==1.26.0",
+    "temporalio==1.33.0",
     "textual>=8.2.3,<8.3",
     "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
     "pygments>=2.20.0",
@@ -95,7 +95,7 @@ temporal = [
 [dependency-groups]
 dev = [
   "mypy",
-  "ruff==0.9.2",
+  "ruff==0.16.8",
   "pytest>=9.0.3",
   "pytest-asyncio",
   "pytest-mock>=3.14.0",
@@ -157,6 +157,10 @@ packages = ["src/agents"]
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.format]
+# Translated documentation is generated; format only the English source.
+exclude = ["docs/ja/**", "docs/ko/**", "docs/zh/**"]
 
 [tool.ruff.lint]
 select = [

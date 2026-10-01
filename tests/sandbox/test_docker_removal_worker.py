@@ -35,6 +35,45 @@ worker_code = pytest.importorskip(
 )
 
 
+@pytest.mark.asyncio
+async def test_removal_preserves_protected_literal_backslash_tree(
+    service: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager, container, worker = service
+    workspace = tmp_path.resolve() / "workspace"
+    workspace.mkdir()
+    protected = tmp_path.resolve() / "protected"
+    target = protected / r"\..\workspace" / "data"
+    target.mkdir(parents=True)
+    sentinel = target / "sentinel.txt"
+    sentinel.write_text("protected contents")
+    (workspace / "link").symlink_to(target.parent, target_is_directory=True)
+    configured = Manifest(
+        root=workspace.as_posix(),
+        extra_path_grants=(SandboxPathGrant(path=protected.as_posix(), read_only=True),),
+    )
+    manager.bind_new(container, configured)
+    original_request = worker.request
+    selected_paths: list[str] = []
+
+    def request(**data: Any) -> dict[str, Any]:
+        result = original_request(**data)
+        if data["operation"] == "inspect":
+            selected, is_directory = worker_code._selected_path(data["path"])
+            selected_paths.append(selected)
+            result.update(path=selected, is_directory=is_directory)
+        return result
+
+    monkeypatch.setattr(worker, "request", request)
+    with pytest.raises(WorkspaceArchiveWriteError) as caught:
+        await session(manager, container, configured).rm("link/data", recursive=True)
+    assert caught.value.context["reason"] == "docker_removal_canonical_path"
+    assert selected_paths == [target.as_posix()]
+    assert worker.removed == []
+    assert sentinel.read_text() == "protected contents"
+    assert not container.attrs["State"]["Paused"]
+
+
 def test_empty_directory_needs_no_search_of_its_contents(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         worker_code.os, "lstat", lambda _, **kwargs: SimpleNamespace(st_mode=0o040000)
@@ -86,9 +125,11 @@ def test_worker_pins_external_mount_device_but_requires_private_workspace(
     monkeypatch.setattr(
         worker_code.os,
         "stat",
-        lambda path, **kwargs: SimpleNamespace(st_dev=1)
-        if path == "/"
-        else metadata[20 if path == "/workspace" else 21],
+        lambda path, **kwargs: (
+            SimpleNamespace(st_dev=1)
+            if path == "/"
+            else metadata[20 if path == "/workspace" else 21]
+        ),
     )
     monkeypatch.setattr(worker_code.os, "open", Mock(side_effect=[20, 21]))
     monkeypatch.setattr(worker_code.os, "fstat", metadata.__getitem__)

@@ -836,6 +836,7 @@ class BaseSandboxSession(abc.ABC):
         path: Path | str,
         *,
         for_write: bool = False,
+        recursive_remove: bool = False,
     ) -> Path:
         """Validate an SDK file path against the remote sandbox filesystem before IO.
 
@@ -848,6 +849,7 @@ class BaseSandboxSession(abc.ABC):
         root = path_policy.sandbox_root()
         workspace_path = path_policy.normalize_sandbox_path(path, for_write=for_write)
         original_path = coerce_posix_path(path)
+        access_mode = "2" if recursive_remove else "1" if for_write else "0"
         helper_path = await self._ensure_runtime_helper_installed(RESOLVE_WORKSPACE_PATH_HELPER)
         extra_grant_args = tuple(
             arg
@@ -858,7 +860,7 @@ class BaseSandboxSession(abc.ABC):
             str(helper_path),
             root.as_posix(),
             workspace_path.as_posix(),
-            "1" if for_write else "0",
+            access_mode,
             *extra_grant_args,
         )
         result = await self.exec(*command, shell=False)
@@ -873,7 +875,7 @@ class BaseSandboxSession(abc.ABC):
                     "resolve_workspace_path",
                     root.as_posix(),
                     workspace_path.as_posix(),
-                    "1" if for_write else "0",
+                    access_mode,
                     *extra_grant_args,
                 ),
                 context={
@@ -914,7 +916,7 @@ class BaseSandboxSession(abc.ABC):
                 "resolve_workspace_path",
                 root.as_posix(),
                 workspace_path.as_posix(),
-                "1" if for_write else "0",
+                access_mode,
                 *extra_grant_args,
             ),
         )
@@ -994,6 +996,23 @@ class BaseSandboxSession(abc.ABC):
         :param data: A file-like object positioned at the start of the payload.
         :param user: Optional sandbox user to perform the write as.
         """
+
+    async def _write_new_file(
+        self,
+        path: Path,
+        data: io.IOBase,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Backend hook for apply_patch creation.
+
+        The default retains the provider's existing mkdir/write semantics. UnixLocal
+        overrides this hook to claim the leaf exclusively; other backends need a native
+        primitive before they can offer the same guarantee.
+        """
+        target = self.normalize_path(path)
+        await self.mkdir(target.parent, parents=True, user=user)
+        await self.write(target, data, user=user)
 
     async def _check_read_with_exec(
         self, path: Path | str, *, user: str | User | None = None
@@ -1189,12 +1208,108 @@ class BaseSandboxSession(abc.ABC):
 
         cmd: list[str] = ["rm"]
         if recursive:
+            if any(grant.read_only for grant in self.state.manifest.extra_path_grants):
+                await self._validate_remote_path_access(path, for_write=True, recursive_remove=True)
             cmd.append("-rf")
         cmd.extend(["--", sandbox_path_str(path)])
 
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise ExecNonZeroError(result, command=cmd)
+
+    async def mv(
+        self,
+        source: Path | str,
+        destination: Path | str,
+        *,
+        user: str | User | None = None,
+    ) -> None:
+        """Rename a regular file or symlink, replacing the destination entry if it exists.
+
+        Directory and special-file sources are unsupported and rejected before the move.
+        As with other workspace file APIs, callers must serialize conflicting mutations.
+
+        The exec fallback requires ``mv -T`` (GNU or compatible). A tool without that option
+        fails without moving the source. Do not replace it with a destination precheck: a
+        concurrently created directory could otherwise receive the source as a child.
+
+        This is the shell fallback for backends that only offer `exec`. A backend with
+        direct filesystem access, such as UnixLocal, overrides it with a descriptor-relative
+        `os.rename`, so the path it validated is the entry it renames.
+
+        :param source: Regular file or symlink to move.
+        :param destination: Path to move it to.
+        :param user: Optional sandbox user to move as.
+        :raises ExecNonZeroError: If the destination is an existing directory, or the move
+                fails.
+        """
+        source = await self._validate_path_access(source, for_write=True)
+        destination = await self._validate_path_access(destination, for_write=True)
+        source_arg = sandbox_path_str(source)
+        destination_arg = sandbox_path_str(destination)
+        script = (
+            'if [ ! -L "$1" ] && [ ! -f "$1" ]; then '
+            'printf "%s\\n" "Move source must be a regular file or symlink" >&2; exit 1; fi; '
+            'exec mv -fT -- "$1" "$2"'
+        )
+        cmd = ("sh", "-c", script, "sh", source_arg, destination_arg)
+        result = await self.exec(*cmd, shell=False, user=user)
+        if not result.ok():
+            raise ExecNonZeroError(
+                result, command=("sh", "-c", "<mv>", source_arg, destination_arg)
+            )
+
+    async def same_file(
+        self,
+        left: Path | str,
+        right: Path | str,
+        *,
+        follow_symlinks: bool = True,
+        user: str | User | None = None,
+    ) -> bool:
+        """Return whether two paths name the same file on the sandbox filesystem.
+
+        This asks the filesystem, through `test -ef`, which compares device and inode. Two
+        paths that differ as strings can be one file: a filesystem that folds case stores
+        `notes.txt` and `Notes.txt` as a single entry, and APFS folds Unicode normalization
+        as well, so the NFC and NFD spellings of one accented name are also a single entry.
+        No string comparison can answer this, and neither can the host that is driving the
+        session, which may not be the kind of system the sandbox is running on.
+
+        `test -ef` resolves symlinks. With ``follow_symlinks=False``, return false if either
+        leaf is a symlink, including two paths naming the same symlink. This mode compares
+        only non-symlink entries and is used before removing an apply-patch source.
+
+        This is the shell fallback for backends that only offer `exec`. UnixLocal overrides
+        it with a descriptor-relative `stat` on both entries.
+
+        :param left: First path to compare.
+        :param right: Second path to compare.
+        :param follow_symlinks: If false, return false when either leaf is a symlink.
+        :param user: Optional sandbox user to compare as.
+        :returns: True when both paths resolve to the same file.
+        """
+        left = await self._validate_path_access(left)
+        right = await self._validate_path_access(right)
+
+        left_arg = sandbox_path_str(left)
+        right_arg = sandbox_path_str(right)
+        test = '[ "$1" -ef "$2" ]'
+        if not follow_symlinks:
+            test = '[ ! -L "$1" ] && [ ! -L "$2" ] && ' + test
+        cmd = ("sh", "-lc", test, "sh", left_arg, right_arg)
+        result = await self.exec(*cmd, shell=False, user=user)
+        if result.exit_code == 0:
+            return True
+        # `[` answers "different file" with 1 and reports its own failures with 2, and a
+        # missing shell exits 127. Only 1 is an answer; anything else is the session
+        # failing to tell us, and a caller about to delete a file on the strength of this
+        # must not read that as "different".
+        if result.exit_code == 1:
+            return False
+        raise ExecNonZeroError(
+            result, command=("sh", "-lc", "<same_file_check>", left_arg, right_arg)
+        )
 
     async def mkdir(
         self,
@@ -1451,6 +1566,10 @@ class BaseSandboxSession(abc.ABC):
         """
 
         await snapshot_lifecycle.clear_workspace_root_on_resume(self)
+
+    async def _remove_workspace_entry_on_resume(self, path: Path) -> None:
+        """Remove a stale workspace entry before restoring a snapshot."""
+        await self.rm(path, recursive=True)
 
     def _workspace_resume_mount_skip_relpaths(self) -> set[Path]:
         return snapshot_lifecycle.workspace_resume_mount_skip_relpaths(self)

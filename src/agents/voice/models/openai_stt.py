@@ -9,7 +9,7 @@ from time import monotonic
 from typing import Any, cast
 from uuid import uuid4
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, omit
 
 from ... import _debug
 from ...exceptions import AgentsException, UserError
@@ -644,7 +644,16 @@ class OpenAISTTModel(STTModel):
                     model=self.model,
                     file=input.to_audio_file(),
                     prompt=self._non_null_or_not_given(settings.prompt),
-                    language=self._non_null_or_not_given(settings.language),
+                    language=(
+                        omit
+                        if self.model == "gpt-transcribe"
+                        else self._non_null_or_not_given(settings.language)
+                    ),
+                    extra_body=(
+                        {"languages": [settings.language]}
+                        if self.model == "gpt-transcribe" and settings.language is not None
+                        else None
+                    ),
                     temperature=self._non_null_or_not_given(settings.temperature),
                 )
                 if trace_include_sensitive_data:

@@ -71,7 +71,7 @@ def default_should_trigger_compaction(context: dict[str, Any]) -> bool:
 
 def is_openai_model_name(model: str) -> bool:
     """Validate model name follows OpenAI conventions."""
-    trimmed = model.strip()
+    trimmed = model.strip().rsplit("/", 1)[-1]
     if not trimmed:
         return False
 
@@ -778,7 +778,11 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         *,
         limit: int | None = None,
     ) -> tuple[list[TResponseInputItem], list[TResponseInputItem], bool]:
-        """Lazy-load candidates, or read a bounded snapshot for automatic coverage checks."""
+        """Load policy-visible candidates, or a bounded automatic coverage snapshot."""
+        if read_items is None:
+            # Resolve the wrapped policy before consulting the cache: visibility can
+            # change without a wrapper mutation, for example when encrypted items expire.
+            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
         cache_snapshot = read_items is None and limit is None
         if (
             cache_snapshot
@@ -786,10 +790,6 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             and self._session_items is not None
         ):
             return (self._compaction_candidate_items[:], self._session_items[:], False)
-        if read_items is None:
-            # Storage wrappers own the logical policy view and bounded raw reads,
-            # including when compaction is the outer wrapper.
-            read_items = getattr(self.underlying_session, "_read_compaction_items", None)
         if read_items is not None:
             items, complete = await read_items(limit)
         else:

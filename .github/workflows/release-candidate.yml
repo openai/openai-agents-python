@@ -1,0 +1,122 @@
+name: Release Candidate
+# Record trigger eligibility in native run metadata, before any jobs execute.
+run-name: >-
+  ${{ github.event.workflow_run.head_repository.full_name == github.repository &&
+      (github.event.workflow_run.name == 'Release Please' ||
+       (github.event.workflow_run.name == 'Tests' &&
+        github.event.workflow_run.head_branch == 'release-please--branches--main')) &&
+      'Release Candidate eligible' || 'Release Candidate unrelated' }}
+
+on:
+  workflow_run:
+    workflows: [Release Please, Tests]
+    types: [completed]
+
+# workflow_run receives read-only default-branch cache access.
+# Retry through Release Please or rerun this workflow; do not add workflow_dispatch.
+permissions: {}
+concurrency:
+  # Unrelated test completions must not replace a pending release candidate.
+  group: >-
+    ${{ github.event.workflow_run.head_repository.full_name == github.repository &&
+        (github.event.workflow_run.name == 'Release Please' ||
+         (github.event.workflow_run.name == 'Tests' &&
+          github.event.workflow_run.head_branch == 'release-please--branches--main')) &&
+        'release-candidate-main' || format('release-candidate-unrelated-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    if: github.repository == 'openai/openai-agents-python' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      candidate: ${{ steps.candidate.outputs.candidate }}
+      commit_sha: ${{ steps.candidate.outputs.head }}
+      version: ${{ steps.candidate.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python .github/scripts/release_automation.py discover
+      - if: steps.candidate.outputs.candidate == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-input-${{ github.run_attempt }}
+          path: candidate.json
+          retention-days: 1
+
+  contract:
+    needs: discover
+    if: needs.discover.outputs.candidate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.discover.outputs.commit_sha }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+        with:
+          version: '0.11.14'
+          python-version: '3.14'
+          enable-cache: false
+      - name: Freeze and validate the candidate public API
+        env:
+          VERSION: ${{ needs.discover.outputs.version }}
+          UV_FROZEN: '1'
+        run: |
+          make sync
+          make update-released-api-contract VERSION="$VERSION"
+          make check-released-api-contract VERSION="$VERSION"
+          make check-prospective-released-api-contract
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: generated-contract-${{ github.run_attempt }}
+          path: tests/fixtures/released_api_contract.json
+          retention-days: 1
+
+  update:
+    needs: [discover, contract]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.update.outputs.head }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: candidate-input-${{ github.run_attempt }}
+          path: input
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: generated-contract-${{ github.run_attempt }}
+          path: generated
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        id: app
+        with:
+          app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}
+          private-key: ${{ secrets.OPENAI_SDKS_APP_PRIVATE_KEY }}
+          owner: openai
+          repositories: openai-agents-python
+          permission-contents: write
+          permission-pull-requests: read
+      - id: update
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+        run: |
+          cp input/candidate.json candidate.json
+          python .github/scripts/release_automation.py write-contract --file generated/released_api_contract.json

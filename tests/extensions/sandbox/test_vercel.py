@@ -12,7 +12,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, cast
 
-import httpx
+import httpx2 as httpx
 import pytest
 from pydantic import BaseModel, PrivateAttr
 
@@ -54,7 +54,7 @@ from tests._fake_workspace_paths import resolve_fake_workspace_path
 
 
 class _FakeNetworkPolicyRule(BaseModel):
-    pass
+    transform: list[dict[str, object]] | None = None
 
 
 class _FakeNetworkPolicySubnets(BaseModel):
@@ -252,6 +252,7 @@ class _FakeAsyncSandbox:
         files: dict[str, bytes] | None = None,
     ) -> None:
         self.sandbox_id = sandbox_id
+        self.sandbox_name = "agents-" + sandbox_id
         self.status = status
         self.routes = routes or [{"port": 3000, "url": "https://3000-sandbox.vercel.run"}]
         self.files = dict(files or {})
@@ -533,7 +534,10 @@ def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     fake_vercel_sandbox.NetworkPolicyCustom = NetworkPolicyCustom
     fake_vercel_sandbox.NetworkPolicyRule = NetworkPolicyRule
     fake_vercel_sandbox.NetworkPolicySubnets = NetworkPolicySubnets
-    fake_vercel_sandbox.Resources = Resources
+    fake_vercel_sandbox.SandboxResources = Resources
+    fake_vercel_sandbox.SandboxCredentialsError = _FakeVercelSandboxAuthError
+    fake_vercel_sandbox.SandboxInvalidHandleError = _FakeVercelSandboxValidationError
+    fake_vercel_sandbox.SandboxPathNotFoundError = _FakeVercelSandboxNotFoundError
     fake_vercel_sandbox.SandboxAuthError = _FakeVercelSandboxAuthError
     fake_vercel_sandbox.SandboxNotFoundError = _FakeVercelSandboxNotFoundError
     fake_vercel_sandbox.SandboxPermissionError = _FakeVercelSandboxPermissionError
@@ -546,6 +550,10 @@ def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
 
     monkeypatch.setitem(sys.modules, "vercel", fake_vercel)
     monkeypatch.setitem(sys.modules, "vercel.sandbox", fake_vercel_sandbox)
+    fake_provider = types.ModuleType("agents.extensions.sandbox.vercel._provider")
+    cast(Any, fake_provider).ProviderSandbox = _FakeAsyncSandbox
+    cast(Any, fake_provider).DEFAULT_VERCEL_WAIT_FOR_RUNNING_TIMEOUT_S = 45.0
+    monkeypatch.setitem(sys.modules, "agents.extensions.sandbox.vercel._provider", fake_provider)
     # Re-importing an adapter also replaces its registered model classes.
     # Record undo before clearing these entries for fresh class registration;
     # unrelated registrations must survive teardown.
@@ -562,6 +570,7 @@ def _load_vercel_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     )
     del MountStrategyBase._subclass_registry["vercel_cloud_bucket"]
     module_names = (
+        "agents.extensions.sandbox.vercel._network_policy",
         "agents.extensions.sandbox.vercel.sandbox",
         "agents.extensions.sandbox.vercel.mounts",
         "agents.extensions.sandbox.vercel",
@@ -2839,7 +2848,9 @@ async def test_vercel_s3_mount_failure_ignores_hostile_exception_descriptors(
     assert exc_info.value.error_code is ErrorCode.MOUNT_FAILED
     assert exc_info.value.op == "materialize"
     assert exc_info.value.context == {}
-    assert exc_info.value.retryable is True
+    # Current Vercel errors use status fields rather than status-specific subclasses.
+    # An unreadable status must stay unknown without invoking hostile descriptors.
+    assert exc_info.value.retryable is None
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     _assert_base_exception_slots_cleared(provider_error)
@@ -3078,7 +3089,10 @@ async def test_vercel_create_passes_provider_options(monkeypatch: pytest.MonkeyP
         ),
     )
 
-    assert _FakeAsyncSandbox.create_calls == [
+    actual_options = dict(_FakeAsyncSandbox.create_calls[0])
+    actual_policy = actual_options.pop("network_policy")
+    assert actual_policy.model_dump() == network_policy.model_dump()
+    assert [actual_options] == [
         {
             "source": None,
             "ports": [3000, 4000],
@@ -3090,7 +3104,6 @@ async def test_vercel_create_passes_provider_options(monkeypatch: pytest.MonkeyP
             "team_id": "team",
             "interactive": True,
             "env": {"FLAG": "manifest", "HELLO": "world", "FROM_MANIFEST": "1"},
-            "network_policy": network_policy,
         }
     ]
     assert _FakeAsyncSandbox.sandboxes["vercel-sandbox-1"].wait_for_status_calls == [
@@ -3526,6 +3539,7 @@ async def test_vercel_resume_reconnects_existing_running_sandbox(
     assert _FakeAsyncSandbox.get_calls == [
         {
             "sandbox_id": "sandbox-existing",
+            "sandbox_name": None,
             "token": None,
             "project_id": None,
             "team_id": None,
@@ -3757,7 +3771,7 @@ async def test_vercel_serialized_session_state_omits_token_and_resume_uses_live_
         "allow": ["example.com"],
         "subnets": {"allow": None, "deny": ["192.168.0.0/16"]},
     }
-    assert restored.network_policy == network_policy
+    assert restored.network_policy.model_dump() == network_policy.model_dump()
     assert _FakeAsyncSandbox.get_calls[-1]["token"] == "token-from-client"
     assert len(_FakeAsyncSandbox.create_calls) == 1
     assert resumed._inner.state.sandbox_id == session._inner.state.sandbox_id

@@ -110,10 +110,11 @@ Sometimes, you might want multiple calls to `run()` to be part of a single trace
 ```python
 from agents import Agent, Runner, trace
 
+
 async def main():
     agent = Agent(name="Joke generator", instructions="Tell funny jokes.")
 
-    with trace("Joke workflow"): # (1)!
+    with trace("Joke workflow"):  # (1)!
         first_result = await Runner.run(agent, "Tell me a joke")
         second_result = await Runner.run(agent, f"Rate this joke: {first_result.final_output}")
         print(f"Joke: {first_result.final_output}")

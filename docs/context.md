@@ -61,15 +61,18 @@ from dataclasses import dataclass
 from agents import Agent, RunContextWrapper, Runner
 from agents.decorators import tool
 
+
 @dataclass
 class UserInfo:  # (1)!
     name: str
     uid: int
 
+
 @tool
 async def fetch_user_age(wrapper: RunContextWrapper[UserInfo]) -> str:  # (2)!
     """Fetch the age of the user. Call this function to get user's age information."""
     return f"The user {wrapper.context.name} is 47 years old"
+
 
 async def main():
     user_info = UserInfo(name="John", uid=123)
@@ -87,6 +90,7 @@ async def main():
 
     print(result.final_output)  # (5)!
     # The user John is 47 years old.
+
 
 if __name__ == "__main__":
     asyncio.run(main())
@@ -112,18 +116,26 @@ from agents import Agent
 from agents.decorators import tool
 from agents.tool_context import ToolContext
 
+
 class WeatherContext(BaseModel):
     user_id: str
+
 
 class Weather(BaseModel):
     city: str = Field(description="The city name")
     temperature_range: str = Field(description="The temperature range in Celsius")
     conditions: str = Field(description="The weather conditions")
 
+
 @tool
-def get_weather(ctx: ToolContext[WeatherContext], city: Annotated[str, "The city to get the weather for"]) -> Weather:
-    print(f"[debug] Tool context: (name: {ctx.tool_name}, call_id: {ctx.tool_call_id}, args: {ctx.tool_arguments})")
+def get_weather(
+    ctx: ToolContext[WeatherContext], city: Annotated[str, "The city to get the weather for"]
+) -> Weather:
+    print(
+        f"[debug] Tool context: (name: {ctx.tool_name}, call_id: {ctx.tool_call_id}, args: {ctx.tool_arguments})"
+    )
     return Weather(city=city, temperature_range="14-20C", conditions="Sunny with wind.")
+
 
 agent = Agent(
     name="Weather Agent",

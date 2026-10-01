@@ -288,7 +288,8 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "decisions to their owning agent. Retains pending Session compaction metadata, "
         "including acknowledgement and model-exchange evidence for retry, and persists "
         "withheld interrupted responses with their conversion policy and current-response "
-        "boundary so approval resumes can settle them under the output-guardrail gate."
+        "boundary so approval resumes can settle them under the output-guardrail gate. "
+        "Records named Vercel sandboxes alongside exact execution IDs."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)

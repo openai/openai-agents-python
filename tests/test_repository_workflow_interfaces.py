@@ -1,8 +1,15 @@
 from __future__ import annotations
 
+import os
 import re
 import runpy
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = ROOT / "Makefile"
@@ -169,8 +176,9 @@ def test_prospective_contract_preparation_removes_api_key_before_uv() -> None:
     assert recipe.index("unset OPENAI_API_KEY") < recipe.index("uv run")
 
 
-def test_release_build_validates_before_executing_candidate_code() -> None:
-    build = _workflow_job("build", PUBLISH_WORKFLOW)
+@pytest.mark.parametrize("job_name", ["checks", "build"])
+def test_release_build_validates_before_executing_candidate_code(job_name: str) -> None:
+    build = _workflow_job(job_name, PUBLISH_WORKFLOW)
 
     assert "contents: read" in build
     assert "id-token:" not in build
@@ -180,9 +188,153 @@ def test_release_build_validates_before_executing_candidate_code() -> None:
     assert build.count("persist-credentials: false") == 2
     assert "fetch-depth: 0" in build
     validation = build.index("python -I control/.github/scripts/verify_release.py")
-    assert validation < build.index("run: make sync") < build.index("run: uv build")
+    candidate_command = (
+        'UV_PYTHON="$python_version" make sync tests' if job_name == "checks" else "run: uv build"
+    )
+    assert validation < build.index(candidate_command)
     assert ' --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"' in build
     assert "enable-cache: false" in build
+
+
+@pytest.mark.parametrize("failed_check", [None, "3.12:sync tests", ":typecheck"])
+def test_release_checks_fail_closed(tmp_path: Path, failed_check: str | None) -> None:
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("The publish workflow requires Bash.")
+    workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    jobs = workflow["jobs"]
+    checks = jobs["checks"]
+    build = jobs["build"]
+    steps = checks["steps"]
+    check_index = next(i for i, step in enumerate(steps) if step["name"] == "Check release source")
+    check = steps[check_index]
+    package = next(step for step in build["steps"] if step.get("run") == "uv build")
+    assert check["working-directory"] == package["working-directory"] == "release-source"
+    assert build["needs"] == "checks"
+    assert check["shell"] == "bash"
+    assert check["env"] == {"OPENAI_API_KEY": "fake-for-tests", "UV_LOCKED": "1"}
+    for job in (checks, build, jobs["publish"]):
+        assert "if" not in job and "continue-on-error" not in job
+        for step in job["steps"]:
+            assert "continue-on-error" not in step
+            if step.get("name") in {
+                "Verify human-reviewed release candidate",
+                "Checkout approval validator from main",
+                "Revalidate human approval before upload",
+            }:
+                assert step["if"] == "vars.RELEASE_AUTOMATION_ENABLED == 'true'"
+            else:
+                assert "if" not in step
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    make = bin_dir / "make"
+    make.write_text(
+        "#!/bin/sh\n"
+        'check="${UV_PYTHON:-}:$*"\n'
+        'printf "%s\\n" "$check" >> "$CHECK_LOG"\n'
+        '[ "$check" != "$FAILED_CHECK" ]\n',
+        encoding="utf-8",
+    )
+    make.chmod(0o755)
+    log = tmp_path / "checks.log"
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-e", "-o", "pipefail", "-c", check["run"]],
+        cwd=tmp_path,
+        env={
+            "PATH": f"{bin_dir}{os.pathsep}{os.defpath}",
+            "CHECK_LOG": str(log),
+            "FAILED_CHECK": failed_check or "",
+            **check["env"],
+        },
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    expected = [f"3.{minor}:sync tests" for minor in range(10, 15)] + [":typecheck"]
+    if failed_check is None:
+        assert result.returncode == 0, result.stderr
+        assert log.read_text(encoding="utf-8").splitlines() == expected
+    else:
+        assert result.returncode != 0
+        assert (
+            log.read_text(encoding="utf-8").splitlines()
+            == expected[: expected.index(failed_check) + 1]
+        )
+
+
+def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("The publish workflow requires uv.")
+    workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    check = next(
+        step
+        for step in workflow["jobs"]["checks"]["steps"]
+        if step["name"] == "Check release source"
+    )
+    dependency = tmp_path / "dependency"
+    dependency.mkdir()
+    (dependency / "pyproject.toml").write_text(
+        '[project]\nname = "fixture-dependency"\nversion = "0.1.0"\n', encoding="utf-8"
+    )
+    project = (
+        '[project]\nname = "release-fixture"\nversion = "0.1.0"\n'
+        'requires-python = ">=3.10"\ndependencies = []\n'
+        '[tool.uv.sources]\nfixture-dependency = { path = "dependency" }\n'
+    )
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(project, encoding="utf-8")
+    env = {
+        "PATH": os.defpath,
+        "UV_PYTHON": sys.executable,
+        "UV_CACHE_DIR": str(tmp_path / "cache"),
+    }
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    command = [uv, "--offline", "--no-config"]
+    subprocess.run(command + ["lock"], cwd=tmp_path, env=env, check=True, timeout=15)
+    lockfile = tmp_path / "uv.lock"
+    original_lock = lockfile.read_bytes()
+    # Exercise synchronization without building or installing either fixture package.
+    sync = command + ["sync", "--no-install-project", "--no-install-package", "fixture-dependency"]
+    env.update(check["env"])
+    subprocess.run(sync, cwd=tmp_path, env=env, check=True, timeout=15)
+    pyproject.write_text(
+        project.replace("dependencies = []", 'dependencies = ["fixture-dependency"]'),
+        encoding="utf-8",
+    )
+    result = subprocess.run(sync, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode != 0
+    assert "lockfile" in result.stderr and "needs to be updated" in result.stderr
+    assert lockfile.read_bytes() == original_lock
+
+
+def test_release_build_is_isolated_from_test_execution() -> None:
+    workflow = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    checks = workflow["jobs"]["checks"]
+    build = workflow["jobs"]["build"]
+    # Separate GitHub-hosted jobs provide fresh runners, not just new directories.
+    assert checks["runs-on"] == build["runs-on"] == "ubuntu-latest"
+    assert build["permissions"] == {"contents": "read"}
+    assert checks["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    assert "outputs" not in checks
+    assert build["needs"] == "checks"
+    for job in (checks, build):
+        assert "env" not in job and "container" not in job
+        for step in job["steps"]:
+            action = step.get("uses", "")
+            assert not action.startswith(("actions/cache@", "actions/download-artifact@"))
+            if action.startswith("astral-sh/setup-uv@"):
+                assert step["with"]["enable-cache"] is False
+            if job is checks:
+                assert not action.startswith("actions/upload-artifact@")
+    build_commands = [step["run"] for step in build["steps"] if "run" in step]
+    assert len(build_commands) == 2  # Provenance validation, then packaging; no test execution.
+    assert build_commands[-1] == "uv build"
 
 
 def test_pypi_job_only_publishes_the_build_artifact() -> None:
@@ -194,11 +346,15 @@ def test_pypi_job_only_publishes_the_build_artifact() -> None:
     assert "needs: build" in publish
     assert "name: pypi" in publish
     assert "id-token: write" in publish
-    assert "run:" not in publish
+    assert (
+        "run: python3 -I control/.github/scripts/release_automation.py verify-publication"
+        in publish
+    )
     actions = re.findall(r"uses: ([^\s]+)", publish)
-    assert len(actions) == 2
+    assert len(actions) == 3
     assert actions[0].startswith("actions/download-artifact@")
-    assert actions[1].startswith("pypa/gh-action-pypi-publish@")
+    assert actions[1].startswith("actions/checkout@")
+    assert actions[2].startswith("pypa/gh-action-pypi-publish@")
     assert all(re.fullmatch(r"[^@]+@[0-9a-f]{40}", action) for action in actions)
     assert "artifact-ids: ${{ needs.build.outputs.artifact-id }}" in publish
     assert "artifact-id: ${{ steps.upload.outputs.artifact-id }}" in _workflow_job(

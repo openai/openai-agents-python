@@ -1689,9 +1689,7 @@ def test_qualified_submodule_callable_contract_detects_signature_change(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
     contract: dict[str, Any] = {
         "baseline": "v0.19.4",
@@ -1718,9 +1716,7 @@ def test_release_contract_update_freezes_submodule_only_callable(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
     contract: dict[str, Any] = {
         "baseline": "v0.19.4",
@@ -1846,9 +1842,7 @@ def test_public_api_contract_requires_released_submodule_exports(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     errors = validate_released_api_contract(contract, agents_module=agents_module)
@@ -2256,9 +2250,7 @@ def test_release_contract_update_promotes_selected_submodule_exports(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     updated = build_released_api_contract(
@@ -2312,9 +2304,7 @@ def test_release_contract_update_freezes_new_sdk_submodule_callable_without_cano
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     updated = build_released_api_contract(
@@ -2378,9 +2368,7 @@ def test_release_contract_update_skips_new_third_party_submodule_callable(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     updated = build_released_api_contract(
@@ -2425,9 +2413,7 @@ def test_release_contract_update_preserves_tracked_submodule_callable_on_unsuppo
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     updated = build_released_api_contract(
@@ -3162,9 +3148,7 @@ def test_public_api_contract_skips_optional_surface_on_frozen_unsupported_platfo
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
@@ -3203,9 +3187,7 @@ def test_public_api_contract_allows_present_optional_surface_on_unsupported_plat
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
@@ -3235,9 +3217,7 @@ def test_public_api_contract_rejects_dangling_optional_export_on_unsupported_pla
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -3271,9 +3251,7 @@ def test_public_api_contract_rejects_dangling_optional_binding_on_unsupported_pl
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -3307,9 +3285,7 @@ def test_public_api_contract_requires_optional_surface_on_supported_platform(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -3339,9 +3315,7 @@ def test_release_contract_policy_rejects_unavailable_dependency_module(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     with pytest.raises(
@@ -3387,9 +3361,7 @@ def test_release_contract_policy_adds_new_public_optional_module(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     updated = build_released_api_contract(
@@ -3745,9 +3717,9 @@ def test_repository_release_policy_declares_public_optional_modules() -> None:
         }
     for module_name in ("agents.voice", "agents.voice.imports", "agents.voice.testing"):
         assert policy.modules[module_name] == {
-            "optional_bindings": {
-                export: "numpy" for export in importlib.import_module(module_name).__all__
-            },
+            "optional_bindings": dict.fromkeys(
+                importlib.import_module(module_name).__all__, "numpy"
+            ),
             "optional_exports": {},
         }
     assert (
@@ -4228,9 +4200,7 @@ def test_public_api_contract_allows_declared_optional_submodule_binding(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
@@ -4288,9 +4258,7 @@ def test_public_api_contract_allows_declared_optional_submodule_export(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == []
@@ -4317,9 +4285,7 @@ def test_public_api_contract_rejects_optional_export_that_remains_in_all(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -4350,9 +4316,7 @@ def test_public_api_contract_rejects_optional_binding_absent_from_all(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -4384,9 +4348,7 @@ def test_public_api_contract_requires_available_optional_submodule_export(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -4418,9 +4380,7 @@ def test_public_api_contract_treats_loaded_dependency_without_spec_as_available(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -4469,9 +4429,7 @@ def test_public_api_contract_rejects_malformed_optional_dependency_declarations(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     assert validate_released_api_contract(contract, agents_module=agents_module) == [
@@ -4503,9 +4461,7 @@ def test_release_contract_update_rejects_new_submodule_export_without_binding(
     monkeypatch.setattr(
         contract_surface,
         "_import_contract_module",
-        lambda module_name, _agents_module: (
-            agents_module if module_name == "agents" else submodule
-        ),
+        lambda module_name, _agents_module: agents_module if module_name == "agents" else submodule,
     )
 
     with pytest.raises(

@@ -1017,9 +1017,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         self, session: ClientSession, cursor: str | None = None
     ) -> ListToolsResult:
         return await self._maybe_serialize_request(
-            lambda: session.list_tools()
-            if cursor is None
-            else session.list_tools(params=PaginatedRequestParams(cursor=cursor))
+            lambda: (
+                session.list_tools()
+                if cursor is None
+                else session.list_tools(params=PaginatedRequestParams(cursor=cursor))
+            )
         )
 
     async def _list_prompts_page(
@@ -1028,9 +1030,11 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
         return await self._run_request_with_transport_error_redaction(
             "list prompts",
             lambda: self._maybe_serialize_request(
-                lambda: session.list_prompts()
-                if cursor is None
-                else session.list_prompts(params=PaginatedRequestParams(cursor=cursor))
+                lambda: (
+                    session.list_prompts()
+                    if cursor is None
+                    else session.list_prompts(params=PaginatedRequestParams(cursor=cursor))
+                )
             ),
         )
 
@@ -1770,12 +1774,14 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             "list resources",
             lambda: self._maybe_serialize_request(
                 lambda: (
-                    session.list_resources()
-                    if cursor is None
-                    else session.list_resources(params=PaginatedRequestParams(cursor=cursor))
+                    (
+                        session.list_resources()
+                        if cursor is None
+                        else session.list_resources(params=PaginatedRequestParams(cursor=cursor))
+                    )
+                    if MCP_V2
+                    else cast(Any, session).list_resources(cursor)
                 )
-                if MCP_V2
-                else cast(Any, session).list_resources(cursor)
             ),
         )
 
@@ -1791,14 +1797,16 @@ class _MCPServerWithClientSession(MCPServer, abc.ABC):
             "list resource templates",
             lambda: self._maybe_serialize_request(
                 lambda: (
-                    session.list_resource_templates()
-                    if cursor is None
-                    else session.list_resource_templates(
-                        params=PaginatedRequestParams(cursor=cursor)
+                    (
+                        session.list_resource_templates()
+                        if cursor is None
+                        else session.list_resource_templates(
+                            params=PaginatedRequestParams(cursor=cursor)
+                        )
                     )
+                    if MCP_V2
+                    else cast(Any, session).list_resource_templates(cursor)
                 )
-                if MCP_V2
-                else cast(Any, session).list_resource_templates(cursor)
             ),
         )
 

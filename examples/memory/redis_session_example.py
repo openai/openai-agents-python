@@ -26,7 +26,7 @@ async def main():
 
     print("=== Redis Session Example ===")
     redis_url = os.environ.get("REDIS_URL", DEFAULT_REDIS_URL)
-    print(f"This example uses Redis at {redis_url}")
+    print("This example uses Redis session memory.")
     print("Set REDIS_URL to use a different Redis server.")
     print()
 
@@ -145,23 +145,22 @@ async def main():
         # Close the main session
         await session.close()
 
-    except Exception as e:
-        print(f"Error: {e}")
-        print(f"Make sure Redis is running and reachable at {redis_url}")
+    except Exception:
+        # Connection exceptions can contain credentials from REDIS_URL.
+        print("Redis session example failed. Check the Redis configuration and connection.")
 
 
 async def demonstrate_advanced_features():
     """Demonstrate advanced Redis session features."""
     print("\n=== Advanced Features Demo ===")
 
-    # Custom key prefix for multi-tenancy
-    tenant_session = RedisSession.from_url(
-        "user_123",
-        url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
-        key_prefix="tenant_abc:sessions",  # Custom prefix for isolation
-    )
-
     try:
+        # Custom key prefix for multi-tenancy
+        tenant_session = RedisSession.from_url(
+            "user_123",
+            url=os.environ.get("REDIS_URL", DEFAULT_REDIS_URL),
+            key_prefix="tenant_abc:sessions",  # Custom prefix for isolation
+        )
         if await tenant_session.ping():
             print("Custom key prefix demo:")
             await Runner.run(
@@ -172,8 +171,13 @@ async def demonstrate_advanced_features():
             print("Session with custom key prefix created successfully")
 
         await tenant_session.close()
-    except Exception as e:
-        print(f"Advanced features error: {e}")
+        return
+    except Exception:
+        # Do not include backend exception text in captured example output.
+        print("Advanced Redis features failed. Check the Redis configuration and connection.")
+
+    # Exit outside the handler so the original exception is not retained as context.
+    raise SystemExit(1)
 
 
 if __name__ == "__main__":

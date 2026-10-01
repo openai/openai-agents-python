@@ -376,14 +376,15 @@ class TestOpenAIResponsesCompactionSession:
         mock.clear_session = AsyncMock()
         return mock
 
-    def test_init_validates_model(self) -> None:
+    @pytest.mark.parametrize("model", ["claude-3", "anthropic/claude-3"])
+    def test_init_validates_model(self, model: str) -> None:
         mock_session = self.create_mock_session()
 
         with pytest.raises(ValueError, match="Unsupported model"):
             OpenAIResponsesCompactionSession(
                 session_id="test",
                 underlying_session=mock_session,
-                model="claude-3",
+                model=model,
             )
 
     def test_init_accepts_valid_model(self) -> None:
@@ -759,7 +760,18 @@ class TestOpenAIResponsesCompactionSession:
         mock_client.responses.compact.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_run_compaction_input_mode_without_response_id(self) -> None:
+    @pytest.mark.parametrize(
+        "model",
+        [
+            "gpt-4.1",
+            "ft:gpt-4.1:my-org::id",
+            "openai/gpt-4.1",
+            "openai/openai/gpt-5.6-terra",
+            "openai/o3",
+            "openai/ft:gpt-4.1:org:proj:id",
+        ],
+    )
+    async def test_run_compaction_input_mode_without_response_id(self, model: str) -> None:
         mock_session = self.create_mock_session()
         items: list[TResponseInputItem] = [
             cast(TResponseInputItem, {"type": "message", "role": "user", "content": "hello"}),
@@ -786,6 +798,7 @@ class TestOpenAIResponsesCompactionSession:
             session_id="test",
             underlying_session=mock_session,
             client=mock_client,
+            model=model,
             compaction_mode="input",
         )
 
@@ -793,7 +806,7 @@ class TestOpenAIResponsesCompactionSession:
 
         mock_client.responses.compact.assert_called_once()
         call_kwargs = mock_client.responses.compact.call_args.kwargs
-        assert call_kwargs.get("model") == "gpt-4.1"
+        assert call_kwargs.get("model") == model
         assert "previous_response_id" not in call_kwargs
         assert call_kwargs.get("input") == items
 

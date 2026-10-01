@@ -401,7 +401,7 @@ async def test_bounded_provider_read_preserves_retry_policy(
     elif provider == "vercel":
         from vercel import sandbox as sdk
 
-        error_cls = sdk.SandboxRateLimitError if retryable else sdk.SandboxPermissionError
+        error_cls = sdk.SandboxApiError
         inner._ensure_sandbox.return_value.iter_file.side_effect = error_cls(
             httpx.Response(429 if retryable else 403), "synthetic-private-response"
         )
@@ -644,7 +644,7 @@ async def test_vercel_bounded_read_preserves_primary_failure_during_close(outcom
         async def __anext__(self) -> bytes:
             entered.set()
             if outcome == "failure":
-                raise sdk.SandboxPermissionError(httpx.Response(403), "synthetic-private-read")
+                raise sdk.SandboxApiError(httpx.Response(403), "synthetic-private-read")
             if outcome == "cancellation":
                 await asyncio.Event().wait()
             return b"fixture"
@@ -653,7 +653,7 @@ async def test_vercel_bounded_read_preserves_primary_failure_during_close(outcom
             nonlocal closed
             assert session.mount_active
             closed = True
-            raise sdk.SandboxRateLimitError(httpx.Response(429), "synthetic-private-close")
+            raise sdk.SandboxApiError(httpx.Response(429), "synthetic-private-close")
 
     session._ensure_sandbox.return_value.iter_file.return_value = Stream()
     task = asyncio.create_task(session.read_bounded(Path("out.jsonl"), max_bytes=5))

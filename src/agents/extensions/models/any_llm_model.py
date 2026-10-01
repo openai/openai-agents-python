@@ -423,9 +423,9 @@ class AnyLLMModel(Model):
             usage = (
                 Usage(
                     requests=1,
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    total_tokens=response.usage.total_tokens,
+                    input_tokens=response.usage.input_tokens or 0,
+                    output_tokens=response.usage.output_tokens or 0,
+                    total_tokens=response.usage.total_tokens or 0,
                     input_tokens_details=response.usage.input_tokens_details,
                     output_tokens_details=response.usage.output_tokens_details,
                 )
@@ -631,9 +631,9 @@ class AnyLLMModel(Model):
             usage = (
                 Usage(
                     requests=1,
-                    input_tokens=response.usage.prompt_tokens,
-                    output_tokens=response.usage.completion_tokens,
-                    total_tokens=response.usage.total_tokens,
+                    input_tokens=response.usage.prompt_tokens or 0,
+                    output_tokens=response.usage.completion_tokens or 0,
+                    total_tokens=response.usage.total_tokens or 0,
                     input_tokens_details=response.usage.prompt_tokens_details,  # type: ignore[arg-type]
                     output_tokens_details=response.usage.completion_tokens_details,  # type: ignore[arg-type]
                 )

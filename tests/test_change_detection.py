@@ -114,6 +114,9 @@ def _detect(
         (".github/workflows/docs.yml", True, True, False),
         (".github/workflows/publish.yml", True, False, False),
         (".github/workflows/repo-skills.yml", True, False, False),
+        (".github/workflows/release-please.yml", True, False, False),
+        ("release-please-config.json", True, False, False),
+        (".release-please-manifest.json", True, False, False),
         ("pyproject.toml", True, False, False),
         ("uv.lock", True, True, False),
         ("Makefile", True, False, False),
@@ -135,6 +138,8 @@ def _detect(
         ("README.md", False, False, False),
         ("AGENTS.md", False, False, False),
         (".github/RELEASING.md", False, False, False),
+        (".github/dependabot.yml", False, False, False),
+        (".github/workflows/codeql.yml", False, False, False),
     ],
 )
 def test_changed_paths_select_owning_checks(
@@ -446,3 +451,26 @@ def test_docs_publish_static_artifact_to_existing_branch(tmp_path: Path) -> None
     assert b"artifact metadata" not in (published / ".git" / "config").read_bytes()
     assert remote.as_posix().encode() in config
     assert _git(published, "remote", "get-url", "origin") == remote.as_posix()
+
+
+def test_packaged_contract_jobs_skip_before_requesting_runners() -> None:
+    jobs = yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text())["jobs"]
+    producer = jobs["prospective-release-contract"]
+    assert producer["outputs"]["run"] == "${{ steps.changes.outputs.run }}"
+    detector = next(step for step in producer["steps"] if step.get("id") == "changes")
+    assert detector["run"].startswith("./.github/scripts/detect-changes.sh code ")
+
+    for name in ("packaged-contract-310", "packaged-contract-314", "packaged-contract-windows"):
+        job = jobs[name]
+        assert job["needs"] == "prospective-release-contract"
+        # This must guard job scheduling, not just steps after a runner is allocated.
+        assert job["if"] == "needs.prospective-release-contract.outputs.run == 'true'"
+
+    # Required check contexts must still exist when the scheduler skips a job.
+    for suffix, version in (("310", "3.10"), ("314", "3.14")):
+        job = jobs[f"packaged-contract-{suffix}"]
+        assert job["name"] == f"packaged-contract ({version})"
+        assert "strategy" not in job
+        assert job["env"]["OPENAI_AGENTS_INTEGRATION_PYTHON"] == version
+        setup = next(step for step in job["steps"] if step.get("name") == "Setup uv")
+        assert setup["with"]["python-version"] == version

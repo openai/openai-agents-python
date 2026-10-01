@@ -1,10 +1,10 @@
 openai-agents
-httpx2>=2.13.0
-pyjwt>=2.14.0
+httpx2>=2.13.1
+pyjwt>=2.15.0
 python-multipart>=0.0.32
-urllib3>=2.7.0
+urllib3>=2.8.0
 fastapi
-starlette>=1.6.0
+starlette>=1.7.0
 uvicorn[standard]
 websockets
 python-dotenv>=1.2.3

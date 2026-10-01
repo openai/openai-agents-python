@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import logging
@@ -185,7 +186,7 @@ async def validate_historical_run_state_fixture(path: Path) -> list[str]:
     from agents.run_state import CURRENT_SCHEMA_VERSION
 
     errors: list[str] = []
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
     historical = deepcopy(payload)
     original_version = historical.get("$schemaVersion")
     agent = _restore_agent(historical)
@@ -291,7 +292,7 @@ async def validate_historical_resume_behavior(
         [ModelStep(output=turn, response_id="queued-fake-response") for turn in model_turns]
     )
     agent = Agent(name="compat-agent", model=model, tools=[tool])
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
     restored = await RunState.from_json(agent, payload)
     if feature == "pending_tool_approval":
         interruptions = restored.get_interruptions()
@@ -336,7 +337,7 @@ async def validate_legacy_credential_run_state_fixture(
     from agents.run_state import CURRENT_SCHEMA_VERSION
 
     errors: list[str] = []
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(await asyncio.to_thread(path.read_text, encoding="utf-8"))
     historical = deepcopy(payload)
     agent = _restore_agent(payload)
     restored = await RunState.from_json(agent, payload)

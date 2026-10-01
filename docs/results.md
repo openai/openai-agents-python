@@ -100,9 +100,7 @@ def raw_field(item, name):
 raw_type = raw_field(item, "type")
 caller = raw_field(item, "caller")
 caller_id = (
-    caller.get("caller_id")
-    if isinstance(caller, Mapping)
-    else getattr(caller, "caller_id", None)
+    caller.get("caller_id") if isinstance(caller, Mapping) else getattr(caller, "caller_id", None)
 )
 ```
 

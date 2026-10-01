@@ -6,13 +6,19 @@ import time
 import pytest
 from openai.types.responses import ResponseCompletedEvent
 
-from agents import Agent, Runner
+from agents import Agent, ComputerProvider, ComputerTool, GuardrailFunctionOutput, Runner
+from agents.decorators import tool
 from agents.guardrail import input_guardrail
 from agents.models.multi_provider import MultiProvider
+from agents.result import RunResultStreaming
+from agents.run_internal import run_loop
 from agents.stream_events import RawResponsesStreamEvent
 from agents.testing import ScriptedModel
 
+from .test_computer_tool_lifecycle import FakeComputer
 from .test_responses import get_function_tool, get_function_tool_call, get_text_message
+from .testing_processor import fetch_events
+from .utils.simple_session import SimpleListSession
 
 
 class SlowCompleteScriptedModel(ScriptedModel):
@@ -328,3 +334,267 @@ async def test_falsy_input_guardrail_exception_is_surfaced_after_stream() -> Non
     with pytest.raises(FalsyRuntimeError, match="falsy guardrail boom"):
         async for _ in result.stream_events():
             pass
+
+
+@pytest.mark.asyncio
+async def test_cancel_with_pending_parallel_input_guardrail_finishes_cleanup() -> None:
+    guardrail_started = asyncio.Event()
+    tool_started = asyncio.Event()
+    disposed: list[FakeComputer] = []
+
+    @input_guardrail
+    async def slow_guardrail(context, agent, input):
+        guardrail_started.set()
+        await asyncio.Event().wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @tool
+    async def slow_tool() -> str:
+        await guardrail_started.wait()
+        tool_started.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    def create_fake_computer(*, run_context) -> FakeComputer:
+        return FakeComputer()
+
+    computer_tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](
+            create=create_fake_computer,
+            dispose=lambda *, run_context, computer: disposed.append(computer),
+        )
+    )
+    agent = Agent(
+        name="A",
+        model=ScriptedModel([[get_function_tool_call("slow_tool", "{}", "call_1")]]),
+        tools=[slow_tool, computer_tool],
+        input_guardrails=[slow_guardrail],
+    )
+    result = Runner.run_streamed(agent, input="hi")
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(tool_started.wait(), timeout=2)
+        result.cancel()
+        await asyncio.wait_for(consumer, timeout=2)
+        assert len(disposed) == 1
+        events = fetch_events()
+        assert events.count("trace_start") == events.count("trace_end") == 1
+        assert events.count("span_start") == events.count("span_end")
+    finally:
+        result.cancel()
+        assert result.run_loop_task is not None
+        await asyncio.gather(consumer, result.run_loop_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wait_target", ["guardrail", "run_loop"])
+async def test_consumer_cancellation_at_terminal_wait_propagates(
+    monkeypatch: pytest.MonkeyPatch, wait_target: str
+) -> None:
+    wait_started = asyncio.Event()
+    guardrail_started = asyncio.Event()
+    disposal_started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+
+    @input_guardrail
+    async def slow_guardrail(context, agent, input):
+        guardrail_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            child_cancelled.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def dispose(**kwargs) -> None:
+        disposal_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            child_cancelled.set()
+
+    def create_fake_computer(*, run_context) -> FakeComputer:
+        return FakeComputer()
+
+    computer_tool = ComputerTool(
+        computer=ComputerProvider[FakeComputer](create=create_fake_computer, dispose=dispose)
+    )
+    result = Runner.run_streamed(
+        Agent(
+            name="A",
+            model=ScriptedModel([[get_text_message("done")]]),
+            input_guardrails=[slow_guardrail] if wait_target == "guardrail" else [],
+            tools=[computer_tool] if wait_target == "run_loop" else [],
+        ),
+        input="hi",
+    )
+    original_wait = RunResultStreaming._await_task_safely
+
+    async def observe_wait(self, task) -> None:
+        target = self._input_guardrails_task if wait_target == "guardrail" else self.run_loop_task
+        if self is result and task is target and task is not None and not task.done():
+            wait_started.set()
+        await original_wait(self, task)
+
+    # Observe entry to the terminal wait without changing its behavior. Public events do not
+    # expose this boundary, and the consumer must already be suspended here before cancellation.
+    monkeypatch.setattr(RunResultStreaming, "_await_task_safely", observe_wait)
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        child_started = guardrail_started if wait_target == "guardrail" else disposal_started
+        await asyncio.wait_for(child_started.wait(), timeout=2)
+        await asyncio.wait_for(wait_started.wait(), timeout=2)
+        assert result.final_output == "done"
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer, timeout=2)
+        await asyncio.wait_for(child_cancelled.wait(), timeout=2)
+        if wait_target == "guardrail":
+            events = fetch_events()
+            assert events.count("trace_start") == events.count("trace_end") == 1
+            assert events.count("span_start") == events.count("span_end")
+    finally:
+        result.cancel()
+        assert result.run_loop_task is not None
+        await asyncio.gather(consumer, result.run_loop_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_pending_guardrail_cancellation_does_not_accept_or_persist_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verdict_wait_started = asyncio.Event()
+    dependency = asyncio.create_task(asyncio.Event().wait())
+    session = SimpleListSession()
+    original_verdict = run_loop.input_guardrail_tripwire_triggered_for_stream
+
+    @input_guardrail
+    async def guardrail(context, agent, input):
+        await dependency
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    async def observe_verdict(result, **kwargs):
+        verdict_wait_started.set()
+        return await original_verdict(result, **kwargs)
+
+    monkeypatch.setattr(run_loop, "input_guardrail_tripwire_triggered_for_stream", observe_verdict)
+    result = Runner.run_streamed(
+        Agent(
+            name="A",
+            model=ScriptedModel([[get_text_message("done")]]),
+            input_guardrails=[guardrail],
+        ),
+        "hi",
+        session=session,
+    )
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(verdict_wait_started.wait(), timeout=2)
+        dependency.cancel()
+        await asyncio.wait_for(consumer, timeout=2)
+        assert result.final_output is None
+        assert await session.get_items() == [{"content": "hi", "role": "user"}]
+        assert result.run_loop_task is not None
+        assert result.run_loop_task.cancelled()
+        events = fetch_events()
+        assert events.count("trace_start") == events.count("trace_end") == 1
+        assert events.count("span_start") == events.count("span_end")
+    finally:
+        dependency.cancel()
+        result.cancel()
+        assert result.run_loop_task is not None
+        await asyncio.gather(dependency, consumer, result.run_loop_task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_terminal_consumer_cancellation_waits_for_registered_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    wait_started = asyncio.Event()
+    model_cleanup_started = asyncio.Event()
+    provider_cleanup_started = asyncio.Event()
+    cleanup_wait_started = asyncio.Event()
+    cleanup_release = asyncio.Event()
+    completed: list[str] = []
+
+    class CleanupModel(ScriptedModel):
+        async def _cleanup_on_run_end(self, owner) -> None:
+            model_cleanup_started.set()
+            await asyncio.Event().wait()
+
+    async def close_provider(provider: MultiProvider) -> None:
+        provider_cleanup_started.set()
+        await cleanup_release.wait()
+        completed.append("provider")
+
+    async def cleanup_sandbox() -> None:
+        await cleanup_release.wait()
+        completed.append("sandbox")
+
+    monkeypatch.setattr(MultiProvider, "aclose", close_provider)
+    result = Runner.run_streamed(
+        Agent(name="A", model=CleanupModel([[get_text_message("done")]])), "hi"
+    )
+    await asyncio.wait_for(model_cleanup_started.wait(), timeout=2)
+    # Register the same cleanup wrapper used by SandboxRuntime without a provider backend.
+    result._sandbox_cleanup = cleanup_sandbox
+    result.ensure_sandbox_cleanup_on_completion()
+    original_wait = RunResultStreaming._await_task_safely
+    original_provider_wait = RunResultStreaming._await_model_provider_cleanup
+
+    async def observe_wait(self, task) -> None:
+        if self is result and task is self.run_loop_task:
+            wait_started.set()
+        await original_wait(self, task)
+
+    monkeypatch.setattr(RunResultStreaming, "_await_task_safely", observe_wait)
+
+    async def observe_provider_wait(self) -> None:
+        if self is result:
+            cleanup_wait_started.set()
+        await original_provider_wait(self)
+
+    monkeypatch.setattr(RunResultStreaming, "_await_model_provider_cleanup", observe_provider_wait)
+
+    async def consume() -> None:
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    cleanup_waiter = asyncio.create_task(cleanup_wait_started.wait())
+    try:
+        await asyncio.wait_for(wait_started.wait(), timeout=2)
+        consumer.cancel()
+        await asyncio.wait_for(provider_cleanup_started.wait(), timeout=2)
+        # The consumer must await registered cleanup rather than return while callbacks run.
+        await asyncio.wait_for(
+            asyncio.wait((consumer, cleanup_waiter), return_when=asyncio.FIRST_COMPLETED), timeout=2
+        )
+        assert cleanup_wait_started.is_set()
+        assert not consumer.done()
+        cleanup_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(consumer, timeout=2)
+        assert sorted(completed) == ["provider", "sandbox"]
+    finally:
+        cleanup_release.set()
+        cleanup_waiter.cancel()
+        result.cancel()
+        assert result.run_loop_task is not None
+        await asyncio.gather(consumer, cleanup_waiter, result.run_loop_task, return_exceptions=True)
+        await result._await_model_provider_cleanup()
+        await result._run_sandbox_cleanup()

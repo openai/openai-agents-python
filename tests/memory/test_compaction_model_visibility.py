@@ -561,6 +561,63 @@ async def test_automatic_compaction_preserves_reordered_history(
     assert await session.get_items() == []
 
 
+@pytest.mark.parametrize("outer", [False, True])
+async def test_manual_compaction_refreshes_expired_encrypted_history(
+    outer: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pytest.importorskip("cryptography")
+    from agents.extensions.memory.encrypt_session import EncryptedSession
+
+    clock = [1000]
+    monkeypatch.setattr("cryptography.fernet.time.time", lambda: clock[0])
+    backend = SQLiteSession("manual-expiry")
+    client = MagicMock()
+    # Echo the request so stale input would also be written back with a fresh TTL.
+    client.responses.compact = AsyncMock(
+        side_effect=lambda **kwargs: SimpleNamespace(output=kwargs["input"])
+    )
+    session: SessionABC
+    if outer:
+        session = EncryptedSession(
+            "manual-expiry",
+            OpenAIResponsesCompactionSession(
+                "manual-expiry",
+                backend,
+                client=client,
+                compaction_mode="input",
+                should_trigger_compaction=lambda _: False,
+            ),
+            encryption_key="synthetic-test-key",
+            ttl=10,
+        )
+    else:
+        session = OpenAIResponsesCompactionSession(
+            "manual-expiry",
+            EncryptedSession("manual-expiry", backend, encryption_key="synthetic-test-key", ttl=10),
+            client=client,
+            compaction_mode="input",
+            should_trigger_compaction=lambda _: False,
+        )
+    try:
+        await session.add_items([{"role": "assistant", "content": "synthetic expired item"}])
+        await session.run_compaction()  # A declined policy check can populate the cache.
+        client.responses.compact.assert_not_awaited()
+
+        clock[0] += 11
+        assert await session.get_items() == []
+        await session.run_compaction({"force": True})
+        client.responses.compact.assert_awaited_once_with(model="gpt-4.1", input=[])
+        assert await session.get_items() == []
+
+        live: TResponseInputItem = {"role": "user", "content": "synthetic live item"}
+        await session.add_items([live])
+        await session.run_compaction({"force": True})
+        assert client.responses.compact.call_args.kwargs["input"] == [live]
+        assert await session.get_items() == [live]
+    finally:
+        backend.close()
+
+
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("outer", [False, True])
 @pytest.mark.parametrize("limited_default", [False, True])
