@@ -7,6 +7,9 @@ description: Prepare a local Python SDK release candidate in a dedicated worktre
 
 Use this skill only when the user explicitly invokes `$release-candidate-prep` and supplies a release version without a leading `v`, for example `VERSION=0.20.1`. This skill is the manual fallback for the GitHub Actions release workflow. Ordinary bot releases use `.github/workflows/release-candidate.yml`; do not invoke this local worktree procedure inside Actions.
 
+For normal Release Please releases, use `$final-release-review <release PR URL>` instead.
+Do not create a manual candidate to review or finish the bot PR.
+
 ## Non-negotiable boundaries
 
 - Treat explicit invocation as authorization to fetch `origin/main`, create one dedicated detached release worktree, run branch-free release-readiness gates there, create or replace the local `release/v<version>` in that worktree only after those gates pass, update the five release-owned files, and create one local commit. If the branch already exists locally or remotely, the required final local state is still exact current `origin/main` plus only the new release commit; an existing local branch may be replaced only when it is not checked out in another worktree.

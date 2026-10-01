@@ -16,8 +16,6 @@ jobs:
     permissions:
       contents: read
       pull-requests: read
-      checks: read
-      actions: read
     runs-on: ubuntu-latest
 
     steps:
@@ -47,7 +45,7 @@ jobs:
         run: >-
           python -I control/.github/scripts/verify_release.py
           --repo release-source --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"
-      - name: Verify automated candidate review
+      - name: Verify human-reviewed release candidate
         if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -134,8 +132,6 @@ jobs:
       id-token: write
       contents: read
       pull-requests: read
-      checks: read
-      actions: read
     runs-on: ubuntu-latest
     steps:
       - name: Download distributions
@@ -152,7 +148,7 @@ jobs:
           path: control
           persist-credentials: false
           sparse-checkout: .github/scripts
-      - name: Revalidate human approval after deployment wait
+      - name: Revalidate human approval before upload
         if: vars.RELEASE_AUTOMATION_ENABLED == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -168,8 +164,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: read
-      checks: read
-      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:

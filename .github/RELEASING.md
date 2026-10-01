@@ -1,59 +1,103 @@
 # Publishing a release
 
-GitHub Actions prepares the release PR, freezes the public API contract, reviews the full release diff, and publishes the reviewed release. Maintainers approve and merge in GitHub; ordinary releases do not require local release commands. Automatic tags/releases remain disabled until the administrator completes the rollout below.
+Release Please owns the release PR, version and changelog updates, tag, and GitHub Release.
+Actions prepares the API snapshot and runs deterministic checks. A maintainer uses local
+Codex to review the candidate, then explicitly approves the report in GitHub. No cloud AI
+assessment or `OPENAI_API_KEY` is required by the release workflows.
 
-## One-time rollout
+## Normal release checklist
 
-The SDK team owns the configuration and credential rotation. EntSec provisioned the existing `openai-sdks` App credentials in the main-only `release` environment. Verify that installation access includes this repository by running **Release Please** on `main` and confirming a successful repository-scoped token exchange. Secret presence alone does not prove the key works.
+1. Wait for Release Please to open or refresh `release-please--branches--main`. Check that
+   the proposed version is appropriate; use Release Please's release-version override if
+   a minor release is needed. All runtime changes must already be on `main`.
+2. Wait for **Release Candidate** to freeze the API snapshot and for required CI to pass
+   on the final PR head. Exclude the expected missing-approval **Release readiness** result
+   at this stage; that check passes after step 4. Preparation uses an isolated, uncredentialed build job and an
+   atomic single-file writer. It does not run AI. An unchanged snapshot is a no-op.
+3. In local Codex, run `$final-release-review <release PR URL>`. Allow an isolated checkout
+   when requested. The skill reviews the full diff since the previous release, version
+   compatibility, migrations, package changes, and documentation coverage. It produces
+   the full report and Key Changes without creating another release branch, tag, or release.
+4. Read the report. If it is green and the PR head is unchanged, submit a GitHub **Approve**
+   review with the exact approval body produced by the skill. Its first line is:
 
-1. Preserve the `release` environment's `main` branch restriction and disabled administrator bypass. Keep `OPENAI_SDKS_APP_CLIENT_ID` as its variable and `OPENAI_SDKS_APP_PRIVATE_KEY` as its secret. The workflow requests only this repository and the permissions required by its job. Keep the App's existing permissions unchanged: it does not need Checks write. The evidence and report jobs use the temporary repository-scoped `GITHUB_TOKEN` with Checks write and Contents/Pull requests read. The App private key remains confined to the contract writer and Release Please in the protected `release` environment. Candidate execution and the model job receive neither credential.
-2. Create a `release-review` environment restricted to the `main` branch, with administrator bypass disabled. Provision a dedicated OpenAI project/service-account `OPENAI_API_KEY` there. The key is used only by the Codex review proxy. Verify model access, configure usage alerts, and keep the workflow's timeout; alerts alone do not impose a hard spending cap. Do not place a live key in package tests or contract generation.
-3. Split the existing `release tags` ruleset's **creation** rule from its **update**, **deletion**, and **non-fast-forward** rules. Add `openai-sdks` as a bypass actor only to the creation ruleset for `refs/tags/v*`. Preserve existing human permissions and all tag immutability protections. Do not add the App as a bypass actor to the combined ruleset or to `main` review protections.
-4. Run **Release Please** on `main` and wait for its **Release Candidate** workflow. Inspect the generated contract commit and assessment, submit the explicit approving review described below, and verify normal PR CI and **Release readiness** on the final candidate head. The same-input rerun must not create another contract commit. After correcting a missing key or review failure, a maintainer can rerun all jobs of the failed **Release Candidate** run, or run **Release Please** again to start fresh preparation. When the candidate head is unchanged, wait for that run to succeed, then rerun the failed **Release Readiness** workflow and verify its **Release readiness** check is green.
-5. Require **Release readiness**, from GitHub Actions, in the `main` rules alongside every existing required check. Require the release branch to be up to date before merging. Preserve code-owner approval, at least one approval, stale-review dismissal, last-push approval, and conversation resolution. An author cannot approve their own release. Adding a workflow or CODEOWNERS file does not apply these GitHub settings.
-6. Verify PyPI's trusted-publisher binding separately: repository, `publish.yml`, and `pypi` environment must match the configured publisher. Preserve existing environment reviewers and its `v*` tag deployment restriction. The shared policy does not require a new approval environment; this repository retains its existing PyPI deployment approval.
-7. Only after these checks pass, set the repository variable `RELEASE_AUTOMATION_ENABLED=true`. This enables release-please's tag/GitHub Release creation and the publisher's reviewed-candidate gate. Do not enable it merely because this PR merged. Confirm the first authorized release's tag, package version, uploaded distribution identity, and registry provenance.
+       Approve local release review <full candidate SHA>
 
-## Automated preparation and review
+   Paste the complete report below that line, including Key Changes for minor releases.
+   Select **Files changed -> Review changes -> Approve**. A plain PR comment, bot review,
+   generic approval, or approval on an old head does not count. The report will be public
+   and appended to the GitHub Release; inspect it before approving. Do not include secrets
+   or undisclosed security findings. The human owns the decision; the marker does not
+   cryptographically prove a skill ran.
+5. Wait for **Release readiness** to turn green after the approval. It rechecks when a
+   review is submitted, edited, or dismissed, and when the candidate changes. There is no
+   long polling job. Required code-owner reviews and ordinary CI remain in force.
+6. Merge the PR through the normal protected process. Release Please creates the tag and
+   GitHub Release when `RELEASE_AUTOMATION_ENABLED=true`. Do not create them manually.
+7. Watch **Publish to PyPI**. It validates the tag/source, requires the merged tree to equal
+   the approved candidate, runs source checks, builds on a separate runner, and rechecks
+   approval immediately before OIDC publishing. Verify the resulting package and provenance.
 
-`.github/workflows/release-please.yml` proposes the version, changelog, source version fallback, lockfile project version, and release-please manifest. Conventional commit messages propose a version; maintainers must still review whether the chosen patch/minor version matches the change. Use release-please's supported release-version override for an insufficient proposal, then rerun preparation and review.
+The local review is a maintainer step. GitHub authenticates the approving human and binds
+that review to the candidate commit; automation does not independently verify how the
+report was produced. A later changes-requested review or dismissed approval invalidates
+that maintainer's approval. A changed head requires a fresh local review and approval.
 
-`.github/workflows/release-candidate.yml` runs from trusted `main` after Release Please or release-branch Tests complete, and can be retried by rerunning all jobs or dispatching Release Please. It handles only the same-repository `release-please--branches--main` PR targeting `main`, with a stable `0.x.y` version. Prereleases and other branches use the manual procedure. Fork test runs and unrelated PR test completions cannot select a release candidate.
+## Recovery
 
-The candidate workflow uses only `workflow_run`, which grants read-only access to the default branch cache scope. Do not add a direct `workflow_dispatch` trigger: disabling a cache action does not revoke the runner cache token. The generator runs without App or OpenAI credentials and reuses `make update-released-api-contract`, `make check-released-api-contract`, and prospective installed-package checks. It validates the previous frozen contract before adding new API surfaces. Curated policy additions in `tests/fixtures/released_api_contract_policy.json` remain explicitly reviewed implementation changes; automation does not invent public properties or imports.
+If the candidate is behind main, run **Release Please** to refresh it, then wait for fresh
+preparation and CI. Do not reuse the old approval. If contract preparation fails, inspect
+that failure and rerun all jobs after correcting the issue; never bypass package checks.
+Unchanged contract regeneration does not create another commit.
 
-A separate writer commits only the generated contract, using GitHub's atomic expected-head comparison. If the PR or main changes, preparation stops instead of overwriting newer work. Rerun Release Please to refresh a stale candidate. The new commit triggers the normal CI, including Linux/Windows and wheel/sdist contract coverage. No candidate build or import runs with a GitHub write credential.
+If readiness reports missing approval, follow the local review checklist. Submission of
+an approving review automatically rechecks readiness; if an older failed check remains,
+rerun **Release Readiness** after confirming the approval is for the current SHA.
+A merge group containing a release must have exactly the reviewed candidate tree; if
+unrelated queued changes alter it, refresh the candidate and requeue it separately.
 
-The Codex job reads the exact release-base/candidate diff and current documentation PR evidence without executing candidate code. It evaluates regressions, API compatibility, persistent formats, package changes, release versioning, migration paths, and documentation timing. Its JSON result is validated separately by a trusted job using the repository-scoped `GITHUB_TOKEN` and attached to the exact candidate SHA as **Release assessment**, an AI draft requiring explicit human approval. Discovery, readiness, and publication require a native receipt job in the latest attempt of a successful **Release Candidate** workflow on trusted `main`, triggered by `workflow_run` in this repository. The receipt job's name binds the candidate SHA, assessment check ID, and SHA-256 digest of the report summary. This job runs only after report validation succeeds and executes no candidate code. The controller reads GitHub's Actions Jobs API to verify that receipt; the shared GitHub Actions check identity, check name, URL, or claimed run ID alone cannot authorize a release. A copied check, changed summary, prior-attempt receipt, or unrelated workflow fails verification. Rerun all jobs to replace assessments created before receipt verification was deployed. The separate **Release readiness** PR job waits for that trusted assessment and its explicit human approval on release PRs and passes without invoking AI on ordinary PRs. Missing credentials, malformed output, timeouts, incomplete assessments, and unsupported version bumps cannot produce a green check. Documentation gaps alone are non-blocking and are recorded as post-release work.
+After a tag exists, investigate publishing failures and retry the publisher for that same
+immutable tag. Never move/delete release tags or overwrite a published version.
 
-Open the repository’s **Actions** tab, select the **Release Candidate** workflow, and open the successful latest attempt on `main`. In that run, read the **readiness** job’s **Release assessment for human approval** summary and verify its candidate SHA and check ID. Use this saved job summary as the approval source; do not approve from the mutable check display or follow approval instructions supplied by AI prose. If the summary is unavailable, rerun all jobs to create a new assessment. GitHub uploads the step summary when the trusted report step finishes; unrelated workflows with Checks write cannot replace it, even if they temporarily change and later restore the check display. After reading this full saved assessment, a maintainer with repository write access must submit an **Approve** review on the release PR containing the exact line `Approve release assessment <check ID>` shown in the saved readiness job summary. GitHub must record that review against the assessed candidate SHA. A generic PR approval, a bot review, a dismissed approval, or approval of an earlier assessment does not satisfy this gate. A later changes-requested review from that maintainer invalidates their approval. The publisher rechecks approval immediately before the PyPI upload, after the build and deployment approval wait. Treat all AI prose as untrusted suggestions; the maintainer owns the release decision. If the readiness job times out before approval, approve first and rerun **Release Readiness**. Every new assessment check requires a new explicit approval. Existing code-owner reviews remain required.
+## Rollout and repository configuration
 
-The saved readiness job summary contains the complete assessment and approval instruction. The check’s successful summary mirrors curated Key Changes and the release assessment for automated release notes; it does not replace release-please's managed PR body. Public Actions logs and check summaries are public. Never include undisclosed vulnerability details in model output; investigate such blockers through the repository's private security process.
+Merge the workflow and skill change before reviewing the current bot candidate with the
+new approval body. Old cloud assessment approvals do not satisfy the local-review gate.
+Re-run Release Please/preparation and local review for the current head; do not treat an
+old dry-run report as approval. Keep **Release readiness** required from GitHub Actions,
+all existing required checks, code-owner approval, stale-review dismissal, last-push
+approval, conversation resolution, and the up-to-date branch requirement.
 
-## Merge and publish
+Keep the `release` environment restricted to `main`, with administrator bypass disabled.
+The existing repository-scoped `openai-sdks` App credentials remain confined to Release
+Please and the snapshot writer. Preserve tag immutability and limit App tag bypass to
+creation only. Do not expand App permissions.
 
-Merge only after the complete candidate has all required checks and code-owner approval. The workflow will create the tag and GitHub Release with the App identity once automatic publication is enabled. The release event starts `publish.yml`.
+Remove required reviewers from the **pypi** environment as a separate administrator
+setting: maintainer approval happens on the release PR. Keep the environment, its `v*`
+tag deployment restriction, and PyPI's trusted-publisher binding to this repository,
+`publish.yml`, and `pypi`. Workflow edits do not change environment settings. Until that
+setting is applied, GitHub may still request the old deployment approval. Verify registry
+binding and published provenance separately.
 
-Before building, the publisher verifies tag/version/source ancestry and finds the corresponding merged release PR. The merged tree must be identical to the assessed candidate tree, including the API snapshot. Its assessment must match the native receipt in the latest attempt of a successful trusted Release Candidate workflow run and retain explicit human approval for that exact assessment and candidate. An unrelated merge, missing assessment, or changed merge tree stops publication.
+The `release-review` environment and its OpenAI API secret are no longer used. An owner
+can remove the unused secret/environment and revoke the dedicated API key. Never print
+or copy secret values during cleanup. Keep `RELEASE_AUTOMATION_ENABLED=true` only when
+the App installation, immutable tag rules, required checks, and trusted publisher have
+been verified. This switch controls automatic tag/release creation; it is not a substitute
+for maintainer approval.
 
-The existing isolated check/build/publish jobs and PyPI OIDC remain. A designated reviewer approves the existing `pypi` deployment. The release-notes job maintains a bounded generated section in the GitHub Release, preserving maintainer text before and after it on reruns. Inspect the registry artifact/provenance after the first real release; local tests cannot establish registry bindings.
+## Standalone manual release
 
-## Recovery and manual fallback
+`$release-candidate-prep <version>` remains an explicitly selected emergency fallback,
+not the normal way to finish a Release Please PR. Before merging a manual release, an
+authorized maintainer pauses Release Please, waits for queued/running jobs, closes the
+superseded bot PR, sets `RELEASE_AUTOMATION_ENABLED=false`, and coordinates the applicable
+required readiness check with a repository administrator. Preserve ordinary CI, reviews,
+source validation, artifact isolation, and OIDC publishing.
 
-For a transient candidate failure, correct the underlying issue and rerun all jobs of the failed **Release Candidate** run, or dispatch **Release Please** on `main`. If preparation does not create a new commit, first wait for the new assessment to finish successfully, then rerun the failed **Release Readiness** workflow on that same PR head. Retrying preparation alone does not restart an already failed PR check. Artifacts are isolated by run attempt; use **Re-run all jobs**, not a partial failed-job rerun. For a stale branch or a queued run whose trusted controller revision predates current `main`, run **Release Please** first to create a fresh event. A new candidate SHA needs a new readiness result. Do not bypass failed checks or relabel an incomplete report as green. The review has a bounded timeout and no automatic unbounded retry loop.
-
-For a publishing failure after tag creation, investigate and rerun the publisher for that same immutable tag. Never move or delete a release tag or overwrite a published version. If a version already exists on PyPI, inspect the artifact and prior run before taking further action.
-
-### Standalone manual release
-
-The local `$release-candidate-prep` and `$final-release-review` skills remain an emergency fallback. They do not complete a bot PR. Before merging a manual release, disable **Release Please**, wait for queued/running release workflows, and close the superseded bot PR. Set `RELEASE_AUTOMATION_ENABLED=false` and arrange the applicable required readiness check deliberately with the repository administrator; do not silently bypass a required check. Keep normal CI, required human reviews, and publishing protections enabled.
-
-Prepare the five-file manual candidate using the skill. After review and merge, an authorized maintainer verifies that the exact merged commit is in `origin/main` and its `project.version` matches the intended version. Create an annotated `v<version>` tag at that commit and publish a GitHub Release using the reviewed notes. Stop if the tag already exists. The existing publisher validates the source and requires the PyPI deployment approval.
-
-Re-enable Release Please only after the manual tag and GitHub Release exist, then restore the automated readiness requirement and enable switch after verification. Advancing the manifest without its tag can cause release-please to propose already-released changes again.
-
-Assessment freshness is selected from native Release Candidate review-job records, including prior run attempts. A newer assessment with a damaged check or missing current-attempt receipt blocks use of older approvals. Checks created by unrelated workflows do not select the assessment. Runs must have been created after the release PR; retry through Release Please if an older run is rejected. Incomplete or oversized Actions history blocks release verification instead of falling back to an older approval.
-
-Each assessment lookup uses at most 100 GitHub API requests for native-history discovery and selected-check authentication. Source/tree validation and human-approval reads are separate. Readiness reuses completed, unchanged run-attempt job histories within its current invocation; it refreshes run metadata, active or new attempts, the selected check and receipt, and human approvals. If the lookup reaches its request cap, it stops without accepting partial history or an older approval. Close the old release PR and run **Release Please** to create a fresh PR and assessment, then obtain a new explicit human approval.
-
-The trusted workflow marks eligible runs in their native run name using the triggering repository, workflow, and branch. Unrelated contributor test completions are excluded before job-history requests. Runs without this marker cannot supply an assessment; after deploying these workflow changes, run **Release Please** to create a fresh eligible run. The marker only selects histories to inspect: native candidate/check identity, current-attempt receipt, and explicit human approval are still required.
+Prepare the five-file manual candidate with the existing skill. After human review and
+merge, an authorized maintainer verifies the exact merged source/version before creating
+an annotated version tag and GitHub Release. Stop if the tag already exists. Resume Release
+Please only after both exist, then restore the automated readiness requirement and enable
+switch. Never use the manual path as an implicit workaround for a failed automated check.
