@@ -415,9 +415,10 @@ async def _save_resumed_stream_items(
         run_state=run_state,
         session=session,
         items=items,
-        # An exit that saves nothing is not settling; the batch keeps riding (a
-        # re-park) or is discarded explicitly at the exit that owns that decision.
-        claim_held=bool(items),
+        # This callback saves a completed resumed turn. A retry can finalize from
+        # checkpointed tool outputs without producing new items, so it must still
+        # settle any held history after the persistence and guardrail gates permit it.
+        claim_held=True,
         handoff_input_filtered=handoff_input_filtered,
         filtered_context_items=filtered_context_items,
         persisted_count=streamed_result._current_turn_persisted_item_count,

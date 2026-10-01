@@ -10,6 +10,7 @@ from agents import (
     Agent,
     HostedMCPTool,
     RunState,
+    StopAtTools,
     ToolsToFinalOutputResult,
     function_tool,
 )
@@ -276,6 +277,7 @@ async def test_a_post_output_callback_failure_keeps_the_executed_output(streamed
     # call and its result vanish from history.
     session = SimpleListSession()
     agent = _make_failing_extractor_agent()
+    agent.tool_use_behavior = StopAtTools(stop_at_tool_names=["write_thing"])
     state = await _parked_and_approved(agent, session, streamed=streamed)
 
     with pytest.raises(Exception, match="extractor boom"):
@@ -284,6 +286,16 @@ async def test_a_post_output_callback_failure_keeps_the_executed_output(streamed
     pending = state._pending_session_write
     assert pending is not None
     assert _parked_pair(pending["items"]) == _EXPECTED_PAIR
+
+    restored = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    agent.output_guardrails = []
+    # The completed tool now supplies the final output without producing new items.
+    # Its failing extractor would raise again if the retry executed the tool again.
+    result = await _run(agent, restored, session, streamed=streamed)
+    assert result.final_output == "wrote:x"
+    assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
+    completed = await RunState.from_json(agent, result.to_state().to_json())
+    assert completed._pending_session_write is None
 
 
 @pytest.mark.parametrize("streamed", [False, True])
