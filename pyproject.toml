@@ -49,7 +49,7 @@ any-llm = [
     "pygments>=2.20.0; python_version >= '3.11'",
 ]
 realtime = ["websockets>=15.0, <17"]
-sqlalchemy = ["SQLAlchemy>=2.0", "asyncpg>=0.29.0"]
+sqlalchemy = ["SQLAlchemy[asyncio]>=2.0", "asyncpg>=0.29.0"]
 encrypt = ["cryptography>=45.0,<51"]
 redis = ["redis>=7"]
 dapr = [
