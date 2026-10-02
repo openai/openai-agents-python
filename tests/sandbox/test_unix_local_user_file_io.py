@@ -10,6 +10,7 @@ import stat
 import subprocess
 import sys
 import threading
+from collections.abc import AsyncIterator
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
 import pytest
+import pytest_asyncio
 
 from agents.sandbox.errors import (
     ExecNonZeroError,
@@ -33,8 +35,11 @@ if TYPE_CHECKING or sys.platform != "win32":
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="Unix only")
 
 
-@pytest.fixture
-def session(monkeypatch: pytest.MonkeyPatch) -> unix_local.UnixLocalSandboxSession:
+@pytest_asyncio.fixture(loop_scope="function")
+async def session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> AsyncIterator[unix_local.UnixLocalSandboxSession]:
+    # Install OS mocks only after the test's event loop has been initialized.
     # Paths are synthetic; permission and lookup outcomes are supplied at the OS boundary.
     monkeypatch.setattr(Path, "resolve", lambda self, **kwargs: self)
     for name in ("open", "close", "mkdir", "unlink", "rmdir", "scandir", "fdopen"):
@@ -45,11 +50,15 @@ def session(monkeypatch: pytest.MonkeyPatch) -> unix_local.UnixLocalSandboxSessi
         subprocess, "run", Mock(side_effect=AssertionError("Unexpected subprocess"))
     )
     monkeypatch.setattr(unix_local.shutil, "which", lambda command: "/usr/bin/sudo")
-    return unix_local.UnixLocalSandboxSession(
-        state=unix_local.UnixLocalSandboxSessionState(
-            manifest=Manifest(root="/workspace"), snapshot=NoopSnapshot(id="mock-user-files")
+    try:
+        yield unix_local.UnixLocalSandboxSession(
+            state=unix_local.UnixLocalSandboxSessionState(
+                manifest=Manifest(root="/workspace"), snapshot=NoopSnapshot(id="mock-user-files")
+            )
         )
-    )
+    finally:
+        # Restore fixture and test patches before asyncio tears down the event loop.
+        monkeypatch.undo()
 
 
 def _worker(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:

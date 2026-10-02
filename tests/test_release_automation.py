@@ -489,11 +489,7 @@ def test_workflows_keep_preparation_isolated_and_remove_cloud_review() -> None:
     readiness = yaml.load(
         (ROOT / ".github/workflows/release-readiness.yml").read_text(), Loader=yaml.BaseLoader
     )
-    assert set(readiness["on"]["pull_request_review"]["types"]) == {
-        "submitted",
-        "edited",
-        "dismissed",
-    }
+    assert set(readiness["on"]) == {"pull_request", "merge_group"}
     assert readiness["jobs"]["readiness"]["timeout-minutes"] == "5"
     publish = yaml.load(
         (ROOT / ".github/workflows/publish.yml").read_text(), Loader=yaml.BaseLoader
@@ -501,3 +497,139 @@ def test_workflows_keep_preparation_isolated_and_remove_cloud_review() -> None:
     upload_steps = publish["jobs"]["publish"]["steps"]
     assert "verify-publication" in upload_steps[-2]["run"]
     assert "pypa/gh-action-pypi-publish@" in upload_steps[-1]["uses"]
+
+
+def test_review_refresh_cannot_cancel_or_replace_the_required_check() -> None:
+    workflows = [
+        yaml.load((ROOT / f".github/workflows/{name}.yml").read_text(), Loader=yaml.BaseLoader)
+        for name in ("release-readiness", "release-readiness-refresh")
+    ]
+    readiness, refresh = workflows
+    assert set(readiness["on"]) == {"pull_request", "merge_group"}
+    assert set(refresh["on"]) == {"pull_request_review"}
+    assert refresh["on"]["pull_request_review"]["types"] == ["submitted", "edited", "dismissed"]
+    assert refresh["concurrency"]["group"] != readiness["concurrency"]["group"]
+    assert refresh["concurrency"]["cancel-in-progress"] == "false"
+    assert refresh["permissions"] == {}
+    job = refresh["jobs"]["refresh"]
+    assert job["name"] != readiness["jobs"]["readiness"]["name"] == "Release readiness"
+    assert job["permissions"] == {"contents": "read", "pull-requests": "read", "actions": "write"}
+    assert readiness["jobs"]["readiness"]["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+    }
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in job["if"]
+    assert "github.event.pull_request.base.ref == 'main'" in job["if"]
+    checkout, command = job["steps"]
+    assert checkout["with"] == {
+        "ref": "refs/heads/main",
+        "persist-credentials": "false",
+        "sparse-checkout": ".github/scripts",
+    }
+    assert checkout["uses"] == readiness["jobs"]["readiness"]["steps"][0]["uses"]
+    assert command["run"] == "python -I .github/scripts/release_automation.py refresh-readiness"
+
+
+@pytest.mark.parametrize(
+    "initial_status", ["cancelled", "failure", "success", "in_progress", "absent"]
+)
+def test_review_refresh_reruns_original_current_head_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, initial_status: str
+) -> None:
+    pr = release_pr()
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"action": "dismissed", "pull_request": pr}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_REPOSITORY", automation.REPO)
+    monkeypatch.setattr(sys, "argv", ["release_automation.py", "refresh-readiness"])
+    clock = [0]
+    monkeypatch.setattr(automation.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        automation.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+    requested: list[int] = []
+    queries: list[str] = []
+
+    def api(path: str, *, method: str = "GET") -> Any:
+        if path == "pulls/1":
+            return pr
+        if path.startswith("actions/workflows/release-readiness.yml/runs?"):
+            queries.append(path)
+            # Competing review-event, stale-head and unrelated workflow runs are not selected.
+            assert path == (
+                "actions/workflows/release-readiness.yml/runs?event=pull_request"
+                f"&head_sha={'a' * 40}"
+                f"&branch={automation.BRANCH}&per_page=1"
+            )
+            if initial_status == "absent" and clock[0] == 0:
+                return {"workflow_runs": []}
+            return {
+                "workflow_runs": [
+                    {
+                        "id": 7,
+                        "status": "in_progress"
+                        if initial_status == "in_progress" and clock[0] == 0
+                        else "completed",
+                    }
+                ]
+            }
+        if path == "actions/runs/7/rerun":
+            assert method == "POST"
+            requested.append(7)
+            return None
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", api)
+    automation.main()
+    assert requested == [7]
+    assert len(queries) == (2 if initial_status in {"in_progress", "absent"} else 1)
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    ["stale", "closed", "fork", "ordinary", "other-base", "changes-during-list", "timeout"],
+)
+def test_review_refresh_does_not_rerun_ineligible_or_active_runs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str
+) -> None:
+    pr = release_pr()
+    event = tmp_path / "event.json"
+    event.write_text(json.dumps({"pull_request": pr}))
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    if scenario == "stale":
+        pr["head"]["sha"] = "b" * 40
+    elif scenario == "closed":
+        pr["state"] = "closed"
+    elif scenario == "fork":
+        pr["head"]["repo"]["full_name"] = "someone/fork"
+    elif scenario == "ordinary":
+        pr["head"]["ref"] = "fix/tool"
+    elif scenario == "other-base":
+        pr["base"]["ref"] = "other"
+    clock = [0]
+    monkeypatch.setattr(automation.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        automation.time, "sleep", lambda seconds: clock.__setitem__(0, clock[0] + seconds)
+    )
+
+    def api(path: str, *, method: str = "GET") -> Any:
+        assert method == "GET"
+        if path == "pulls/1":
+            return pr
+        if path.startswith("actions/workflows/"):
+            if scenario == "changes-during-list":
+                pr["head"]["sha"] = "b" * 40
+            return {
+                "workflow_runs": [
+                    {"id": 7, "status": "in_progress" if scenario == "timeout" else "completed"}
+                ]
+            }
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", api)
+    if scenario == "timeout":
+        with pytest.raises(ValueError, match="PR-triggered"):
+            automation.refresh_readiness()
+        assert clock[0] == 300
+    else:
+        automation.refresh_readiness()

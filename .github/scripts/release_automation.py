@@ -8,6 +8,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -262,6 +263,43 @@ def published_review(tag: str, release_sha: str) -> str:
     raise ValueError("Explicit human approval of the local release review is missing")
 
 
+def refresh_readiness() -> None:
+    """Refresh the PR-event check suite instead of publishing a competing review check."""
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    pr = event["pull_request"]
+    head = sha(pr["head"]["sha"])
+    deadline = time.monotonic() + 300
+    while time.monotonic() < deadline:
+        current_pr = repo_api(f"pulls/{int(pr['number'])}")
+        if (
+            current_pr["state"] != "open"
+            or current_pr["head"]["sha"] != head
+            or current_pr["head"]["ref"] != BRANCH
+            or current_pr["head"]["repo"]["full_name"] != REPO
+            or current_pr["base"]["ref"] != "main"
+        ):
+            print("Not the current open release candidate; no readiness rerun requested.")
+            return
+        runs = repo_api(
+            "actions/workflows/release-readiness.yml/runs"
+            f"?event=pull_request&head_sha={head}&branch={BRANCH}&per_page=1"
+        )["workflow_runs"]
+        if runs and runs[0]["status"] == "completed":
+            # Revalidate after waiting or listing runs; the gate also checks the live head.
+            latest = repo_api(f"pulls/{int(pr['number'])}")
+            if latest["head"]["sha"] != head or latest["state"] != "open":
+                print("Release candidate changed; no readiness rerun requested.")
+                return
+            repo_api(f"actions/runs/{int(runs[0]['id'])}/rerun", method="POST")
+            print("Requested a rerun of the current PR's Release readiness check.")
+            return
+        time.sleep(5)
+    raise ValueError(
+        "PR readiness run did not finish within five minutes; "
+        "rerun the PR-triggered Release Readiness workflow after it finishes."
+    )
+
+
 def gate() -> None:
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
     if "merge_group" in event:
@@ -311,6 +349,7 @@ def main() -> None:
         "command",
         choices=[
             "gate",
+            "refresh-readiness",
             "discover",
             "write-contract",
             "verify-publication",
@@ -324,6 +363,8 @@ def main() -> None:
         raise ValueError("This controller is restricted to the Agents Python repository")
     if args.command == "gate":
         gate()
+    elif args.command == "refresh-readiness":
+        refresh_readiness()
     elif args.command == "discover":
         discover()
     elif args.command in {"verify-publication", "publish-notes"}:
