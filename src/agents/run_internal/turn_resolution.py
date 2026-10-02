@@ -154,6 +154,7 @@ from .run_steps import (
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
 )
+from .session_persistence import extend_held_session_write
 from .tool_caller import ensure_programmatic_tool_call_parent, ensure_tool_caller_allowed
 from .tool_execution import (
     build_litellm_json_tool_call,
@@ -754,6 +755,7 @@ async def execute_handoffs(
         tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
         nested_history_owned_items=nested_history_owned_items,
+        handoff_input_filtered=input_filter is not None,
     )
 
 
@@ -2543,6 +2545,17 @@ async def resolve_interrupted_turn(
         )
         if run_state is not None:
             run_state._generated_items = [*original_pre_step_items, *committed_tool_outputs]
+            # The approved tool's side effect is done and its output is committed, so
+            # the withheld batch takes it at this boundary rather than at the turn
+            # exit. A post-output callback that raises (``custom_data_extractor``,
+            # ``on_tool_end``) leaves a retry that skips the completed invocation and
+            # produces no new session items, and the batch would otherwise settle, or
+            # be discarded as an emptied turn, without the output the tool produced.
+            extend_held_session_write(
+                run_state,
+                run_items=[item],
+                reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            )
         _register_tool_call_items(context_wrapper, [item])
 
     (
@@ -2619,6 +2632,13 @@ async def resolve_interrupted_turn(
     def _checkpoint_new_items() -> None:
         if run_state is not None:
             run_state._generated_items = [*original_pre_step_items, *new_items]
+            # A retry skips checkpointed results, including hosted approval responses.
+            # Retain them in the withheld batch before later callbacks can fail.
+            extend_held_session_write(
+                run_state,
+                run_items=new_items,
+                reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            )
         _register_tool_call_items(context_wrapper, new_items)
 
     _checkpoint_new_items()
