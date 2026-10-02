@@ -536,12 +536,19 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
 
 
 def _relabel_as_older_schema(payload: dict[str, Any], version: str) -> None:
-    """Rewrite the 1.18-only agent-scoped approvals and MCP bindings the older readers refuse."""
-    for entry in payload["context"].pop("function_tool_approvals", []):
-        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
-    response = payload.get("last_processed_response")
-    if isinstance(response, dict):
-        response.pop("mcp_tool_bindings", None)
+    """Downgrade only what the destination label cannot represent, then relabel.
+
+    Agent-scoped approvals and MCP recipient bindings arrived in 1.18, which v0.23.0
+    released, so a 1.18 payload keeps them. Rewriting them unconditionally would hand
+    the reader a 1.17-shaped payload wearing a newer label, and a test built on that
+    would stay green even if the newer reader lost the fields.
+    """
+    if tuple(int(part) for part in version.split(".", maxsplit=1)) < (1, 18):
+        for entry in payload["context"].pop("function_tool_approvals", []):
+            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+        response = payload.get("last_processed_response")
+        if isinstance(response, dict):
+            response.pop("mcp_tool_bindings", None)
     payload["$schemaVersion"] = version
 
 

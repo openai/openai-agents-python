@@ -392,7 +392,10 @@ async def test_a_held_checkpoint_loads_only_under_the_label_that_introduced_it(
     # emits the version that introduced the keys, loads under that label, and is refused
     # under the released 1.18 and 1.17 labels rather than misidentifying the format.
     from agents import RunState, UserError
-    from agents.run_state import CURRENT_SCHEMA_VERSION
+    from agents.run_state import (
+        _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION,
+        CURRENT_SCHEMA_VERSION,
+    )
 
     session = SimpleListSession()
     agent = _make_deferring_agent()
@@ -401,14 +404,14 @@ async def test_a_held_checkpoint_loads_only_under_the_label_that_introduced_it(
 
     payload = first.to_state().to_json()
     assert payload["pending_session_write"]["held"] is True
-    assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION == "1.19"
+    assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION
+    assert _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION == "1.19"
     await RunState.from_json(agent, json.loads(json.dumps(payload)))
 
-    for released_label in ("1.18", "1.17"):
-        relabeled = json.loads(json.dumps(payload))
-        for entry in relabeled["context"].pop("function_tool_approvals", []):
-            relabeled["context"]["approvals"][entry["tool_key"]] = entry["decision"]
-        relabeled.get("last_processed_response", {}).pop("mcp_tool_bindings", None)
-        relabeled["$schemaVersion"] = released_label
-        with pytest.raises(UserError, match="pending Session write is invalid"):
-            await RunState.from_json(agent, relabeled)
+    # 1.18 is the label that proves the held gate: v0.23.0 released it, so every other
+    # key on this payload is one that reader accepts and only the held keys can be the
+    # reason it refuses. The batch is left otherwise untouched for the same reason.
+    relabeled = json.loads(json.dumps(payload))
+    relabeled["$schemaVersion"] = "1.18"
+    with pytest.raises(UserError, match="pending Session write is invalid"):
+        await RunState.from_json(agent, relabeled)

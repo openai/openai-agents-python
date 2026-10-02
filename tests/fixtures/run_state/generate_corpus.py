@@ -32,8 +32,15 @@ state = RunState(
 
 # v0.23.0 is the first release whose writer emits schema 1.18, so its tag commit is the
 # historical writer for that version. The held pending write arrived after that release
-# and introduced 1.19; its writer is this pull request's own commit, filled in once the
-# bump commit exists so the generator can archive it.
+# and introduced 1.19; its writer is this pull request's own bump commit, which the
+# generator archives to emit the 1.19 fixtures.
+#
+# That 1.19 commit lives on the pull request branch, and this repository squash-merges,
+# so the SHA below stops resolving once the branch is merged and `git archive` fails for
+# the two 1.19 fixtures. Re-pin it to the squashed merge commit, which emits the same
+# payloads, when that commit exists. The same already happened to the entry this one
+# replaces: 821afdc3, recorded as the unreleased 1.17 writer, is no longer reachable
+# from main either.
 RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
 HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
 
