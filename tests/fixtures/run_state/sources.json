@@ -129,13 +129,20 @@
       "version": "1.17"
     },
     {
-      "commit": "46599c9f5c129b46ab6a0919418f35ef1984cc1e",
-      "emitted_version": "1.18",
-      "feature": "held_pending_session_write",
-      "fixture": "features/v1_18_held_pending_session_write.json",
-      "note": "The unreleased held-write scenario includes the current-response boundary. The recorded 1.18 writer serializes this canonical scenario payload without interpretation; this is not a historical checkpoint from a released version.",
-      "provenance": "canonical_compatibility",
+      "commit": "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4",
+      "feature": "compaction_metadata",
+      "fixture": "features/v1_18_compaction_metadata.json",
+      "provenance": "historical_writer",
       "version": "1.18"
+    },
+    {
+      "commit": "9303a8f8b8a528f572582ba09743b37b9fd0735c",
+      "emitted_version": "1.19",
+      "feature": "held_pending_session_write",
+      "fixture": "features/v1_19_held_pending_session_write.json",
+      "note": "The unreleased held-write scenario includes the current-response boundary. The recorded 1.19 writer serializes this canonical scenario payload without interpretation; this is not a historical checkpoint from a released version.",
+      "provenance": "canonical_compatibility",
+      "version": "1.19"
     }
   ],
   "resume": {
@@ -205,10 +212,14 @@
       "provenance": "canonical_compatibility"
     },
     "1.18": {
-      "commit": "821afdc3f709f409a307c93f42a603704be63033",
-      "emitted_version": "1.17",
-      "fixture": "minimal/v1_18.json",
-      "note": "The held pending Session write was first emitted with the unreleased 1.17 writer. The fixture changes only the schema label to exercise the 1.18 compatibility reader while preserving older payload compatibility.",
+      "commit": "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4",
+      "fixture": "minimal/v1_18.json"
+    },
+    "1.19": {
+      "commit": "9303a8f8b8a528f572582ba09743b37b9fd0735c",
+      "emitted_version": "1.19",
+      "fixture": "minimal/v1_19.json",
+      "note": "The held pending Session write introduced 1.19 after v0.23.0 released 1.18. The recorded 1.19 writer is this pull request's own commit; the fixture is the minimal payload it emits, not a historical checkpoint from a released version.",
       "provenance": "canonical_compatibility"
     },
     "1.2": {

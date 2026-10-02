@@ -35,7 +35,7 @@ state = RunState(
 # and introduced 1.19; its writer is this pull request's own commit, filled in once the
 # bump commit exists so the generator can archive it.
 RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
-HELD_WRITE_1_19_WRITER = "HELD_WRITE_1_19_WRITER_PLACEHOLDER"
+HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
 
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
     "The release-boundary schema renumbering introduced this reader version without a writer "

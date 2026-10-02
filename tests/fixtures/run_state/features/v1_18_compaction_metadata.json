@@ -53,27 +53,36 @@
   "output_guardrail_results": [],
   "pending_input": [],
   "pending_session_write": {
-    "before": null,
-    "current_response": {
-      "start": 0,
-      "turn": 0
+    "append_acknowledged": true,
+    "before": [
+      "digest-1",
+      "digest-2"
+    ],
+    "compaction_model_exchange": {
+      "item_digests": [
+        "digest-1",
+        "digest-2"
+      ],
+      "reasoning_item_id_policy": null
     },
-    "held": true,
+    "has_local_tool_outputs": true,
     "items": [
       {
         "arguments": "{}",
-        "call_id": "call_held_1",
+        "call_id": "call_compacted_1",
         "name": "write_thing",
         "type": "function_call"
       },
       {
-        "call_id": "call_held_1",
+        "call_id": "call_compacted_1",
         "output": "wrote",
         "type": "function_call_output"
       }
     ],
     "persisted_count": 2,
-    "session_id": "session-118"
+    "response_id": "resp_118",
+    "session_id": "session-118",
+    "store": false
   },
   "previous_response_id": null,
   "reasoning_item_id_policy": null,
