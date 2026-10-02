@@ -105,7 +105,7 @@ def test_extra_credential_examples_are_skipped_in_default_auto_runs(
         str(tmp_path / "artifacts"),
     ]
     for path in paths:
-        args.extend(["--filter", path])
+        args.extend(["--filter", str(Path(path))])
     if auto_source == "argument":
         args.append("--auto-mode")
     elif auto_source == "manual":
