@@ -555,6 +555,7 @@ def _relabel_as_older_schema(payload: dict[str, Any], version: str) -> None:
         "held-shape",
         "held-with-before",
         "held-under-1-17",
+        "held-under-1-18",
         "held-keys-without-held",
         "policy-shape",
         "response-boundary-shape",
@@ -629,6 +630,18 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
         _relabel_as_older_schema(payload, "1.17")
         payload["pending_session_write"]["held"] = True
         payload["pending_session_write"]["before"] = None
+    elif invalid == "held-under-1-18":
+        # v0.23.0 released 1.18 with the compaction metadata only. Its reader rejects the
+        # held keys, so a well-formed held record under that label would misidentify the
+        # durable format; the held variant is readable only under the version that
+        # introduced it.
+        _relabel_as_older_schema(payload, "1.18")
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["current_response"] = {
+            "turn": state._current_turn,
+            "start": 0,
+        }
     else:
         # A held batch was never offered to the Session, so recorded digests and the
         # held marker cannot coexist on one record.
@@ -651,6 +664,39 @@ async def test_pending_session_write_without_the_held_key_keeps_its_meaning() ->
     for key in ("response_id", "store", "has_local_tool_outputs"):
         payload["pending_session_write"].pop(key, None)
     restored = await RunState.from_json(agent, payload)
+
+    result = await _run_session_resume(agent, restored, session, False)
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledged", [False, True], ids=["in-flight", "acknowledged"])
+async def test_compaction_metadata_stays_readable_under_1_18(acknowledged: bool) -> None:
+    # v0.23.0 shipped 1.18 with the compaction metadata on the pending write. That
+    # released format must keep loading under its own label, independently of the held
+    # keys that only a later version introduces.
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    pending = payload["pending_session_write"]
+    assert "held" not in pending
+    assert {"response_id", "store", "has_local_tool_outputs"} <= set(pending)
+    _relabel_as_older_schema(payload, "1.18")
+    if acknowledged:
+        pending["append_acknowledged"] = True
+        pending["compaction_model_exchange"] = {
+            "item_digests": list(pending["before"]),
+            "reasoning_item_id_policy": None,
+        }
+    restored = await RunState.from_json(agent, payload)
+    assert restored._pending_session_write is not None
+    assert restored._pending_session_write.get("append_acknowledged", False) is acknowledged
+    if acknowledged:
+        return
 
     result = await _run_session_resume(agent, restored, session, False)
     assert result.final_output == "done"
