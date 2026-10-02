@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.23.2](https://github.com/openai/openai-agents-python/compare/v0.23.1...v0.23.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **examples:** render realtime tool events as text ([#5283](https://github.com/openai/openai-agents-python/issues/5283)) ([81f0ccf](https://github.com/openai/openai-agents-python/commit/81f0ccf20c6e24063b9da36fa37f2bdb6a43d8d3))
+
 ## [0.23.1](https://github.com/openai/openai-agents-python/compare/v0.23.0...v0.23.1) (2026-10-02)
 
 
