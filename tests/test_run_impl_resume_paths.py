@@ -40,7 +40,7 @@ from agents.run_internal.run_loop import (
     ProcessedResponse,
     SingleStepResult,
 )
-from agents.run_state import RunState
+from agents.run_state import CURRENT_SCHEMA_VERSION, RunState
 from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.tool import Tool
@@ -1369,7 +1369,7 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
     interruption_agent_data = cast(dict[str, str], interruption_data["agent"])
     assert interruption_agent_data["identity"] == current_agent_data["identity"]
     interruption_agent_data.pop("identity")
-    if schema_version != "1.18":
+    if tuple(int(part) for part in schema_version.split(".", maxsplit=1)) < (1, 18):
         for entry in json_data["context"].pop("function_tool_approvals", []):
             json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     json_data["$schemaVersion"] = schema_version
@@ -1844,7 +1844,7 @@ async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume(
 
     if round_trip:
         payload = state.to_json()
-        assert payload["$schemaVersion"] == "1.18"
+        assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION
         state = await RunState.from_json(triage, payload)
 
     result = await _run_session_resume(triage, state, session, False)

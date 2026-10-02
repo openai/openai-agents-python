@@ -242,11 +242,12 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.18"
+CURRENT_SCHEMA_VERSION = "1.19"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
-_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.18"
+_PENDING_WRITE_COMPACTION_MIN_SCHEMA_VERSION = "1.18"
+_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.19"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -285,11 +286,14 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.18": (
         "Binds restored local MCP calls to their configured server and original tool name, "
         "preserves independent apply_patch approval scopes, and binds function-tool approval "
-        "decisions to their owning agent. Retains pending Session compaction metadata, "
-        "including acknowledgement and model-exchange evidence for retry, and persists "
-        "withheld interrupted responses with their conversion policy and current-response "
-        "boundary so approval resumes can settle them under the output-guardrail gate. "
-        "Records named Vercel sandboxes alongside exact execution IDs."
+        "decisions to their owning agent, and retains compaction metadata for pending "
+        "Session writes, including acknowledgement and model-exchange evidence for "
+        "compaction retry, and records named Vercel sandboxes alongside exact execution IDs."
+    ),
+    "1.19": (
+        "Persists the interrupted turn's withheld Session write as a held pending write, "
+        "with the conversion policy its items were registered under and the current-response "
+        "boundary, so an approval resume can settle it under the output-guardrail gate."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4555,28 +4559,32 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
-        # 1.17 defines this object as exactly four keys and its readers are already on
-        # main, so writing the held variant under that label would emit checkpoints
-        # those readers reject. The held keys are therefore gated to the version that
-        # introduced them, and a 1.17 payload keeps the four keys it defined and
-        # settles eagerly as it always did.
-        held_keys_allowed = (schema_major, schema_minor) >= tuple(
-            int(part)
-            for part in _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
-        )
+        # Released readers validate this object by exact key set, so every key is gated
+        # to the version that introduced it and a payload keeps exactly the keys its own
+        # label defined. 1.17 defined the four base keys. 1.18 (v0.23.0) added the
+        # compaction metadata. The held keys arrived after that release, so writing them
+        # under the 1.18 label would emit checkpoints the released reader rejects; they
+        # require 1.19, while a 1.18 payload with compaction metadata keeps loading.
+        def _at_least(minimum: str) -> bool:
+            return (schema_major, schema_minor) >= tuple(
+                int(part) for part in minimum.split(".", maxsplit=1)
+            )
+
         base_keys = {"session_id", "items", "before", "persisted_count"}
-        held_keys = (
+        compaction_keys = (
             {
-                "held",
                 "response_id",
                 "store",
                 "has_local_tool_outputs",
-                "reasoning_item_id_policy",
-                "current_response",
                 "append_acknowledged",
                 "compaction_model_exchange",
             }
-            if held_keys_allowed
+            if _at_least(_PENDING_WRITE_COMPACTION_MIN_SCHEMA_VERSION)
+            else set()
+        )
+        held_keys = (
+            {"held", "reasoning_item_id_policy", "current_response"}
+            if _at_least(_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION)
             else set()
         )
         compaction_exchange = (
@@ -4588,7 +4596,7 @@ async def _build_run_state_from_json(
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or set(pending_write) - held_keys != base_keys
+            or set(pending_write) - compaction_keys - held_keys != base_keys
             or ("held" in pending_write and type(pending_write["held"]) is not bool)
             or (pending_write.get("held") is True and pending_write.get("before") is not None)
             or (pending_write.get("held") is True and "current_response" not in pending_write)
