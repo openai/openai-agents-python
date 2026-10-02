@@ -3,13 +3,35 @@ on:
   pull_request_review:
     types: [submitted, edited, dismissed]
 permissions: {}
-concurrency:
-  group: release-readiness-refresh-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
 jobs:
+  authorize:
+    name: Authorize readiness refresh
+    if: github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      authorized: ${{ steps.permission.outputs.authorized }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+          sparse-checkout: .github/scripts
+      - name: Check event sender permission
+        id: permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -I .github/scripts/release_automation.py authorize-refresh
   refresh:
     name: Refresh release readiness
-    if: github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main'
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
+    concurrency:
+      group: release-readiness-refresh-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

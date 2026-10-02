@@ -263,6 +263,16 @@ def published_review(tag: str, release_sha: str) -> str:
     raise ValueError("Explicit human approval of the local release review is missing")
 
 
+def authorize_refresh() -> None:
+    """Check the event sender with a read-only token before granting rerun authority."""
+    event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+    login = event["sender"]["login"]
+    permission = repo_api(f"collaborators/{quote(login, safe='')}/permission")
+    authorized = permission["permission"] in {"write", "admin"}
+    with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
+        output.write(f"authorized={str(authorized).lower()}\n")
+
+
 def refresh_readiness() -> None:
     """Refresh the PR-event check suite instead of publishing a competing review check."""
     event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
@@ -350,6 +360,7 @@ def main() -> None:
         choices=[
             "gate",
             "refresh-readiness",
+            "authorize-refresh",
             "discover",
             "write-contract",
             "verify-publication",
@@ -363,6 +374,8 @@ def main() -> None:
         raise ValueError("This controller is restricted to the Agents Python repository")
     if args.command == "gate":
         gate()
+    elif args.command == "authorize-refresh":
+        authorize_refresh()
     elif args.command == "refresh-readiness":
         refresh_readiness()
     elif args.command == "discover":

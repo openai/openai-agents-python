@@ -508,8 +508,9 @@ def test_review_refresh_cannot_cancel_or_replace_the_required_check() -> None:
     assert set(readiness["on"]) == {"pull_request", "merge_group"}
     assert set(refresh["on"]) == {"pull_request_review"}
     assert refresh["on"]["pull_request_review"]["types"] == ["submitted", "edited", "dismissed"]
-    assert refresh["concurrency"]["group"] != readiness["concurrency"]["group"]
-    assert refresh["concurrency"]["cancel-in-progress"] == "false"
+    assert "concurrency" not in refresh
+    assert refresh["jobs"]["refresh"]["concurrency"]["group"] != readiness["concurrency"]["group"]
+    assert refresh["jobs"]["refresh"]["concurrency"]["cancel-in-progress"] == "false"
     assert refresh["permissions"] == {}
     job = refresh["jobs"]["refresh"]
     assert job["name"] != readiness["jobs"]["readiness"]["name"] == "Release readiness"
@@ -518,8 +519,18 @@ def test_review_refresh_cannot_cancel_or_replace_the_required_check() -> None:
         "contents": "read",
         "pull-requests": "read",
     }
-    assert "github.event.pull_request.head.repo.full_name == github.repository" in job["if"]
-    assert "github.event.pull_request.base.ref == 'main'" in job["if"]
+    authorize = refresh["jobs"]["authorize"]
+    assert authorize["permissions"] == {"contents": "read", "pull-requests": "read"}
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in authorize["if"]
+    assert "github.event.pull_request.base.ref == 'main'" in authorize["if"]
+    assert job["needs"] == "authorize"
+    assert job["if"] == "needs.authorize.outputs.authorized == 'true'"
+    assert authorize["outputs"] == {"authorized": "${{ steps.permission.outputs.authorized }}"}
+    assert authorize["steps"][0] == job["steps"][0]
+    assert authorize["steps"][1]["id"] == "permission"
+    assert authorize["steps"][1]["run"] == (
+        "python -I .github/scripts/release_automation.py authorize-refresh"
+    )
     checkout, command = job["steps"]
     assert checkout["with"] == {
         "ref": "refs/heads/main",
@@ -633,3 +644,36 @@ def test_review_refresh_does_not_rerun_ineligible_or_active_runs(
         assert clock[0] == 300
     else:
         automation.refresh_readiness()
+
+
+@pytest.mark.parametrize("permission", ["read", "triage", "none", "write", "admin", "error"])
+def test_refresh_authorization_uses_current_event_sender_permission(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, permission: str
+) -> None:
+    event = tmp_path / "event.json"
+    # A maintainer dismissing another user's review must be checked as the sender.
+    event.write_text(
+        json.dumps({"sender": {"login": "actor"}, "review": {"user": {"login": "other"}}})
+    )
+    output = tmp_path / "output"
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_REPOSITORY", automation.REPO)
+    monkeypatch.setattr(sys, "argv", ["release_automation.py", "authorize-refresh"])
+
+    def api(path: str) -> Any:
+        assert path == "collaborators/actor/permission"
+        if permission == "error":
+            raise RuntimeError("GitHub API operation failed")
+        return {"permission": permission}
+
+    monkeypatch.setattr(automation, "repo_api", api)
+    if permission == "error":
+        with pytest.raises(RuntimeError, match="GitHub API"):
+            automation.main()
+        assert not output.exists()
+    else:
+        automation.main()
+        assert output.read_text() == (
+            "authorized=true\n" if permission in {"write", "admin"} else "authorized=false\n"
+        )

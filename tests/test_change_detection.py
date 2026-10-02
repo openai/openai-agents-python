@@ -111,6 +111,7 @@ def _detect(
         (".github/scripts/update_released_api_contract.py", True, False, False),
         (".github/scripts/run_repo_skill_tests.py", True, False, False),
         (".github/workflows/tests.yml", True, False, False),
+        (".github/workflows/release-readiness-refresh.yml", True, False, False),
         (".github/workflows/docs.yml", True, True, False),
         (".github/workflows/publish.yml", True, False, False),
         (".github/workflows/repo-skills.yml", True, False, False),
