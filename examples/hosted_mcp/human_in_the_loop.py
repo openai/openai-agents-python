@@ -63,7 +63,7 @@ async def main(verbose: bool, stream: bool) -> None:
             "additional configuration."
         ),
         model_settings=ModelSettings(
-            tool_choice=MCPToolChoice(server_label="deepwiki", name="ask_question")
+            tool_choice=MCPToolChoice(server_label="deepwiki", name="ask_wiki_question")
         ),
         tools=[
             HostedMCPTool(

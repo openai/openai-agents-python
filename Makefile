@@ -176,7 +176,7 @@ integration-tests-providers:
 
 .PHONY: integration-tests-providers-external
 integration-tests-providers-external:
-	OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS=1 $(INTEGRATION_TEST_RUNNER) --profile providers $(filter --all,$(MAKECMDGOALS))
+	$(INTEGRATION_TEST_RUNNER) --profile providers --external-providers $(filter --all,$(MAKECMDGOALS))
 
 .PHONY: integration-tests-providers-all
 integration-tests-providers-all:

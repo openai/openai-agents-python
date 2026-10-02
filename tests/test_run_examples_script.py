@@ -50,6 +50,79 @@ def test_local_temporal_runner_selection(
     spawn.assert_not_called()
 
 
+@pytest.mark.parametrize("auto_source", ["argument", "environment", "manual"])
+def test_extra_credential_examples_are_skipped_in_default_auto_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    auto_source: str,
+) -> None:
+    paths = [
+        "examples/memory/dapr_session_example.py",
+        "examples/model_providers/any_llm_auto.py",
+        "examples/model_providers/any_llm_provider.py",
+        "examples/model_providers/litellm_auto.py",
+        "examples/model_providers/litellm_provider.py",
+        "examples/reasoning_content/gpt_oss_stream.py",
+        "examples/sandbox/extensions/daytona/daytona_runner.py",
+        "examples/sandbox/extensions/daytona/usaspending_text2sql/agent.py",
+        "examples/sandbox/extensions/e2b_runner.py",
+        "examples/sandbox/extensions/modal_runner.py",
+        "examples/sandbox/extensions/runloop/capabilities.py",
+        "examples/sandbox/extensions/runloop/runner.py",
+    ]
+    monkeypatch.delenv("EXAMPLES_AUTO_SKIP", raising=False)
+    monkeypatch.setenv(
+        "EXAMPLES_INTERACTIVE_MODE", "auto" if auto_source == "environment" else "manual"
+    )
+    # Configured credentials must not opt these examples into default auto runs.
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "DAYTONA_API_KEY",
+        "E2B_API_KEY",
+        "MODAL_TOKEN_ID",
+        "MODAL_TOKEN_SECRET",
+        "RUNLOOP_API_KEY",
+        "POSTGRES_PASSWORD",
+    ):
+        monkeypatch.setenv(name, "synthetic-test-value")
+    monkeypatch.setattr(run_examples, "build_command_path", lambda: "")
+    monkeypatch.setattr(run_examples, "dapr_sidecar_available", lambda env: True)
+    spawn = Mock(side_effect=AssertionError("Credential-dependent examples must not start"))
+    monkeypatch.setattr(run_examples.subprocess, "Popen", spawn)
+    args = [
+        "run_examples.py",
+        "--include-interactive",
+        "--include-server",
+        "--include-audio",
+        "--include-external",
+        "--logs-dir",
+        str(tmp_path / "logs"),
+        "--main-log",
+        str(tmp_path / "main.log"),
+        "--artifacts-dir",
+        str(tmp_path / "artifacts"),
+    ]
+    for path in paths:
+        args.extend(["--filter", path])
+    if auto_source == "argument":
+        args.append("--auto-mode")
+    elif auto_source == "manual":
+        args.append("--dry-run")
+    monkeypatch.setattr(sys, "argv", args)
+
+    assert run_examples.main() == 0
+
+    output = capsys.readouterr().out
+    for path in paths:
+        if auto_source == "manual":
+            assert f"- RUN  {path}" in output
+        else:
+            assert f"- SKIP {path} (skipped: auto-skip)" in output
+    spawn.assert_not_called()
+
+
 @pytest.mark.parametrize("mode", ["auto", "AUTO", "manual"])
 @pytest.mark.skipif(sys.platform == "win32", reason="The example requires the Unix-only backend")
 @pytest.mark.asyncio

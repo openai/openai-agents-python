@@ -51,6 +51,7 @@ PROFILE_CREDENTIAL_CLASSES = {
     "nightly": LIVE_CREDENTIAL_CLASS,
     "manual": LIVE_CREDENTIAL_CLASS,
 }
+PROVIDER_PROFILES = frozenset({"providers", "full", "release", "nightly", "manual"})
 PROFILES = tuple(PROFILE_CREDENTIAL_CLASSES)
 BOOTSTRAPPED_ENV = "OPENAI_AGENTS_INTEGRATION_RUNNER_BOOTSTRAPPED"
 
@@ -59,16 +60,27 @@ def parse_args(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run packaged openai-agents integration tests.")
     parser.add_argument("--profile", choices=PROFILES, default="full")
     parser.add_argument(
+        "--external-providers",
+        action="store_true",
+        help="Enable external provider coverage and configured provider model overrides.",
+    )
+    parser.add_argument(
         "--all",
         action="store_true",
         help="Include configured direct Anthropic and Gemini providers alongside OpenRouter.",
     )
-    return parser.parse_args(arguments)
+    args = parser.parse_args(arguments)
+    if (args.external_providers or args.all) and args.profile not in PROVIDER_PROFILES:
+        parser.error("External providers require a profile that includes provider tests.")
+    return args
 
 
 def prepare_profile_environment(
     profile: str,
     environ: MutableMapping[str, str] | None = None,
+    *,
+    external_providers: bool = False,
+    direct_providers: bool = False,
 ) -> str:
     environment = os.environ if environ is None else environ
     try:
@@ -89,6 +101,38 @@ def prepare_profile_environment(
         raise RuntimeError(
             f"Integration profile {profile!r} has unknown credential class {credential_class!r}."
         )
+    # Only command-line intent enables external coverage; inherited flags are not intent.
+    external_providers = external_providers or direct_providers
+    environment["OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS"] = str(int(external_providers))
+    environment["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] = str(int(direct_providers))
+    if not external_providers:
+        for credential in (
+            "OPENROUTER_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+        ):
+            environment.pop(credential, None)
+        if credential_class == LIVE_CREDENTIAL_CLASS:
+            model = environment.get("OPENAI_AGENTS_INTEGRATION_MODEL", "")
+            if model.startswith(("litellm/", "any-llm/")):
+                raise RuntimeError(
+                    "OPENAI_AGENTS_INTEGRATION_MODEL must select OpenAI directly in default runs. "
+                    "Use integration-tests-providers-external for explicit provider routing."
+                )
+        if profile in PROVIDER_PROFILES:
+            for variable in (
+                "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS",
+                "OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS",
+            ):
+                models = environment.get(variable, "").split(",")
+                if any(
+                    model.strip() and not model.strip().startswith("openai/") for model in models
+                ):
+                    raise RuntimeError(
+                        f"{variable} requires --external-providers for non-OpenAI models. "
+                        "Use integration-tests-providers-external for explicit external coverage."
+                    )
     return credential_class
 
 
@@ -98,7 +142,9 @@ def bootstrap_in_uv(
     exec_function: Callable[[str, list[str], dict[str, str]], object] = os.execvpe,
 ) -> None:
     args = parse_args(arguments)
-    prepare_profile_environment(args.profile, environ)
+    prepare_profile_environment(
+        args.profile, environ, external_providers=args.external_providers, direct_providers=args.all
+    )
     child_env = dict(environ)
     child_env[BOOTSTRAPPED_ENV] = "1"
     command = ["uv", "run", "python", str(Path(__file__).resolve()), *arguments]
@@ -421,7 +467,9 @@ def _sanitize_and_load_junit(result_path: Path) -> ET.Element | None:
 
 def main() -> None:
     args = parse_args()
-    prepare_profile_environment(args.profile)
+    prepare_profile_environment(
+        args.profile, external_providers=args.external_providers, direct_providers=args.all
+    )
     prospective_policy: SubmoduleExportPolicy | None = None
     if args.profile in {"prospective-contract", "prospective-platform"}:
         prospective_contract = os.environ.get(PROSPECTIVE_CONTRACT_ENV)
@@ -434,9 +482,6 @@ def main() -> None:
     if args.profile in STRICT_PROFILES:
         os.environ["OPENAI_AGENTS_INTEGRATION_STRICT"] = "1"
     shutil.rmtree(RESULTS / args.profile, ignore_errors=True)
-    if args.all:
-        os.environ["OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS"] = "1"
-        os.environ["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] = "1"
     wheel, sdist = build_distributions()
     print(f"[integration] wheel={wheel.name} sdist={sdist.name} profile={args.profile}")
 

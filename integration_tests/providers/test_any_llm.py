@@ -69,6 +69,7 @@ async def test_any_llm_openai_supports_both_api_families(integration_model: str,
     "ignore:Inheritance class AiohttpClientSession from ClientSession is discouraged:"
     r"DeprecationWarning:google\.genai\._api_client"
 )
+@pytest.mark.external_provider
 async def test_any_llm_major_external_providers_execute_function_tools(
     external_provider: Any,
 ) -> None:
@@ -108,6 +109,7 @@ async def test_any_llm_major_external_providers_execute_function_tools(
     "ignore:Inheritance class AiohttpClientSession from ClientSession is discouraged:"
     r"DeprecationWarning:google\.genai\._api_client"
 )
+@pytest.mark.external_provider
 async def test_any_llm_external_provider_streams_function_tool_results(
     external_provider: Any,
 ) -> None:

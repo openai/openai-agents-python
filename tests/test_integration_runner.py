@@ -572,6 +572,8 @@ def test_extra_collection_deselects_only_non_applicable_memory_backends(
         )
     )
     items = [requested, matching, non_applicable]
+    for item in items:
+        item.get_closest_marker = lambda name: None
     monkeypatch.setenv("OPENAI_AGENTS_INTEGRATION_EXTRA", "redis")
 
     hook(config, items)
@@ -1003,3 +1005,91 @@ def test_prospective_platform_profile_excludes_unsupported_optional_dependencies
         "[integration] skipping optional dependency vercel on unsupported platform win32"
         in capsys.readouterr().out
     )
+
+
+@pytest.mark.parametrize(
+    "arguments,external,direct",
+    [
+        (["--profile", "release"], False, False),
+        (["--profile", "nightly"], False, False),
+        (["--profile", "providers", "--external-providers"], True, False),
+        (["--profile", "providers", "--all"], True, True),
+    ],
+)
+def test_provider_opt_in_is_explicit_before_bootstrap(
+    arguments: list[str], external: bool, direct: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bootstrap = runpy.run_path(str(RUNNER))["bootstrap_in_uv"]
+    environment = {
+        "OPENAI_API_KEY_SOURCE": "service-account",
+        "OPENAI_API_KEY": "synthetic-openai",
+        "OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS": "1",
+        "OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS": "1",
+        "OPENROUTER_API_KEY": "synthetic-router",
+        "ANTHROPIC_API_KEY": "synthetic-anthropic",
+        "GEMINI_API_KEY": "synthetic-gemini",
+        "GOOGLE_API_KEY": "synthetic-google",
+        "OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS": "openai/gpt-4.1-mini",
+    }
+    captured: list[dict[str, str]] = []
+    monkeypatch.setattr(bootstrap.__globals__["sys"], "platform", "linux")
+    with pytest.raises(RuntimeError, match="bootstrap returned unexpectedly"):
+        bootstrap(arguments, environment, lambda file, command, env: captured.append(env))
+    child = captured[0]
+    assert child["OPENAI_API_KEY"] == "synthetic-openai"
+    assert child["OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS"] == str(int(external))
+    assert child["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] == str(int(direct))
+    assert child["OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS"] == "openai/gpt-4.1-mini"
+    for name in ("OPENROUTER_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        assert (name in child) is external
+
+
+@pytest.mark.parametrize(
+    "variable,model",
+    [
+        ("OPENAI_AGENTS_INTEGRATION_ANY_LLM_MODELS", "openai/gpt-4.1-mini,anthropic/model"),
+        ("OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS", "bedrock/model"),
+        ("OPENAI_AGENTS_INTEGRATION_MODEL", "any-llm/openrouter/model"),
+    ],
+)
+def test_default_profile_rejects_external_overrides_before_build(
+    variable: str, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    main = runpy.run_path(str(RUNNER))["main"]
+    monkeypatch.setenv("OPENAI_API_KEY_SOURCE", "service-account")
+    monkeypatch.setenv(variable, model)
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "release"])
+    builds: list[bool] = []
+    monkeypatch.setitem(main.__globals__, "build_distributions", lambda: builds.append(True))
+    with pytest.raises(RuntimeError, match=variable):
+        main()
+    assert builds == []
+
+
+def test_explicit_provider_profile_preserves_custom_model_lists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bootstrap = runpy.run_path(str(RUNNER))["bootstrap_in_uv"]
+    environment = {
+        "OPENAI_API_KEY_SOURCE": "service-account",
+        "OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS": "anthropic/model",
+        "ANTHROPIC_API_KEY": "synthetic-anthropic",
+    }
+    captured: list[dict[str, str]] = []
+    monkeypatch.setattr(bootstrap.__globals__["sys"], "platform", "linux")
+    with pytest.raises(RuntimeError, match="bootstrap returned unexpectedly"):
+        bootstrap(
+            ["--profile", "providers", "--external-providers"],
+            environment,
+            lambda file, command, env: captured.append(env),
+        )
+    assert captured[0]["OPENAI_AGENTS_INTEGRATION_LITELLM_MODELS"] == "anthropic/model"
+    assert captured[0]["ANTHROPIC_API_KEY"] == "synthetic-anthropic"
+
+
+@pytest.mark.parametrize("flag", ["--external-providers", "--all"])
+def test_external_opt_in_rejects_profiles_without_provider_tests(flag: str) -> None:
+    parse_args = runpy.run_path(str(RUNNER))["parse_args"]
+    with pytest.raises(SystemExit) as error:
+        parse_args(["--profile", "packaging", flag])
+    assert error.value.code == 2
