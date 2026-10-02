@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.23.0",
-  "baseline_commit": "1ea381bd2dbb39be7431190de03a7b6e482ed19c",
+  "baseline": "v0.23.1",
+  "baseline_commit": "b31b9f8d13d49142a64f8873f2cc2ee40441a795",
   "callables": {
     "Agent": {
       "dataclass_fields": [
