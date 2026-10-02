@@ -519,7 +519,7 @@ def test_default_trace_provider_force_flush_still_flushes_when_disabled():
     mock_processor.force_flush.assert_called_once_with()
 
 
-def test_trace_provider_force_flush_and_shutdown_default_to_noops():
+def test_trace_provider_optional_methods_preserve_legacy_subclasses():
     class MinimalProvider(TraceProvider):
         def register_processor(self, processor: TracingProcessor) -> None:
             pass
@@ -563,6 +563,7 @@ def test_trace_provider_force_flush_and_shutdown_default_to_noops():
             raise NotImplementedError
 
     provider = MinimalProvider()
+    assert provider.is_disabled() is False
     provider.force_flush()
     provider.shutdown()
 

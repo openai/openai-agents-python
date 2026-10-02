@@ -242,6 +242,14 @@ class TraceProvider(ABC):
     def set_disabled(self, disabled: bool) -> None:
         """Enable or disable tracing globally."""
 
+    def is_disabled(self) -> bool:
+        """Return whether tracing is globally disabled.
+
+        Custom providers can override this query to apply their disable policy to
+        Realtime server tracing. The default preserves their existing behavior.
+        """
+        return False
+
     @abstractmethod
     def time_iso(self) -> str:
         """Return the current time in ISO 8601 format."""
@@ -354,6 +362,11 @@ class DefaultTraceProvider(TraceProvider):
             self._disabled = bool(self._env_disabled)
         else:
             self._disabled = self._manual_disabled
+
+    def is_disabled(self) -> bool:
+        """Return the effective disabled state, honoring cached env and manual overrides."""
+        self._refresh_disabled_flag()
+        return self._disabled
 
     def time_iso(self) -> str:
         """Return the current time in ISO 8601 format."""

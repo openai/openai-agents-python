@@ -174,3 +174,20 @@ def test_falsy_current_span_becomes_parent() -> None:
 
     assert isinstance(child, SpanImpl)
     assert child.parent_id == "span_parent"
+
+
+def test_disabled_query_shares_cached_env_and_manual_precedence(monkeypatch):
+    provider = DefaultTraceProvider()
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "1")
+    assert provider.is_disabled() is True
+
+    monkeypatch.setenv("OPENAI_AGENTS_DISABLE_TRACING", "0")
+    assert provider.is_disabled() is True
+    assert isinstance(provider.create_trace("synthetic"), NoOpTrace)
+
+    provider.set_disabled(False)
+    assert provider.is_disabled() is False
+    assert isinstance(provider.create_trace("synthetic"), TraceImpl)
+
+    provider.set_disabled(True)
+    assert provider.is_disabled() is True
