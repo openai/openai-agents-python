@@ -8,11 +8,13 @@ from inline_snapshot import snapshot
 from openai.types.responses.response_usage import InputTokensDetails
 
 from agents import Agent, RunConfig, Runner, RunState, custom_span, function_tool, trace
+from agents.exceptions import UserError
 from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
+from agents.tracing import get_current_span
 from agents.usage import Usage
 
-from .test_responses import get_function_tool_call, get_text_message
+from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 from .testing_processor import (
     assert_no_traces,
     fetch_events,
@@ -394,6 +396,94 @@ async def test_multiple_runs_are_multiple_traces():
             },
         ]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("include_task_and_turn_spans", [False, True])
+@pytest.mark.parametrize("outcome", ["continue", "stop", "error", "handoff"])
+async def test_approved_tool_executes_inside_resumed_agent_span(
+    streamed: bool, include_task_and_turn_spans: bool, outcome: str
+) -> None:
+    calls = 0
+
+    @function_tool(needs_approval=True, failure_error_function=None)
+    def approved_tool() -> str:
+        nonlocal calls
+        calls += 1
+        if outcome == "error":
+            raise RuntimeError("synthetic tool failure")
+        return "tool result"
+
+    target = Agent(name="target", model=ScriptedModel(steps=[[get_text_message("done")]]))
+    first_response = [get_function_tool_call("approved_tool", "{}")]
+    if outcome == "handoff":
+        first_response.append(get_handoff_tool_call(target))
+    agent = Agent(
+        name="approval agent",
+        tools=[approved_tool],
+        handoffs=[target] if outcome == "handoff" else [],
+        model=ScriptedModel(
+            steps=[
+                first_response,
+                [get_text_message("done")],
+            ]
+        ),
+        tool_use_behavior="stop_on_first_tool" if outcome == "stop" else "run_llm_again",
+    )
+    config = RunConfig(tracing={"include_task_and_turn_spans": include_task_and_turn_spans})
+
+    async def run(input: str | RunState[None]):
+        # A direct tool-result resume must not consume another model turn.
+        max_turns = 1 if outcome == "stop" else 2
+        if streamed:
+            result = Runner.run_streamed(agent, input, run_config=config, max_turns=max_turns)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, input, run_config=config, max_turns=max_turns)
+
+    first = await run("run the tool")
+    assert calls == 0
+    assert len(first.interruptions) == 1
+    state = first.to_state()
+    state.approve(first.interruptions[0])
+    initial_span_ids = {span.span_id for span in fetch_ordered_spans()}
+
+    if outcome == "error":
+        with pytest.raises(UserError, match="synthetic tool failure"):
+            await run(state)
+    else:
+        result = await run(state)
+        assert result.final_output == ("tool result" if outcome == "stop" else "done")
+
+    assert calls == 1
+    spans = [span for span in fetch_ordered_spans() if span.span_id not in initial_span_ids]
+    agent_spans = [span for span in spans if span.span_data.type == "agent"]
+    function_spans = [span for span in spans if span.span_data.type == "function"]
+    assert len(agent_spans) == (2 if outcome == "handoff" else 1)
+    assert len(function_spans) == 1
+    agent_span = agent_spans[0]
+    assert function_spans[0].parent_id == agent_span.span_id
+    assert agent_span.span_data.name == "approval agent"
+    assert agent_span.span_data.tools == ["approved_tool"]
+    assert agent_span.span_data.handoffs == (["target"] if outcome == "handoff" else [])
+    if outcome == "handoff":
+        assert agent_spans[1].span_data.name == "target"
+        assert agent_spans[1].parent_id == agent_span.parent_id
+        handoff_spans = [span for span in spans if span.span_data.type == "handoff"]
+        assert len(handoff_spans) == 1
+        assert handoff_spans[0].parent_id == agent_span.span_id
+    if outcome == "error":
+        assert agent_span.error is not None
+        assert agent_span.error["message"] == "Error in agent run"
+        assert function_spans[0].error is not None
+        assert function_spans[0].error["message"] == "Error running tool"
+    else:
+        assert agent_span.error is None
+    assert all(span.ended_at is not None for span in spans)
+    assert fetch_events().count("span_start") == fetch_events().count("span_end")
+    assert get_current_span() is None
 
 
 @pytest.mark.asyncio

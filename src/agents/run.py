@@ -1082,6 +1082,22 @@ class AgentRunner:
                             wrapper=context_wrapper,
                         )
                         session_input_items_for_persistence = []
+                    # Resumed tool work belongs to the agent even when it finishes or fails
+                    # before another model turn starts. Keep turn accounting below.
+                    if current_span is None:
+                        if (output_schema := get_output_schema(execution_agent)) is not None:
+                            output_type_name = output_schema.name()
+                        else:
+                            output_type_name = "str"
+
+                        current_span = agent_span(
+                            name=current_agent.name,
+                            handoffs=[],
+                            tools=[],
+                            output_type=output_type_name,
+                        )
+                        current_span.start(mark_as_current=True)
+
                     if run_state is not None and run_state._current_step is not None:
                         if isinstance(run_state._current_step, NextStepInterruption):
                             logger.debug("Continuing from interruption")
@@ -1113,6 +1129,7 @@ class AgentRunner:
                             )
 
                             turn_result = await resolve_interrupted_turn(
+                                agent_span=current_span,
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 original_pre_step_items=generated_items,
@@ -1489,20 +1506,6 @@ class AgentRunner:
                             if not run_state._pending_input:
                                 run_state._generated_items = list(generated_items)
                                 run_state._session_items = list(session_items)
-                    if current_span is None:
-                        if (output_schema := get_output_schema(execution_agent)) is not None:
-                            output_type_name = output_schema.name()
-                        else:
-                            output_type_name = "str"
-
-                        current_span = agent_span(
-                            name=current_agent.name,
-                            handoffs=[],
-                            tools=[],
-                            output_type=output_type_name,
-                        )
-                        current_span.start(mark_as_current=True)
-
                     current_turn += 1
                     if max_turns is not None and current_turn > max_turns:
                         _error_tracing.attach_error_to_span(
