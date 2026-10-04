@@ -466,6 +466,8 @@ async def test_approved_tool_executes_inside_resumed_agent_span(
     agent_span = agent_spans[0]
     assert function_spans[0].parent_id == agent_span.span_id
     assert agent_span.span_data.name == "approval agent"
+    assert agent_span.span_data.tools == ["approved_tool"]
+    assert agent_span.span_data.handoffs == (["target"] if outcome == "handoff" else [])
     if outcome == "handoff":
         assert agent_spans[1].span_data.name == "target"
         assert agent_spans[1].parent_id == agent_span.parent_id

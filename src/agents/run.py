@@ -1129,6 +1129,7 @@ class AgentRunner:
                             )
 
                             turn_result = await resolve_interrupted_turn(
+                                agent_span=current_span,
                                 bindings=current_bindings,
                                 original_input=original_input,
                                 original_pre_step_items=generated_items,

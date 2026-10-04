@@ -1337,6 +1337,7 @@ async def start_streaming(
                     )
 
                     turn_result = await resolve_interrupted_turn(
+                        agent_span=current_span,
                         bindings=current_bindings,
                         original_input=run_state._original_input,
                         original_pre_step_items=run_state._generated_items,
