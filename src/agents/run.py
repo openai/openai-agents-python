@@ -2485,7 +2485,6 @@ class AgentRunner:
                     context=context,
                 )
                 context_wrapper._resolve_function_approval_owners(starting_agent)
-                context = context_wrapper.context
 
                 # Override max_turns with the state's max_turns to preserve it across resumption
                 max_turns = run_state._max_turns
