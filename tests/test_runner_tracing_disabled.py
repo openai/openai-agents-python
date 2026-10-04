@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import asyncio
 from contextvars import ContextVar, Token
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
-from agents import Agent, GuardrailFunctionOutput, RunConfig, Runner
-from agents.decorators import input_guardrail, tool
+from agents import Agent, GuardrailFunctionOutput, OpenAIChatCompletionsModel, RunConfig, Runner
+from agents.decorators import input_guardrail, output_guardrail, tool
 from agents.items import TResponseInputItem
+from agents.models.interface import Model, ModelProvider
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from agents.tracing import custom_span, get_current_span, get_current_trace, trace
 from agents.tracing.provider import DefaultTraceProvider
@@ -274,7 +275,8 @@ async def test_disabled_runner_uses_configured_provider(streamed: bool) -> None:
                 result = await Runner.run(agent, "hi", run_config=RunConfig(tracing_disabled=True))
             assert result.final_output == "done"
             assert not disabled_context.get()
-            assert restored == [False]
+            # Streaming setup and background execution own separate disabled contexts.
+            assert restored == ([False, False] if streamed else [False])
         assert [getattr(span.span_data, "name", None) for span in fetch_ordered_spans()] == [
             "caller-parent"
         ]
@@ -338,4 +340,68 @@ async def test_runner_tracing_opt_out_during_session_preparation(
             for span in spans
             if getattr(span.span_data, "name", None) in calls
         )
+    assert spans[-1].parent_id == caller_span.span_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("provider_error", [False, True])
+async def test_streamed_setup_tracing_opt_out_during_model_resolution(
+    disabled: bool, provider_error: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    scripted = ScriptedModel([[assistant_message("done")]])
+    # Keep the supported Chat Completions validation path, with no network I/O.
+    model = OpenAIChatCompletionsModel(model="synthetic-model", openai_client=cast(Any, object()))
+    monkeypatch.setattr(model, "stream_response", scripted.stream_response)
+    resolutions: list[str | None] = []
+
+    class Provider(ModelProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            with custom_span("provider-resolution"):
+                resolutions.append(model_name)
+                if provider_error:
+                    raise ValueError("synthetic provider failure")
+                return model
+
+    @output_guardrail
+    def allow(ctx, agent, output):
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(name="provider", model="synthetic-model", output_guardrails=[allow])
+    config = RunConfig(tracing_disabled=disabled, model_provider=Provider())
+    with trace("caller") as caller_trace, custom_span("caller-parent") as caller_span:
+        if provider_error:
+            with pytest.raises(ValueError, match="synthetic provider failure"):
+                Runner.run_streamed(
+                    agent, "hi", previous_response_id="response-id", run_config=config
+                )
+        else:
+            result = Runner.run_streamed(
+                agent, "hi", previous_response_id="response-id", run_config=config
+            )
+            assert resolutions == ["synthetic-model"]
+            assert get_current_trace() is caller_trace
+            assert get_current_span() is caller_span
+            with custom_span("after-setup"):
+                pass
+            async for _ in result.stream_events():
+                assert get_current_trace() is caller_trace
+                assert get_current_span() is caller_span
+            assert result.final_output == "done"
+        assert resolutions
+        assert get_current_trace() is caller_trace
+        assert get_current_span() is caller_span
+        with custom_span("after-run"):
+            pass
+    spans = fetch_ordered_spans()
+    names = [getattr(span.span_data, "name", None) for span in spans]
+    assert fetch_traces() == [caller_trace]
+    if disabled:
+        assert names == (
+            ["caller-parent", "after-run"]
+            if provider_error
+            else ["caller-parent", "after-setup", "after-run"]
+        )
+    else:
+        assert names.count("provider-resolution") == len(resolutions)
     assert spans[-1].parent_id == caller_span.span_id

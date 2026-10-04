@@ -2417,221 +2417,237 @@ class AgentRunner:
 
         run_config, owns_model_provider = _normalize_run_config_for_runner(run_config)
 
-        # Handle RunState input
-        is_resumed_state = isinstance(input, RunState)
-        run_state: RunState[TContext] | None = None
-        input_for_result: str | list[TResponseInputItem]
-        starting_input = input if not is_resumed_state else None
+        # Synchronous setup can invoke application providers before the task starts.
+        # Restore caller context before creating the independently masked background task.
+        with (
+            TraceCtxManager(
+                workflow_name=run_config.workflow_name,
+                trace_id=run_config.trace_id,
+                group_id=run_config.group_id,
+                metadata=run_config.trace_metadata,
+                tracing=run_config.tracing,
+                disabled=True,
+            )
+            if run_config.tracing_disabled
+            else contextlib.nullcontext()
+        ):
+            # Handle RunState input
+            is_resumed_state = isinstance(input, RunState)
+            run_state: RunState[TContext] | None = None
+            input_for_result: str | list[TResponseInputItem]
+            starting_input = input if not is_resumed_state else None
 
-        if is_resumed_state:
-            run_state = cast(RunState[TContext], input)
+            if is_resumed_state:
+                run_state = cast(RunState[TContext], input)
+                (
+                    conversation_id,
+                    previous_response_id,
+                    auto_previous_response_id,
+                ) = apply_resumed_conversation_settings(
+                    run_state=run_state,
+                    conversation_id=conversation_id,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                )
+                validate_session_conversation_settings(
+                    session,
+                    conversation_id=conversation_id,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                )
+                # When resuming, use the original_input from state.
+                # primeFromState will mark items as sent so prepareInput skips them
+                starting_input = run_state._original_input
+
+                logger.debug(
+                    "Resuming from RunState in run_streaming()",
+                    extra=build_resumed_stream_debug_extra(
+                        run_state,
+                        include_tool_output=not _debug.DONT_LOG_TOOL_DATA,
+                    ),
+                )
+                # When resuming, use the original_input from state.
+                # primeFromState will mark items as sent so prepareInput skips them
+                raw_input_for_result = run_state._original_input
+                input_for_result = normalize_resumed_input(raw_input_for_result)
+                (
+                    input_for_result,
+                    run_state._nested_history_owned_session_item_refs,
+                ) = reconcile_nested_history_owned_input_after_rewrite(
+                    raw_input_for_result,
+                    input_for_result,
+                    run_state._nested_history_owned_session_item_refs,
+                )
+                run_state._original_input = copy_input_items(input_for_result)
+                # Use context from RunState if not provided, otherwise override it.
+                context_wrapper = resolve_resumed_context(
+                    run_state=run_state,
+                    context=context,
+                )
+                context_wrapper._resolve_function_approval_owners(starting_agent)
+                context = context_wrapper.context
+
+                # Override max_turns with the state's max_turns to preserve it across resumption
+                max_turns = run_state._max_turns
+
+            else:
+                # input is already str | list[TResponseInputItem] when not RunState
+                # Reuse input_for_result variable from outer scope
+                input_for_result = cast(str | list[TResponseInputItem], input)
+                validate_session_conversation_settings(
+                    session,
+                    conversation_id=conversation_id,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                )
+                context_wrapper = ensure_context_wrapper(context)
+                context_wrapper._resolve_function_approval_owners(starting_agent)
+                set_agent_tool_state_scope(context_wrapper, uuid4().hex)
+                # input_for_state is the same as input_for_result here
+                input_for_state = input_for_result
+                run_state = RunState(
+                    context=context_wrapper,
+                    original_input=copy_input_items(input_for_state),
+                    starting_agent=starting_agent,
+                    max_turns=max_turns,
+                    conversation_id=conversation_id,
+                    previous_response_id=previous_response_id,
+                    auto_previous_response_id=auto_previous_response_id,
+                )
+
+            resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
+                run_config.reasoning_item_id_policy
+                if run_config.reasoning_item_id_policy is not None
+                else (run_state._reasoning_item_id_policy if run_state is not None else None)
+            )
+            if run_state is not None:
+                run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+
+            schema_agent = (
+                run_state._current_agent
+                if run_state is not None and run_state._current_agent is not None
+                else starting_agent
+            )
+            validate_output_guardrails_with_server_managed_conversation(
+                schema_agent,
+                run_config,
+                conversation_id=conversation_id,
+                previous_response_id=previous_response_id,
+                auto_previous_response_id=auto_previous_response_id,
+            )
+
             (
-                conversation_id,
-                previous_response_id,
-                auto_previous_response_id,
-            ) = apply_resumed_conversation_settings(
-                run_state=run_state,
-                conversation_id=conversation_id,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-            )
-            validate_session_conversation_settings(
-                session,
-                conversation_id=conversation_id,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-            )
-            # When resuming, use the original_input from state.
-            # primeFromState will mark items as sent so prepareInput skips them
-            starting_input = run_state._original_input
+                trace_workflow_name,
+                trace_id,
+                trace_group_id,
+                trace_metadata,
+                trace_config,
+            ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
 
-            logger.debug(
-                "Resuming from RunState in run_streaming()",
-                extra=build_resumed_stream_debug_extra(
-                    run_state,
-                    include_tool_output=not _debug.DONT_LOG_TOOL_DATA,
+            # Reuse an active trace unless this run opts out. Start and finish any new trace in
+            # the background task, where the actual work happens.
+            new_trace = create_trace_for_run(
+                workflow_name=trace_workflow_name,
+                trace_id=trace_id,
+                group_id=trace_group_id,
+                metadata=trace_metadata,
+                tracing=trace_config,
+                disabled=run_config.tracing_disabled,
+                trace_state=run_state._trace_state if run_state is not None else None,
+                reattach_resumed_trace=is_resumed_state,
+            )
+            if run_state is not None:
+                run_state.set_trace(new_trace if new_trace is not None else get_current_trace())
+
+            sandbox_runtime = SandboxRuntime(
+                starting_agent=starting_agent,
+                run_config=run_config,
+                rollout_id=_sandbox_memory_rollout_id(
+                    run_config=run_config,
+                    conversation_id=conversation_id,
+                    session=session,
+                ),
+                run_state=run_state,
+            )
+
+            sandbox_runtime.assert_agent_supported(schema_agent)
+            output_schema = get_output_schema(schema_agent)
+
+            streamed_input: str | list[TResponseInputItem] = (
+                starting_input
+                if starting_input is not None and not isinstance(starting_input, RunState)
+                else ""
+            )
+            streamed_result = RunResultStreaming(
+                input=copy_input_items(streamed_input),
+                # When resuming from RunState, use session_items from state.
+                # primeFromState will mark items as sent so prepareInput skips them.
+                # Copy it: the streamed loop appends to new_items, and the caller still
+                # owns the state as a resumable snapshot.
+                new_items=list(run_state._session_items) if run_state is not None else [],
+                current_agent=schema_agent,
+                raw_responses=run_state._model_responses if run_state is not None else [],
+                final_output=None,
+                is_complete=False,
+                current_turn=run_state._current_turn if run_state is not None else 0,
+                max_turns=max_turns,
+                input_guardrail_results=(
+                    list(run_state._input_guardrail_results) if run_state is not None else []
+                ),
+                output_guardrail_results=(
+                    list(run_state._output_guardrail_results) if run_state is not None else []
+                ),
+                tool_input_guardrail_results=(
+                    list(getattr(run_state, "_tool_input_guardrail_results", []))
+                    if run_state is not None
+                    else []
+                ),
+                tool_output_guardrail_results=(
+                    list(getattr(run_state, "_tool_output_guardrail_results", []))
+                    if run_state is not None
+                    else []
+                ),
+                _current_agent_output_schema=output_schema,
+                trace=new_trace,
+                context_wrapper=context_wrapper,
+                interruptions=[],
+                # Preserve persisted-count from state to avoid re-saving items when resuming.
+                # If a cross-SDK state omits the counter, fall back to len(generated_items)
+                # to avoid duplication.
+                _current_turn_persisted_item_count=(
+                    run_state._current_turn_persisted_item_count if run_state is not None else 0
+                ),
+                # When resuming from RunState, preserve the original input from the state
+                # This ensures originalInput in serialized state reflects the first turn's input
+                _original_input=(
+                    copy_input_items(run_state._original_input)
+                    if run_state is not None and run_state._original_input is not None
+                    else copy_input_items(streamed_input)
                 ),
             )
-            # When resuming, use the original_input from state.
-            # primeFromState will mark items as sent so prepareInput skips them
-            raw_input_for_result = run_state._original_input
-            input_for_result = normalize_resumed_input(raw_input_for_result)
-            (
-                input_for_result,
-                run_state._nested_history_owned_session_item_refs,
-            ) = reconcile_nested_history_owned_input_after_rewrite(
-                raw_input_for_result,
-                input_for_result,
-                run_state._nested_history_owned_session_item_refs,
+            streamed_result._model_input_items = (
+                list(run_state._generated_items) if run_state is not None else []
             )
-            run_state._original_input = copy_input_items(input_for_result)
-            # Use context from RunState if not provided, otherwise override it.
-            context_wrapper = resolve_resumed_context(
-                run_state=run_state,
-                context=context,
-            )
-            context_wrapper._resolve_function_approval_owners(starting_agent)
-            context = context_wrapper.context
-
-            # Override max_turns with the state's max_turns to preserve it across resumption
-            max_turns = run_state._max_turns
-
-        else:
-            # input is already str | list[TResponseInputItem] when not RunState
-            # Reuse input_for_result variable from outer scope
-            input_for_result = cast(str | list[TResponseInputItem], input)
-            validate_session_conversation_settings(
-                session,
-                conversation_id=conversation_id,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-            )
-            context_wrapper = ensure_context_wrapper(context)
-            context_wrapper._resolve_function_approval_owners(starting_agent)
-            set_agent_tool_state_scope(context_wrapper, uuid4().hex)
-            # input_for_state is the same as input_for_result here
-            input_for_state = input_for_result
-            run_state = RunState(
-                context=context_wrapper,
-                original_input=copy_input_items(input_for_state),
-                starting_agent=starting_agent,
-                max_turns=max_turns,
-                conversation_id=conversation_id,
-                previous_response_id=previous_response_id,
-                auto_previous_response_id=auto_previous_response_id,
-            )
-
-        resolved_reasoning_item_id_policy: ReasoningItemIdPolicy | None = (
-            run_config.reasoning_item_id_policy
-            if run_config.reasoning_item_id_policy is not None
-            else (run_state._reasoning_item_id_policy if run_state is not None else None)
-        )
-        if run_state is not None:
-            run_state._reasoning_item_id_policy = resolved_reasoning_item_id_policy
-
-        schema_agent = (
-            run_state._current_agent
-            if run_state is not None and run_state._current_agent is not None
-            else starting_agent
-        )
-        validate_output_guardrails_with_server_managed_conversation(
-            schema_agent,
-            run_config,
-            conversation_id=conversation_id,
-            previous_response_id=previous_response_id,
-            auto_previous_response_id=auto_previous_response_id,
-        )
-
-        (
-            trace_workflow_name,
-            trace_id,
-            trace_group_id,
-            trace_metadata,
-            trace_config,
-        ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
-
-        # Reuse an active trace unless this run opts out. Start and finish any new trace in
-        # the background task, where the actual work happens.
-        new_trace = create_trace_for_run(
-            workflow_name=trace_workflow_name,
-            trace_id=trace_id,
-            group_id=trace_group_id,
-            metadata=trace_metadata,
-            tracing=trace_config,
-            disabled=run_config.tracing_disabled,
-            trace_state=run_state._trace_state if run_state is not None else None,
-            reattach_resumed_trace=is_resumed_state,
-        )
-        if run_state is not None:
-            run_state.set_trace(new_trace if new_trace is not None else get_current_trace())
-
-        sandbox_runtime = SandboxRuntime(
-            starting_agent=starting_agent,
-            run_config=run_config,
-            rollout_id=_sandbox_memory_rollout_id(
-                run_config=run_config,
-                conversation_id=conversation_id,
-                session=session,
-            ),
-            run_state=run_state,
-        )
-
-        sandbox_runtime.assert_agent_supported(schema_agent)
-        output_schema = get_output_schema(schema_agent)
-
-        streamed_input: str | list[TResponseInputItem] = (
-            starting_input
-            if starting_input is not None and not isinstance(starting_input, RunState)
-            else ""
-        )
-        streamed_result = RunResultStreaming(
-            input=copy_input_items(streamed_input),
-            # When resuming from RunState, use session_items from state.
-            # primeFromState will mark items as sent so prepareInput skips them.
-            # Copy it: the streamed loop appends to new_items, and the caller still
-            # owns the state as a resumable snapshot.
-            new_items=list(run_state._session_items) if run_state is not None else [],
-            current_agent=schema_agent,
-            raw_responses=run_state._model_responses if run_state is not None else [],
-            final_output=None,
-            is_complete=False,
-            current_turn=run_state._current_turn if run_state is not None else 0,
-            max_turns=max_turns,
-            input_guardrail_results=(
-                list(run_state._input_guardrail_results) if run_state is not None else []
-            ),
-            output_guardrail_results=(
-                list(run_state._output_guardrail_results) if run_state is not None else []
-            ),
-            tool_input_guardrail_results=(
-                list(getattr(run_state, "_tool_input_guardrail_results", []))
+            streamed_result._replay_from_model_input_items = (
+                list(run_state._generated_items) != list(run_state._session_items)
                 if run_state is not None
-                else []
-            ),
-            tool_output_guardrail_results=(
-                list(getattr(run_state, "_tool_output_guardrail_results", []))
-                if run_state is not None
-                else []
-            ),
-            _current_agent_output_schema=output_schema,
-            trace=new_trace,
-            context_wrapper=context_wrapper,
-            interruptions=[],
-            # Preserve persisted-count from state to avoid re-saving items when resuming.
-            # If a cross-SDK state omits the counter, fall back to len(generated_items)
-            # to avoid duplication.
-            _current_turn_persisted_item_count=(
-                run_state._current_turn_persisted_item_count if run_state is not None else 0
-            ),
-            # When resuming from RunState, preserve the original input from the state
-            # This ensures originalInput in serialized state reflects the first turn's input
-            _original_input=(
-                copy_input_items(run_state._original_input)
-                if run_state is not None and run_state._original_input is not None
-                else copy_input_items(streamed_input)
-            ),
-        )
-        streamed_result._model_input_items = (
-            list(run_state._generated_items) if run_state is not None else []
-        )
-        streamed_result._replay_from_model_input_items = (
-            list(run_state._generated_items) != list(run_state._session_items)
-            if run_state is not None
-            else False
-        )
-        streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
-        if run_state is not None:
-            streamed_result._trace_state = run_state._trace_state
-        # Store run_state in streamed_result._state so it's accessible throughout streaming
-        # Now that we create run_state for both fresh and resumed runs, always set it
-        streamed_result._conversation_id = conversation_id
-        streamed_result._previous_response_id = previous_response_id
-        streamed_result._auto_previous_response_id = auto_previous_response_id
-        streamed_result._state = run_state
-        if run_state is not None:
-            streamed_result._tool_use_tracker_snapshot = run_state.get_tool_use_tracker_snapshot()
-        if sandbox_runtime.enabled:
-            sandbox_runtime.apply_result_metadata(streamed_result)
+                else False
+            )
+            streamed_result._reasoning_item_id_policy = resolved_reasoning_item_id_policy
+            if run_state is not None:
+                streamed_result._trace_state = run_state._trace_state
+            # Store run_state in streamed_result._state so it's accessible throughout streaming
+            # Now that we create run_state for both fresh and resumed runs, always set it
+            streamed_result._conversation_id = conversation_id
+            streamed_result._previous_response_id = previous_response_id
+            streamed_result._auto_previous_response_id = auto_previous_response_id
+            streamed_result._state = run_state
+            if run_state is not None:
+                streamed_result._tool_use_tracker_snapshot = (
+                    run_state.get_tool_use_tracker_snapshot()
+                )
+            if sandbox_runtime.enabled:
+                sandbox_runtime.apply_result_metadata(streamed_result)
 
         # Kick off the actual agent loop in the background and return the streamed result object.
         async def run_loop() -> None:
