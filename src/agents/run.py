@@ -160,7 +160,15 @@ from .sandbox.memory.rollouts import terminal_metadata_for_exception
 from .sandbox.runtime import SandboxRuntime
 from .tool import dispose_resolved_computers
 from .tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from .tracing import Span, SpanError, agent_span, get_current_trace, task_span, turn_span
+from .tracing import (
+    Span,
+    SpanError,
+    agent_span,
+    custom_span,
+    get_current_trace,
+    task_span,
+    turn_span,
+)
 from .tracing.config import include_task_and_turn_spans
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
@@ -2497,9 +2505,8 @@ class AgentRunner:
             trace_config,
         ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
 
-        # If there's already a trace, we don't create a new one. In addition, we can't end the
-        # trace here, because the actual work is done in `stream_events` and this method ends
-        # before that.
+        # Reuse an active trace unless this run opts out. Start and finish any new trace in
+        # the background task, where the actual work happens.
         new_trace = create_trace_for_run(
             workflow_name=trace_workflow_name,
             trace_id=trace_id,
@@ -2608,7 +2615,13 @@ class AgentRunner:
                 if run_state is not None and run_state._current_agent is not None
                 else starting_agent
             )
-            with agent_tool_configuration_run(configuration_agent):
+            with (
+                # Mask the inherited span in this task; the streaming loop owns the trace.
+                custom_span(name="Agent run", disabled=True)
+                if run_config.tracing_disabled
+                else contextlib.nullcontext(),
+                agent_tool_configuration_run(configuration_agent),
+            ):
                 await start_streaming(
                     starting_input=input_for_result,
                     streamed_result=streamed_result,
