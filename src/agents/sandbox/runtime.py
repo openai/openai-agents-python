@@ -21,6 +21,7 @@ from ..run_internal.agent_bindings import (
 )
 from ..run_state import RunState
 from ..tracing import custom_span, get_current_trace
+from ..tracing.context import TraceCtxManager
 from .capabilities import Capability
 from .capabilities.memory import Memory
 from .memory.manager import SandboxMemoryGenerationManager, get_or_create_memory_generation_manager
@@ -82,6 +83,7 @@ class SandboxRuntime(Generic[TContext]):
         run_state: RunState[TContext] | None,
     ) -> None:
         self._sandbox_config = run_config.sandbox if run_config is not None else None
+        self._tracing_disabled = run_config.tracing_disabled if run_config is not None else False
         self._run_config_model = run_config.model if run_config is not None else None
         self._workspace_scope = SandboxWorkspaceScope.from_cwd(
             self._sandbox_config.cwd if self._sandbox_config is not None else None
@@ -111,22 +113,35 @@ class SandboxRuntime(Generic[TContext]):
         if isinstance(result, RunResultStreaming):
 
             async def _cleanup_and_store() -> None:
-                try:
+                # Cleanup can run in a callback or consumer task outside the run-loop mask.
+                with (
+                    TraceCtxManager(
+                        workflow_name="Sandbox cleanup",
+                        trace_id=None,
+                        group_id=None,
+                        metadata=None,
+                        tracing=None,
+                        disabled=True,
+                    )
+                    if self.enabled and self._tracing_disabled
+                    else nullcontext()
+                ):
                     try:
-                        await self.enqueue_memory_result(
-                            result,
-                            input_override=_stream_memory_input_override(result),
-                        )
-                    except Exception as error:
-                        log_model_and_tool_action_warning(
-                            logger,
-                            "Failed to enqueue sandbox memory after streamed run",
-                            error,
-                        )
-                    payload = await self.cleanup()
-                    result._sandbox_resume_state = payload
-                finally:
-                    result._sandbox_session = None
+                        try:
+                            await self.enqueue_memory_result(
+                                result,
+                                input_override=_stream_memory_input_override(result),
+                            )
+                        except Exception as error:
+                            log_model_and_tool_action_warning(
+                                logger,
+                                "Failed to enqueue sandbox memory after streamed run",
+                                error,
+                            )
+                        payload = await self.cleanup()
+                        result._sandbox_resume_state = payload
+                    finally:
+                        result._sandbox_session = None
 
             result._sandbox_cleanup = _cleanup_and_store
 

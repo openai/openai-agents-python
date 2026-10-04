@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from contextlib import ExitStack
 from typing import Any
 
 from .config import TracingConfig
-from .create import get_current_trace, trace
+from .create import custom_span, get_current_trace, trace
+from .setup import get_trace_provider
 from .traces import (
     Trace,
     TraceState,
@@ -55,14 +57,22 @@ def create_trace_for_run(
     trace_state: TraceState | None = None,
     reattach_resumed_trace: bool = False,
 ) -> Trace | None:
-    """Return a trace object for this run when one is not already active."""
+    """Return a run trace when none is active, or a disabled trace to mask an active one."""
+    if disabled:
+        return get_trace_provider().create_trace(
+            name=workflow_name,
+            trace_id=trace_id,
+            group_id=group_id,
+            metadata=metadata,
+            tracing=tracing,
+            disabled=True,
+        )
     current_trace = get_current_trace()
     if current_trace is not None:
         return None
 
     if (
         reattach_resumed_trace
-        and not disabled
         and trace_state is not None
         and _trace_id_was_started(trace_state.trace_id)
         and _trace_state_matches_effective_settings(
@@ -111,6 +121,7 @@ class TraceCtxManager:
         self.disabled = disabled
         self.trace_state = trace_state
         self.reattach_resumed_trace = reattach_resumed_trace
+        self._exit_stack = ExitStack()
 
     def __enter__(self) -> TraceCtxManager:
         self.trace = create_trace_for_run(
@@ -123,10 +134,15 @@ class TraceCtxManager:
             trace_state=self.trace_state,
             reattach_resumed_trace=self.reattach_resumed_trace,
         )
-        if self.trace is not None:
-            self.trace.start(mark_as_current=True)
+        with ExitStack() as stack:
+            if self.trace is not None:
+                self.trace.start(mark_as_current=True)
+                stack.callback(self.trace.finish, reset_current=True)
+            if self.disabled:
+                # Also hide the caller's span from code that consults it directly.
+                stack.enter_context(custom_span(name="Agent run", disabled=True))
+            self._exit_stack = stack.pop_all()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.trace is not None:
-            self.trace.finish(reset_current=True)
+        self._exit_stack.__exit__(exc_type, exc_val, exc_tb)

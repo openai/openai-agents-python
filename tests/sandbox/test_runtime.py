@@ -104,17 +104,17 @@ from agents.sandbox.session.sandbox_session_state import SandboxSessionState
 from agents.sandbox.snapshot import LocalSnapshotSpec, NoopSnapshot, SnapshotBase
 from agents.sandbox.types import ExecResult
 from agents.stream_events import RunItemStreamEvent
-from agents.testing import ScriptedModel, scripted_sandbox_session
+from agents.testing import ModelStep, ScriptedModel, scripted_sandbox_session
 from agents.tool import FunctionTool, Tool
 from agents.tool_context import ToolContext
-from agents.tracing import trace
+from agents.tracing import custom_span, get_current_span, get_current_trace, trace
 from tests.test_responses import (
     get_final_output_message,
     get_function_tool,
     get_function_tool_call,
     get_handoff_tool_call,
 )
-from tests.testing_processor import fetch_normalized_spans
+from tests.testing_processor import fetch_events, fetch_normalized_spans, fetch_ordered_spans
 from tests.utils.factories import TestSessionState
 from tests.utils.simple_session import SimpleListSession
 
@@ -2948,6 +2948,90 @@ async def test_wrapped_unix_local_helpers_reject_symlink_escape_paths(tmp_path: 
             await session.rm("link/file.txt")
     finally:
         await client.delete(session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("outcome", ["success", "cleanup-error", "run-error", "cancel"])
+async def test_streamed_sandbox_cleanup_honors_tracing_opt_out(
+    disabled: bool,
+    outcome: str,
+) -> None:
+    model_entered = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    release_cleanup = asyncio.Event()
+
+    # Stop-time blocking and failure injection need the session lifecycle boundary,
+    # which scripted_sandbox_session does not expose as a scriptable method.
+    class CleanupSession(_FakeSession):
+        async def stop(self) -> None:
+            await super().stop()
+            with custom_span("session-stop"):
+                cleanup_entered.set()
+                await release_cleanup.wait()
+                if outcome == "cleanup-error":
+                    raise RuntimeError("synthetic cleanup failure")
+
+    async def respond(_call):
+        model_entered.set()
+        if outcome == "cancel":
+            await asyncio.Event().wait()
+        if outcome == "run-error":
+            raise ValueError("synthetic run failure")
+        return [get_final_output_message("done")]
+
+    session = CleanupSession(Manifest())
+    client = _FakeClient(session)
+    agent = SandboxAgent(name="sandbox", model=ScriptedModel([ModelStep.respond(respond)]))
+    config = _sandbox_run_config(client)
+    config.tracing_disabled = disabled
+
+    with trace("caller") as caller_trace, custom_span("caller-parent") as caller_span:
+        result = Runner.run_streamed(agent, "hello", run_config=config)
+
+        async def consume() -> None:
+            async for _ in result.stream_events():
+                pass
+
+        consumer = asyncio.create_task(consume())
+        try:
+            await asyncio.wait_for(model_entered.wait(), timeout=5)
+            if outcome == "cancel":
+                result.cancel()
+            await asyncio.wait_for(cleanup_entered.wait(), timeout=5)
+            assert get_current_trace() is caller_trace
+            assert get_current_span() is caller_span
+            with custom_span("during-cleanup"):
+                pass
+        finally:
+            release_cleanup.set()
+            if not model_entered.is_set() or not cleanup_entered.is_set():
+                result.cancel()
+            if outcome == "run-error":
+                with pytest.raises(ValueError, match="synthetic run failure"):
+                    await asyncio.wait_for(consumer, timeout=5)
+            else:
+                await asyncio.wait_for(consumer, timeout=5)
+            if result._sandbox_cleanup_task is not None:
+                await asyncio.wait_for(result._sandbox_cleanup_task, timeout=5)
+        assert get_current_trace() is caller_trace
+        assert get_current_span() is caller_span
+        with custom_span("after-cleanup"):
+            pass
+
+    assert session.stop_calls == 1
+    assert session.shutdown_calls == 1
+    assert session.close_dependency_calls == 1
+    assert client.delete_calls == 1
+    assert result._sandbox_session is None
+    if outcome in {"success", "cleanup-error"}:
+        assert result.final_output == "done"
+    names = [getattr(span.span_data, "name", None) for span in fetch_ordered_spans()]
+    if disabled:
+        assert names == ["caller-parent", "during-cleanup", "after-cleanup"]
+        assert fetch_events().count("span_start") == 3
+    else:
+        assert {"sandbox.cleanup", "sandbox.cleanup_sessions", "session-stop"} <= set(names)
 
 
 @pytest.mark.asyncio
