@@ -6129,6 +6129,7 @@
 </tbody>
 </table>
 </div>
+<p><code>GitRepo</code> requires the <code>git</code> executable on <code>PATH</code> inside the sandbox where the repository is materialized. For <code>UnixLocalSandboxClient</code>, install Git on the local machine. For Docker or hosted sandbox clients, include Git in the sandbox image or environment before applying the manifest. Installing the Python SDK does not install Git.</p>
 <p><code>Dir</code> creates a directory inside the sandbox workspace from synthetic children or as an output location; it does not read from the host filesystem. Use <code>LocalDir</code> when an existing host directory should be copied into the sandbox workspace.</p>
 <p><code>LocalFile.src</code> and <code>LocalDir.src</code> are resolved against the SDK process working directory by default. The source must stay under that base directory unless it is covered by <code>extra_path_grants</code>. This keeps local source materialization inside the same host-path trust boundary as the rest of the sandbox manifest.</p>
 <p>Mount entries describe what storage to expose; mount strategies describe how a sandbox backend attaches that storage. See <a href="../clients/#mounts-and-remote-storage">Sandbox clients</a> for mount options and provider support.</p>
