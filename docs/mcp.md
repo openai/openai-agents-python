@@ -26,6 +26,8 @@ Before wiring an MCP server into an agent decide where the tool calls should exe
 
 The sections below walk through each option, how to configure it, and when to prefer one transport over another.
 
+For a remote MCP server, obtain the endpoint URL and authentication requirements from the server provider's documentation. You can also find published servers in the [official MCP Registry](https://registry.modelcontextprotocol.io/). Configure the SDK with the provider's MCP endpoint URL, which may differ from the provider's website URL.
+
 ## MCP Python SDK v1 and v2
 
 The Agents SDK supports both major versions of the `mcp` Python package through the dependency range `mcp>=1.19.0,<3`. The installed `mcp` package version is separate from the MCP protocol version negotiated with a server. The Agents SDK detects the installed package major version and adapts stdio, SSE, and Streamable HTTP connections automatically, so ordinary server configuration does not need a version switch.
