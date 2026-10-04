@@ -8,6 +8,7 @@ import pytest
 
 from agents import Agent, GuardrailFunctionOutput, RunConfig, Runner
 from agents.decorators import input_guardrail, tool
+from agents.items import TResponseInputItem
 from agents.testing import ModelStep, ScriptedModel, assistant_message, function_call
 from agents.tracing import custom_span, get_current_span, get_current_trace, trace
 from agents.tracing.provider import DefaultTraceProvider
@@ -20,6 +21,7 @@ from .testing_processor import (
     fetch_ordered_spans,
     fetch_traces,
 )
+from .utils.simple_session import SimpleListSession
 
 
 @pytest.mark.asyncio
@@ -278,3 +280,62 @@ async def test_disabled_runner_uses_configured_provider(streamed: bool) -> None:
         ]
     finally:
         set_trace_provider(original_provider)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("failure", [None, "session-read", "input-callback"])
+async def test_runner_tracing_opt_out_during_session_preparation(
+    disabled: bool, failure: str | None
+) -> None:
+    calls: list[str] = []
+
+    class Session(SimpleListSession):
+        async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+            with custom_span("session-read"):
+                calls.append("session-read")
+                if failure == "session-read":
+                    raise ValueError("synthetic session-read failure")
+                return await super().get_items(limit)
+
+    async def prepare_input(
+        history: list[TResponseInputItem], new_input: list[TResponseInputItem]
+    ) -> list[TResponseInputItem]:
+        with custom_span("input-callback"):
+            calls.append("input-callback")
+            if failure == "input-callback":
+                raise ValueError("synthetic input-callback failure")
+            return history + new_input
+
+    session = Session()
+    agent = Agent(name="session", model=ScriptedModel([[assistant_message("done")]]))
+    config = RunConfig(tracing_disabled=disabled, session_input_callback=prepare_input)
+    with trace("caller") as caller_trace, custom_span("caller-parent") as caller_span:
+        if failure is not None:
+            with pytest.raises(ValueError, match=f"synthetic {failure} failure"):
+                await Runner.run(agent, "hi", session=session, run_config=config)
+            assert session.saved_items == []
+        else:
+            result = await Runner.run(agent, "hi", session=session, run_config=config)
+            assert result.final_output == "done"
+            assert session.saved_items[0] == {"role": "user", "content": "hi"}
+        assert calls == (
+            ["session-read"] if failure == "session-read" else ["session-read", "input-callback"]
+        )
+        assert get_current_trace() is caller_trace
+        assert get_current_span() is caller_span
+        with custom_span("after-preparation"):
+            pass
+    spans = fetch_ordered_spans()
+    names = [getattr(span.span_data, "name", None) for span in spans]
+    assert fetch_traces() == [caller_trace]
+    if disabled:
+        assert names == ["caller-parent", "after-preparation"]
+    else:
+        assert all(name in names for name in calls)
+        assert all(
+            span.parent_id == caller_span.span_id
+            for span in spans
+            if getattr(span.span_data, "name", None) in calls
+        )
+    assert spans[-1].parent_id == caller_span.span_id

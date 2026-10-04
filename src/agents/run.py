@@ -568,23 +568,42 @@ class AgentRunner:
         run_config, owns_model_provider = _normalize_run_config_for_runner(kwargs.get("run_config"))
         cast(dict[str, Any], kwargs)["run_config"] = run_config
         redacted_error: BaseException | None = None
-        try:
+        # Mask caller tracing before any run-owned preparation or cleanup can execute.
+        with contextlib.ExitStack() as trace_stack:
             try:
-                configuration_agent = (
-                    input._current_agent
-                    if isinstance(input, RunState) and input._current_agent is not None
-                    else starting_agent
-                )
-                with agent_tool_configuration_run(configuration_agent):
-                    return await self._run_impl(starting_agent, input, **kwargs)
-            except BaseException as error:
-                if not _is_error_data_redacted(error):
-                    raise
-                _detach_data_redacted_error_traceback(error)
-                redacted_error = error
-        finally:
-            if owns_model_provider:
-                await _close_runner_owned_model_provider(run_config.model_provider)
+                try:
+                    if run_config.tracing_disabled:
+                        workflow_name, trace_id, group_id, metadata, tracing = (
+                            resolve_trace_settings(
+                                run_state=input if isinstance(input, RunState) else None,
+                                run_config=run_config,
+                            )
+                        )
+                        trace_stack.enter_context(
+                            TraceCtxManager(
+                                workflow_name=workflow_name,
+                                trace_id=trace_id,
+                                group_id=group_id,
+                                metadata=metadata,
+                                tracing=tracing,
+                                disabled=True,
+                            )
+                        )
+                    configuration_agent = (
+                        input._current_agent
+                        if isinstance(input, RunState) and input._current_agent is not None
+                        else starting_agent
+                    )
+                    with agent_tool_configuration_run(configuration_agent):
+                        return await self._run_impl(starting_agent, input, **kwargs)
+                except BaseException as error:
+                    if not _is_error_data_redacted(error):
+                        raise
+                    _detach_data_redacted_error_traceback(error)
+                    redacted_error = error
+            finally:
+                if owns_model_provider:
+                    await _close_runner_owned_model_provider(run_config.model_provider)
 
         self = cast(Any, None)
         starting_agent = cast(Any, None)
@@ -763,15 +782,21 @@ class AgentRunner:
             trace_config,
         ) = resolve_trace_settings(run_state=run_state, run_config=run_config)
 
-        with TraceCtxManager(
-            workflow_name=trace_workflow_name,
-            trace_id=trace_id,
-            group_id=trace_group_id,
-            metadata=trace_metadata,
-            tracing=trace_config,
-            disabled=run_config.tracing_disabled,
-            trace_state=run_state._trace_state if run_state is not None else None,
-            reattach_resumed_trace=is_resumed_state,
+        # Disabled tracing already covers the complete run in AgentRunner.run.
+        # Keep enabled tracing's existing preparation and resume boundaries.
+        with (
+            contextlib.nullcontext()
+            if run_config.tracing_disabled
+            else TraceCtxManager(
+                workflow_name=trace_workflow_name,
+                trace_id=trace_id,
+                group_id=trace_group_id,
+                metadata=trace_metadata,
+                tracing=trace_config,
+                disabled=run_config.tracing_disabled,
+                trace_state=run_state._trace_state if run_state is not None else None,
+                reattach_resumed_trace=is_resumed_state,
+            )
         ):
             if is_resumed_state and run_state is not None:
                 run_state.set_trace(get_current_trace())
