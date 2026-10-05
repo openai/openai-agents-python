@@ -1167,6 +1167,25 @@ def test_google_docstring_missing_blank_line_function_tool():
     assert "Args:" not in (weather.description or "")
 
 
+@pytest.mark.parametrize("style", [None, "google"])
+def test_google_docstring_without_summary(style):
+    def weather(city: str, units: str) -> str:
+        """
+        Args:
+            city: The city to get
+                weather for.
+            units: Temperature units to use.
+        """
+        return f"{city} {units}"
+
+    weather_tool = tool(weather, docstring_style=style)
+    properties = weather_tool.params_json_schema["properties"]
+    assert properties["city"]["description"] == "The city to get\nweather for."
+    assert properties["units"]["description"] == "Temperature units to use."
+    assert weather_tool.description == ""
+    assert function_schema(weather, docstring_style=style).description is None
+
+
 def section_body_before_args_google_function(city: str, units: str):
     """Get the weather for a city.
 
