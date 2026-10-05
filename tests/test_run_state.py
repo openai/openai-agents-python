@@ -6,6 +6,7 @@ import gc
 import importlib
 import json
 import logging
+import threading
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -613,6 +614,50 @@ class TestRunState:
             state.to_json(strict_context=True)
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("resource", [threading.Lock(), {"not-json"}], ids=["lock", "set"])
+    async def test_dataclass_context_serialization_failure_warns_and_omits(self, resource, caplog):
+        @dataclass
+        class AppContext:
+            tenant_id: str
+            resource: Any
+
+        context = AppContext(tenant_id="synthetic-private-tenant", resource=resource)
+        agent = Agent(name="AgentMapping")
+        state = make_state(
+            agent, context=RunContextWrapper(context), original_input="input", max_turns=1
+        )
+
+        with caplog.at_level(logging.WARNING, logger="openai.agents"):
+            json_data = state.to_json()
+            string_data = json.loads(state.to_string())
+
+        for payload in (json_data, string_data):
+            assert payload["context"]["context"] == {}
+            meta = payload["context"]["context_meta"]
+            assert meta["original_type"] == "dataclass"
+            assert meta["serialized_via"] == "omitted"
+            assert meta["requires_deserializer"] is True
+            assert meta["omitted"] is True
+        assert "not serializable; storing empty context" in caplog.text
+        assert context.tenant_id not in caplog.text
+        assert context.resource is resource
+
+        restored = await RunState.from_json(agent, string_data, context_override=context)
+        assert restored._context is not None
+        assert restored._context.context is context
+        with pytest.raises(UserError, match="context_serializer"):
+            state.to_string(strict_context=True)
+
+        serialized = json.loads(
+            state.to_string(
+                context_serializer=lambda ctx: {"tenant_id": ctx.tenant_id}, strict_context=True
+            )
+        )
+        assert serialized["context"]["context"] == {"tenant_id": context.tenant_id}
+        assert serialized["context"]["context_meta"]["serialized_via"] == "context_serializer"
+        assert serialized["context"]["context_meta"]["omitted"] is False
+
+    @pytest.mark.asyncio
     async def test_from_json_with_context_deserializer(self, caplog):
         """Ensure context_deserializer restores non-mapping contexts."""
 
@@ -629,6 +674,11 @@ class TestRunState:
 
         def deserialize_context(payload: Mapping[str, Any]) -> SampleContext:
             return SampleContext(**payload)
+
+        assert json_data["context"]["context"] == {"value": "hello"}
+        assert json.loads(state.to_string())["context"] == json_data["context"]
+        assert json_data["context"]["context_meta"]["serialized_via"] == "asdict"
+        assert json_data["context"]["context_meta"]["omitted"] is False
 
         new_state = await RunState.from_json(
             agent,
