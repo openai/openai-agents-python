@@ -385,18 +385,12 @@ class DefaultTraceProvider(TraceProvider):
         """
         self._refresh_disabled_flag()
         if self._disabled or disabled:
-            if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
-                logger.debug("Tracing is disabled. Not creating trace")
-            else:
-                logger.debug("Tracing is disabled. Not creating trace %s", name)
+            logger.debug("Tracing is disabled. Not creating trace")
             return NoOpTrace()
 
         trace_id = trace_id or self.gen_trace_id()
 
-        if _debug.DONT_LOG_MODEL_DATA or _debug.DONT_LOG_TOOL_DATA:
-            logger.debug("Creating trace with id %s", trace_id)
-        else:
-            logger.debug("Creating trace %s with id %s", name, trace_id)
+        logger.debug("Creating trace")
 
         return TraceImpl(
             name=name,
