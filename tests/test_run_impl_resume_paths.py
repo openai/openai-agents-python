@@ -11,7 +11,15 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff, output_guardrail
+from agents import (
+    Agent,
+    AgentUpdatedStreamEvent,
+    Runner,
+    ShellTool,
+    function_tool,
+    handoff,
+    output_guardrail,
+)
 from agents.agent import StopAtTools, ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
@@ -55,6 +63,7 @@ from tests.utils.hitl import (
     make_agent,
     make_context_wrapper,
     make_model_and_agent,
+    make_shell_call,
     queue_function_call_and_text,
 )
 from tests.utils.simple_session import SimpleListSession
@@ -143,13 +152,15 @@ async def _run_session_resume(
     session: Session | None,
     streamed: bool,
     hooks: RunHooks[Any] | None = None,
+    events: list[Any] | None = None,
 ):
     config = RunConfig(tracing_disabled=True)
     if not streamed:
         return await Runner.run(agent, value, session=session, run_config=config, hooks=hooks)
     result = Runner.run_streamed(agent, value, session=session, run_config=config, hooks=hooks)
-    async for _ in result.stream_events():
-        pass
+    async for event in result.stream_events():
+        if events is not None:
+            events.append(event)
     return result
 
 
@@ -206,15 +217,35 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
     state = paused.to_state()
     state.approve(state.get_interruptions()[0])
 
-    with pytest.raises(UserError, match="post-tool callback failed"):
-        await _run_session_resume(agent, state, None, streamed, hooks)
+    events: list[Any] = []
+    if streamed:
+        failed = Runner.run_streamed(
+            agent, state, run_config=RunConfig(tracing_disabled=True), hooks=hooks
+        )
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            async for event in failed.stream_events():
+                events.append(event)
+        state = failed.to_state()
+    else:
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            await _run_session_resume(agent, state, None, streamed, hooks)
+
+    assert [
+        item.output for item in state._session_items if isinstance(item, ToolCallOutputItem)
+    ] == ["receipt-7"]
 
     if round_trip:
         state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
-    result = await _run_session_resume(agent, state, None, streamed, hooks)
+    result = await _run_session_resume(agent, state, None, streamed, hooks, events)
 
     assert effects == ["charged"]
     assert callback_calls == [failure]
+    if streamed:
+        assert [
+            event.item.output
+            for event in events
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+        ] == ["receipt-7"]
     assert result.final_output == ("receipt-7" if failure == "extractor" else "done")
     assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
         "receipt-7"
@@ -227,6 +258,152 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
     assert [
         item.output for item in restored._session_items if isinstance(item, ToolCallOutputItem)
     ] == ["receipt-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) -> None:
+    effects: list[str] = []
+
+    @function_tool(needs_approval=True)
+    async def left() -> str:
+        effects.append("left")
+        return "left-result"
+
+    @function_tool(needs_approval=True)
+    async def right() -> str:
+        effects.append("right")
+        return "right-result"
+
+    class FailingRightEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            if tool.name == "right":
+                raise RuntimeError("right callback failed")
+
+    agent = Agent(
+        name="parallel",
+        model=ScriptedModel(
+            [
+                [
+                    get_function_tool_call("left", "{}", call_id="left-1"),
+                    get_function_tool_call("right", "{}", call_id="right-1"),
+                ],
+                [get_text_message("done")],
+            ]
+        ),
+        tools=[left, right],
+    )
+    hooks = FailingRightEndHook()
+    paused = await _run_session_resume(agent, "run both", None, streamed, hooks)
+    state = paused.to_state()
+    left_approval, right_approval = state.get_interruptions()
+    state.approve(right_approval)
+    with pytest.raises(UserError, match="right callback failed"):
+        await _run_session_resume(agent, state, None, streamed, hooks)
+
+    state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    state.approve(left_approval)
+    result = await _run_session_resume(agent, state, None, streamed, hooks)
+    assert effects == ["right", "left"]
+    assert result.final_output == "done"
+    assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
+        "left-result",
+        "right-result",
+    ]
+    assert [
+        item.get("call_id")
+        for item in result.to_input_list()
+        if item.get("type") == "function_call_output"
+    ] == ["left-1", "right-1"]
+    restored = await RunState.from_json(agent, result.to_state().to_json())
+    for history in (restored._session_items, restored._generated_items):
+        assert [item.output for item in history if isinstance(item, ToolCallOutputItem)] == [
+            "left-result",
+            "right-result",
+        ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_callback_retry_preserves_hosted_output_before_local_result(
+    streamed: bool, round_trip: bool
+) -> None:
+    effects: list[str] = []
+
+    @function_tool
+    async def prelude() -> str:
+        return "prefix"
+
+    @function_tool(needs_approval=True)
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    class FailingChargeEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            if tool.name == "charge":
+                raise RuntimeError("charge callback failed")
+
+    @output_guardrail
+    async def allowed(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(
+        name="hosted-shell",
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("prelude", "{}", call_id="prelude")],
+                [
+                    get_function_tool_call("charge", "{}", call_id="charge"),
+                    make_shell_call("shell-1", id_value="sh-hosted", commands=["echo hi"]),
+                    cast(
+                        Any,
+                        {
+                            "type": "shell_call_output",
+                            "id": "sh-out-hosted",
+                            "call_id": "shell-1",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "stdout": "hi",
+                                    "stderr": "",
+                                    "outcome": {"type": "exit", "exit_code": 0},
+                                }
+                            ],
+                        },
+                    ),
+                ],
+                [get_text_message("done")],
+            ]
+        ),
+        tools=[prelude, charge, ShellTool(environment={"type": "container_auto"})],
+        output_guardrails=[allowed],
+    )
+    hooks = FailingChargeEndHook()
+    # ScriptedModel does not stream mapping-shaped hosted output items.
+    paused = await _run_session_resume(agent, "prepare and charge", None, False, hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(UserError, match="charge callback failed"):
+        await _run_session_resume(agent, state, None, streamed, hooks)
+
+    if round_trip:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    result = await _run_session_resume(agent, state, None, streamed, hooks)
+    assert result.final_output == "done"
+    assert effects == ["charged"]
+    assert [
+        item.get("call_id")
+        for item in result.to_input_list()
+        if item.get("type") in {"function_call_output", "shell_call_output"}
+    ] == ["prelude", "shell-1", "charge"]
 
 
 async def _approved_session_state(streamed: bool, session: Session | None = None):

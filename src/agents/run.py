@@ -1186,8 +1186,9 @@ class AgentRunner:
 
                             input_before_turn_rewrite = original_input
                             original_input = turn_result.original_input
-                            generated_items, turn_session_items = resumed_turn_items(turn_result)
-                            session_items.extend(turn_session_items)
+                            generated_items, session_items, turn_session_items = resumed_turn_items(
+                                turn_result, session_items, run_state
+                            )
                             if run_state is not None:
                                 if turn_result.nested_history_owned_items is not None:
                                     run_state._nested_history_owned_session_item_refs = (

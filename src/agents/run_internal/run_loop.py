@@ -54,6 +54,7 @@ from ..items import (
     ModelResponse,
     RunItem,
     ToolApprovalItem,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from ..lifecycle import RunHooks
@@ -1339,20 +1340,49 @@ async def start_streaming(
                     # The resolver can checkpoint outputs before callbacks finish.
                     # Append this attempt's new items to its starting history only.
                     base_session_items = list(run_state._session_items)
-                    turn_result = await resolve_interrupted_turn(
-                        agent_span=current_span,
-                        bindings=current_bindings,
-                        original_input=run_state._original_input,
-                        original_pre_step_items=run_state._generated_items,
-                        new_response=last_model_response,
-                        processed_response=run_state._last_processed_response,
-                        hooks=hooks,
-                        context_wrapper=context_wrapper,
-                        run_config=run_config,
-                        server_manages_conversation=server_conversation_tracker is not None,
-                        run_state=run_state,
-                        error_handlers=error_handlers,
-                    )
+                    try:
+                        turn_result = await resolve_interrupted_turn(
+                            agent_span=current_span,
+                            bindings=current_bindings,
+                            original_input=run_state._original_input,
+                            original_pre_step_items=run_state._generated_items,
+                            new_response=last_model_response,
+                            processed_response=run_state._last_processed_response,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            run_config=run_config,
+                            server_manages_conversation=server_conversation_tracker is not None,
+                            run_state=run_state,
+                            error_handlers=error_handlers,
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if not _is_error_data_redacted(exc):
+                            previous_items = {id(item) for item in base_session_items}
+                            accepted_outputs = [
+                                item
+                                for item in run_state._session_items
+                                if isinstance(item, ToolCallOutputItem)
+                                and id(item) not in previous_items
+                            ]
+                            if accepted_outputs:
+                                streamed_result.new_items = list(run_state._session_items)
+                                streamed_result._model_input_items = list(
+                                    run_state._generated_items
+                                )
+                                streamed_result._last_processed_response = (
+                                    run_state._last_processed_response
+                                )
+                                streamed_result._replay_from_model_input_items = (
+                                    streamed_result._model_input_items != streamed_result.new_items
+                                )
+                                stream_step_items_to_queue(
+                                    cast(list[RunItem], accepted_outputs),
+                                    streamed_result._event_queue,
+                                )
+                                _mark_error_to_drain_stream_events(exc)
+                        raise
 
                     tool_use_tracker.record_processed_response(
                         current_agent, run_state._last_processed_response
@@ -1369,9 +1399,11 @@ async def start_streaming(
                     input_before_turn_rewrite = streamed_result.input
                     streamed_result.input = turn_result.original_input
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
-                    generated_items, turn_session_items = resumed_turn_items(turn_result)
+                    generated_items, resumed_session_items, turn_session_items = resumed_turn_items(
+                        turn_result, base_session_items, run_state
+                    )
                     streamed_result._model_input_items = generated_items
-                    streamed_result.new_items = base_session_items + list(turn_session_items)
+                    streamed_result.new_items = resumed_session_items
                     if turn_result.nested_history_owned_items is not None:
                         owned_refs = reconcile_nested_history_owned_session_item_refs(
                             streamed_result.new_items,

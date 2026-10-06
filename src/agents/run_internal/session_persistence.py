@@ -42,6 +42,7 @@ from ..memory.session import _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
 from ..run_state import RunState
+from .blocked_output import _current_response_boundary, _identity_sequence_start
 from .items import (
     NestedHistoryOwnedItem,
     NestedHistoryOwnedItemRef,
@@ -56,6 +57,7 @@ from .items import (
     fingerprint_input_item,
     nested_history_run_item_occurrence_key,
     normalize_input_items_for_api,
+    order_current_turn_tool_outputs,
     reconcile_nested_history_owned_input_after_rewrite,
     run_item_to_input_item,
     strip_internal_input_item_metadata,
@@ -68,6 +70,7 @@ from .run_steps import (
     ProcessedResponse,
     SingleStepResult,
 )
+from .tool_execution import extract_tool_call_id
 
 __all__ = [
     "admit_pending_input",
@@ -603,11 +606,35 @@ def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
     return list(items)
 
 
-def resumed_turn_items(turn_result: SingleStepResult) -> tuple[list[RunItem], list[RunItem]]:
-    """Return generated and session items for a resumed turn."""
+def resumed_turn_items(
+    turn_result: SingleStepResult, session_items: list[RunItem], run_state: RunState
+) -> tuple[list[RunItem], list[RunItem], list[RunItem]]:
+    """Merge resumed history in model order while keeping this attempt's delta separate."""
+    boundary = _current_response_boundary((), run_state._last_processed_response, run_state)
+    call_positions: dict[str, int] = {}
+    for index, output in enumerate(turn_result.model_response.output):
+        if (call_id := extract_tool_call_id(output)) is not None:
+            call_positions.setdefault(call_id, index)
     generated_items = list(turn_result.pre_step_items) + list(turn_result.new_step_items)
+    # A handoff may filter model history, so locate its remaining response anchors again.
+    generated_output_start = _identity_sequence_start(generated_items, boundary.processed_items)
+    session_output_start = boundary.session_start
+    if generated_output_start is not None:
+        generated_output_start += len(boundary.processed_items)
+    if session_output_start is not None:
+        session_output_start += len(boundary.processed_items)
+    generated_items = order_current_turn_tool_outputs(
+        generated_items,
+        start=generated_output_start,
+        call_positions=call_positions,
+    )
     turn_session_items = session_items_for_turn(turn_result)
-    return generated_items, turn_session_items
+    session_items = order_current_turn_tool_outputs(
+        [*session_items, *turn_session_items],
+        start=session_output_start,
+        call_positions=call_positions,
+    )
+    return generated_items, session_items, turn_session_items
 
 
 def update_run_state_after_resume(

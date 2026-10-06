@@ -122,6 +122,7 @@ from ..util._approvals import evaluate_needs_approval_setting
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
 from .agent_tool_configuration import register_agent_tool_configuration
+from .blocked_output import _current_response_boundary
 from .error_handlers import (
     build_run_error_data,
     create_message_output_item,
@@ -135,6 +136,7 @@ from .items import (
     apply_patch_rejection_item,
     extract_mcp_request_id_from_run,
     function_rejection_item,
+    order_current_turn_tool_outputs,
     shell_rejection_item,
 )
 from .run_steps import (
@@ -1163,6 +1165,13 @@ async def resolve_interrupted_turn(
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
     output_index = _build_tool_output_index(original_pre_step_items)
+    response_boundary = _current_response_boundary((), processed_response, run_state)
+    generated_output_start = response_boundary.generated_start
+    session_output_start = response_boundary.session_start
+    if generated_output_start is not None:
+        generated_output_start += len(response_boundary.processed_items)
+    if session_output_start is not None:
+        session_output_start += len(response_boundary.processed_items)
 
     current_step = run_state._current_step if run_state is not None else None
     if (
@@ -2545,17 +2554,19 @@ async def resolve_interrupted_turn(
         if any(existing is item for existing in committed_tool_outputs):
             return
         committed_tool_outputs.append(item)
-        committed_tool_outputs.sort(
-            key=lambda output: call_positions.get(
-                extract_tool_call_id(getattr(output, "raw_item", None)) or "",
-                len(call_positions),
-            )
-        )
         if run_state is not None:
-            run_state._generated_items = [*original_pre_step_items, *committed_tool_outputs]
+            run_state._generated_items = order_current_turn_tool_outputs(
+                [*original_pre_step_items, *committed_tool_outputs],
+                start=generated_output_start,
+                call_positions=call_positions,
+            )
             # Callbacks can fail after the output is accepted. Keep public history
             # in the same checkpoint so a retry can reuse the output in both views.
-            run_state._session_items = [*original_session_items, *committed_tool_outputs]
+            run_state._session_items = order_current_turn_tool_outputs(
+                [*original_session_items, *committed_tool_outputs],
+                start=session_output_start,
+                call_positions=call_positions,
+            )
         _register_tool_call_items(context_wrapper, [item])
 
     (
@@ -2631,7 +2642,11 @@ async def resolve_interrupted_turn(
 
     def _checkpoint_new_items() -> None:
         if run_state is not None:
-            run_state._generated_items = [*original_pre_step_items, *new_items]
+            run_state._generated_items = order_current_turn_tool_outputs(
+                [*original_pre_step_items, *new_items],
+                start=generated_output_start,
+                call_positions=call_positions,
+            )
         _register_tool_call_items(context_wrapper, new_items)
 
     _checkpoint_new_items()

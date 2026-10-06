@@ -68,6 +68,7 @@ __all__ = [
     "prepare_model_input_items",
     "run_item_to_input_item",
     "run_items_to_input_items",
+    "order_current_turn_tool_outputs",
     "normalize_input_items_for_api",
     "normalize_resumed_input",
     "fingerprint_input_item",
@@ -88,6 +89,28 @@ __all__ = [
     "extract_mcp_request_id",
     "extract_mcp_request_id_from_run",
 ]
+
+
+def order_current_turn_tool_outputs(
+    items: Sequence[RunItem], *, start: int | None, call_positions: dict[str, int]
+) -> list[RunItem]:
+    """Order appended local outputs, leaving the processed response and other items fixed."""
+    ordered_items = list(items)
+    if start is None:
+        return ordered_items
+    slots = [
+        index
+        for index in range(start, len(ordered_items))
+        if isinstance(item := ordered_items[index], ToolCallOutputItem)
+        and item.call_id in call_positions
+    ]
+    outputs = sorted(
+        (ordered_items[index] for index in slots),
+        key=lambda item: call_positions[cast(ToolCallOutputItem, item).call_id or ""],
+    )
+    for index, output in zip(slots, outputs, strict=True):
+        ordered_items[index] = output
+    return ordered_items
 
 
 @dataclass(frozen=True)
