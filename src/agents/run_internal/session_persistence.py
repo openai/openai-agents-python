@@ -625,7 +625,7 @@ def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
 def resumed_turn_items(
     turn_result: SingleStepResult, session_items: list[RunItem], run_state: RunState
 ) -> tuple[list[RunItem], list[RunItem], list[RunItem]]:
-    """Merge resumed history in model order while keeping this attempt's delta separate."""
+    """Order this attempt's pending outputs and preserve previously published history."""
     boundary = _current_response_boundary((), run_state._last_processed_response, run_state)
     call_positions: dict[str, int] = {}
     for index, output in enumerate(turn_result.model_response.output):
@@ -643,15 +643,14 @@ def resumed_turn_items(
         generated_items,
         start=generated_output_start,
         call_positions=call_positions,
+        published_items=(
+            session_items[session_output_start:] if session_output_start is not None else ()
+        ),
     )
     turn_session_items = order_current_turn_tool_outputs(
         session_items_for_turn(turn_result), start=0, call_positions=call_positions
     )
-    session_items = order_current_turn_tool_outputs(
-        [*session_items, *turn_session_items],
-        start=session_output_start,
-        call_positions=call_positions,
-    )
+    session_items = [*session_items, *turn_session_items]
     return generated_items, session_items, turn_session_items
 
 

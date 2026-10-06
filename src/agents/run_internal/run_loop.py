@@ -646,6 +646,7 @@ async def _finalize_streamed_final_output(
         if retry_on_guardrail_error:
             # A recovered callback output remains pending, including its held
             # Session write, so a retry checks the same accepted output again.
+            del streamed_result.output_guardrail_results[output_guardrail_result_start:]
             raise
         try:
             final_turn_items = _final_turn_items_for_persistence(
@@ -1482,14 +1483,16 @@ async def start_streaming(
                             error_handlers=error_handlers,
                         )
                     except (Exception, asyncio.CancelledError) as exc:
+                        # Private resumable state follows the source checkpoint even when
+                        # a callback propagates a redacted error from a nested run.
+                        streamed_result._model_input_items = list(run_state._generated_items)
+                        streamed_result._last_processed_response = (
+                            run_state._last_processed_response
+                        )
+                        streamed_result._replay_from_model_input_items = (
+                            streamed_result._model_input_items != streamed_result.new_items
+                        )
                         if not _is_error_data_redacted(exc):
-                            streamed_result._model_input_items = list(run_state._generated_items)
-                            streamed_result._last_processed_response = (
-                                run_state._last_processed_response
-                            )
-                            streamed_result._replay_from_model_input_items = (
-                                streamed_result._model_input_items != streamed_result.new_items
-                            )
                             streamed_result.tool_input_guardrail_results = list(
                                 run_state._tool_input_guardrail_results
                             )

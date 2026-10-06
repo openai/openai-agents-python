@@ -2613,6 +2613,11 @@ async def resolve_interrupted_turn(
                 [*original_pre_step_items, *committed_tool_outputs],
                 start=generated_output_start,
                 call_positions=call_positions,
+                published_items=(
+                    run_state._session_items[session_output_start:]
+                    if session_output_start is not None
+                    else ()
+                ),
             )
             run_state._tool_input_guardrail_results = [
                 *prior_input_results,
@@ -2722,6 +2727,11 @@ async def resolve_interrupted_turn(
                 [*original_pre_step_items, *new_items],
                 start=generated_output_start,
                 call_positions=call_positions,
+                published_items=(
+                    run_state._session_items[session_output_start:]
+                    if session_output_start is not None
+                    else ()
+                ),
             )
             # A retry skips checkpointed results, including hosted approval responses.
             # Retain them in the withheld batch before later callbacks can fail.

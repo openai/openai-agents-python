@@ -1436,6 +1436,7 @@ class AgentRunner:
                                     if retry_terminal_output:
                                         # Keep accepted execution private and retryable until
                                         # the final guardrails permit delivery.
+                                        del output_guardrail_results[output_guardrail_result_start:]
                                         session_items = list(run_state._session_items)
                                         raise
                                     if not isinstance(

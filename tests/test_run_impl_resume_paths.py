@@ -16,6 +16,7 @@ from agents import (
     AgentUpdatedStreamEvent,
     Runner,
     ShellTool,
+    ToolExecutionConfig,
     function_tool,
     handoff,
     output_guardrail,
@@ -27,6 +28,7 @@ from agents.exceptions import (
     InputGuardrailTripwireTriggered,
     OutputGuardrailTripwireTriggered,
     UserError,
+    _is_error_data_redacted,
 )
 from agents.guardrail import GuardrailFunctionOutput, input_guardrail
 from agents.handoffs import HandoffInputData
@@ -289,7 +291,10 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
-async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) -> None:
+@pytest.mark.parametrize("previously_published", [False, True], ids=["pending", "published"])
+async def test_callback_retry_keeps_current_response_tool_order(
+    streamed: bool, previously_published: bool
+) -> None:
     effects: list[str] = []
     session = SimpleListSession()
     events: list[Any] = []
@@ -320,12 +325,12 @@ async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) 
         effects.append("right")
         return "right-result"
 
-    class FailingRightEndHook(RunHooks[Any]):
+    class FailingEndHook(RunHooks[Any]):
         async def on_tool_end(
             self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
         ) -> None:
-            if tool.name == "right":
-                raise RuntimeError("right callback failed")
+            if tool.name == ("left" if previously_published else "right"):
+                raise RuntimeError("tool callback failed")
 
     agent = Agent(
         name="parallel",
@@ -340,12 +345,21 @@ async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) 
         ),
         tools=[left, right],
     )
-    hooks = FailingRightEndHook()
+    hooks = FailingEndHook()
     paused = await _run_session_resume(agent, "run both", session, streamed, hooks)
     state = paused.to_state()
     left_approval, right_approval = state.get_interruptions()
     state.approve(right_approval)
-    with pytest.raises(UserError, match="right callback failed"):
+    if previously_published:
+        partial = await _run_session_resume(agent, state, session, streamed, hooks)
+        assert [
+            item.get("call_id")
+            for item in await session.get_items()
+            if item.get("type") == "function_call_output"
+        ] == ["right-1"]
+        state = partial.to_state()
+        state.approve(state.get_interruptions()[0])
+    with pytest.raises(UserError, match="tool callback failed"):
         await _run_session_resume(agent, state, session, streamed, hooks)
 
     state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
@@ -353,27 +367,34 @@ async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) 
     result = await _run_session_resume(agent, state, session, streamed, hooks, events)
     assert effects == ["right", "left"]
     assert result.final_output == "done"
-    assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
-        "left-result",
-        "right-result",
-    ]
+    expected_ids = ["right-1", "left-1"] if previously_published else ["left-1", "right-1"]
+    expected_outputs = (
+        ["right-result", "left-result"] if previously_published else ["left-result", "right-result"]
+    )
+    assert [
+        item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)
+    ] == expected_outputs
     assert [
         item.get("call_id")
         for item in result.to_input_list()
         if item.get("type") == "function_call_output"
-    ] == ["left-1", "right-1"]
+    ] == expected_ids
+    assert [
+        item.get("call_id")
+        for item in cast(ScriptedModel, agent.model).calls[-1].input
+        if item.get("type") == "function_call_output"
+    ] == expected_ids
     restored = await RunState.from_json(agent, result.to_state().to_json())
     for history in (restored._session_items, restored._generated_items):
-        assert [item.output for item in history if isinstance(item, ToolCallOutputItem)] == [
-            "left-result",
-            "right-result",
-        ]
+        assert [
+            item.output for item in history if isinstance(item, ToolCallOutputItem)
+        ] == expected_outputs
 
     assert [
         item.get("call_id")
         for item in await session.get_items()
         if item.get("type") == "function_call_output"
-    ] == ["left-1", "right-1"]
+    ] == expected_ids
     assert [r.output.output_info for r in result.tool_input_guardrail_results] == [
         "right-1",
         "left-1",
@@ -387,7 +408,7 @@ async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) 
             event.item.output
             for event in events
             if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
-        ] == ["left-result", "right-result"]
+        ] == (["left-result"] if previously_published else expected_outputs)
 
 
 @pytest.mark.asyncio
@@ -539,6 +560,12 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
         return "receipt-7"
 
     @output_guardrail
+    async def record_terminal_candidate(
+        _context: Any, _agent: Any, output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=False)
+
+    @output_guardrail
     async def terminal_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
         guardrail_outputs.append(output)
         guardrail_entered.set()
@@ -560,7 +587,7 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
         model=model,
         tools=[prelude, charge],
         tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
-        output_guardrails=[terminal_policy],
+        output_guardrails=[record_terminal_candidate, terminal_policy],
     )
     paused = await Runner.run(agent, "charge once", session=session, run_config=config)
     state = paused.to_state()
@@ -647,6 +674,7 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
             assert [
                 item.output for item in run_data.new_items if isinstance(item, ToolCallOutputItem)
             ] == prior_metadata
+            assert run_data.output_guardrail_results == []
         else:
             with pytest.raises(RuntimeError, match="policy temporarily unavailable"):
                 await consumer
@@ -684,6 +712,7 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
     if guardrail_outcome == "error":
         assert retry_outputs == []
         if retry is not None:
+            assert retry.output_guardrail_results == []
             assert [
                 result.output.output_info for result in retry.tool_output_guardrail_results
             ] == prior_metadata
@@ -768,6 +797,162 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
     assert input_outputs(failed) == withheld_inputs, (
         "later retries changed the failed stream's public output"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["extractor", "end_hook"])
+@pytest.mark.parametrize("with_output_guardrail", [True, False])
+async def test_redacted_callback_preserves_private_failed_stream_checkpoint(
+    failure: str, with_output_guardrail: bool
+) -> None:
+    config = RunConfig(tracing_disabled=True)
+    modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+    effects: list[str] = []
+    callback_calls: list[str] = []
+    checked: list[str] = []
+    emitted: list[Any] = []
+
+    @output_guardrail
+    def inner_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    @function_tool
+    def inspect_callback() -> str:
+        return "inner-private-candidate"
+
+    inner_model = ScriptedModel(
+        [[get_function_tool_call("inspect_callback", "{}", call_id="inner-1")]]
+    )
+    inner = Agent(
+        name="inner",
+        model=inner_model,
+        tools=[inspect_callback],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["inspect_callback"]),
+        output_guardrails=[inner_policy],
+    )
+
+    async def nested_callback() -> None:
+        callback_calls.append(failure)
+        await Runner.run(inner, "check callback", run_config=config)
+
+    async def extract_custom_data(_context: Any) -> dict[str, Any]:
+        await nested_callback()
+        return {}
+
+    class EndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            await nested_callback()
+
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @tool_input_guardrail
+    def record_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="approval input checked")
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=extract_custom_data if failure == "extractor" else None,
+        tool_input_guardrails=[record_input],
+        tool_output_guardrails=[record_output] if with_output_guardrail else [],
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    def outer_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        checked.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[outer_policy],
+    )
+    hooks = EndHook() if failure == "end_hook" else None
+    paused = await Runner.run(agent, "charge once", run_config=config, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    failed = Runner.run_streamed(agent, state, run_config=config, hooks=hooks)
+    with pytest.raises(OutputGuardrailTripwireTriggered) as caught:
+        async for event in failed.stream_events():
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+                emitted.append(event.item.output)
+
+    assert _is_error_data_redacted(caught.value)
+    assert caught.value.run_data is None
+    assert "inner-private-candidate" not in str(caught.value)
+    assert emitted == []
+    assert checked == []
+    assert failed.tool_output_guardrail_results == []
+    assert not any(isinstance(item, ToolCallOutputItem) for item in failed.new_items)
+
+    for mode in modes:
+        assert not any(
+            item.get("type") == "function_call_output" for item in failed.to_input_list(mode=mode)
+        )
+    restored = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    assert [result.output.output_info for result in restored._tool_input_guardrail_results] == [
+        "approval input checked"
+    ]
+    retry = Runner.run_streamed(agent, restored, run_config=config, hooks=hooks)
+    async for event in retry.stream_events():
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+            emitted.append(event.item.output)
+    assert checked == ["receipt-7"]
+    assert retry.final_output == "receipt-7"
+    assert effects == ["charged"]
+    assert callback_calls == [failure]
+    assert len(model.calls) == 1
+    assert len(inner_model.calls) == 1
+    assert emitted == ["receipt-7"]
+    assert [result.output.output_info for result in retry.tool_output_guardrail_results] == (
+        ["receipt-7"] if with_output_guardrail else []
+    )
+    assert [result.output.output_info for result in retry.tool_input_guardrail_results] == [
+        "approval input checked"
+    ]
+    assert not any(isinstance(item, ToolCallOutputItem) for item in failed.new_items)
+    for mode in modes:
+        assert not any(
+            item.get("type") == "function_call_output" for item in failed.to_input_list(mode=mode)
+        )
+
+
+@pytest.mark.asyncio
+async def test_streamed_preapproval_checkpoint_preserves_input_guardrail_results() -> None:
+    @tool_input_guardrail
+    def check_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="input checked before approval")
+
+    @function_tool(needs_approval=True, tool_input_guardrails=[check_input])
+    def charge() -> str:
+        raise AssertionError("An unapproved tool must not run")
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(name="agent", model=model, tools=[charge])
+    result = Runner.run_streamed(
+        agent,
+        "charge once",
+        run_config=RunConfig(
+            tracing_disabled=True,
+            tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True),
+        ),
+    )
+    async for _ in result.stream_events():
+        pass
+    assert len(result.interruptions) == 1
+    restored = await RunState.from_json(agent, json.loads(json.dumps(result.to_state().to_json())))
+    assert [item.output.output_info for item in restored._tool_input_guardrail_results] == [
+        "input checked before approval"
+    ]
 
 
 @pytest.mark.asyncio
@@ -3271,3 +3456,99 @@ async def test_max_turns_guardrail_failure_leaves_the_state_retryable() -> None:
     # The retry reports the real guardrail failure rather than a fail-closed rejection.
     with pytest.raises(RuntimeError, match="guardrail exploded"):
         await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guardrail_blocks", [False, True], ids=["allowed", "blocked"])
+@pytest.mark.parametrize(
+    "published_sibling", [False, True], ids=["no-prior-output", "prior-output"]
+)
+async def test_legacy_first_turn_callback_failure_withholds_normalized_output(
+    guardrail_blocks: bool,
+    published_sibling: bool,
+) -> None:
+    effects: list[str] = []
+    checked: list[str] = []
+    config = RunConfig(tracing_disabled=True)
+
+    def fail_after_execution(_context: Any) -> dict[str, Any]:
+        raise RuntimeError("post-tool callback failed")
+
+    @function_tool(needs_approval=True, custom_data_extractor=fail_after_execution)
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    def terminal(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        checked.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=guardrail_blocks)
+
+    @function_tool(needs_approval=True)
+    async def prelude() -> str:
+        return "published-receipt"
+
+    calls = [get_function_tool_call("charge", "{}", call_id="charge-1")]
+    if published_sibling:
+        calls.insert(0, get_function_tool_call("prelude", "{}", call_id="prelude-1"))
+    model = ScriptedModel([calls])
+    agent = Agent(
+        name="legacy-retry",
+        model=model,
+        tools=[prelude, charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[terminal],
+    )
+    paused = await Runner.run(agent, "charge once", run_config=config)
+    if published_sibling:
+        partial_state = paused.to_state()
+        partial_state.approve(partial_state.get_interruptions()[0])
+        paused = await Runner.run(agent, partial_state, run_config=config)
+    payload = json.loads(paused.to_state().to_string())
+    # Schema 1.16 predates current-response ownership and held Session writes.
+    payload["$schemaVersion"] = "1.16"
+    payload["context"].pop("function_tool_approvals", None)
+    payload.pop("generated_session_item_indexes", None)
+    payload.pop("current_response_generated_item_ownership", None)
+    payload.pop("pending_session_write", None)
+    state = await RunState.from_json(agent, payload)
+    state.approve(state.get_interruptions()[0])
+
+    failed = Runner.run_streamed(agent, state, run_config=config)
+    with pytest.raises(UserError, match="post-tool callback failed"):
+        async for _ in failed.stream_events():
+            pass
+    assert effects == ["charged"]
+    assert checked == []
+    modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+    for mode in modes:
+        assert [
+            item.get("output")
+            for item in failed.to_input_list(mode=mode)
+            if item.get("type") == "function_call_output"
+        ] == (["published-receipt"] if published_sibling else [])
+
+    # Resume the same source so later public reads cannot borrow its mutated boundary.
+    retry = Runner.run_streamed(agent, state, run_config=config)
+    events = []
+    if guardrail_blocks:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            async for event in retry.stream_events():
+                events.append(event)
+    else:
+        async for event in retry.stream_events():
+            events.append(event)
+        assert retry.final_output == "receipt-7"
+    assert checked == ["receipt-7"]
+    assert effects == ["charged"]
+    assert [
+        event.item.output
+        for event in events
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+    ] == ([] if guardrail_blocks else ["receipt-7"])
+    for mode in modes:
+        assert [
+            item.get("output")
+            for item in failed.to_input_list(mode=mode)
+            if item.get("type") == "function_call_output"
+        ] == (["published-receipt"] if published_sibling else [])

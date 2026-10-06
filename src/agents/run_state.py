@@ -242,12 +242,13 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.19"
+CURRENT_SCHEMA_VERSION = "1.20"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
 _PENDING_WRITE_COMPACTION_MIN_SCHEMA_VERSION = "1.18"
 _HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.19"
+_TOOL_OUTPUT_GUARDRAIL_BOUNDARY_MIN_SCHEMA_VERSION = "1.20"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -294,6 +295,10 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists the interrupted turn's withheld Session write as a held pending write, "
         "with the conversion policy its items were registered under and the current-response "
         "boundary, so an approval resume can settle it under the output-guardrail gate."
+    ),
+    "1.20": (
+        "Persists the pending tool output guardrail result boundary so a resumed run withholds "
+        "current-response diagnostics until its terminal guardrails complete."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -4344,6 +4349,16 @@ async def _build_run_state_from_json(
 
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
+        if last_processed_response_data.get("tool_output_guardrail_result_start") is not None and (
+            schema_major,
+            schema_minor,
+        ) < tuple(
+            int(part)
+            for part in _TOOL_OUTPUT_GUARDRAIL_BOUNDARY_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+        ):
+            raise validation_error_factory(
+                "Run state tool output guardrail result boundary requires schema 1.20.", UserError
+            )
         program_call_ids, completed_program_call_ids = _run_state_program_call_ids(state_json)
         state._last_processed_response = await _deserialize_processed_response(
             last_processed_response_data,
@@ -4508,9 +4523,20 @@ async def _build_run_state_from_json(
     state._tool_input_guardrail_results = _deserialize_tool_input_guardrail_results(
         state_json.get("tool_input_guardrail_results", [])
     )
+    serialized_tool_output_results = state_json.get("tool_output_guardrail_results", []) or []
     state._tool_output_guardrail_results = _deserialize_tool_output_guardrail_results(
-        state_json.get("tool_output_guardrail_results", [])
+        serialized_tool_output_results
     )
+    if state._last_processed_response is not None:
+        result_start = state._last_processed_response.tool_output_guardrail_result_start
+        if result_start is not None and (
+            result_start > len(state._tool_output_guardrail_results)
+            or len(state._tool_output_guardrail_results) != len(serialized_tool_output_results)
+        ):
+            # Dropping a serialized entry shifts every following result's boundary.
+            raise validation_error_factory(
+                "Invalid tool output guardrail result boundary", UserError
+            )
 
     current_step_data = state_json.get("current_step")
     if current_step_data and current_step_data.get("type") == "next_step_run_again":
@@ -5497,6 +5523,8 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
+        "Invalid tool output guardrail result boundary",
+        "Run state tool output guardrail result boundary requires schema 1.20.",
         "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         (
