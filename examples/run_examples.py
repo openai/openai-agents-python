@@ -59,6 +59,8 @@ DEFAULT_AUTO_SKIP = {
     "examples/agent_patterns/llm_as_a_judge.py",
     "examples/hosted_mcp/connectors.py",
     "examples/mcp/git_example/main.py",
+    # Dapr setup requires separate PostgreSQL credentials.
+    "examples/memory/dapr_session_example.py",
     # These are helper daemons or multi-process components exercised by sibling examples.
     "examples/mcp/manager_example/app.py",
     "examples/mcp/manager_example/mcp_server.py",
@@ -66,9 +68,15 @@ DEFAULT_AUTO_SKIP = {
     "examples/mcp/sse_example/server.py",
     "examples/mcp/streamablehttp_custom_client_example/server.py",
     "examples/mcp/streamablehttp_example/server.py",
+    # These provider examples default to OpenRouter and require its API key.
+    "examples/model_providers/any_llm_auto.py",
+    "examples/model_providers/any_llm_provider.py",
     "examples/model_providers/custom_example_agent.py",
     "examples/model_providers/custom_example_global.py",
     "examples/model_providers/custom_example_provider.py",
+    "examples/model_providers/litellm_auto.py",
+    "examples/model_providers/litellm_provider.py",
+    "examples/reasoning_content/gpt_oss_stream.py",
     "examples/realtime/app/server.py",
     "examples/realtime/cli/demo.py",
     "examples/realtime/twilio/server.py",
@@ -79,11 +87,18 @@ DEFAULT_AUTO_SKIP = {
     # Blaxel 0.3.2 still imports an MCP v1 module that was removed in MCP v2.
     "examples/sandbox/extensions/blaxel_runner.py",
     "examples/sandbox/extensions/cloudflare_runner.py",
+    # Cloud backends require provider credentials in addition to OPENAI_API_KEY.
+    "examples/sandbox/extensions/daytona/daytona_runner.py",
+    "examples/sandbox/extensions/daytona/usaspending_text2sql/agent.py",
     "examples/sandbox/extensions/daytona/usaspending_text2sql/setup_db.py",
+    "examples/sandbox/extensions/e2b_runner.py",
+    "examples/sandbox/extensions/modal_runner.py",
+    "examples/sandbox/extensions/runloop/capabilities.py",
+    "examples/sandbox/extensions/runloop/runner.py",
     # This local workflow gives model-selected shell commands access to the host.
     "examples/sandbox/extensions/temporal/local_hello_workflow.py",
     "examples/sandbox/extensions/temporal/temporal_sandbox_agent.py",
-    # Temporarily disabled due to credential issues.
+    # Vercel also requires its own provider credentials.
     "examples/sandbox/extensions/vercel_runner.py",
     "examples/sandbox/memory_s3.py",
     "examples/sandbox/sandbox_agent_with_remote_snapshot.py",

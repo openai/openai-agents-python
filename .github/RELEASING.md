@@ -50,9 +50,7 @@ preparation and CI. Do not reuse the old approval. If contract preparation fails
 that failure and rerun all jobs after correcting the issue; never bypass package checks.
 Unchanged contract regeneration does not create another commit.
 
-If readiness reports missing approval, follow the local review checklist. Submission of
-an approving review automatically rechecks readiness; if an older failed check remains,
-rerun **Release Readiness** after confirming the approval is for the current SHA.
+If readiness reports missing approval, follow the local review checklist. Submission, editing, or dismissal of a review starts **Refresh Release Readiness**, which reruns the original PR-triggered **Release Readiness** check for the current SHA. The refresh waits up to five minutes for an active readiness run to finish. If refresh fails or an older failed or cancelled check remains, rerun the **PR-triggered Release Readiness** run after confirming the approval is for the current SHA.
 A merge group containing a release must have exactly the reviewed candidate tree; if
 unrelated queued changes alter it, refresh the candidate and requeue it separately.
 

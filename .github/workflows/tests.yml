@@ -150,6 +150,11 @@ jobs:
       - name: Run tests with coverage
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.14'
         run: make coverage
+      - name: Test realtime demo in Chromium
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.14'
+        run: |
+          uv run playwright install --with-deps chromium
+          uv run pytest -o pythonpath=. examples/realtime/app/test_frontend.py
       - name: Run tests
         if: steps.changes.outputs.run == 'true' && matrix.python-version != '3.14'
         run: make tests

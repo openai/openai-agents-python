@@ -16,6 +16,8 @@ For suspected vulnerabilities, follow [SECURITY.md](SECURITY.md). Keep undisclos
 
 Read [AGENTS.md](AGENTS.md) for the repository's scope, compatibility, review, and verification requirements. Use Python 3.10 or newer, `uv`, and `make`. Install the development dependencies with `make sync`, and run Python commands through `uv run`.
 
+Install Git with your operating system's package manager and ensure the `git` executable is on `PATH` before running the test suite. The release-provenance and change-detection tests invoke Git to create and inspect temporary repositories. Git is a system dependency; `make sync` and Python package installers do not install it.
+
 Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [tests/README.md](tests/README.md) for test execution. Run focused checks while developing, then the applicable final checks described in [AGENTS.md](AGENTS.md#testing--automated-checks). Use the [pull request template](.github/PULL_REQUEST_TEMPLATE/pull_request_template.md) to explain the problem, change, and validation. Documentation changes follow the repository's verification tiers and release-timing rules.
 
 ## Tracing integration listings

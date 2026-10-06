@@ -1719,23 +1719,27 @@ class RunState(Generic[TContext, TAgent]):
             )
 
         if dataclasses.is_dataclass(raw_context_payload):
-            serialized = dataclasses.asdict(cast(Any, raw_context_payload))
-            if not isinstance(serialized, Mapping):
-                raise UserError("RunState dataclass context must serialize to a mapping.")
-            # Dataclass instances serialize to dicts, so reconstruction requires a deserializer.
-            logger.warning(
-                "RunState context was serialized from a dataclass. "
-                "Provide context_deserializer or context_override to restore the original type."
-            )
-            return (
-                dict(serialized),
-                _build_context_meta(
-                    raw_context_payload,
-                    serialized_via="asdict",
-                    requires_deserializer=True,
-                    omitted=False,
-                ),
-            )
+            try:
+                serialized = dataclasses.asdict(cast(Any, raw_context_payload))
+                # Copyable dataclass fields are not necessarily JSON serializable.
+                json.dumps(serialized)
+            except (TypeError, ValueError):
+                pass  # Use the same omission fallback as other unsupported contexts.
+            else:
+                # Dataclass instances become dicts, so restoring the type needs a deserializer.
+                logger.warning(
+                    "RunState context was serialized from a dataclass. "
+                    "Provide context_deserializer or context_override to restore the original type."
+                )
+                return (
+                    serialized,
+                    _build_context_meta(
+                        raw_context_payload,
+                        serialized_via="asdict",
+                        requires_deserializer=True,
+                        omitted=False,
+                    ),
+                )
 
         # Fall back to an empty dict so the run state remains serializable, but
         # explicitly warn because the original context will be unavailable on restore.

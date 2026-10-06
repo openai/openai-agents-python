@@ -1360,6 +1360,22 @@ async def start_streaming(
                     run_state._nested_history_owned_session_item_refs = list(retained_owned_refs)
                 sandbox_runtime.apply_result_metadata(streamed_result)
 
+            # Resumed tool work belongs to the agent even when it finishes or fails
+            # before another model turn starts. Keep turn accounting below.
+            if current_span is None:
+                if (output_schema := get_output_schema(execution_agent)) is not None:
+                    output_type_name = output_schema.name()
+                else:
+                    output_type_name = "str"
+
+                current_span = agent_span(
+                    name=current_agent.name,
+                    handoffs=[],
+                    tools=[],
+                    output_type=output_type_name,
+                )
+                current_span.start(mark_as_current=True)
+
             if is_resumed_state and run_state is not None and run_state._current_step is not None:
                 if isinstance(run_state._current_step, NextStepInterruption):
                     if not run_state._model_responses:
@@ -1396,6 +1412,7 @@ async def start_streaming(
                     )
 
                     turn_result = await resolve_interrupted_turn(
+                        agent_span=current_span,
                         bindings=current_bindings,
                         original_input=run_state._original_input,
                         original_pre_step_items=run_state._generated_items,
@@ -1634,20 +1651,6 @@ async def start_streaming(
                 if not run_state._pending_input:
                     run_state._generated_items = list(streamed_result._model_input_items)
                     run_state._session_items = list(streamed_result.new_items)
-
-            if current_span is None:
-                if (output_schema := get_output_schema(execution_agent)) is not None:
-                    output_type_name = output_schema.name()
-                else:
-                    output_type_name = "str"
-
-                current_span = agent_span(
-                    name=current_agent.name,
-                    handoffs=[],
-                    tools=[],
-                    output_type=output_type_name,
-                )
-                current_span.start(mark_as_current=True)
 
             current_turn += 1
             streamed_result.current_turn = current_turn
@@ -2126,6 +2129,11 @@ async def start_streaming(
         if _is_error_data_redacted(exc):
             _detach_data_redacted_error_traceback(exc)
         else:
+            attach_generic_agent_error(
+                current_span,
+                exc,
+                trace_include_sensitive_data=run_config.trace_include_sensitive_data,
+            )
             _clear_data_redacted_error_traceback(exc)
             exc.run_data = RunErrorDetails(
                 input=streamed_result.input,

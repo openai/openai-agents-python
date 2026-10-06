@@ -100,14 +100,15 @@ def pytest_generate_tests(metafunc: pytest.Metafunc) -> None:
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     requested_extra = os.environ.get("OPENAI_AGENTS_INTEGRATION_EXTRA")
-    if requested_extra is None:
-        return
-
     selected: list[pytest.Item] = []
     deselected: list[pytest.Item] = []
     for item in items:
+        if item.get_closest_marker("external_provider") and not _external_providers_enabled():
+            deselected.append(item)
+            continue
         if (
-            getattr(item, "originalname", None)
+            requested_extra is None
+            or getattr(item, "originalname", None)
             != "test_memory_extra_lazy_exports_resolve_to_the_installed_backend"
         ):
             selected.append(item)

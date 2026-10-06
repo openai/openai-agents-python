@@ -267,7 +267,9 @@ def generate_func_documentation(
         doc = _ensure_blank_line_before_google_sections(doc)
 
     with _suppress_griffe_logging():
-        docstring = Docstring(doc, lineno=1, parser=resolved_style)
+        # Griffe runs cleandoc again. A leading newline keeps the already-cleaned first
+        # line in its indentation calculation, preserving an initial Args: section's body.
+        docstring = Docstring("\n" + doc, lineno=1, parser=resolved_style)
         parsed = docstring.parse()
 
     description: str | None = next(

@@ -2,8 +2,6 @@ name: Release Readiness
 on:
   pull_request:
     branches: [main]
-  pull_request_review:
-    types: [submitted, edited, dismissed]
   merge_group:
     types: [checks_requested]
 permissions: {}

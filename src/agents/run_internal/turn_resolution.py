@@ -43,6 +43,7 @@ from .._tool_identity import (
     get_tool_call_namespace,
     get_tool_call_qualified_name,
     get_tool_call_trace_name,
+    get_tool_trace_name_for_tool,
     resolve_tool_name_collisions,
     restore_tool_call_routing_identity,
     should_allow_bare_name_approval_alias,
@@ -115,7 +116,7 @@ from ..tool import (
     get_function_tool_origin,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
-from ..tracing import SpanError, handoff_span
+from ..tracing import AgentSpanData, Span, SpanError, handoff_span
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_needs_approval_setting
 from ..util._asyncio_tasks import gather_with_cancel
@@ -1158,6 +1159,7 @@ async def resolve_interrupted_turn(
     run_state: RunState | None = None,
     error_handlers: RunErrorHandlers[TContext] | None = None,
     nest_handoff_history_fn: Callable[..., HandoffInputData] | None = None,
+    agent_span: Span[AgentSpanData] | None = None,
 ) -> SingleStepResult:
     """Continue a turn that was previously interrupted waiting for tool approval."""
     public_agent = bindings.public_agent
@@ -2013,6 +2015,13 @@ async def resolve_interrupted_turn(
         available_handoffs,
         collision_policy=run_config.tool_name_collision_policy,
     )
+    if agent_span is not None:
+        agent_span.span_data.handoffs = [handoff.agent_name for handoff in resolved_handoffs]
+        agent_span.span_data.tools = [
+            tool_name
+            for tool in resolved_tools
+            if (tool_name := get_tool_trace_name_for_tool(tool)) is not None
+        ]
     resolved_function_tools = [tool for tool in resolved_tools if isinstance(tool, FunctionTool)]
     local_function_tool_ids = {
         id(tool) for tool in execution_agent.tools if isinstance(tool, FunctionTool)

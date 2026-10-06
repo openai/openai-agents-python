@@ -66,7 +66,9 @@ async def test_hosted_mcp_approval_survives_serialized_pause_and_resume(
         instructions="Use the DeepWiki MCP server to answer the repository language question.",
         model_settings=ModelSettings(
             max_tokens=768,
-            tool_choice=MCPToolChoice(server_label="packaged_mcp_approval", name="ask_question"),
+            tool_choice=MCPToolChoice(
+                server_label="packaged_mcp_approval", name="ask_wiki_question"
+            ),
         ),
         tools=[
             HostedMCPTool(
@@ -120,7 +122,9 @@ async def test_hosted_mcp_rejection_survives_serialized_pause_and_resume(
         ),
         model_settings=ModelSettings(
             max_tokens=512,
-            tool_choice=MCPToolChoice(server_label="packaged_mcp_rejection", name="ask_question"),
+            tool_choice=MCPToolChoice(
+                server_label="packaged_mcp_rejection", name="ask_wiki_question"
+            ),
         ),
         tools=[
             HostedMCPTool(
@@ -129,7 +133,7 @@ async def test_hosted_mcp_rejection_survives_serialized_pause_and_resume(
                     "server_label": "packaged_mcp_rejection",
                     "server_url": server_url,
                     "require_approval": "always",
-                    "allowed_tools": ["ask_question"],
+                    "allowed_tools": ["ask_wiki_question"],
                 }
             )
         ],

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import runpy
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -257,3 +260,52 @@ def test_all_provider_coverage_adds_explicit_direct_provider_models(
         "anthropic/claude-sonnet-5",
         "gemini/gemini-3.6-flash",
     ]
+
+
+@pytest.mark.parametrize("external,expected", [(False, 11), (True, 17)])
+def test_provider_collection_excludes_only_unrequested_external_cases(
+    external: bool,
+    expected: int,
+) -> None:
+    root = Path(__file__).resolve().parents[2]
+    environment = dict(os.environ)
+    for name in (
+        "OPENAI_API_KEY",
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "OPENAI_AGENTS_INTEGRATION_EXTRA",
+        "OPENAI_AGENTS_INTEGRATION_OPENROUTER_MODELS",
+    ):
+        environment.pop(name, None)
+    environment["OPENAI_AGENTS_INTEGRATION_EXTERNAL_PROVIDERS"] = "1" if external else "0"
+    environment["OPENAI_AGENTS_INTEGRATION_DIRECT_PROVIDERS"] = "0"
+    if external:
+        environment["OPENROUTER_API_KEY"] = "synthetic-collection-only"
+    # Collection never enters a live test or a credential-bearing provider client.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-m",
+            "pytest",
+            "-c",
+            str(root / "integration_tests/pytest.ini"),
+            str(root / "integration_tests/providers"),
+            "--collect-only",
+            "-q",
+            "-m",
+            "providers and not nightly",
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    nodes = [line for line in result.stdout.splitlines() if "::test_" in line]
+    assert len(nodes) == expected, result.stdout
+    assert sum("major_external" in node for node in nodes) == (6 if external else 0)
+    assert "unconfigured" not in result.stdout

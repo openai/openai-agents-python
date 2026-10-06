@@ -75,6 +75,7 @@ async def test_litellm_streaming_preserves_real_provider_usage(integration_model
     assert result.context_wrapper.usage.total_tokens > 0
 
 
+@pytest.mark.external_provider
 async def test_litellm_major_external_providers_execute_function_tools(
     external_provider: Any,
 ) -> None:
@@ -115,6 +116,7 @@ async def test_litellm_major_external_providers_execute_function_tools(
     "pydantic.warnings.PydanticDeprecatedSince211:"
     r"litellm\.litellm_core_utils\.model_response_utils"
 )
+@pytest.mark.external_provider
 async def test_litellm_external_provider_streams_function_tool_results(
     external_provider: Any,
 ) -> None:

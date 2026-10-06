@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.22.3",
-  "baseline_commit": "1d17ca40b927452d5f27df662092f767fa9f05b7",
+  "baseline": "v0.23.1",
+  "baseline_commit": "b31b9f8d13d49142a64f8873f2cc2ee40441a795",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -284,6 +284,15 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "include_input_schema"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.int",
+                "value": 1024
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "on_stream_max_pending_events"
             }
           ]
         },
@@ -2894,6 +2903,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "_emit_tool_origin"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_mcp_tool_binding"
         }
       ]
     },
@@ -6721,6 +6739,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "should_trigger_compaction"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "max_rollback_items"
         }
       ]
     },
@@ -13857,6 +13884,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "ttl"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "max_scan_items"
         }
       ]
     },
@@ -17370,6 +17406,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -17534,6 +17599,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -17613,6 +17698,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -19500,6 +19623,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -19664,6 +19816,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -19743,6 +19915,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -21412,6 +21622,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -21576,6 +21815,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -21655,6 +21914,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -22063,6 +22360,14 @@
             "value": false
           },
           "name": "s3_mounts_non_resumable"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "name": "sandbox_name"
         }
       ],
       "parameters": [
@@ -22235,6 +22540,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "s3_mounts_non_resumable"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "sandbox_name"
         }
       ]
     },
@@ -23027,6 +23341,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "tool_output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "max_list_pages"
         }
       ]
     },
@@ -23319,6 +23642,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "tool_output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "max_list_pages"
         }
       ]
     },
@@ -23611,6 +23943,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "tool_output_guardrails"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "max_list_pages"
         }
       ]
     },
@@ -26451,6 +26792,15 @@
           },
           "init": true,
           "name": "extra_prompt"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 500
+          },
+          "init": true,
+          "name": "phase_two_max_turns"
         }
       ],
       "kind": "class",
@@ -26505,6 +26855,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "extra_prompt"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 500
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "phase_two_max_turns"
         }
       ]
     },
@@ -26922,6 +27281,15 @@
               },
               "kind": "POSITIONAL_OR_KEYWORD",
               "name": "include_input_schema"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.int",
+                "value": 1024
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "on_stream_max_pending_events"
             }
           ]
         },
@@ -29326,6 +29694,15 @@
           },
           "init": true,
           "name": "extra_prompt"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 500
+          },
+          "init": true,
+          "name": "phase_two_max_turns"
         }
       ],
       "kind": "class",
@@ -29380,6 +29757,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "extra_prompt"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.int",
+            "value": 500
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "phase_two_max_turns"
         }
       ]
     },
@@ -34039,6 +34425,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "retryable"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "message"
         }
       ]
     },
@@ -35026,6 +35421,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -35190,6 +35614,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -35269,6 +35713,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -35879,6 +36361,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -36043,6 +36554,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -36122,6 +36653,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -36419,6 +36988,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -36583,6 +37181,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -36662,6 +37280,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -36933,6 +37589,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -37097,6 +37782,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -37176,6 +37881,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -38675,6 +39418,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -38839,6 +39611,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -38918,6 +39710,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",
@@ -40306,6 +41136,35 @@
             }
           ]
         },
+        "mv": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "source"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "destination"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
+        },
         "normalize_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -40470,6 +41329,26 @@
             }
           ]
         },
+        "read_bounded": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "path"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "max_bytes"
+            }
+          ]
+        },
         "register_persist_workspace_skip_path": {
           "binding": "instance",
           "execution_kind": "sync",
@@ -40549,6 +41428,44 @@
           "binding": "instance",
           "execution_kind": "coroutine",
           "parameters": []
+        },
+        "same_file": {
+          "binding": "instance",
+          "execution_kind": "coroutine",
+          "parameters": [
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "left"
+            },
+            {
+              "default": {
+                "kind": "required"
+              },
+              "kind": "POSITIONAL_OR_KEYWORD",
+              "name": "right"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.bool",
+                "value": true
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "follow_symlinks"
+            },
+            {
+              "default": {
+                "kind": "literal",
+                "type": "builtins.NoneType",
+                "value": null
+              },
+              "kind": "KEYWORD_ONLY",
+              "name": "user"
+            }
+          ]
         },
         "set_dependencies": {
           "binding": "instance",

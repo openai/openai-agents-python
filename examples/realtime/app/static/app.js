@@ -543,15 +543,27 @@ class RealtimeDemo {
             eventClass = 'tool';
         }
 
-        eventDiv.innerHTML = `
-            <div class="event-header ${eventClass}">
-                <div>
-                    <div style="font-weight: 600; margin-bottom: 2px;">${title}</div>
-                    <div style="font-size: 0.8rem; opacity: 0.8;">${description}</div>
-                </div>
-                <span style="font-size: 0.7rem; opacity: 0.6;">${new Date().toLocaleTimeString()}</span>
-            </div>
-        `;
+        const headerDiv = document.createElement('div');
+        headerDiv.className = `event-header ${eventClass}`;
+
+        const detailsDiv = document.createElement('div');
+        const titleDiv = document.createElement('div');
+        titleDiv.style.cssText = 'font-weight: 600; margin-bottom: 2px;';
+        titleDiv.textContent = title;
+
+        const descriptionDiv = document.createElement('div');
+        descriptionDiv.style.cssText = 'font-size: 0.8rem; opacity: 0.8;';
+        descriptionDiv.textContent = description;
+
+        const timeSpan = document.createElement('span');
+        timeSpan.style.cssText = 'font-size: 0.7rem; opacity: 0.6;';
+        timeSpan.textContent = new Date().toLocaleTimeString();
+
+        detailsDiv.appendChild(titleDiv);
+        detailsDiv.appendChild(descriptionDiv);
+        headerDiv.appendChild(detailsDiv);
+        headerDiv.appendChild(timeSpan);
+        eventDiv.appendChild(headerDiv);
 
         this.toolsContent.appendChild(eventDiv);
 
