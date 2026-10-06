@@ -330,6 +330,33 @@ agent = Agent(
 )
 ```
 
+#### Pending computer safety checks
+
+The Responses API can include `pending_safety_checks` in a `computer_call` to flag concerns for your application to review. Each check has an `id` and optional `code` and `message` fields that describe the type of concern and provide details. These checks come from the API; the Agents SDK passes them to your callback. See the [Responses API reference](https://developers.openai.com/api/reference/resources/responses/methods/create) for `pending_safety_checks` and `acknowledged_safety_checks`, and the [computer-use safety guidance](https://developers.openai.com/api/docs/guides/tools-computer-use#run-safely) for application-level precautions.
+
+Configure [`ComputerTool.on_safety_check`][agents.tool.ComputerTool.on_safety_check] to decide whether to proceed with a flagged computer call. The SDK invokes this callback only when the call includes pending checks, before executing the call's actions.
+
+The callback receives one [`ComputerToolSafetyCheckData`][agents.tool.ComputerToolSafetyCheckData] at a time. Return `True` to acknowledge that check. Return `False` to raise [`UserError`][agents.exceptions.UserError] before the call's actions or screenshot execute. The SDK requires all reported checks to be acknowledged when a callback is configured. The callback can be synchronous or asynchronous.
+
+If `on_safety_check` is omitted, the SDK proceeds with execution and leaves the checks unacknowledged. The SDK does not prompt a person automatically. Configure the callback explicitly when your application requires review of flagged calls. For example, this conservative policy rejects every flagged call:
+
+```python
+from agents import AsyncComputer, Computer, ComputerTool
+from agents.tool import ComputerToolSafetyCheckData
+
+
+def reject_flagged_call(data: ComputerToolSafetyCheckData) -> bool:
+    return False
+
+
+def computer_tool_with_safety_checks(computer: Computer | AsyncComputer) -> ComputerTool:
+    return ComputerTool(computer=computer, on_safety_check=reject_flagged_call)
+```
+
+To allow reviewed calls, replace `reject_flagged_call` with a callback that presents `data.safety_check` and the proposed `data.tool_call` to your application's reviewer, waits for a decision, and returns that decision. Treat unknown check codes as requiring review as well.
+
+Computer calls without pending checks do not invoke this callback. Enforce any policy that must apply to every computer action in your computer harness. To collect a person's decision, your callback must arrange that interaction and return the decision; the SDK does not populate `RunResult.interruptions` or use the pause-and-resume flow described in [Human-in-the-loop](human_in_the_loop.md).
+
 ## Function tools
 
 You can use any Python function as a tool. The Agents SDK will set up the tool automatically:
