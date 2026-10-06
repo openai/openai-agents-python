@@ -40,7 +40,7 @@ from agents.run_internal.run_loop import (
     ProcessedResponse,
     SingleStepResult,
 )
-from agents.run_state import RunState
+from agents.run_state import CURRENT_SCHEMA_VERSION, RunState
 from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.tool import Tool
@@ -535,6 +535,23 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
     assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
+def _relabel_as_older_schema(payload: dict[str, Any], version: str) -> None:
+    """Downgrade only what the destination label cannot represent, then relabel.
+
+    Agent-scoped approvals and MCP recipient bindings arrived in 1.18, which v0.23.0
+    released, so a 1.18 payload keeps them. Rewriting them unconditionally would hand
+    the reader a 1.17-shaped payload wearing a newer label, and a test built on that
+    would stay green even if the newer reader lost the fields.
+    """
+    if tuple(int(part) for part in version.split(".", maxsplit=1)) < (1, 18):
+        for entry in payload["context"].pop("function_tool_approvals", []):
+            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+        response = payload.get("last_processed_response")
+        if isinstance(response, dict):
+            response.pop("mcp_tool_bindings", None)
+    payload["$schemaVersion"] = version
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid",
@@ -542,6 +559,15 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
         "old-schema",
         "batch-shape",
         "compaction-under-1.17",
+        "held-shape",
+        "held-with-before",
+        "held-under-1-17",
+        "held-under-1-18",
+        "held-keys-without-held",
+        "policy-shape",
+        "response-boundary-shape",
+        "response-boundary-missing",
+        "response-boundary-outside-batch",
         "acknowledgement-type",
         "acknowledgement-without-before",
         "compaction-exchange-type",
@@ -555,13 +581,10 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
     with pytest.raises(RuntimeError):
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
-    if invalid in {"old-schema", "compaction-under-1.17", "acknowledgement-under-1.17"}:
-        for entry in payload["context"].pop("function_tool_approvals", []):
-            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     if invalid == "old-schema":
-        payload["$schemaVersion"] = "1.16"
+        _relabel_as_older_schema(payload, "1.16")
     elif invalid == "compaction-under-1.17":
-        payload["$schemaVersion"] = "1.17"
+        _relabel_as_older_schema(payload, "1.17")
     elif invalid == "acknowledgement-type":
         payload["pending_session_write"]["append_acknowledged"] = "true"
     elif invalid == "acknowledgement-without-before":
@@ -578,33 +601,113 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
             "reasoning_item_id_policy": "unknown",
         }
     elif invalid == "acknowledgement-under-1.17":
-        payload["$schemaVersion"] = "1.17"
+        _relabel_as_older_schema(payload, "1.17")
         for key in ("response_id", "store", "has_local_tool_outputs"):
             payload["pending_session_write"].pop(key)
         payload["pending_session_write"]["append_acknowledged"] = True
-    else:
+    elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
+    elif invalid == "held-shape":
+        payload["pending_session_write"]["held"] = "yes"
+    elif invalid == "held-keys-without-held":
+        # Conversion policy belongs only to a withheld response.
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "omit"
+    elif invalid == "policy-shape":
+        # The conversion-policy key only speaks the two policy literals or None; any
+        # other value would silently change how a fold converts the batch's items.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "banana"
+    elif invalid.startswith("response-boundary-"):
+        # The boundary selects the response governed by the current filter.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        if invalid == "response-boundary-shape":
+            boundary = {"turn": -1, "start": 0}
+        else:
+            boundary = {
+                "turn": state._current_turn,
+                "start": len(payload["pending_session_write"]["items"]) + 1,
+            }
+        if invalid != "response-boundary-missing":
+            payload["pending_session_write"]["current_response"] = boundary
+    elif invalid == "held-under-1-17":
+        # 1.17 defined the pending write as exactly four keys, so the held variant is
+        # only readable under the version that introduced it.
+        _relabel_as_older_schema(payload, "1.17")
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+    elif invalid == "held-under-1-18":
+        # v0.23.0 released 1.18 with the compaction metadata only. Its reader rejects the
+        # held keys, so a well-formed held record under that label would misidentify the
+        # durable format; the held variant is readable only under the version that
+        # introduced it.
+        _relabel_as_older_schema(payload, "1.18")
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["current_response"] = {
+            "turn": state._current_turn,
+            "start": 0,
+        }
+    else:
+        # A held batch was never offered to the Session, so recorded digests and the
+        # held marker cannot coexist on one record.
+        payload["pending_session_write"]["held"] = True
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
 
 
 @pytest.mark.asyncio
-async def test_legacy_pending_session_write_still_resumes_without_compaction_metadata() -> None:
+async def test_pending_session_write_without_the_held_key_keeps_its_meaning() -> None:
+    # The four-key form 1.17 defined still settles eagerly on resume entry under its
+    # own label, unchanged by the held variant that 1.18 introduced.
     agent, model, session, state, effects = await _approved_session_state(False)
     session.failure = "before"
-    with pytest.raises(RuntimeError, match="session append failed"):
+    with pytest.raises(RuntimeError):
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
-    payload["$schemaVersion"] = "1.17"
-    for entry in payload["context"].pop("function_tool_approvals", []):
-        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+    assert "held" not in payload["pending_session_write"]
+    _relabel_as_older_schema(payload, "1.17")
     for key in ("response_id", "store", "has_local_tool_outputs"):
-        payload["pending_session_write"].pop(key)
+        payload["pending_session_write"].pop(key, None)
     restored = await RunState.from_json(agent, payload)
+
     result = await _run_session_resume(agent, restored, session, False)
     assert result.final_output == "done"
     assert effects == [7]
-    assert len(model.calls) == 2
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledged", [False, True], ids=["in-flight", "acknowledged"])
+async def test_compaction_metadata_stays_readable_under_1_18(acknowledged: bool) -> None:
+    # v0.23.0 shipped 1.18 with the compaction metadata on the pending write. That
+    # released format must keep loading under its own label, independently of the held
+    # keys that only a later version introduces.
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    pending = payload["pending_session_write"]
+    assert "held" not in pending
+    assert {"response_id", "store", "has_local_tool_outputs"} <= set(pending)
+    _relabel_as_older_schema(payload, "1.18")
+    if acknowledged:
+        pending["append_acknowledged"] = True
+        pending["compaction_model_exchange"] = {
+            "item_digests": list(pending["before"]),
+            "reasoning_item_id_policy": None,
+        }
+    restored = await RunState.from_json(agent, payload)
+    assert restored._pending_session_write is not None
+    assert restored._pending_session_write.get("append_acknowledged", False) is acknowledged
+    if acknowledged:
+        return
+
+    result = await _run_session_resume(agent, restored, session, False)
+    assert result.final_output == "done"
+    assert effects == [7]
     assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
@@ -1273,7 +1376,7 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
     interruption_agent_data = cast(dict[str, str], interruption_data["agent"])
     assert interruption_agent_data["identity"] == current_agent_data["identity"]
     interruption_agent_data.pop("identity")
-    if schema_version != "1.18":
+    if tuple(int(part) for part in schema_version.split(".", maxsplit=1)) < (1, 18):
         for entry in json_data["context"].pop("function_tool_approvals", []):
             json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     json_data["$schemaVersion"] = schema_version
@@ -1748,7 +1851,7 @@ async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume(
 
     if round_trip:
         payload = state.to_json()
-        assert payload["$schemaVersion"] == "1.18"
+        assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION
         state = await RunState.from_json(triage, payload)
 
     result = await _run_session_resume(triage, state, session, False)

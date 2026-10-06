@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections.abc import Mapping
 from typing import Any, cast
 
@@ -41,7 +42,14 @@ from .run_steps import (
     NextStepRunAgain,
     ProcessedResponse,
 )
-from .session_persistence import save_result_to_session, save_resumed_turn_items
+from .session_persistence import (
+    _held_items_safe_to_settle,
+    _pending_approval_call_ids,
+    held_session_items_for_save,
+    save_result_to_session,
+    save_resumed_turn_items,
+    take_held_session_write,
+)
 from .tool_use_tracker import AgentToolUseTracker, serialize_tool_use_tracker
 from .turn_preparation import get_model
 
@@ -500,6 +508,10 @@ def build_interruption_result(
     if run_state is not None:
         result._current_turn_persisted_item_count = run_state._current_turn_persisted_item_count
         result._trace_state = run_state._trace_state
+        # The held pending write must survive the result checkpoint: a non-streamed
+        # caller serializes ``result.to_state()``, which has no live ``RunState`` to
+        # read the declaration from.
+        result._pending_session_write = copy.deepcopy(run_state._pending_session_write)
     result._original_input = copy_input_items(original_input)
     return result
 
@@ -593,12 +605,26 @@ async def save_final_turn_items_after_guardrails(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
 ) -> int:
-    """Persist deferred final-turn items without skipping a partially persisted resumed turn."""
-    if not session_persistence_enabled or not items:
+    """Persist deferred final-turn items without skipping a partially persisted resumed turn.
+
+    Claim held history only after persistence is enabled and input guardrails permit
+    the write. Detached failures retain their checkpoint until the owning terminal
+    exit decides whether completion succeeded.
+    """
+    if session is None or not session_persistence_enabled:
         return 0
     if input_guardrails_triggered(input_guardrail_results):
         return 0
+    held_write = take_held_session_write(run_state)
+    if not items and held_write is None:
+        return 0
+    # Whether a held batch is being claimed at all, captured before any dedup empties
+    # it: the recovery registration below must stay armed even when the guardrail
+    # rebuild already carries the batch.
+    settling_held = held_write is not None
     if run_state is not None and run_state._current_turn_persisted_item_count > 0:
+        # save_resumed_turn_items owns the dedup, pairing, and recovery arming; the raw
+        # held batch rides in so it can arm from its own pre-dedup view.
         run_state._current_turn_persisted_item_count = await save_resumed_turn_items(
             session=session,
             items=items,
@@ -607,17 +633,34 @@ async def save_final_turn_items_after_guardrails(
             reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             store=store,
             wrapper=wrapper,
+            run_state=run_state,
+            held_write=held_write,
         )
         return run_state._current_turn_persisted_item_count
+    held_input = held_session_items_for_save(
+        held_write, run_state, items, reasoning_item_id_policy=reasoning_item_id_policy
+    )
+    if held_input:
+        held_input = _held_items_safe_to_settle(
+            held_input,
+            items,
+            reasoning_item_id_policy,
+            pending_call_ids=_pending_approval_call_ids(run_state),
+        )
     return await save_result_to_session(
         session,
-        [],
+        list(held_input) if held_input else [],
         list(items),
         run_state,
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        # A settling held batch always registers, so a crash inside this append fails
+        # closed with the batch recorded instead of silently losing it, even when the
+        # payload was deduplicated from the append.
+        resumed_write_state=run_state if settling_held else None,
+        settling_held_batch=settling_held,
     )
 
 
