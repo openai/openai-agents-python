@@ -360,6 +360,8 @@ def _complete_stream_interruption(
     interruptions: list[ToolApprovalItem],
     processed_response: ProcessedResponse | None,
 ) -> None:
+    if processed_response is not None:
+        processed_response.tool_output_guardrail_result_start = None
     streamed_result.interruptions = interruptions
     streamed_result._last_processed_response = processed_response
     streamed_result.is_complete = True

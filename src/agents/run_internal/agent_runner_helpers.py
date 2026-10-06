@@ -478,6 +478,8 @@ def build_interruption_result(
     original_input: str | list[TResponseInputItem],
 ) -> RunResult:
     """Create a RunResult for an interruption path."""
+    if processed_response is not None:
+        processed_response.tool_output_guardrail_result_start = None
     identity_root_agent = (
         run_state._starting_agent
         if run_state is not None and run_state._starting_agent is not None

@@ -318,6 +318,8 @@ def _input_items_for_result(
                 boundary_state._current_turn = result.current_turn
                 boundary = _current_response_boundary((), processed, boundary_state)
                 start = boundary.generated_start
+                if start is None and boundary_state._terminal_unrecoverable:
+                    return session_items
                 if start is not None and boundary.session_start is not None:
                     public_start = boundary.session_start + len(boundary.processed_items)
                     legacy_public_outputs = {

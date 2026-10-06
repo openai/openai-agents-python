@@ -2604,6 +2604,9 @@ async def resolve_interrupted_turn(
             return
         committed_tool_outputs.append(item)
         if run_state is not None:
+            if not response_boundary.proven:
+                # Keep failed callbacks closed until this response returns successfully.
+                run_state._terminal_unrecoverable = True
             if (
                 tool_output_guardrail_results
                 and processed_response.tool_output_guardrail_result_start is None
@@ -2755,6 +2758,8 @@ async def resolve_interrupted_turn(
             ]
         for call in missing_state_calls:
             _drop_stable_nested_result(call)
+        if run_state is not None and committed_tool_outputs and not response_boundary.proven:
+            run_state._terminal_unrecoverable = False
         return result
 
     processed_response.interruptions = pending_interruptions

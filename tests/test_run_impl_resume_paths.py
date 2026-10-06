@@ -352,6 +352,9 @@ async def test_callback_retry_keeps_current_response_tool_order(
     state.approve(right_approval)
     if previously_published:
         partial = await _run_session_resume(agent, state, session, streamed, hooks)
+        assert [r.output.output_info for r in partial.tool_output_guardrail_results] == [
+            "right-result"
+        ]
         assert [
             item.get("call_id")
             for item in await session.get_items()
@@ -359,8 +362,26 @@ async def test_callback_retry_keeps_current_response_tool_order(
         ] == ["right-1"]
         state = partial.to_state()
         state.approve(state.get_interruptions()[0])
-    with pytest.raises(UserError, match="tool callback failed"):
-        await _run_session_resume(agent, state, session, streamed, hooks)
+    if streamed:
+        failed = Runner.run_streamed(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+            hooks=hooks,
+        )
+        with pytest.raises(UserError, match="tool callback failed"):
+            async for _ in failed.stream_events():
+                pass
+        failed_output_results = failed.tool_output_guardrail_results
+    else:
+        with pytest.raises(UserError, match="tool callback failed") as caught:
+            await _run_session_resume(agent, state, session, streamed, hooks)
+        assert caught.value.run_data is not None
+        failed_output_results = caught.value.run_data.tool_output_guardrail_results
+    assert [r.output.output_info for r in failed_output_results] == (
+        ["right-result"] if previously_published else []
+    )
 
     state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
     state.approve(left_approval)
@@ -3552,3 +3573,92 @@ async def test_legacy_first_turn_callback_failure_withholds_normalized_output(
             for item in failed.to_input_list(mode=mode)
             if item.get("type") == "function_call_output"
         ] == (["published-receipt"] if published_sibling else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("failure", ["extractor", "tool_use_behavior"])
+async def test_legacy_later_turn_callback_failure_rejects_incomplete_retry(
+    streamed: bool,
+    failure: str,
+) -> None:
+    effects: list[str] = []
+    charged_decisions: list[str] = []
+
+    def fail_after_execution(_context: Any) -> dict[str, Any]:
+        raise RuntimeError("post-tool callback failed")
+
+    @function_tool
+    async def before() -> str:
+        return "before-ok"
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=fail_after_execution if failure == "extractor" else None,
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    def decide_final_output(_context: Any, results: list[Any]) -> ToolsToFinalOutputResult:
+        if any(result.tool.name == "charge" for result in results):
+            charged_decisions.append("charge")
+            if len(charged_decisions) == 1:
+                raise RuntimeError("post-tool callback failed")
+        return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("before", "{}", call_id="before-1")],
+            [get_function_tool_call("charge", "{}", call_id="charge-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="legacy-later-turn",
+        model=model,
+        tools=[before, charge],
+        tool_use_behavior=decide_final_output
+        if failure == "tool_use_behavior"
+        else "run_llm_again",
+    )
+    paused = await _run_session_resume(agent, "charge once", None, False)
+    assert [item.output for item in paused.new_items if isinstance(item, ToolCallOutputItem)] == [
+        "before-ok"
+    ]
+    payload = json.loads(paused.to_state().to_string())
+    # Schema 1.16 cannot prove which saved items belong to a later model response.
+    payload["$schemaVersion"] = "1.16"
+    payload["context"].pop("function_tool_approvals", None)
+    payload.pop("generated_session_item_indexes", None)
+    payload.pop("current_response_generated_item_ownership", None)
+    payload.pop("pending_session_write", None)
+    state = await RunState.from_json(agent, payload)
+    state.approve(state.get_interruptions()[0])
+
+    callback_error = UserError if failure == "extractor" else RuntimeError
+    if streamed:
+        failed = Runner.run_streamed(agent, state, run_config=RunConfig(tracing_disabled=True))
+        with pytest.raises(callback_error, match="post-tool callback failed"):
+            async for _ in failed.stream_events():
+                pass
+        modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+        for mode in modes:
+            assert [
+                item.get("output")
+                for item in failed.to_input_list(mode=mode)
+                if item.get("type") == "function_call_output"
+            ] == ["before-ok"]
+        state = failed.to_state()
+    else:
+        with pytest.raises(callback_error, match="post-tool callback failed"):
+            await _run_session_resume(agent, state, None, streamed)
+    assert effects == ["charged"]
+    assert len(model.calls) == 2
+
+    restored = await RunState.from_json(agent, json.loads(state.to_string()))
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await _run_session_resume(agent, restored, None, not streamed)
+    assert effects == ["charged"]
+    assert charged_decisions == (["charge"] if failure == "tool_use_behavior" else [])
+    assert len(model.calls) == 2
