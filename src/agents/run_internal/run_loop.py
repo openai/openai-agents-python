@@ -1336,6 +1336,9 @@ async def start_streaming(
                         ),
                     )
 
+                    # The resolver can checkpoint outputs before callbacks finish.
+                    # Append this attempt's new items to its starting history only.
+                    base_session_items = list(run_state._session_items)
                     turn_result = await resolve_interrupted_turn(
                         agent_span=current_span,
                         bindings=current_bindings,
@@ -1367,9 +1370,6 @@ async def start_streaming(
                     streamed_result.input = turn_result.original_input
                     streamed_result._original_input = copy_input_items(turn_result.original_input)
                     generated_items, turn_session_items = resumed_turn_items(turn_result)
-                    base_session_items = (
-                        list(run_state._session_items) if run_state is not None else []
-                    )
                     streamed_result._model_input_items = generated_items
                     streamed_result.new_items = base_session_items + list(turn_session_items)
                     if turn_result.nested_history_owned_items is not None:

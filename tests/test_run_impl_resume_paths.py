@@ -12,7 +12,7 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessa
 
 import agents.run as run_module
 from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff, output_guardrail
-from agents.agent import ToolsToFinalOutputResult
+from agents.agent import StopAtTools, ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
 from agents.exceptions import InputGuardrailTripwireTriggered, UserError
@@ -151,6 +151,82 @@ async def _run_session_resume(
     async for _ in result.stream_events():
         pass
     return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["extractor", "end_hook"])
+async def test_callback_retry_preserves_tool_output_in_result_history(
+    streamed: bool, round_trip: bool, failure: str
+) -> None:
+    effects: list[str] = []
+    callback_calls: list[str] = []
+
+    def fail_callback() -> None:
+        callback_calls.append(failure)
+        raise RuntimeError("post-tool callback failed")
+
+    def extract_custom_data(_context: Any) -> dict[str, Any]:
+        fail_callback()
+        return {}
+
+    class FailingEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            fail_callback()
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=extract_custom_data if failure == "extractor" else None,
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", "{}", call_id="charge-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=(
+            StopAtTools(stop_at_tool_names=["charge"])
+            if failure == "extractor"
+            else "run_llm_again"
+        ),
+    )
+    hooks = FailingEndHook() if failure == "end_hook" else None
+    paused = await _run_session_resume(agent, "charge once", None, streamed, hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    with pytest.raises(UserError, match="post-tool callback failed"):
+        await _run_session_resume(agent, state, None, streamed, hooks)
+
+    if round_trip:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    result = await _run_session_resume(agent, state, None, streamed, hooks)
+
+    assert effects == ["charged"]
+    assert callback_calls == [failure]
+    assert result.final_output == ("receipt-7" if failure == "extractor" else "done")
+    assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
+        "receipt-7"
+    ]
+    assert _call_pair(result.to_input_list(), "charge-1") == [
+        "function_call",
+        "function_call_output",
+    ]
+    restored = await RunState.from_json(agent, result.to_state().to_json())
+    assert [
+        item.output for item in restored._session_items if isinstance(item, ToolCallOutputItem)
+    ] == ["receipt-7"]
 
 
 async def _approved_session_state(streamed: bool, session: Session | None = None):

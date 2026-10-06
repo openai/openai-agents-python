@@ -2539,6 +2539,7 @@ async def resolve_interrupted_turn(
             next_call_position += 1
 
     committed_tool_outputs: list[RunItem] = []
+    original_session_items = list(run_state._session_items) if run_state is not None else []
 
     def _commit_tool_output(item: RunItem) -> None:
         if any(existing is item for existing in committed_tool_outputs):
@@ -2552,6 +2553,9 @@ async def resolve_interrupted_turn(
         )
         if run_state is not None:
             run_state._generated_items = [*original_pre_step_items, *committed_tool_outputs]
+            # Callbacks can fail after the output is accepted. Keep public history
+            # in the same checkpoint so a retry can reuse the output in both views.
+            run_state._session_items = [*original_session_items, *committed_tool_outputs]
         _register_tool_call_items(context_wrapper, [item])
 
     (
