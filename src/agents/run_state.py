@@ -2075,7 +2075,7 @@ class RunState(Generic[TContext, TAgent]):
             if isinstance(interruption, ToolApprovalItem)
         ]
 
-        return {
+        result: dict[str, Any] = {
             "new_items": [
                 self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
                 for item in processed_response.new_items
@@ -2088,6 +2088,11 @@ class RunState(Generic[TContext, TAgent]):
                 for call_id, binding in processed_response.mcp_tool_bindings.items()
             },
         }
+        if processed_response.tool_output_guardrail_result_start is not None:
+            result["tool_output_guardrail_result_start"] = (
+                processed_response.tool_output_guardrail_result_start
+            )
+        return result
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current resumable step."""
@@ -3551,6 +3556,10 @@ async def _deserialize_processed_response(
         if isinstance(binding, list)
     }
 
+    guardrail_start = processed_response_data.get("tool_output_guardrail_result_start")
+    if guardrail_start is not None and (type(guardrail_start) is not int or guardrail_start < 0):
+        raise validation_error_factory("Invalid tool output guardrail result boundary", UserError)
+
     return ProcessedResponse(
         new_items=new_items,
         handoffs=handoffs,
@@ -3564,6 +3573,7 @@ async def _deserialize_processed_response(
         mcp_approval_requests=mcp_approval_requests,
         interruptions=interruptions,
         mcp_tool_bindings=mcp_tool_bindings,
+        tool_output_guardrail_result_start=guardrail_start,
     )
 
 

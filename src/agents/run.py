@@ -1157,6 +1157,8 @@ class AgentRunner:
                             )
                             for item in resumed_response_boundary.items:
                                 ensure_nested_history_run_item_occurrence_key(item)
+                            processed = run_state._last_processed_response
+                            guardrail_result_start = processed.tool_output_guardrail_result_start
                             blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                                 nonstreamed_session_items=(resumed_response_boundary.session_start),
                                 run_state_generated_items=(
@@ -1164,8 +1166,10 @@ class AgentRunner:
                                 ),
                                 run_state_session_items=resumed_response_boundary.session_start,
                                 run_state_model_responses=len(run_state._model_responses) - 1,
-                                run_state_tool_output_guardrail_results=len(
-                                    run_state._tool_output_guardrail_results
+                                run_state_tool_output_guardrail_results=(
+                                    guardrail_result_start
+                                    if guardrail_result_start is not None
+                                    else len(run_state._tool_output_guardrail_results)
                                 ),
                             )
 
@@ -1314,6 +1318,13 @@ class AgentRunner:
                                 return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
+                                if turn_result.has_recovered_tool_outputs:
+                                    tool_input_guardrail_results.extend(
+                                        turn_result.tool_input_guardrail_results
+                                    )
+                                    tool_output_guardrail_results.extend(
+                                        turn_result.tool_output_guardrail_results
+                                    )
                                 continue
 
                             append_model_response_if_new(

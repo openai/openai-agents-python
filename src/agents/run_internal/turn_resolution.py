@@ -867,6 +867,11 @@ async def execute_tools_and_side_effects(
             return
         if not run_state._current_step.response_accepted:
             return
+        if (
+            tool_output_guardrail_results
+            and processed_response.tool_output_guardrail_result_start is None
+        ):
+            processed_response.tool_output_guardrail_result_start = len(prior_output_results)
         if item not in run_state._generated_items:
             run_state._generated_items.append(item)
         run_state._tool_input_guardrail_results = [
@@ -2599,6 +2604,11 @@ async def resolve_interrupted_turn(
             return
         committed_tool_outputs.append(item)
         if run_state is not None:
+            if (
+                tool_output_guardrail_results
+                and processed_response.tool_output_guardrail_result_start is None
+            ):
+                processed_response.tool_output_guardrail_result_start = len(prior_output_results)
             run_state._generated_items = order_current_turn_tool_outputs(
                 [*original_pre_step_items, *committed_tool_outputs],
                 start=generated_output_start,
@@ -2623,7 +2633,6 @@ async def resolve_interrupted_turn(
                 run_items=committed_tool_outputs,
                 reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             )
-
         _register_tool_call_items(context_wrapper, [item])
 
     (
@@ -2726,6 +2735,7 @@ async def resolve_interrupted_turn(
     _checkpoint_new_items()
 
     def _commit_missing_state(result: SingleStepResult) -> SingleStepResult:
+        result.has_recovered_tool_outputs = bool(recovered_outputs)
         _checkpoint_new_items()
         if missing_function_call_ids:
             processed_response.functions = [

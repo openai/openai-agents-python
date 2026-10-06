@@ -644,7 +644,9 @@ def resumed_turn_items(
         start=generated_output_start,
         call_positions=call_positions,
     )
-    turn_session_items = session_items_for_turn(turn_result)
+    turn_session_items = order_current_turn_tool_outputs(
+        session_items_for_turn(turn_result), start=0, call_positions=call_positions
+    )
     session_items = order_current_turn_tool_outputs(
         [*session_items, *turn_session_items],
         start=session_output_start,

@@ -135,6 +135,8 @@ class ProcessedResponse:
         default_factory=dict
     )
     # Original invocation recipients, independent of the currently available callables.
+    tool_output_guardrail_result_start: int | None = None
+    # First checkpointed tool output guardrail result owned by this response.
 
     def has_tools_or_approvals_to_run(self) -> bool:
         # Handoffs, functions and computer actions need local processing
@@ -232,6 +234,9 @@ class SingleStepResult:
 
     processed_response: ProcessedResponse | None = None
     """The processed model response. This is needed for resuming from interruptions."""
+
+    has_recovered_tool_outputs: bool = False
+    """Whether this step delivers outputs checkpointed before a failed callback."""
 
     @property
     def generated_items(self) -> list[RunItem]:

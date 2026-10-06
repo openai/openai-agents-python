@@ -290,13 +290,31 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
 @pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
 async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) -> None:
     effects: list[str] = []
+    session = SimpleListSession()
+    events: list[Any] = []
 
-    @function_tool(needs_approval=True)
+    @tool_input_guardrail
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
+
+    @tool_output_guardrail
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        needs_approval=True,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
+    )
     async def left() -> str:
         effects.append("left")
         return "left-result"
 
-    @function_tool(needs_approval=True)
+    @function_tool(
+        needs_approval=True,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
+    )
     async def right() -> str:
         effects.append("right")
         return "right-result"
@@ -322,16 +340,16 @@ async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) 
         tools=[left, right],
     )
     hooks = FailingRightEndHook()
-    paused = await _run_session_resume(agent, "run both", None, streamed, hooks)
+    paused = await _run_session_resume(agent, "run both", session, streamed, hooks)
     state = paused.to_state()
     left_approval, right_approval = state.get_interruptions()
     state.approve(right_approval)
     with pytest.raises(UserError, match="right callback failed"):
-        await _run_session_resume(agent, state, None, streamed, hooks)
+        await _run_session_resume(agent, state, session, streamed, hooks)
 
     state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
     state.approve(left_approval)
-    result = await _run_session_resume(agent, state, None, streamed, hooks)
+    result = await _run_session_resume(agent, state, session, streamed, hooks, events)
     assert effects == ["right", "left"]
     assert result.final_output == "done"
     assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
@@ -349,6 +367,26 @@ async def test_callback_retry_keeps_current_response_tool_order(streamed: bool) 
             "left-result",
             "right-result",
         ]
+
+    assert [
+        item.get("call_id")
+        for item in await session.get_items()
+        if item.get("type") == "function_call_output"
+    ] == ["left-1", "right-1"]
+    assert [r.output.output_info for r in result.tool_input_guardrail_results] == [
+        "right-1",
+        "left-1",
+    ]
+    assert [r.output.output_info for r in result.tool_output_guardrail_results] == [
+        "right-result",
+        "left-result",
+    ]
+    if streamed:
+        assert [
+            event.item.output
+            for event in events
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+        ] == ["left-result", "right-result"]
 
 
 @pytest.mark.asyncio
@@ -450,7 +488,15 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
         callbacks.append("extractor")
         raise RuntimeError("post-tool callback failed")
 
-    @function_tool(needs_approval=True, custom_data_extractor=fail_after_execution)
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=fail_after_execution,
+        tool_output_guardrails=[record_output],
+    )
     async def charge() -> str:
         effects.append("charged")
         return "receipt-7"
@@ -519,6 +565,9 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
     else:
         assert retry_outputs == ["receipt-7"]
         assert retry.final_output == "receipt-7"
+        assert [result.output.output_info for result in retry.tool_output_guardrail_results] == [
+            "receipt-7"
+        ]
         assert [
             item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)
         ] == ["receipt-7"]

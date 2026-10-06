@@ -1399,18 +1399,25 @@ async def start_streaming(
                     )
                     for item in resumed_response_boundary.items:
                         ensure_nested_history_run_item_occurrence_key(item)
+                    guardrail_result_start = (
+                        run_state._last_processed_response.tool_output_guardrail_result_start
+                    )
                     blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                         run_state_generated_items=resumed_response_boundary.generated_start,
                         run_state_session_items=resumed_response_boundary.session_start,
                         run_state_model_responses=len(run_state._model_responses) - 1,
-                        run_state_tool_output_guardrail_results=len(
-                            run_state._tool_output_guardrail_results
+                        run_state_tool_output_guardrail_results=(
+                            guardrail_result_start
+                            if guardrail_result_start is not None
+                            else len(run_state._tool_output_guardrail_results)
                         ),
                         streamed_new_items=resumed_response_boundary.session_start,
                         streamed_model_input_items=resumed_response_boundary.generated_start,
                         streamed_raw_responses=len(streamed_result.raw_responses) - 1,
-                        streamed_tool_output_guardrail_results=len(
-                            streamed_result.tool_output_guardrail_results
+                        streamed_tool_output_guardrail_results=(
+                            guardrail_result_start
+                            if guardrail_result_start is not None
+                            else len(streamed_result.tool_output_guardrail_results)
                         ),
                     )
 
@@ -1506,11 +1513,10 @@ async def start_streaming(
                         current_agent.model_settings.resolve(run_config.model_settings).store,
                     )
 
-
-                    # The non-streaming resume path extends its run-wide lists before finalizing
-                    # but skips a resumed turn that loops back to the model, so a guardrail that
-                    # re-runs for the same tool call on resume is not counted twice.
-                    if not isinstance(turn_result.next_step, NextStepRunAgain):
+                    if (
+                        not isinstance(turn_result.next_step, NextStepRunAgain)
+                        or turn_result.has_recovered_tool_outputs
+                    ):
                         _accumulate_tool_guardrail_results(
                             streamed_result,
                             turn_result,
