@@ -44,6 +44,8 @@ agent = Agent(
 
 For local `ShellTool` and `ApplyPatchTool`, approval is opt-in: `needs_approval` defaults to `False`. An `on_approval` callback alone does not enable approval. Set `needs_approval=True` or a callable approval policy as well; the SDK invokes the callback only for calls that require approval and have no existing approval decision. See [approval for local shell and file edits](tools.md#approval-for-local-shell-and-file-edits) for execution responsibilities and example configurations.
 
+For `ComputerTool`, use `on_safety_check` to accept or reject safety checks returned by the Responses API. This callback runs only for computer calls with pending checks and does not use the pause-and-resume approval flow described on this page. See [computer safety checks](tools.md#pending-computer-safety-checks) for details and an example.
+
 ## How the approval flow works
 
 1. When the model emits a tool call, the runner evaluates its approval rule (`needs_approval`, `require_approval`, or the hosted MCP equivalent).

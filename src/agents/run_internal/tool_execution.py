@@ -2504,6 +2504,12 @@ async def execute_computer_actions(
                     )
                 else:
                     raise UserError("Computer tool safety check was not acknowledged")
+        elif action.tool_call.pending_safety_checks:
+            logger.warning(
+                "Computer call has pending safety checks, but no on_safety_check handler is "
+                "configured. The action will proceed without acknowledging the checks. "
+                "Configure ComputerTool.on_safety_check to review or reject them."
+            )
 
         results.append(
             await ComputerAction.execute(

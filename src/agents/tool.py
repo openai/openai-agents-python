@@ -895,7 +895,12 @@ class ComputerTool(Generic[ComputerT]):
     """The computer implementation, or a factory that produces a computer per run."""
 
     on_safety_check: Callable[[ComputerToolSafetyCheckData], MaybeAwaitable[bool]] | None = None
-    """Optional callback to acknowledge computer tool safety checks."""
+    """Optional callback invoked for each pending safety check before computer actions execute.
+
+    Return True to acknowledge a check or False to raise UserError before execution.
+    If omitted, pending checks remain unacknowledged and execution continues with a warning.
+    The callback runs only when the model reports pending checks, not for every action.
+    """
 
     custom_data_extractor: ComputerToolCustomDataExtractor | None = field(
         default=None,
