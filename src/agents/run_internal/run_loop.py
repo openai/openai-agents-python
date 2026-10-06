@@ -388,6 +388,40 @@ def _publish_streamed_result_agent(
     streamed_result._current_agent_output_schema = get_output_schema(agent)
 
 
+def _publish_resumed_stream_turn(
+    streamed_result: RunResultStreaming,
+    run_state: RunState[Any],
+    turn_result: SingleStepResult,
+    generated_items: list[RunItem],
+    session_items: list[RunItem],
+) -> None:
+    input_before_turn_rewrite = streamed_result.input
+    streamed_result.input = turn_result.original_input
+    streamed_result._original_input = copy_input_items(turn_result.original_input)
+    streamed_result.new_items = session_items
+    streamed_result._model_input_items = generated_items
+    if turn_result.nested_history_owned_items is not None:
+        owned_refs = reconcile_nested_history_owned_session_item_refs(
+            streamed_result.new_items,
+            streamed_result._nested_history_owned_session_item_refs,
+            input_before_turn_rewrite,
+            turn_result.original_input,
+            turn_result.nested_history_owned_items,
+        )
+        streamed_result._nested_history_owned_session_item_refs = owned_refs
+        run_state._nested_history_owned_session_item_refs = list(owned_refs)
+    streamed_result._replay_from_model_input_items = generated_items != streamed_result.new_items
+    update_run_state_after_resume(
+        run_state,
+        turn_result=turn_result,
+        generated_items=generated_items,
+        session_items=streamed_result.new_items,
+    )
+    run_state._current_turn_persisted_item_count = (
+        streamed_result._current_turn_persisted_item_count
+    )
+
+
 async def _save_resumed_stream_items(
     *,
     session: Session | None,
@@ -531,6 +565,7 @@ async def _finalize_streamed_final_output(
     store_setting: bool | None,
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
     stream_items_after_guardrails: bool = False,
+    retry_on_guardrail_error: bool = False,
 ) -> None:
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
@@ -608,6 +643,10 @@ async def _finalize_streamed_final_output(
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
         if guardrail_error_is_redacted:
             _detach_data_redacted_error_traceback(guardrail_error)
+        if retry_on_guardrail_error:
+            # A recovered callback output remains pending, including its held
+            # Session write, so a retry checks the same accepted output again.
+            raise
         try:
             final_turn_items = _final_turn_items_for_persistence(
                 items,
@@ -883,6 +922,7 @@ def _accumulate_tool_guardrail_results(
     *,
     accepted_input_results: list[ToolInputGuardrailResult],
     accepted_output_results: list[ToolOutputGuardrailResult],
+    publish_output_results: bool = True,
 ) -> None:
     """Carry a turn's tool guardrail results onto the streamed result.
 
@@ -892,9 +932,11 @@ def _accumulate_tool_guardrail_results(
     streamed_result.tool_input_guardrail_results = (
         streamed_result.tool_input_guardrail_results + turn_result.tool_input_guardrail_results
     )
-    streamed_result.tool_output_guardrail_results = (
-        streamed_result.tool_output_guardrail_results + turn_result.tool_output_guardrail_results
-    )
+    if publish_output_results:
+        streamed_result.tool_output_guardrail_results = (
+            streamed_result.tool_output_guardrail_results
+            + turn_result.tool_output_guardrail_results
+        )
     if isinstance(turn_result.next_step, NextStepRunAgain | NextStepHandoff):
         accepted_input_results.extend(turn_result.tool_input_guardrail_results)
         accepted_output_results.extend(turn_result.tool_output_guardrail_results)
@@ -1439,9 +1481,7 @@ async def start_streaming(
                             run_state=run_state,
                             error_handlers=error_handlers,
                         )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as exc:
+                    except (Exception, asyncio.CancelledError) as exc:
                         if not _is_error_data_redacted(exc):
                             streamed_result._model_input_items = list(run_state._generated_items)
                             streamed_result._last_processed_response = (
@@ -1453,9 +1493,11 @@ async def start_streaming(
                             streamed_result.tool_input_guardrail_results = list(
                                 run_state._tool_input_guardrail_results
                             )
+                            processed = run_state._last_processed_response
+                            result_start = processed.tool_output_guardrail_result_start
                             streamed_result.tool_output_guardrail_results = list(
                                 run_state._tool_output_guardrail_results
-                            )
+                            )[:result_start]
                         raise
 
                     tool_use_tracker.record_processed_response(
@@ -1470,40 +1512,34 @@ async def start_streaming(
                         ),
                     )
 
-                    input_before_turn_rewrite = streamed_result.input
-                    streamed_result.input = turn_result.original_input
-                    streamed_result._original_input = copy_input_items(turn_result.original_input)
                     generated_items, resumed_session_items, turn_session_items = resumed_turn_items(
                         turn_result, base_session_items, run_state
                     )
-                    streamed_result._model_input_items = generated_items
-                    streamed_result.new_items = resumed_session_items
-                    if turn_result.nested_history_owned_items is not None:
-                        owned_refs = reconcile_nested_history_owned_session_item_refs(
-                            streamed_result.new_items,
-                            streamed_result._nested_history_owned_session_item_refs,
-                            input_before_turn_rewrite,
-                            turn_result.original_input,
-                            turn_result.nested_history_owned_items,
+                    retry_terminal_output = (
+                        isinstance(turn_result.next_step, NextStepFinalOutput)
+                        and turn_result.has_recovered_tool_outputs
+                    )
+                    if retry_terminal_output:
+                        # Keep approval anchors in the pending checkpoint. The
+                        # finalized history drops them and is published after allow.
+                        streamed_result._model_input_items = list(run_state._generated_items)
+                        streamed_result._replay_from_model_input_items = (
+                            streamed_result._model_input_items != streamed_result.new_items
                         )
-                        streamed_result._nested_history_owned_session_item_refs = owned_refs
-                        if run_state is not None:
-                            run_state._nested_history_owned_session_item_refs = list(owned_refs)
-                    streamed_result._replay_from_model_input_items = list(
-                        streamed_result._model_input_items
-                    ) != list(streamed_result.new_items)
-                    if run_state is not None:
-                        update_run_state_after_resume(
+                    else:
+                        _publish_resumed_stream_turn(
+                            streamed_result,
                             run_state,
-                            turn_result=turn_result,
-                            generated_items=generated_items,
-                            session_items=streamed_result.new_items,
-                        )
-                        run_state._current_turn_persisted_item_count = (
-                            streamed_result._current_turn_persisted_item_count
+                            turn_result,
+                            generated_items,
+                            resumed_session_items,
                         )
 
                     if not isinstance(turn_result.next_step, NextStepFinalOutput):
+                        if guardrail_result_start is not None:
+                            streamed_result.tool_output_guardrail_results.extend(
+                                accepted_tool_output_guardrail_results[guardrail_result_start:]
+                            )
                         stream_step_items_to_queue(
                             list(turn_session_items), streamed_result._event_queue
                         )
@@ -1522,6 +1558,9 @@ async def start_streaming(
                             turn_result,
                             accepted_input_results=accepted_tool_input_guardrail_results,
                             accepted_output_results=accepted_tool_output_guardrail_results,
+                            publish_output_results=not isinstance(
+                                turn_result.next_step, NextStepFinalOutput
+                            ),
                         )
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
@@ -1576,6 +1615,11 @@ async def start_streaming(
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
+                        streamed_result._last_processed_response = (
+                            turn_result.processed_response
+                            if turn_result.processed_response is not None
+                            else run_state._last_processed_response
+                        )
                         await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
                             agent=current_agent,
@@ -1585,18 +1629,30 @@ async def start_streaming(
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
                             model_response=turn_result.model_response,
-                            processed_response=(
-                                turn_result.processed_response
-                                if turn_result.processed_response is not None
-                                else run_state._last_processed_response
-                            ),
+                            processed_response=streamed_result._last_processed_response,
                             owner_starts=blocked_output_owner_starts,
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
                             stream_items_after_guardrails=True,
+                            retry_on_guardrail_error=retry_terminal_output,
                         )
                         if streamed_result._stored_exception is not None:
                             break
+                        if retry_terminal_output:
+                            _publish_resumed_stream_turn(
+                                streamed_result,
+                                run_state,
+                                turn_result,
+                                generated_items,
+                                resumed_session_items,
+                            )
+                        if guardrail_result_start is not None:
+                            streamed_result.tool_output_guardrail_results.extend(
+                                accepted_tool_output_guardrail_results[guardrail_result_start:]
+                            )
+                        streamed_result.tool_output_guardrail_results.extend(
+                            turn_result.tool_output_guardrail_results
+                        )
                         if session is None:
                             # A detached final output has no Session to settle against
                             # and the run ends here, so the batch is discarded rather

@@ -40,6 +40,7 @@ from agents.items import (
 )
 from agents.lifecycle import RunHooks
 from agents.memory import OpenAIResponsesCompactionSession, Session, SQLiteSession
+from agents.result import RunResultStreaming, ToInputListMode
 from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal import run_loop, turn_resolution
@@ -471,9 +472,27 @@ async def test_callback_retry_preserves_hosted_output_before_local_result(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tripwire", [False, True], ids=["allowed", "blocked"])
+@pytest.mark.parametrize(
+    "guardrail_outcome,prior_turn,with_session,retry_mode",
+    [
+        pytest.param("allowed", False, False, "streamed-live", id="first-turn-allowed"),
+        pytest.param("blocked", False, False, "streamed-live", id="first-turn-blocked"),
+        pytest.param("error", False, False, "streamed-json", id="first-turn-error"),
+        pytest.param("allowed", True, False, "streamed-json", id="prior-turn-allowed"),
+        pytest.param("blocked", True, False, "streamed-json", id="prior-turn-blocked"),
+        pytest.param("error", True, False, "streamed-json", id="prior-turn-error"),
+        pytest.param("error", True, True, "streamed-json", id="prior-turn-error-sqlite"),
+        pytest.param("error", True, True, "run-live", id="prior-turn-error-sqlite-run-live"),
+        pytest.param("error", True, True, "run-json", id="prior-turn-error-sqlite-run-json"),
+    ],
+)
 async def test_failed_approval_callback_defers_stream_output_until_retry_guardrail(
-    tripwire: bool,
+    guardrail_outcome: str,
+    prior_turn: bool,
+    with_session: bool,
+    retry_mode: Literal["streamed-live", "streamed-json", "run-live", "run-json"],
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
 ) -> None:
     effects: list[str] = []
     callbacks: list[str] = []
@@ -483,6 +502,20 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
     failed_outputs: list[str] = []
     retry_outputs: list[str] = []
     config = RunConfig(tracing_disabled=True)
+    session = SQLiteSession("approval-retry", tmp_path / "session.db") if with_session else None
+    if session is not None:
+        request.addfinalizer(session.close)
+
+    def input_outputs(result: RunResultStreaming) -> dict[str, list[Any]]:
+        modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+        return {
+            mode: [
+                item.get("output")
+                for item in result.to_input_list(mode=mode)
+                if item.get("type") == "function_call_output"
+            ]
+            for mode in modes
+        }
 
     def fail_after_execution(_context: Any) -> dict[str, Any]:
         callbacks.append("extractor")
@@ -491,6 +524,10 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
     @tool_output_guardrail
     def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
         return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(tool_output_guardrails=[record_output])
+    async def prelude() -> str:
+        return "earlier-result"
 
     @function_tool(
         needs_approval=True,
@@ -506,33 +543,66 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
         guardrail_outputs.append(output)
         guardrail_entered.set()
         await release_guardrail.wait()
-        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=tripwire)
+        if guardrail_outcome == "error" and len(guardrail_outputs) == 1:
+            if retry_mode in {"run-live", "run-json"}:
+                raise UserError("policy temporarily unavailable")
+            raise RuntimeError("policy temporarily unavailable")
+        return GuardrailFunctionOutput(
+            output_info=None, tripwire_triggered=guardrail_outcome == "blocked"
+        )
 
-    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    model = ScriptedModel(
+        ([[get_function_tool_call("prelude", "{}", call_id="prelude-1")]] if prior_turn else [])
+        + [[get_function_tool_call("charge", "{}", call_id="charge-1")]]
+    )
     agent = Agent(
         name="agent",
         model=model,
-        tools=[charge],
+        tools=[prelude, charge],
         tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
         output_guardrails=[terminal_policy],
     )
-    paused = await Runner.run(agent, "charge once", run_config=config)
+    paused = await Runner.run(agent, "charge once", session=session, run_config=config)
     state = paused.to_state()
     state.approve(state.get_interruptions()[0])
+    prior_metadata = ["earlier-result"] if prior_turn else []
+    withheld_inputs = dict.fromkeys(("preserve_all", "normalized"), prior_metadata)
 
-    failed = Runner.run_streamed(agent, state, run_config=config)
+    failed = Runner.run_streamed(agent, state, session=session, run_config=config)
     with pytest.raises(UserError, match="post-tool callback failed"):
         async for event in failed.stream_events():
             if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
                 # Copy the value at emission, so later owner replacements cannot hide a leak.
                 failed_outputs.append(event.item.output)
     assert not guardrail_outputs
+    failed_metadata = [result.output.output_info for result in failed.tool_output_guardrail_results]
+    failed_input_outputs = input_outputs(failed)
 
-    # Exercise the documented failed-result resume path and supported durable state format.
-    state = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
-    retry = Runner.run_streamed(agent, state, run_config=config)
+    if retry_mode != "streamed-live":
+        # Exercise the documented failed-result resume path and supported durable state format.
+        state = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    # For live retries, reuse the same approved state that was passed to the failed stream.
+    assert [result.output.output_info for result in state._tool_output_guardrail_results] == [
+        *prior_metadata,
+        "receipt-7",
+    ]
+    retry = (
+        Runner.run_streamed(agent, state, session=session, run_config=config)
+        if retry_mode in {"streamed-live", "streamed-json"}
+        else None
+    )
+    initial_retry_metadata = (
+        [result.output.output_info for result in retry.tool_output_guardrail_results]
+        if retry is not None
+        else None
+    )
+    initial_retry_inputs = input_outputs(retry) if retry is not None else None
 
     async def collect_retry() -> None:
+        if retry is None:
+            # Runner.run fails without returning a result; the caller resumes its same RunState.
+            await Runner.run(agent, state, session=session, run_config=config)
+            return
         async for event in retry.stream_events():
             if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
                 retry_outputs.append(event.item.output)
@@ -544,42 +614,244 @@ async def test_failed_approval_callback_defers_stream_output_until_retry_guardra
         for _ in range(3):
             await asyncio.sleep(0)
         outputs_before_allow = list(retry_outputs)
+        metadata_before_allow = (
+            [result.output.output_info for result in retry.tool_output_guardrail_results]
+            if retry is not None
+            else None
+        )
+        pending_metadata = [
+            result.output.output_info for result in state._tool_output_guardrail_results
+        ]
+        public_new_outputs = (
+            [item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)]
+            if retry is not None
+            else None
+        )
+        public_input_outputs = input_outputs(retry) if retry is not None else None
+        stored_before_allow = await session.get_items() if session is not None else None
     finally:
         release_guardrail.set()
 
-    if tripwire:
+    if guardrail_outcome == "blocked":
         with pytest.raises(OutputGuardrailTripwireTriggered):
             await consumer
+    elif guardrail_outcome == "error":
+        if retry is None:
+            with pytest.raises(UserError, match="policy temporarily unavailable") as error:
+                await consumer
+            run_data = error.value.run_data
+            assert run_data is not None
+            assert [
+                result.output.output_info for result in run_data.tool_output_guardrail_results
+            ] == prior_metadata
+            assert [
+                item.output for item in run_data.new_items if isinstance(item, ToolCallOutputItem)
+            ] == prior_metadata
+        else:
+            with pytest.raises(RuntimeError, match="policy temporarily unavailable"):
+                await consumer
     else:
         await consumer
 
     # Assertions at the end ensure the failed snapshot really reaches the retry guardrail.
+    if guardrail_outcome == "error" and session is not None:
+        assert "function_call_output" not in _call_pair(await session.get_items(), "charge-1")
     assert effects == ["charged"]
     assert callbacks == ["extractor"]
     assert guardrail_outputs == ["receipt-7"]
     assert failed_outputs == [], "callback failure exposed unchecked terminal output"
+    assert failed_metadata == prior_metadata, (
+        "callback failure exposed unchecked guardrail metadata"
+    )
+    assert failed_input_outputs == withheld_inputs, "callback failure exposed unchecked model input"
     assert outputs_before_allow == [], "retry exposed output while its guardrail was pending"
-    if tripwire:
+    assert pending_metadata == [*prior_metadata, "receipt-7"]
+    if retry is not None:
+        assert initial_retry_metadata == prior_metadata, (
+            "retry exposed metadata before its guardrail"
+        )
+        assert initial_retry_inputs == withheld_inputs, "retry exposed model input before starting"
+        assert metadata_before_allow == prior_metadata, (
+            "retry exposed metadata during its guardrail"
+        )
+        assert public_new_outputs == prior_metadata, "retry exposed history during its guardrail"
+        assert public_input_outputs == withheld_inputs, (
+            "retry exposed model input during its guardrail"
+        )
+    assert len(model.calls) == (2 if prior_turn else 1)
+    if stored_before_allow is not None:
+        assert "function_call_output" not in _call_pair(stored_before_allow, "charge-1")
+    if guardrail_outcome == "error":
         assert retry_outputs == []
+        if retry is not None:
+            assert [
+                result.output.output_info for result in retry.tool_output_guardrail_results
+            ] == prior_metadata
+            assert input_outputs(retry) == withheld_inputs, (
+                "guardrail error exposed unchecked input"
+            )
+            state = retry.to_state()
+        restored = state
+        if retry_mode != "run-live":
+            restored = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+        assert [
+            result.output.output_info for result in restored._tool_output_guardrail_results
+        ] == [*prior_metadata, "receipt-7"]
+        guardrail_entered.clear()
+        release_guardrail.clear()
+        retry = Runner.run_streamed(agent, restored, session=session, run_config=config)
+        assert [
+            result.output.output_info for result in retry.tool_output_guardrail_results
+        ] == prior_metadata
+        consumer = asyncio.create_task(collect_retry())
+        try:
+            await asyncio.wait_for(guardrail_entered.wait(), timeout=5)
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert retry_outputs == [], (
+                "second retry exposed output before its guardrail allowed it"
+            )
+            assert [
+                result.output.output_info for result in retry.tool_output_guardrail_results
+            ] == prior_metadata
+            assert [
+                item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)
+            ] == prior_metadata
+            assert input_outputs(retry) == withheld_inputs
+            if session is not None:
+                assert "function_call_output" not in _call_pair(
+                    await session.get_items(), "charge-1"
+                )
+        finally:
+            release_guardrail.set()
+            await consumer
+
+        assert guardrail_outputs == ["receipt-7", "receipt-7"]
+        assert len(model.calls) == (2 if prior_turn else 1)
+        assert effects == ["charged"]
+        assert callbacks == ["extractor"]
+        if session is not None:
+            assert _call_pair(await session.get_items(), "charge-1") == [
+                "function_call",
+                "function_call_output",
+            ]
+    elif guardrail_outcome == "blocked":
+        assert retry is not None
+        assert retry_outputs == []
+        assert all(
+            result.output.output_info != "receipt-7"
+            for result in retry.tool_output_guardrail_results
+        )
         assert "receipt-7" not in state.to_string()
-    else:
+        assert input_outputs(retry) == dict.fromkeys(
+            ("preserve_all", "normalized"),
+            [*prior_metadata, run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT],
+        )
+    if guardrail_outcome != "blocked":
+        assert retry is not None
         assert retry_outputs == ["receipt-7"]
         assert retry.final_output == "receipt-7"
         assert [result.output.output_info for result in retry.tool_output_guardrail_results] == [
-            "receipt-7"
+            *prior_metadata,
+            "receipt-7",
         ]
         assert [
             item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)
-        ] == ["receipt-7"]
-        assert [
-            item.get("output")
-            for item in retry.to_input_list()
-            if item.get("type") == "function_call_output"
-        ] == ["receipt-7"]
+        ] == [*prior_metadata, "receipt-7"]
+        assert input_outputs(retry) == dict.fromkeys(
+            ("preserve_all", "normalized"), [*prior_metadata, "receipt-7"]
+        )
         restored = await RunState.from_json(agent, retry.to_state().to_json())
         assert [
             item.output for item in restored._session_items if isinstance(item, ToolCallOutputItem)
-        ] == ["receipt-7"]
+        ] == [*prior_metadata, "receipt-7"]
+    assert input_outputs(failed) == withheld_inputs, (
+        "later retries changed the failed stream's public output"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_approval_callback_stream_checkpoint_retries_accepted_output() -> None:
+    effects: list[str] = []
+    callbacks: list[str] = []
+    checked_outputs: list[str] = []
+
+    def cancel_after_execution(_context: Any) -> dict[str, Any]:
+        callbacks.append("extractor")
+        raise asyncio.CancelledError("post-tool callback cancelled")
+
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=cancel_after_execution,
+        tool_output_guardrails=[record_output],
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    async def allow_output(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        checked_outputs.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[allow_output],
+    )
+    config = RunConfig(tracing_disabled=True)
+    paused = await Runner.run(agent, "charge once", run_config=config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    failed = Runner.run_streamed(agent, state, run_config=config)
+    failed_outputs = [
+        event.item.output
+        async for event in failed.stream_events()
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+    ]
+    # Background cancellation completes the stream silently; consumer cancellation still raises.
+    assert failed.is_complete
+    assert failed.run_loop_exception is None
+    assert failed.final_output is None
+    assert failed_outputs == []
+    assert checked_outputs == []
+    assert failed.tool_output_guardrail_results == []
+
+    restored = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    assert [
+        item.output for item in restored._generated_items if isinstance(item, ToolCallOutputItem)
+    ] == ["receipt-7"]
+    assert [result.output.output_info for result in restored._tool_output_guardrail_results] == [
+        "receipt-7"
+    ]
+
+    retry = Runner.run_streamed(agent, restored, run_config=config)
+    retry_outputs = [
+        event.item.output
+        async for event in retry.stream_events()
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+    ]
+    assert retry.final_output == "receipt-7"
+    assert retry_outputs == ["receipt-7"]
+    assert checked_outputs == ["receipt-7"]
+    assert effects == ["charged"]
+    assert callbacks == ["extractor"]
+    assert len(model.calls) == 1
+    assert _call_pair(retry.to_input_list(), "charge-1") == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert [result.output.output_info for result in retry.tool_output_guardrail_results] == [
+        "receipt-7"
+    ]
 
 
 @pytest.mark.asyncio
