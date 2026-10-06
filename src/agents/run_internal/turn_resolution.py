@@ -2562,7 +2562,7 @@ async def resolve_interrupted_turn(
             # be discarded as an emptied turn, without the output the tool produced.
             extend_held_session_write(
                 run_state,
-                run_items=[item],
+                run_items=committed_tool_outputs,
                 reasoning_item_id_policy=run_state._reasoning_item_id_policy,
             )
         _register_tool_call_items(context_wrapper, [item])

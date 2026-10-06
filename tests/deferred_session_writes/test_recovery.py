@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -294,6 +295,68 @@ async def test_a_post_output_callback_failure_keeps_the_executed_output(streamed
     result = await _run(agent, restored, session, streamed=streamed)
     assert result.final_output == "wrote:x"
     assert _parked_pair(await session.get_items()) == _EXPECTED_PAIR
+    completed = await RunState.from_json(agent, result.to_state().to_json())
+    assert completed._pending_session_write is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_callback_failure_preserves_model_order_for_completed_outputs(streamed: bool) -> None:
+    second_committed = asyncio.Event()
+    executions: list[str] = []
+
+    def mark_second_committed(ctx: Any) -> None:
+        second_committed.set()
+
+    @function_tool(needs_approval=True, custom_data_extractor=_boom_custom_data_extractor)
+    async def first() -> str:
+        await second_committed.wait()
+        executions.append("first")
+        return "first result"
+
+    @function_tool(needs_approval=True, custom_data_extractor=mark_second_committed)
+    async def second() -> str:
+        executions.append("second")
+        return "second result"
+
+    agent = Agent(
+        name="ordered callback recovery",
+        tools=[first, second],
+        output_guardrails=[always_fine],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["first"]),
+        model=ScriptedModel(
+            [
+                ModelStep(
+                    output=[
+                        function_call("first", {}, call_id="call_FIRST"),
+                        function_call("second", {}, call_id="call_SECOND"),
+                    ]
+                )
+            ]
+        ),
+    )
+    session = SimpleListSession()
+    parked = await _run(agent, "go", session, streamed=streamed)
+    state = await RunState.from_json(agent, parked.to_state().to_json())
+    for interruption in state.get_interruptions():
+        state.approve(interruption)
+
+    # The callback signals after the second output is committed, ensuring that
+    # completion order differs from the model's call order before the failure.
+    with pytest.raises(Exception, match="extractor boom"):
+        await _run(agent, state, session, streamed=streamed)
+
+    restored = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    agent.output_guardrails = []
+    result = await _run(agent, restored, session, streamed=streamed)
+
+    assert result.final_output == "first result"
+    assert executions == ["second", "first"]
+    assert [
+        (item["call_id"], item["output"])
+        for item in await session.get_items()
+        if item.get("type") == "function_call_output"
+    ] == [("call_FIRST", "first result"), ("call_SECOND", "second result")]
     completed = await RunState.from_json(agent, result.to_state().to_json())
     assert completed._pending_session_write is None
 
