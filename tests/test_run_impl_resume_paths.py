@@ -23,7 +23,11 @@ from agents import (
 from agents.agent import StopAtTools, ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
-from agents.exceptions import InputGuardrailTripwireTriggered, UserError
+from agents.exceptions import (
+    InputGuardrailTripwireTriggered,
+    OutputGuardrailTripwireTriggered,
+    UserError,
+)
 from agents.guardrail import GuardrailFunctionOutput, input_guardrail
 from agents.handoffs import HandoffInputData
 from agents.items import (
@@ -48,7 +52,7 @@ from agents.run_internal.run_loop import (
     ProcessedResponse,
     SingleStepResult,
 )
-from agents.run_state import RunState
+from agents.run_state import CURRENT_SCHEMA_VERSION, RunState
 from agents.sandbox.runtime import SandboxRuntime
 from agents.testing import ScriptedModel
 from agents.tool import Tool
@@ -182,6 +186,14 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
         fail_callback()
         return {}
 
+    @tool_input_guardrail
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="input checked")
+
+    @tool_output_guardrail
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="output checked")
+
     class FailingEndHook(RunHooks[Any]):
         async def on_tool_end(
             self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
@@ -191,6 +203,8 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
     @function_tool(
         needs_approval=True,
         custom_data_extractor=extract_custom_data if failure == "extractor" else None,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
     )
     async def charge() -> str:
         effects.append("charged")
@@ -231,8 +245,14 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
             await _run_session_resume(agent, state, None, streamed, hooks)
 
     assert [
-        item.output for item in state._session_items if isinstance(item, ToolCallOutputItem)
+        item.output for item in state._generated_items if isinstance(item, ToolCallOutputItem)
     ] == ["receipt-7"]
+    assert [result.output.output_info for result in state._tool_input_guardrail_results] == [
+        "input checked"
+    ]
+    assert [result.output.output_info for result in state._tool_output_guardrail_results] == [
+        "output checked"
+    ]
 
     if round_trip:
         state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
@@ -240,6 +260,12 @@ async def test_callback_retry_preserves_tool_output_in_result_history(
 
     assert effects == ["charged"]
     assert callback_calls == [failure]
+    assert [result.output.output_info for result in result.tool_input_guardrail_results] == [
+        "input checked"
+    ]
+    assert [result.output.output_info for result in result.tool_output_guardrail_results] == [
+        "output checked"
+    ]
     if streamed:
         assert [
             event.item.output
@@ -404,6 +430,189 @@ async def test_callback_retry_preserves_hosted_output_before_local_result(
         for item in result.to_input_list()
         if item.get("type") in {"function_call_output", "shell_call_output"}
     ] == ["prelude", "shell-1", "charge"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tripwire", [False, True], ids=["allowed", "blocked"])
+async def test_failed_approval_callback_defers_stream_output_until_retry_guardrail(
+    tripwire: bool,
+) -> None:
+    effects: list[str] = []
+    callbacks: list[str] = []
+    guardrail_outputs: list[str] = []
+    guardrail_entered = asyncio.Event()
+    release_guardrail = asyncio.Event()
+    failed_outputs: list[str] = []
+    retry_outputs: list[str] = []
+    config = RunConfig(tracing_disabled=True)
+
+    def fail_after_execution(_context: Any) -> dict[str, Any]:
+        callbacks.append("extractor")
+        raise RuntimeError("post-tool callback failed")
+
+    @function_tool(needs_approval=True, custom_data_extractor=fail_after_execution)
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    async def terminal_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        guardrail_outputs.append(output)
+        guardrail_entered.set()
+        await release_guardrail.wait()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=tripwire)
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[terminal_policy],
+    )
+    paused = await Runner.run(agent, "charge once", run_config=config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    failed = Runner.run_streamed(agent, state, run_config=config)
+    with pytest.raises(UserError, match="post-tool callback failed"):
+        async for event in failed.stream_events():
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+                # Copy the value at emission, so later owner replacements cannot hide a leak.
+                failed_outputs.append(event.item.output)
+    assert not guardrail_outputs
+
+    # Exercise the documented failed-result resume path and supported durable state format.
+    state = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    retry = Runner.run_streamed(agent, state, run_config=config)
+
+    async def collect_retry() -> None:
+        async for event in retry.stream_events():
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+                retry_outputs.append(event.item.output)
+
+    consumer = asyncio.create_task(collect_retry())
+    try:
+        await asyncio.wait_for(guardrail_entered.wait(), timeout=5)
+        # Let the waiting stream consumer drain anything the producer queued before its await.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        outputs_before_allow = list(retry_outputs)
+    finally:
+        release_guardrail.set()
+
+    if tripwire:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await consumer
+    else:
+        await consumer
+
+    # Assertions at the end ensure the failed snapshot really reaches the retry guardrail.
+    assert effects == ["charged"]
+    assert callbacks == ["extractor"]
+    assert guardrail_outputs == ["receipt-7"]
+    assert failed_outputs == [], "callback failure exposed unchecked terminal output"
+    assert outputs_before_allow == [], "retry exposed output while its guardrail was pending"
+    if tripwire:
+        assert retry_outputs == []
+        assert "receipt-7" not in state.to_string()
+    else:
+        assert retry_outputs == ["receipt-7"]
+        assert retry.final_output == "receipt-7"
+        assert [
+            item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)
+        ] == ["receipt-7"]
+        assert [
+            item.get("output")
+            for item in retry.to_input_list()
+            if item.get("type") == "function_call_output"
+        ] == ["receipt-7"]
+        restored = await RunState.from_json(agent, retry.to_state().to_json())
+        assert [
+            item.output for item in restored._session_items if isinstance(item, ToolCallOutputItem)
+        ] == ["receipt-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed,round_trip,retry_append",
+    [
+        (False, False, False, "success"),
+        (True, True, True, "success"),
+        (False, True, True, "lost-ack"),
+        (True, False, False, "lost-ack"),
+    ],
+    ids=["run-live", "stream-json", "run-to-stream-lost-ack", "stream-to-run-lost-ack"],
+)
+async def test_callback_failure_retry_delivers_output_to_session(
+    failing_streamed: bool,
+    retry_streamed: bool,
+    round_trip: bool,
+    retry_append: str,
+) -> None:
+    agent, model, session, state, effects = await _approved_session_state(failing_streamed)
+    callback_calls: list[str] = []
+
+    class FailingEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            callback_calls.append(tool.name)
+            raise RuntimeError("post-tool callback failed")
+
+    hooks = FailingEndHook()
+    if failing_streamed:
+        failed = Runner.run_streamed(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+            hooks=hooks,
+        )
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            async for _ in failed.stream_events():
+                pass
+        state = failed.to_state()
+    else:
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            await _run_session_resume(agent, state, session, False, hooks)
+
+    assert effects == [7]
+    assert callback_calls == ["charge"]
+    assert len(model.calls) == 1
+    assert _charge_pair(await session.get_items()) == ["function_call"]
+
+    if round_trip:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+
+    if retry_append == "lost-ack":
+        session.failure = "after"
+        with pytest.raises(RuntimeError) as error:
+            await _run_session_resume(agent, state, session, retry_streamed, hooks)
+        assert error.value is session.error
+        assert len(model.calls) == 1
+        assert effects == [7]
+        assert callback_calls == ["charge"]
+        assert _charge_pair(await session.get_items()) == [
+            "function_call",
+            "function_call_output",
+        ]
+        # Also serialize while the Session acknowledgement is outstanding.
+        if round_trip:
+            state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+
+    result = await _run_session_resume(agent, state, session, retry_streamed, hooks)
+    expected_pair = ["function_call", "function_call_output"]
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert callback_calls == ["charge"]
+    assert _charge_pair(result.to_input_list()) == expected_pair
+    assert _charge_pair(await session.get_items()) == expected_pair
+    assert _charge_pair(model.calls[-1].input) == expected_pair
+
+    await _run_session_resume(agent, "What was the receipt?", session, retry_streamed)
+    assert _charge_pair(model.calls[-1].input) == expected_pair
+    assert effects == [7]
 
 
 async def _approved_session_state(streamed: bool, session: Session | None = None):
@@ -788,6 +997,23 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
     assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
+def _relabel_as_older_schema(payload: dict[str, Any], version: str) -> None:
+    """Downgrade only what the destination label cannot represent, then relabel.
+
+    Agent-scoped approvals and MCP recipient bindings arrived in 1.18, which v0.23.0
+    released, so a 1.18 payload keeps them. Rewriting them unconditionally would hand
+    the reader a 1.17-shaped payload wearing a newer label, and a test built on that
+    would stay green even if the newer reader lost the fields.
+    """
+    if tuple(int(part) for part in version.split(".", maxsplit=1)) < (1, 18):
+        for entry in payload["context"].pop("function_tool_approvals", []):
+            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+        response = payload.get("last_processed_response")
+        if isinstance(response, dict):
+            response.pop("mcp_tool_bindings", None)
+    payload["$schemaVersion"] = version
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "invalid",
@@ -795,6 +1021,15 @@ async def test_failed_streamed_result_checkpoint_retains_detached_pending_write(
         "old-schema",
         "batch-shape",
         "compaction-under-1.17",
+        "held-shape",
+        "held-with-before",
+        "held-under-1-17",
+        "held-under-1-18",
+        "held-keys-without-held",
+        "policy-shape",
+        "response-boundary-shape",
+        "response-boundary-missing",
+        "response-boundary-outside-batch",
         "acknowledgement-type",
         "acknowledgement-without-before",
         "compaction-exchange-type",
@@ -808,13 +1043,10 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
     with pytest.raises(RuntimeError):
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
-    if invalid in {"old-schema", "compaction-under-1.17", "acknowledgement-under-1.17"}:
-        for entry in payload["context"].pop("function_tool_approvals", []):
-            payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     if invalid == "old-schema":
-        payload["$schemaVersion"] = "1.16"
+        _relabel_as_older_schema(payload, "1.16")
     elif invalid == "compaction-under-1.17":
-        payload["$schemaVersion"] = "1.17"
+        _relabel_as_older_schema(payload, "1.17")
     elif invalid == "acknowledgement-type":
         payload["pending_session_write"]["append_acknowledged"] = "true"
     elif invalid == "acknowledgement-without-before":
@@ -831,33 +1063,113 @@ async def test_pending_session_write_rejects_invalid_serialized_checkpoint(inval
             "reasoning_item_id_policy": "unknown",
         }
     elif invalid == "acknowledgement-under-1.17":
-        payload["$schemaVersion"] = "1.17"
+        _relabel_as_older_schema(payload, "1.17")
         for key in ("response_id", "store", "has_local_tool_outputs"):
             payload["pending_session_write"].pop(key)
         payload["pending_session_write"]["append_acknowledged"] = True
-    else:
+    elif invalid == "batch-shape":
         payload["pending_session_write"]["items"] = "not an item batch"
+    elif invalid == "held-shape":
+        payload["pending_session_write"]["held"] = "yes"
+    elif invalid == "held-keys-without-held":
+        # Conversion policy belongs only to a withheld response.
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "omit"
+    elif invalid == "policy-shape":
+        # The conversion-policy key only speaks the two policy literals or None; any
+        # other value would silently change how a fold converts the batch's items.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["reasoning_item_id_policy"] = "banana"
+    elif invalid.startswith("response-boundary-"):
+        # The boundary selects the response governed by the current filter.
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        if invalid == "response-boundary-shape":
+            boundary = {"turn": -1, "start": 0}
+        else:
+            boundary = {
+                "turn": state._current_turn,
+                "start": len(payload["pending_session_write"]["items"]) + 1,
+            }
+        if invalid != "response-boundary-missing":
+            payload["pending_session_write"]["current_response"] = boundary
+    elif invalid == "held-under-1-17":
+        # 1.17 defined the pending write as exactly four keys, so the held variant is
+        # only readable under the version that introduced it.
+        _relabel_as_older_schema(payload, "1.17")
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+    elif invalid == "held-under-1-18":
+        # v0.23.0 released 1.18 with the compaction metadata only. Its reader rejects the
+        # held keys, so a well-formed held record under that label would misidentify the
+        # durable format; the held variant is readable only under the version that
+        # introduced it.
+        _relabel_as_older_schema(payload, "1.18")
+        payload["pending_session_write"]["held"] = True
+        payload["pending_session_write"]["before"] = None
+        payload["pending_session_write"]["current_response"] = {
+            "turn": state._current_turn,
+            "start": 0,
+        }
+    else:
+        # A held batch was never offered to the Session, so recorded digests and the
+        # held marker cannot coexist on one record.
+        payload["pending_session_write"]["held"] = True
     with pytest.raises(UserError, match="pending Session write is invalid"):
         await RunState.from_json(agent, payload)
 
 
 @pytest.mark.asyncio
-async def test_legacy_pending_session_write_still_resumes_without_compaction_metadata() -> None:
+async def test_pending_session_write_without_the_held_key_keeps_its_meaning() -> None:
+    # The four-key form 1.17 defined still settles eagerly on resume entry under its
+    # own label, unchanged by the held variant that 1.18 introduced.
     agent, model, session, state, effects = await _approved_session_state(False)
     session.failure = "before"
-    with pytest.raises(RuntimeError, match="session append failed"):
+    with pytest.raises(RuntimeError):
         await _run_session_resume(agent, state, session, False)
     payload = state.to_json()
-    payload["$schemaVersion"] = "1.17"
-    for entry in payload["context"].pop("function_tool_approvals", []):
-        payload["context"]["approvals"][entry["tool_key"]] = entry["decision"]
+    assert "held" not in payload["pending_session_write"]
+    _relabel_as_older_schema(payload, "1.17")
     for key in ("response_id", "store", "has_local_tool_outputs"):
-        payload["pending_session_write"].pop(key)
+        payload["pending_session_write"].pop(key, None)
     restored = await RunState.from_json(agent, payload)
+
     result = await _run_session_resume(agent, restored, session, False)
     assert result.final_output == "done"
     assert effects == [7]
-    assert len(model.calls) == 2
+    assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledged", [False, True], ids=["in-flight", "acknowledged"])
+async def test_compaction_metadata_stays_readable_under_1_18(acknowledged: bool) -> None:
+    # v0.23.0 shipped 1.18 with the compaction metadata on the pending write. That
+    # released format must keep loading under its own label, independently of the held
+    # keys that only a later version introduces.
+    agent, model, session, state, effects = await _approved_session_state(False)
+    session.failure = "before"
+    with pytest.raises(RuntimeError):
+        await _run_session_resume(agent, state, session, False)
+    payload = state.to_json()
+    pending = payload["pending_session_write"]
+    assert "held" not in pending
+    assert {"response_id", "store", "has_local_tool_outputs"} <= set(pending)
+    _relabel_as_older_schema(payload, "1.18")
+    if acknowledged:
+        pending["append_acknowledged"] = True
+        pending["compaction_model_exchange"] = {
+            "item_digests": list(pending["before"]),
+            "reasoning_item_id_policy": None,
+        }
+    restored = await RunState.from_json(agent, payload)
+    assert restored._pending_session_write is not None
+    assert restored._pending_session_write.get("append_acknowledged", False) is acknowledged
+    if acknowledged:
+        return
+
+    result = await _run_session_resume(agent, restored, session, False)
+    assert result.final_output == "done"
+    assert effects == [7]
     assert _charge_pair(await session.get_items()) == ["function_call", "function_call_output"]
 
 
@@ -1526,7 +1838,7 @@ async def test_resolve_interrupted_turn_only_uses_name_fallback_for_legacy_appro
     interruption_agent_data = cast(dict[str, str], interruption_data["agent"])
     assert interruption_agent_data["identity"] == current_agent_data["identity"]
     interruption_agent_data.pop("identity")
-    if schema_version != "1.18":
+    if tuple(int(part) for part in schema_version.split(".", maxsplit=1)) < (1, 18):
         for entry in json_data["context"].pop("function_tool_approvals", []):
             json_data["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     json_data["$schemaVersion"] = schema_version
@@ -2001,7 +2313,7 @@ async def test_fresh_streamed_handoff_replays_deferred_compaction_after_resume(
 
     if round_trip:
         payload = state.to_json()
-        assert payload["$schemaVersion"] == "1.18"
+        assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION
         state = await RunState.from_json(triage, payload)
 
     result = await _run_session_resume(triage, state, session, False)
