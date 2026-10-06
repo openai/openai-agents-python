@@ -6,6 +6,7 @@ import sys
 import time
 from collections.abc import Awaitable
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -108,6 +109,29 @@ async def _create_test_session(session_id: str | None = None) -> RedisSession:
     await session.clear_session()
 
     return session
+
+
+async def test_redis_session_rejects_cluster_client_before_io(monkeypatch: pytest.MonkeyPatch):
+    from redis.asyncio.cluster import RedisCluster
+
+    client = RedisCluster(host="localhost", port=6379)
+    initialize = AsyncMock(side_effect=AssertionError("must not connect"))
+    close = AsyncMock(side_effect=AssertionError("caller owns the client"))
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(client, "initialize", initialize)
+            patch.setattr(client, "aclose", close)
+            with pytest.raises(
+                TypeError, match="RedisSession does not support RedisCluster"
+            ) as exc:
+                RedisSession("cluster-session", redis_client=cast("Redis", client))
+
+            assert "redis.asyncio.Redis connected to a standalone Redis server" in str(exc.value)
+            assert "custom Session backend" in str(exc.value)
+            initialize.assert_not_called()
+            close.assert_not_called()
+    finally:
+        await client.aclose()
 
 
 async def test_redis_session_direct_ops():

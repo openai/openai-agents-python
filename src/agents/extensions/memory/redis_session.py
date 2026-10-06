@@ -33,6 +33,7 @@ try:
     import redis.asyncio as redis
     import redis.asyncio.connection as redis_connection
     from redis.asyncio import BlockingConnectionPool, Redis
+    from redis.asyncio.cluster import RedisCluster
     from redis.event import AsyncAfterConnectionReleasedEvent
     from redis.exceptions import ConnectionError as RedisConnectionError, ResponseError, WatchError
 except ImportError as e:
@@ -372,7 +373,8 @@ class RedisSession(SessionABC):
 
         Args:
             session_id (str): Unique identifier for the conversation.
-            redis_client (Redis[bytes]): A pre-configured Redis async client.
+            redis_client (Redis[bytes]): A pre-configured standalone Redis async client.
+                RedisCluster clients are not supported.
             key_prefix (str, optional): Prefix for Redis keys to avoid collisions.
                 Defaults to "agents:session".
             ttl (int | None, optional): Time-to-live in seconds for session data.
@@ -381,6 +383,12 @@ class RedisSession(SessionABC):
             session_settings (SessionSettings | None): Session configuration settings including
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
+        if isinstance(redis_client, RedisCluster):
+            raise TypeError(
+                "RedisSession does not support RedisCluster clients. "
+                "Use redis.asyncio.Redis connected to a standalone Redis server, "
+                "or implement a custom Session backend for Redis Cluster."
+            )
         self.session_id = session_id
         self.session_settings = (
             coerce_session_settings(session_settings)
