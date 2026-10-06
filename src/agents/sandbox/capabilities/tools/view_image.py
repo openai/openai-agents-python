@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ....run_context import RunContextWrapper
 from ....tool import FunctionTool, ToolOutputImage
@@ -14,6 +14,7 @@ from ...errors import InvalidManifestPathError, WorkspaceReadNotFoundError
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
 from ...workspace_paths import SandboxWorkspaceScope, coerce_posix_path, sandbox_path_str
+from ._input_errors import format_invalid_arguments
 
 _MAX_IMAGE_BYTES = 10 * 1024 * 1024
 _MAX_IMAGE_SIZE_LABEL = "10MB"
@@ -110,9 +111,20 @@ class ViewImageTool(FunctionTool):
         )
 
     async def _invoke(self, _: object, raw_input: str) -> ToolOutputImage | str:
-        return await self.run(self.args_model.model_validate_json(raw_input))
+        try:
+            args = self.args_model.model_validate_json(raw_input)
+        except ValidationError as exc:
+            return format_invalid_arguments(exc, self.args_model)
+        try:
+            resolved_path, display_path = self._prepare_path(args)
+        except InvalidManifestPathError:
+            return "Invalid path. Use a path within the workspace or an explicitly granted path."
+        return await self._run(resolved_path, display_path)
 
     async def run(self, args: ViewImageArgs) -> ToolOutputImage | str:
+        return await self._run(*self._prepare_path(args))
+
+    def _prepare_path(self, args: ViewImageArgs) -> tuple[Path, str]:
         input_path = args.path
         scoped_path = self.workspace_scope.anchor(coerce_posix_path(input_path))
         path_policy = self.session._workspace_path_policy()
@@ -125,7 +137,9 @@ class ViewImageTool(FunctionTool):
             ).as_posix()
         except InvalidManifestPathError:
             display_path = sandbox_path_str(resolved_path)
+        return resolved_path, display_path
 
+    async def _run(self, resolved_path: Path, display_path: str) -> ToolOutputImage | str:
         try:
             file_obj = await self.session.read(resolved_path, user=self.user)
         except (FileNotFoundError, WorkspaceReadNotFoundError):
