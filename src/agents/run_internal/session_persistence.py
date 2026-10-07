@@ -1496,7 +1496,8 @@ async def resume_pending_session_write(
             pending["before"] = digests(tail)
             append = True
         else:
-            expected = (before or []) + digests(pending["items"])
+            batch = digests(pending["items"])
+            expected = (before or []) + batch
             observed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
@@ -1509,7 +1510,16 @@ async def resume_pending_session_write(
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
-            if (acknowledged and not committed) or (not acknowledged and committed == unchanged):
+            # Repeated content can make a partial append look unchanged or fully committed.
+            # The saved tail plus any proper batch prefix fits in this read window.
+            # Do not settle an unacknowledged write when that evidence also admits a prefix.
+            partial = not acknowledged and any(
+                observed[-(len(before or []) + count) :] == (before or []) + batch[:count]
+                for count in range(1, len(batch))
+            )
+            if (acknowledged and not committed) or (
+                not acknowledged and (partial or committed == unchanged)
+            ):
                 raise UserError(
                     "Cannot reconcile the pending Session write: history changed or is "
                     "ambiguous. Repair the original Session before resuming; do not rerun "
