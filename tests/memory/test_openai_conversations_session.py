@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-from openai import AsyncOpenAI, BadRequestError
+from openai import APIConnectionError, AsyncOpenAI, BadRequestError
 from openai.types.responses.response_output_item import Program, ProgramOutput
 
 from agents import (
@@ -41,6 +41,7 @@ from tests.utils.simple_session import IdStrippingSession
 def mock_openai_client():
     """Create a mock OpenAI client for testing."""
     client = AsyncMock()
+    client.with_options = MagicMock(return_value=client)
 
     # Mock conversations.create
     client.conversations.create.return_value = MagicMock(id="test_conversation_id")
@@ -714,6 +715,76 @@ class TestOpenAIConversationsSessionBatches:
 
         assert batches == [items[:20], items[20:40], items[40:]]
         assert saved == items[:20] + items[40:]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("configured_retries", [None, 4])
+    @pytest.mark.parametrize("lost_response_batch", [1, 2])
+    async def test_chunk_lost_response_is_not_retried(
+        self, configured_retries: int | None, lost_response_batch: int
+    ):
+        saved: list[dict[str, Any]] = []
+        batches: list[list[dict[str, Any]]] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            batch = json.loads(request.content)["items"]
+            batches.append(batch)
+            saved.extend(batch)
+            if len(batches) == lost_response_batch:
+                raise httpx.ReadError("synthetic lost response", request=request)
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(41)
+        ]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+            **({"max_retries": configured_retries} if configured_retries is not None else {}),
+        ) as client:
+            original_retries = client.max_retries
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            with pytest.raises(APIConnectionError):
+                await session.add_items(items)
+            assert client.max_retries == original_retries
+            assert not client.is_closed()
+
+        assert len(batches) == lost_response_batch
+        assert saved == items[: 20 * lost_response_batch]
+
+    @pytest.mark.asyncio
+    async def test_chunk_retry_override_preserves_single_request_retries(self):
+        calls = 0
+        saved: list[dict[str, Any]] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                return httpx.Response(
+                    429,
+                    headers={"retry-after-ms": "1"},
+                    json={"error": {"message": "synthetic rate limit"}},
+                )
+            saved.extend(json.loads(request.content)["items"])
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(21)
+        ]
+        single: list[TResponseInputItem] = [{"role": "user", "content": "single request"}]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            max_retries=1,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            await session.add_items(items)
+            await session.add_items(single)
+            assert client.max_retries == 1
+            assert not client.is_closed()
+
+        assert calls == 4
+        assert saved == items + single
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("request_fails", [False, True])

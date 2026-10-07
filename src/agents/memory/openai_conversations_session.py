@@ -130,6 +130,9 @@ class OpenAIConversationsSession(SessionABC):
         sent. For multi-request writes, cancellation waits for the current request
         to complete or fail before releasing the instance lock and propagating
         cancellation. Single-request writes retain their existing cancellation behavior.
+        Automatic client retries are disabled for multi-request writes, even if
+        the supplied client enables retries, to avoid duplicating a saved chunk
+        after a lost response. Single-request writes retain the client's retry policy.
         The original exception propagates. Before retrying, callers must
         reconcile the remote history; retrying the entire list can duplicate
         items that were already saved, including an unacknowledged request.
@@ -139,13 +142,19 @@ class OpenAIConversationsSession(SessionABC):
 
         async with self._mutation_lock:
             session_id = await self._get_session_id()
+            multiple_requests = len(items) > _MAX_ITEMS_PER_REQUEST
+            client = (
+                self._openai_client.with_options(max_retries=0)
+                if multiple_requests
+                else self._openai_client
+            )
             # The Conversations items-create endpoint accepts up to 20 items per request.
             for offset in range(0, len(items), _MAX_ITEMS_PER_REQUEST):
-                request = self._openai_client.conversations.items.create(
+                request = client.conversations.items.create(
                     conversation_id=session_id,
                     items=items[offset : offset + _MAX_ITEMS_PER_REQUEST],
                 )
-                if len(items) > _MAX_ITEMS_PER_REQUEST:
+                if multiple_requests:
                     await _await_mutation(request)
                 else:
                     await request
