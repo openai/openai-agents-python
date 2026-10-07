@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
 from copy import deepcopy
@@ -70,6 +71,7 @@ from ..exceptions import (
     UserError,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _mark_error_data_redacted,
 )
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
@@ -803,7 +805,11 @@ async def check_for_final_output_from_tools(
 
 def _completed_tool_step_items(model_items: list[RunItem], outputs: list[RunItem]) -> list[RunItem]:
     """Keep accepted call/output pairs in model order and their preceding reasoning."""
-    outputs_by_call_id = {extract_tool_call_id(item.raw_item): item for item in outputs}
+    outputs_by_call_id = {
+        extract_tool_call_id(item.raw_item): item
+        for item in outputs
+        if not (isinstance(item, ToolCallOutputItem) and item._custom_data_pending)
+    }
     retained: list[RunItem] = []
     ordered_outputs: list[RunItem] = []
     reasoning: list[RunItem] = []
@@ -812,11 +818,25 @@ def _completed_tool_step_items(model_items: list[RunItem], outputs: list[RunItem
             reasoning.append(item)
         elif isinstance(item, ToolCallItem):
             output = outputs_by_call_id.get(extract_tool_call_id(item.raw_item))
-            if output is not None:
+            provider_completed = (
+                isinstance(
+                    item.raw_item,
+                    (
+                        ResponseFileSearchToolCall,
+                        ResponseFunctionWebSearch,
+                        ResponseCodeInterpreterToolCall,
+                        ImageGenerationCall,
+                        McpCall,
+                    ),
+                )
+                and item.raw_item.status == "completed"
+            )
+            if output is not None or provider_completed:
                 retained.extend(reasoning)
                 reasoning.clear()
                 retained.append(item)
-                ordered_outputs.append(output)
+                if output is not None:
+                    ordered_outputs.append(output)
     return [*retained, *ordered_outputs]
 
 
@@ -836,6 +856,7 @@ async def execute_tools_and_side_effects(
     precomputed_skipped_raw_item_ids: set[int] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
@@ -905,6 +926,23 @@ async def execute_tools_and_side_effects(
             *tool_output_guardrail_results,
         ]
 
+    def _publish_completed_tools() -> None:
+        # Accepted server responses already have their own resumable checkpoint.
+        if on_tool_execution_error is not None and not server_manages_conversation:
+            retained_items = _completed_tool_step_items(new_step_items, completed_outputs)
+            if retained_items:
+                on_tool_execution_error(
+                    SingleStepResult(
+                        original_input=original_input,
+                        model_response=new_response,
+                        pre_step_items=pre_step_items,
+                        new_step_items=retained_items,
+                        next_step=NextStepRunAgain(),
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
+                    )
+                )
+
     try:
         (
             function_results,
@@ -922,25 +960,13 @@ async def execute_tools_and_side_effects(
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_output_committer=_commit_accepted_response_tool_output,
+            on_tool_error_selected=on_tool_error_selected,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
         )
-    except Exception:
-        # Accepted server responses already have their own resumable checkpoint.
-        if on_tool_execution_error is not None and not server_manages_conversation:
-            retained_items = _completed_tool_step_items(new_step_items, completed_outputs)
-            if retained_items:
-                on_tool_execution_error(
-                    SingleStepResult(
-                        original_input=original_input,
-                        model_response=new_response,
-                        pre_step_items=pre_step_items,
-                        new_step_items=retained_items,
-                        next_step=NextStepRunAgain(),
-                        tool_input_guardrail_results=tool_input_guardrail_results,
-                        tool_output_guardrail_results=tool_output_guardrail_results,
-                    )
-                )
+    except (Exception, asyncio.CancelledError) as error:
+        if not isinstance(error, asyncio.CancelledError) or _is_tool_local_cancellation(error):
+            _publish_completed_tools()
         raise
 
     new_step_items.extend(
@@ -999,20 +1025,24 @@ async def execute_tools_and_side_effects(
     _register_tool_call_items(context_wrapper, new_step_items)
 
     if run_handoffs := processed_response.handoffs:
-        return await execute_handoffs_call(
-            public_agent=public_agent,
-            original_input=original_input,
-            pre_step_items=pre_step_items,
-            new_step_items=new_step_items,
-            new_response=new_response,
-            run_handoffs=run_handoffs,
-            hooks=hooks,
-            context_wrapper=context_wrapper,
-            run_config=run_config,
-            server_manages_conversation=server_manages_conversation,
-            tool_input_guardrail_results=tool_input_guardrail_results,
-            tool_output_guardrail_results=tool_output_guardrail_results,
-        )
+        try:
+            return await execute_handoffs_call(
+                public_agent=public_agent,
+                original_input=original_input,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                new_response=new_response,
+                run_handoffs=run_handoffs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                server_manages_conversation=server_manages_conversation,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
+        except Exception:
+            _publish_completed_tools()
+            raise
 
     tool_final_output = await _maybe_finalize_from_tool_results(
         public_agent=public_agent,
@@ -3842,6 +3872,7 @@ async def get_single_step_result_from_response(
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     try:
@@ -3905,4 +3936,5 @@ async def get_single_step_result_from_response(
         precomputed_skipped_raw_item_ids=skipped_raw_item_ids,
         run_state=run_state,
         on_tool_execution_error=on_tool_execution_error,
+        on_tool_error_selected=on_tool_error_selected,
     )

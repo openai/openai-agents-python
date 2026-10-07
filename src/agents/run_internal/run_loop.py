@@ -1994,8 +1994,20 @@ async def start_streaming(
                         run_state=run_state,
                         on_tool_execution_error=partial_tool_results.append,
                     )
-                except Exception as tool_error:
+                except (Exception, asyncio.CancelledError) as tool_error:
+                    if not partial_tool_results:
+                        raise
                     input_task = streamed_result._input_guardrails_task
+                    if partial_tool_results and input_task is not None and not input_task.done():
+                        # The finalizer already waits for this verdict. Settle it before
+                        # publishing, without letting a late verdict replace the tool error.
+                        streamed_result._tool_error_selected = True
+                        try:
+                            await input_guardrail_tripwire_triggered_for_stream(
+                                streamed_result, ignore_cancelled=True
+                            )
+                        except Exception:
+                            pass
                     input_accepted = input_task is None or (
                         input_task.done()
                         and not input_task.cancelled()
@@ -2704,6 +2716,10 @@ async def run_single_turn_streamed(
     async def check_input_guardrails_before_side_effects() -> None:
         await raise_if_input_guardrail_tripwire_known()
 
+    def on_tool_error_selected() -> None:
+        # The category has selected its failure, before draining native finalization.
+        streamed_result._tool_error_selected = True
+
     single_step_result = await get_single_step_result_from_response(
         bindings=bindings,
         original_input=streamed_result.input,
@@ -2722,6 +2738,7 @@ async def run_single_turn_streamed(
         before_side_effects=check_input_guardrails_before_side_effects,
         run_state=run_state,
         on_tool_execution_error=on_tool_execution_error,
+        on_tool_error_selected=on_tool_error_selected,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)

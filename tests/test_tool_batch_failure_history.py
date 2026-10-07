@@ -431,3 +431,102 @@ async def test_resumed_failure_keeps_accepted_history_and_reconciles_session(
         assert state._pending_session_write is None
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["pass", "reject", "error", "cancel"])
+async def test_streamed_partial_history_waits_for_input_verdict(monkeypatch, verdict: str):
+    from agents.run_internal import run_loop
+
+    finished = asyncio.Event()
+    release_verdict = asyncio.Event()
+    waiting_for_verdict = asyncio.Event()
+    effects: list[str] = []
+    original_wait = run_loop.input_guardrail_tripwire_triggered_for_stream
+
+    async def observe_verdict_wait(*args, **kwargs):
+        # Control the ordering at the existing verdict wait; all assertions below
+        # exercise the public run result and Session, not the helper's call shape.
+        waiting_for_verdict.set()
+        return await original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(
+        run_loop, "input_guardrail_tripwire_triggered_for_stream", observe_verdict_wait
+    )
+
+    @input_guardrail
+    async def delayed_verdict(context, agent, input):
+        await release_verdict.wait()
+        if verdict == "error":
+            raise ValueError("synthetic input verdict failure")
+        return GuardrailFunctionOutput(
+            output_info="checked", tripwire_triggered=verdict == "reject"
+        )
+
+    @tool
+    async def completed_tool() -> str:
+        effects.append("done")
+        return "completed"
+
+    @tool(failure_error_function=None)
+    async def failed_tool() -> str:
+        await finished.wait()
+        raise ValueError("synthetic sibling failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            finished.set()
+
+    agent = Agent(
+        name="support",
+        model=ScriptedModel(
+            [
+                [
+                    function_call("completed_tool", {}, call_id="done"),
+                    function_call("failed_tool", {}, call_id="failed"),
+                ]
+            ]
+        ),
+        tools=[completed_tool, failed_tool],
+        input_guardrails=[delayed_verdict],
+    )
+    session = SQLiteSession("delayed")
+    result = Runner.run_streamed(agent, "go", session=session, hooks=Hooks())
+
+    async def consume():
+        async for _ in result.stream_events():
+            pass
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(waiting_for_verdict.wait(), timeout=5)
+        assert effects == ["done"]
+        assert result.new_items == []
+        assert _shape(await session.get_items()) == ["user"]
+        assert result.run_loop_task is not None
+        if verdict == "cancel":
+            result.run_loop_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await result.run_loop_task
+            assert result._input_guardrails_task is not None
+            assert result._input_guardrails_task.cancelled()
+        else:
+            release_verdict.set()
+            with pytest.raises(UserError, match="synthetic sibling failure"):
+                await result.run_loop_task
+            with pytest.raises(UserError, match="synthetic sibling failure"):
+                await consumer
+        expected = ["function_call:done", "function_call_output:done"] if verdict == "pass" else []
+        assert _shape(result.to_input_list()) == ["user", *expected]
+        assert _shape(await session.get_items()) == ["user", *expected]
+        state = result.to_state()
+        assert _shape([item.to_input_item() for item in state._generated_items]) == expected
+    finally:
+        release_verdict.set()
+        if result.run_loop_task is not None and not result.run_loop_task.done():
+            result.run_loop_task.cancel()
+            await asyncio.gather(result.run_loop_task, return_exceptions=True)
+        if not consumer.done():
+            consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        session.close()

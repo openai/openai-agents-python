@@ -32,7 +32,7 @@ async def test_gather_with_cancel_reports_child_failure_before_cancelling_siblin
         await gather_with_cancel(
             sibling(),
             fail_after_sibling_starts(),
-            on_child_failure=child_failure_reported.set,
+            on_child_failure=lambda _error: child_failure_reported.set(),
         )
 
     assert child_failure_reported.is_set()
@@ -61,7 +61,7 @@ async def test_gather_with_cancel_does_not_report_parent_cancellation_as_child_f
             gather_with_cancel(
                 child(),
                 child(),
-                on_child_failure=child_failure_reported.set,
+                on_child_failure=lambda _error: child_failure_reported.set(),
             )
         )
         await all_children_started.wait()
@@ -170,7 +170,9 @@ async def test_closing_task_helper_leaves_child_cleanup_to_owner(producer_consum
     coro = (
         run_producer_consumer(*children, on_failure=child_failure_reported.set)
         if producer_consumer
-        else gather_with_cancel(*children, on_child_failure=child_failure_reported.set)
+        else gather_with_cancel(
+            *children, on_child_failure=lambda _error: child_failure_reported.set()
+        )
     )
     try:
         # Drive the coroutine as its owner; do not close a live asyncio Task's coroutine.

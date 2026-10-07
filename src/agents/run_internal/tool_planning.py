@@ -23,7 +23,7 @@ from .._tool_invocation import (
     tool_output_identity,
 )
 from ..agent import Agent
-from ..exceptions import ModelBehaviorError, UserError
+from ..exceptions import ModelBehaviorError, UserError, _mark_tool_local_cancellation
 from ..items import (
     HandoffCallItem,
     HandoffOutputItem,
@@ -957,6 +957,7 @@ async def _execute_tool_plan(
     run_config,
     parallel: bool = True,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
     tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
 ) -> tuple[
@@ -983,6 +984,14 @@ async def _execute_tool_plan(
     )
     if parallel:
         sibling_category_failure = asyncio.Event()
+
+        def on_category_failure(error: BaseException) -> None:
+            sibling_category_failure.set()
+            if on_tool_error_selected is not None:
+                on_tool_error_selected()
+            if isinstance(error, asyncio.CancelledError):
+                _mark_tool_local_cancellation(error)
+
         (
             (function_results, tool_input_guardrail_results, tool_output_guardrail_results),
             computer_results,
@@ -998,6 +1007,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 isolate_parallel_failures=isolate_function_tool_failures,
+                on_tool_error_selected=on_tool_error_selected,
                 sibling_category_failure=sibling_category_failure,
                 tool_output_committer=tool_output_committer,
                 tool_input_guardrail_results=tool_input_guardrail_results,
@@ -1010,6 +1020,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             ),
             execute_custom_tool_calls(
                 public_agent=public_agent,
@@ -1018,6 +1029,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             ),
             execute_shell_calls(
                 public_agent=public_agent,
@@ -1026,6 +1038,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             ),
             execute_apply_patch_calls(
                 public_agent=public_agent,
@@ -1034,6 +1047,7 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             ),
             execute_local_shell_calls(
                 public_agent=public_agent,
@@ -1042,8 +1056,9 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             ),
-            on_child_failure=sibling_category_failure.set,
+            on_child_failure=on_category_failure,
         )
     else:
         (
@@ -1057,6 +1072,7 @@ async def _execute_tool_plan(
             context_wrapper=context_wrapper,
             config=run_config,
             isolate_parallel_failures=isolate_function_tool_failures,
+            on_tool_error_selected=on_tool_error_selected,
             tool_output_committer=tool_output_committer,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,

@@ -54,6 +54,7 @@ from ..exceptions import (
     ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailTripwireTriggered,
     UserError,
+    _mark_tool_local_cancellation,
 )
 from ..items import (
     ItemHelpers,
@@ -100,7 +101,7 @@ from ..tool_guardrails import (
 from ..tracing import Span, SpanError, function_span, get_current_trace
 from ..util import _coro, _error_tracing
 from ..util._approvals import evaluate_function_tool_approval
-from ..util._asyncio_tasks import gather_with_cancel
+from ..util._asyncio_tasks import _consume_future_exception, gather_with_cancel
 from ..util._custom_data import maybe_extract_custom_data, merge_custom_data
 from ..util._tool_errors import get_trace_tool_error
 from ..util._types import MaybeAwaitable
@@ -1557,6 +1558,7 @@ class _FunctionToolBatchExecutor:
         config: RunConfig,
         isolate_parallel_failures: bool | None,
         sibling_category_failure: asyncio.Event | None,
+        on_tool_error_selected: Callable[[], None] | None,
         tool_output_committer: Callable[[RunItem], None] | None,
         tool_input_guardrail_results: list[ToolInputGuardrailResult] | None,
         tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None,
@@ -1571,6 +1573,7 @@ class _FunctionToolBatchExecutor:
             len(tool_runs) > 1 if isolate_parallel_failures is None else isolate_parallel_failures
         )
         self.sibling_category_failure = sibling_category_failure
+        self.on_tool_error_selected = on_tool_error_selected
         self.tool_output_committer = tool_output_committer
         self.tool_input_guardrail_results = (
             tool_input_guardrail_results if tool_input_guardrail_results is not None else []
@@ -1628,6 +1631,7 @@ class _FunctionToolBatchExecutor:
             await self._drain_pending_tasks(pending_tool_runs)
         except asyncio.CancelledError as exc:
             if self.propagating_failure is exc:
+                _mark_tool_local_cancellation(exc)
                 raise
             if self.sibling_category_failure is not None and self.sibling_category_failure.is_set():
                 await self._drain_pending_tasks_for_sibling_category_failure()
@@ -1687,6 +1691,8 @@ class _FunctionToolBatchExecutor:
         self,
         failure: _FunctionToolFailure,
     ) -> None:
+        if self.on_tool_error_selected is not None:
+            self.on_tool_error_selected()
         cancellable_tasks, post_invoke_tasks = self._partition_pending_tasks()
         self.teardown_cancelled_tasks.update(cancellable_tasks)
         _cancel_function_tool_tasks(cancellable_tasks)
@@ -2342,6 +2348,7 @@ async def execute_function_tool_calls(
     config: RunConfig,
     isolate_parallel_failures: bool | None = None,
     sibling_category_failure: asyncio.Event | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
     tool_output_committer: Callable[[RunItem], None] | None = None,
     tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
@@ -2357,10 +2364,37 @@ async def execute_function_tool_calls(
         config=config,
         isolate_parallel_failures=isolate_parallel_failures,
         sibling_category_failure=sibling_category_failure,
+        on_tool_error_selected=on_tool_error_selected,
         tool_output_committer=tool_output_committer,
         tool_input_guardrail_results=tool_input_guardrail_results,
         tool_output_guardrail_results=tool_output_guardrail_results,
     ).execute()
+
+
+async def run_native_tool_post_invoke(
+    post_invoke: Awaitable[None],
+    sibling_category_failure: asyncio.Event | None,
+) -> None:
+    """Settle native output finalization on sibling failure without delaying parent cancellation."""
+    if sibling_category_failure is None:
+        await post_invoke
+        return
+
+    task = asyncio.ensure_future(post_invoke)
+    task.add_done_callback(_consume_future_exception)
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        if sibling_category_failure.is_set():
+            try:
+                await asyncio.wait((task,), timeout=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS)
+            except BaseException:
+                task.cancel()
+                raise
+        else:
+            task.cancel()
+        # Do not start the next native invocation after the category was cancelled.
+        raise
 
 
 async def execute_custom_tool_calls(
@@ -2371,6 +2405,7 @@ async def execute_custom_tool_calls(
     hooks: RunHooks[Any],
     config: RunConfig,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    sibling_category_failure: asyncio.Event | None = None,
 ) -> list[RunItem]:
     """Run Responses custom tool calls serially and wrap outputs."""
     from .tool_actions import CustomToolAction
@@ -2385,6 +2420,7 @@ async def execute_custom_tool_calls(
                 context_wrapper=context_wrapper,
                 config=config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             )
         )
     return results
@@ -2398,6 +2434,7 @@ async def execute_local_shell_calls(
     hooks: RunHooks[Any],
     config: RunConfig,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    sibling_category_failure: asyncio.Event | None = None,
 ) -> list[RunItem]:
     """Run local shell tool calls serially and wrap outputs."""
     from .tool_actions import LocalShellAction
@@ -2412,6 +2449,7 @@ async def execute_local_shell_calls(
                 context_wrapper=context_wrapper,
                 config=config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             )
         )
     return results
@@ -2425,6 +2463,7 @@ async def execute_shell_calls(
     hooks: RunHooks[Any],
     config: RunConfig,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    sibling_category_failure: asyncio.Event | None = None,
 ) -> list[RunItem]:
     """Run shell tool calls serially and wrap outputs."""
     from .tool_actions import ShellAction
@@ -2439,6 +2478,7 @@ async def execute_shell_calls(
                 context_wrapper=context_wrapper,
                 config=config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             )
         )
     return results
@@ -2452,6 +2492,7 @@ async def execute_apply_patch_calls(
     hooks: RunHooks[Any],
     config: RunConfig,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    sibling_category_failure: asyncio.Event | None = None,
 ) -> list[RunItem]:
     """Run apply_patch tool calls serially and normalize outputs."""
     from .tool_actions import ApplyPatchAction
@@ -2466,6 +2507,7 @@ async def execute_apply_patch_calls(
                 context_wrapper=context_wrapper,
                 config=config,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             )
         )
     return results
@@ -2479,6 +2521,7 @@ async def execute_computer_actions(
     context_wrapper: RunContextWrapper[Any],
     config: RunConfig,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    sibling_category_failure: asyncio.Event | None = None,
 ) -> list[RunItem]:
     """Run computer actions serially and emit screenshot outputs."""
     from .tool_actions import ComputerAction
@@ -2530,6 +2573,7 @@ async def execute_computer_actions(
                 config=config,
                 acknowledged_safety_checks=acknowledged,
                 tool_output_committer=tool_output_committer,
+                sibling_category_failure=sibling_category_failure,
             )
         )
 

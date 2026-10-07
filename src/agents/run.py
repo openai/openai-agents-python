@@ -1887,7 +1887,9 @@ class AgentRunner:
                                 run_state=run_state,
                                 on_tool_execution_error=partial_tool_results.append,
                             )
-                    except Exception:
+                    except (Exception, asyncio.CancelledError):
+                        if not partial_tool_results:
+                            raise
                         input_accepted = len(_attempt_input_guardrail_results()) >= len(
                             all_input_guardrails
                         ) and not input_guardrails_triggered(_attempt_input_guardrail_results())

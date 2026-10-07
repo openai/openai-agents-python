@@ -451,6 +451,9 @@ class ToolCallOutputItem(RunItemBase[Any]):
     replayed as input.
     """
 
+    _custom_data_pending: bool = field(default=False, init=False, repr=False, compare=False)
+    """Live finalization state; excluded from fresh partial history, not serialized to RunState."""
+
     @property
     def call_id(self) -> str | None:
         """Return the call identifier from the raw item, if available."""
