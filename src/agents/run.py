@@ -121,9 +121,11 @@ from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
+    _ToolTaskCancellation,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
     get_output_schema,
+    preserve_tool_task_cancellation,
     resolve_interrupted_turn,
     run_input_guardrails,
     run_output_guardrails,
@@ -1788,30 +1790,32 @@ class AgentRunner:
                                 raise
 
                             model_task = asyncio.create_task(
-                                run_single_turn(
-                                    bindings=current_bindings,
-                                    original_input=original_input,
-                                    generated_items=items_for_model,
-                                    hooks=hooks,
-                                    context_wrapper=context_wrapper,
-                                    run_config=run_config,
-                                    should_run_agent_start_hooks=should_run_agent_start_hooks,
-                                    tool_use_tracker=tool_use_tracker,
-                                    server_conversation_tracker=server_conversation_tracker,
-                                    session=session,
-                                    session_items_to_rewind=(
-                                        last_saved_input_snapshot_for_rewind
-                                        if not is_resumed_state and session_persistence_enabled
-                                        else None
-                                    ),
-                                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
-                                    prompt_cache_key_resolver=prompt_cache_key_resolver,
-                                    error_handlers=error_handlers,
-                                    agent_span=current_span,
-                                    on_response_accepted=_commit_pending_server_response,
-                                    on_response_hooks_started=_mark_response_hooks_started,
-                                    run_state=run_state,
-                                    on_tool_execution_error=partial_tool_results.append,
+                                preserve_tool_task_cancellation(
+                                    run_single_turn(
+                                        bindings=current_bindings,
+                                        original_input=original_input,
+                                        generated_items=items_for_model,
+                                        hooks=hooks,
+                                        context_wrapper=context_wrapper,
+                                        run_config=run_config,
+                                        should_run_agent_start_hooks=should_run_agent_start_hooks,
+                                        tool_use_tracker=tool_use_tracker,
+                                        server_conversation_tracker=server_conversation_tracker,
+                                        session=session,
+                                        session_items_to_rewind=(
+                                            last_saved_input_snapshot_for_rewind
+                                            if not is_resumed_state and session_persistence_enabled
+                                            else None
+                                        ),
+                                        reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                                        prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                        error_handlers=error_handlers,
+                                        agent_span=current_span,
+                                        on_response_accepted=_commit_pending_server_response,
+                                        on_response_hooks_started=_mark_response_hooks_started,
+                                        run_state=run_state,
+                                        on_tool_execution_error=partial_tool_results.append,
+                                    )
                                 )
                             )
 
@@ -1899,6 +1903,8 @@ class AgentRunner:
                         ) and not _is_tool_local_cancellation(error):
                             raise
                         if not partial_tool_results:
+                            if isinstance(error, _ToolTaskCancellation):
+                                raise error.error from None
                             raise
                         input_accepted = len(_attempt_input_guardrail_results()) >= len(
                             all_input_guardrails
@@ -1942,6 +1948,8 @@ class AgentRunner:
                                     )
                             except Exception:
                                 logger.warning("Failed to save completed tools after a tool error")
+                        if isinstance(error, _ToolTaskCancellation):
+                            raise error.error from None
                         raise
                     finally:
                         if current_turn_span is not None:

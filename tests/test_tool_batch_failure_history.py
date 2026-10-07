@@ -603,7 +603,9 @@ async def test_function_partial_history_excludes_pending_custom_data(monkeypatch
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict", ["pass", "reject", "error", "cancel", "cancel_at_verdict"])
+@pytest.mark.parametrize(
+    "verdict", ["pass", "reject", "error", "cancel", "cancel_at_verdict", "tool_cancel"]
+)
 async def test_nonstreamed_partial_history_waits_for_input_verdict(monkeypatch, verdict):
     completed = asyncio.Event()
     release = asyncio.Event()
@@ -640,6 +642,8 @@ async def test_nonstreamed_partial_history_waits_for_input_verdict(monkeypatch, 
     @tool(failure_error_function=None)
     async def fail() -> str:
         await completed.wait()
+        if verdict == "tool_cancel":
+            raise asyncio.CancelledError("synthetic sibling failure")
         raise ValueError("synthetic sibling failure")
 
     class Hooks(RunHooks):
@@ -679,18 +683,28 @@ async def test_nonstreamed_partial_history_waits_for_input_verdict(monkeypatch, 
                 await run_task
         else:
             release.set()
-            with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+            error_type = asyncio.CancelledError if verdict == "tool_cancel" else UserError
+            with pytest.raises(
+                error_type, match=None if verdict == "tool_cancel" else "synthetic sibling failure"
+            ) as caught:
                 await run_task
-            assert caught.value.run_data is not None
             expected = (
-                ["function_call:done", "function_call_output:done"] if verdict == "pass" else []
+                ["function_call:done", "function_call_output:done"]
+                if verdict in ("pass", "tool_cancel")
+                else []
             )
-            assert (
-                _shape([item.to_input_item() for item in caught.value.run_data.new_items])
-                == expected
-            )
+            if isinstance(caught.value, UserError):
+                assert caught.value.run_data is not None
+                assert (
+                    _shape([item.to_input_item() for item in caught.value.run_data.new_items])
+                    == expected
+                )
         assert guardrail_exited.is_set()
-        expected = ["function_call:done", "function_call_output:done"] if verdict == "pass" else []
+        expected = (
+            ["function_call:done", "function_call_output:done"]
+            if verdict in ("pass", "tool_cancel")
+            else []
+        )
         assert _shape(await session.get_items()) == ["user", *expected]
     finally:
         release.set()

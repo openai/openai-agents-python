@@ -42,6 +42,7 @@ from ..exceptions import (
     _copy_data_redacted_process_control_error,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _mark_error_data_redacted,
     _mark_error_to_drain_stream_events,
     _prepare_data_redacted_error,
@@ -964,6 +965,23 @@ async def _finalize_streamed_interruption(
 
 
 T = TypeVar("T")
+
+
+class _ToolTaskCancellation(Exception):
+    """Carry selected tool cancellation across Task on Python versions that replace it."""
+
+    def __init__(self, error: asyncio.CancelledError) -> None:
+        super().__init__()
+        self.error = error
+
+
+async def preserve_tool_task_cancellation(awaitable: Awaitable[T]) -> T:
+    try:
+        return await awaitable
+    except asyncio.CancelledError as error:
+        if _is_tool_local_cancellation(error):
+            raise _ToolTaskCancellation(error) from None
+        raise
 
 
 async def start_streaming(
