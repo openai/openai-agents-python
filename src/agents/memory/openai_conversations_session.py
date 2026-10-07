@@ -150,6 +150,9 @@ class OpenAIConversationsSession(SessionABC):
             )
             # The Conversations items-create endpoint accepts up to 20 items per request.
             for offset in range(0, len(items), _MAX_ITEMS_PER_REQUEST):
+                if offset:
+                    # Deliver queued cancellation before scheduling another mutation.
+                    await asyncio.sleep(0)
                 request = client.conversations.items.create(
                     conversation_id=session_id,
                     items=items[offset : offset + _MAX_ITEMS_PER_REQUEST],

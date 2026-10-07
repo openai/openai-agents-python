@@ -874,6 +874,35 @@ class TestOpenAIConversationsSessionBatches:
         assert saved == (items[:20] if request_fails else items[:40]) + survivor
 
     @pytest.mark.asyncio
+    async def test_cancellation_between_chunks_stops_next_request(self):
+        batches: list[list[dict[str, Any]]] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            batches.append(json.loads(request.content)["items"])
+            if len(batches) == 1:
+                request_task = asyncio.current_task()
+                assert request_task is not None
+                # Queue cancellation after the completed request wakes its caller.
+                request_task.add_done_callback(
+                    lambda _: asyncio.get_running_loop().call_soon(write.cancel)
+                )
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(41)
+        ]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            write = asyncio.create_task(session.add_items(items))
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(write, timeout=5)
+
+        assert batches == [items[:20]]
+
+    @pytest.mark.asyncio
     async def test_single_request_cancellation_does_not_wait_for_response(self):
         started = asyncio.Event()
         release_request = asyncio.Event()
