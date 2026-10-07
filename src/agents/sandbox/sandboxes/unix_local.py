@@ -988,6 +988,8 @@ class UnixLocalSandboxSession(BaseSandboxSession):
             [
                 "(version 1)",
                 "(allow default)",
+                # Launch Services can start applications outside this process's sandbox.
+                "(deny lsopen)",
                 deny_rules,
                 *allow_rules,
             ]
