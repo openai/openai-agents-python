@@ -11,6 +11,8 @@ from ..items import TResponseInputItem
 from .session import SessionABC, _await_mutation
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
+_MAX_ITEMS_PER_REQUEST = 20
+
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
     _maybe_openai_client = openai_client
@@ -135,10 +137,10 @@ class OpenAIConversationsSession(SessionABC):
         async with self._mutation_lock:
             session_id = await self._get_session_id()
             # The Conversations items-create endpoint accepts up to 20 items per request.
-            for offset in range(0, len(items), 20):
+            for offset in range(0, len(items), _MAX_ITEMS_PER_REQUEST):
                 await self._openai_client.conversations.items.create(
                     conversation_id=session_id,
-                    items=items[offset : offset + 20],
+                    items=items[offset : offset + _MAX_ITEMS_PER_REQUEST],
                 )
 
     async def pop_item(self) -> TResponseInputItem | None:

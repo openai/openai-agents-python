@@ -39,7 +39,10 @@ from ..memory import (
     SessionSettings,
     is_openai_responses_compaction_aware_session,
 )
-from ..memory.openai_conversations_session import OpenAIConversationsSession
+from ..memory.openai_conversations_session import (
+    _MAX_ITEMS_PER_REQUEST,
+    OpenAIConversationsSession,
+)
 from ..memory.session import _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
@@ -1510,13 +1513,26 @@ async def resume_pending_session_write(
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
-            # Repeated content can make a partial append look unchanged or fully committed.
-            # The saved tail plus any proper batch prefix fits in this read window.
-            # Do not settle an unacknowledged write when that evidence also admits a prefix.
-            partial = not acknowledged and any(
-                observed[-(len(before or []) + count) :] == (before or []) + batch[:count]
-                for count in range(1, len(batch))
-            )
+            # Only multi-request Conversations writes admit partially committed chunks.
+            # Other backends and single-request writes retain their atomic recovery contract.
+            partial = False
+            if (
+                isinstance(session, OpenAIConversationsSession)
+                and not acknowledged
+                and len(batch) > _MAX_ITEMS_PER_REQUEST
+            ):
+                before_count = len(before or [])
+                complete_before = before_count < len(batch) + 1
+                # A short snapshot captured all prior history: count must agree with
+                # zero progress as well as each candidate chunk prefix. A full-size
+                # snapshot may omit older items, so repeated content remains ambiguous.
+                if complete_before:
+                    unchanged = unchanged and len(observed) == before_count
+                partial = any(
+                    (not complete_before or len(observed) == before_count + count)
+                    and observed[-(before_count + count) :] == (before or []) + batch[:count]
+                    for count in range(_MAX_ITEMS_PER_REQUEST, len(batch), _MAX_ITEMS_PER_REQUEST)
+                )
             if (acknowledged and not committed) or (
                 not acknowledged and (partial or committed == unchanged)
             ):

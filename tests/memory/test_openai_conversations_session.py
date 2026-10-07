@@ -34,6 +34,7 @@ from agents.memory.openai_conversations_session import (
 )
 from agents.testing import ScriptedModel
 from tests.test_responses import get_function_tool_call, get_text_message
+from tests.utils.simple_session import IdStrippingSession
 
 
 @pytest.fixture
@@ -915,14 +916,20 @@ class TestOpenAIConversationsSessionBatches:
             assert effects == ["lookup"]
 
     @pytest.mark.asyncio
-    async def test_runner_resume_rejects_partial_history_that_looks_fully_committed(self):
+    @pytest.mark.parametrize(
+        "atomic,output_count,history_size",
+        [(False, 23, 30), (True, 23, 30), (False, 2, 30), (False, 23, 1), (False, 21, 1)],
+    )
+    async def test_runner_resume_handles_periodic_history_for_session_atomicity(
+        self, atomic: bool, output_count: int, history_size: int
+    ):
         """A bounded periodic tail cannot prove every item in a failed append was saved."""
         messages = [
             get_text_message("ABC"[i % 3]).model_copy(update={"id": f"msg_{i}"}) for i in range(30)
         ]
         stored: list[dict[str, Any]] = [
             {**item.model_dump(exclude_none=True), "id": f"old_{i}"}
-            for i, item in enumerate(messages[:29])
+            for i, item in enumerate(messages[: history_size - 1])
         ]
         writes: list[list[dict[str, Any]]] = []
 
@@ -932,16 +939,25 @@ class TestOpenAIConversationsSessionBatches:
                 return httpx.Response(200, json={"object": "list", "data": data, "has_more": False})
             batch = json.loads(request.content)["items"]
             writes.append(batch)
-            if len(writes) == 3:
+            fail = len(writes) == (2 if output_count <= 20 else 3)
+            if not fail or output_count <= 20 or history_size == 1:
+                for item in batch:
+                    stored.append({**item, "id": f"item_{len(stored)}"})
+            if fail:
                 return httpx.Response(
                     400,
                     json={
                         "error": {"message": "synthetic failure", "type": "invalid_request_error"}
                     },
                 )
-            for item in batch:
-                stored.append({**item, "id": f"item_{len(stored)}"})
             return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        class LostAckSession(IdStrippingSession):
+            async def add_items(self, items: list[TResponseInputItem]) -> None:
+                writes.append(cast(list[dict[str, Any]], items))
+                await super().add_items(items)
+                if len(writes) == 2:
+                    raise RuntimeError("synthetic failure")
 
         def retain_messages(data: HandoffInputData) -> HandoffInputData:
             return data.clone(
@@ -952,7 +968,7 @@ class TestOpenAIConversationsSessionBatches:
 
         model = ScriptedModel(
             [
-                messages[:23]
+                messages[:output_count]
                 + [get_function_tool_call("transfer_to_delegate", "{}", call_id="handoff_1")],
                 [get_text_message("done")],
             ]
@@ -967,26 +983,51 @@ class TestOpenAIConversationsSessionBatches:
             max_retries=0,
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
         ) as client:
-            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            session = (
+                LostAckSession(history=cast(list[TResponseInputItem], stored))
+                if atomic
+                else OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            )
             original = messages[29].model_dump(exclude_none=True)
             original.pop("id")
             failed = Runner.run_streamed(
                 agent, [cast(TResponseInputItem, original)], session=session, run_config=config
             )
-            with pytest.raises(BadRequestError, match="synthetic failure"):
+            with pytest.raises(
+                RuntimeError if atomic else BadRequestError, match="synthetic failure"
+            ):
                 async for _ in failed.stream_events():
                     pass
-            assert len(stored) == 50
-            assert [len(batch) for batch in writes] == [1, 20, 3]
-            snapshot = stored[:]
+            snapshot = await session.get_items()
+            assert len(snapshot) == (
+                history_size + output_count
+                if atomic or output_count <= 20 or history_size == 1
+                else history_size + 20
+            )
+            assert [len(batch) for batch in writes] == (
+                [1, output_count] if atomic or output_count <= 20 else [1, 20, output_count - 20]
+            )
             state = await RunState.from_json(agent, failed.to_state().to_json())
-            with pytest.raises(UserError, match="Cannot reconcile the pending Session write"):
-                await Runner.run(agent, state, session=session, run_config=config)
-            assert stored == snapshot
-            assert len(writes) == 3
-            assert len(model.calls) == 1
-            # The missing final three messages remain pending rather than being discarded.
-            assert len(state.to_json()["pending_session_write"]["items"]) == 23
+            if atomic or output_count <= 20 or history_size == 1:
+                resumed = await Runner.run(agent, state, session=session, run_config=config)
+                assert resumed.final_output == "done"
+                history = await session.get_items()
+                assert history[:-1] == snapshot
+                assert len(history) == history_size + output_count + 1
+                assert [len(batch) for batch in writes] == (
+                    [1, output_count, 1]
+                    if atomic or output_count <= 20
+                    else [1, 20, output_count - 20, 1]
+                )
+                assert len(model.calls) == 2
+            else:
+                with pytest.raises(UserError, match="Cannot reconcile the pending Session write"):
+                    await Runner.run(agent, state, session=session, run_config=config)
+                assert await session.get_items() == snapshot
+                assert len(writes) == 3
+                assert len(model.calls) == 1
+                # Missing messages remain pending rather than being discarded.
+                assert len(state.to_json()["pending_session_write"]["items"]) == 23
 
 
 class TestOpenAIConversationsSessionRunnerIntegration:
