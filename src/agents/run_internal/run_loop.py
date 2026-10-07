@@ -2013,11 +2013,38 @@ async def start_streaming(
                         streamed_result._model_input_items.extend(partial_result.new_step_items)
                         streamed_result.new_items.extend(partial_result.new_step_items)
                         streamed_result.raw_responses.append(partial_result.model_response)
+                        _accumulate_tool_guardrail_results(
+                            streamed_result,
+                            partial_result,
+                            accepted_input_results=accepted_tool_input_guardrail_results,
+                            accepted_output_results=accepted_tool_output_guardrail_results,
+                        )
+                        streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
+                            tool_use_tracker,
+                            starting_agent=(
+                                run_state._starting_agent
+                                if run_state is not None and run_state._starting_agent is not None
+                                else starting_agent
+                            ),
+                        )
                         if run_state is not None:
+                            _synchronize_accepted_run_state(
+                                run_state,
+                                generated_items=streamed_result._model_input_items,
+                                session_items=streamed_result.new_items,
+                                model_responses=streamed_result.raw_responses,
+                                tool_input_guardrail_results=(
+                                    streamed_result.tool_input_guardrail_results
+                                ),
+                                tool_output_guardrail_results=(
+                                    streamed_result.tool_output_guardrail_results
+                                ),
+                                current_turn=current_turn,
+                            )
                             run_state._current_step = NextStepRunAgain()
-                            run_state._generated_items = list(streamed_result._model_input_items)
-                            run_state._session_items = list(streamed_result.new_items)
-                            run_state._model_responses = list(streamed_result.raw_responses)
+                            run_state.set_tool_use_tracker_snapshot(
+                                streamed_result._tool_use_tracker_snapshot
+                            )
                         stream_step_items_to_queue(
                             [
                                 item
@@ -2028,7 +2055,7 @@ async def start_streaming(
                         )
                         _mark_error_to_drain_stream_events(tool_error)
                         try:
-                            await _save_stream_items_with_count(
+                            await _save_stream_items_without_count(
                                 partial_result.new_step_items,
                                 partial_result.model_response.response_id,
                                 current_agent.model_settings.resolve(

@@ -13,6 +13,7 @@ from agents import (
     AgentsException,
     GuardrailFunctionOutput,
     InputGuardrailTripwireTriggered,
+    ModelSettings,
     RunHooks,
     Runner,
     RunState,
@@ -45,7 +46,15 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
     finished = asyncio.Event()
     effects: list[str] = []
 
-    @tool
+    @tool_input_guardrail
+    async def allow_input(data):
+        return ToolGuardrailFunctionOutput.allow(output_info="input accepted")
+
+    @tool_output_guardrail
+    async def allow_output(data):
+        return ToolGuardrailFunctionOutput.allow(output_info="output accepted")
+
+    @tool(tool_input_guardrails=[allow_input], tool_output_guardrails=[allow_output])
     async def create_ticket() -> str:
         effects.append("ticket")
         return "ticket T-1"
@@ -88,7 +97,12 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
             [assistant_message("done")],
         ]
     )
-    agent = Agent(name="support", model=model, tools=[send_email, create_ticket])
+    agent = Agent(
+        name="support",
+        model=model,
+        tools=[send_email, create_ticket],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
     session = SQLiteSession("test")
     expected_error = {
         "input": ToolInputGuardrailTripwireTriggered,
@@ -121,6 +135,14 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
         expected += ["function_call_output:ticket"]
         assert isinstance(caught.value, AgentsException)
         assert caught.value.run_data is not None
+        assert any(
+            decision.output.output_info == "input accepted"
+            for decision in caught.value.run_data.tool_input_guardrail_results
+        )
+        assert any(
+            decision.output.output_info == "output accepted"
+            for decision in caught.value.run_data.tool_output_guardrail_results
+        )
         assert _shape([i.to_input_item() for i in caught.value.run_data.new_items]) == expected
         history = await session.get_items()
         assert _shape(history) == ["user", *expected]
@@ -132,10 +154,15 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
             ]
             assert _shape(result.to_input_list()) == ["user", *expected]
             state = await RunState.from_json(agent, result.to_state().to_json())
+            assert any(
+                decision.output.output_info == "output accepted"
+                for decision in state._tool_output_guardrail_results
+            )
             replay_model = ScriptedModel([[assistant_message("resumed")]])
             agent.model = replay_model
             await Runner.run(agent, state)
             assert replay_model.last_call is not None
+            assert replay_model.last_call.model_settings.tool_choice is None
             assert _shape(replay_model.last_call.input) == ["user", *expected]
             assert effects == ["ticket"]
             agent.model = model
@@ -270,5 +297,137 @@ async def test_session_save_failure_preserves_primary_tool_error(streaming: bool
             "function_call_output:done",
         ]
         assert _shape(await session.get_items()) == ["user"]
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("write_failure", [None, "before_append", "after_append"])
+async def test_resumed_failure_keeps_accepted_history_and_reconciles_session(
+    streaming: bool, write_failure: str | None
+):
+    class FailingSession(SQLiteSession):
+        fail_once = write_failure
+
+        async def add_items(self, items):
+            failure = self.fail_once
+            if failure and any(item.get("call_id") == "done" for item in items):
+                self.fail_once = None
+                if failure == "after_append":
+                    await super().add_items(items)
+                raise RuntimeError("synthetic append failure")
+            await super().add_items(items)
+
+    finished = asyncio.Event()
+    effects: list[str] = []
+    admissions: list[str] = []
+
+    @input_guardrail
+    async def admit(context, agent, input):
+        admissions.append("admitted")
+        return GuardrailFunctionOutput(output_info="safe", tripwire_triggered=False)
+
+    @tool(needs_approval=True)
+    async def approved_tool() -> str:
+        effects.append("approved")
+        return "approved"
+
+    @tool_output_guardrail
+    async def accept_output(data):
+        return ToolGuardrailFunctionOutput.allow(output_info="accepted side effect")
+
+    @tool(tool_output_guardrails=[accept_output])
+    async def completed_tool() -> str:
+        effects.append("done")
+        return "completed"
+
+    @tool(failure_error_function=None)
+    async def failed_tool() -> str:
+        await finished.wait()
+        raise ValueError("synthetic sibling failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool.name == "completed_tool":
+                finished.set()
+
+    model = ScriptedModel(
+        [
+            [function_call("approved_tool", {}, call_id="approved")],
+            [
+                function_call("completed_tool", {}, call_id="done"),
+                function_call("failed_tool", {}, call_id="failed"),
+            ],
+            [assistant_message("resumed")],
+        ]
+    )
+    agent = Agent(
+        name="support",
+        model=model,
+        tools=[approved_tool, completed_tool, failed_tool],
+        input_guardrails=[admit],
+        model_settings=ModelSettings(tool_choice="required"),
+    )
+    session = FailingSession("resume")
+    try:
+        interrupted = await Runner.run(agent, "go", session=session)
+        state = interrupted.to_state()
+        state.approve(interrupted.interruptions[0])
+        stream_result = None
+        with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+            if streaming:
+                stream_result = Runner.run_streamed(agent, state, session=session, hooks=Hooks())
+                async for _ in stream_result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, state, session=session, hooks=Hooks())
+        expected = [
+            "function_call:approved",
+            "function_call_output:approved",
+            "function_call:done",
+            "function_call_output:done",
+        ]
+        assert admissions == ["admitted"]
+        assert caught.value.run_data is not None
+        assert (
+            _shape(
+                [
+                    item.to_input_item()
+                    for item in caught.value.run_data.new_items
+                    if item.type != "tool_approval_item"
+                ]
+            )
+            == expected
+        )
+        assert (
+            _shape(
+                [
+                    item.to_input_item()
+                    for item in state._generated_items
+                    if item.type != "tool_approval_item"
+                ]
+            )
+            == expected
+        )
+        assert len(state._model_responses) == 2
+        assert state._current_turn == 2
+        assert [r.output.output_info for r in state._tool_output_guardrail_results] == [
+            "accepted side effect"
+        ]
+        assert (state._pending_session_write is not None) == (write_failure is not None)
+        if stream_result is not None:
+            state = stream_result.to_state()
+            assert (state._pending_session_write is not None) == (write_failure is not None)
+        state = await RunState.from_json(agent, state.to_json())
+        resumed = await Runner.run(agent, state, session=session)
+        assert resumed.final_output == "resumed"
+        assert model.last_call is not None
+        assert _shape(model.last_call.input) == ["user", *expected]
+        assert model.last_call.model_settings.tool_choice is None
+        assert _shape(await session.get_items()) == ["user", *expected, "message"]
+        assert effects == ["approved", "done"]
+        assert admissions == ["admitted"]
+        assert state._pending_session_write is None
     finally:
         session.close()

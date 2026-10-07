@@ -1896,17 +1896,38 @@ class AgentRunner:
                             generated_items.extend(partial_result.new_step_items)
                             session_items.extend(partial_result.new_step_items)
                             model_responses.append(partial_result.model_response)
-                            try:
-                                await save_turn_items_if_needed(
-                                    session=session,
-                                    run_state=run_state,
-                                    session_persistence_enabled=session_persistence_enabled,
-                                    input_guardrail_results=input_guardrail_results,
-                                    items=partial_result.new_step_items,
-                                    response_id=partial_result.model_response.response_id,
-                                    store=store_setting,
-                                    wrapper=context_wrapper,
+                            tool_input_guardrail_results.extend(
+                                partial_result.tool_input_guardrail_results
+                            )
+                            tool_output_guardrail_results.extend(
+                                partial_result.tool_output_guardrail_results
+                            )
+                            if run_state is not None:
+                                _synchronize_accepted_run_state(
+                                    run_state,
+                                    generated_items=generated_items,
+                                    session_items=session_items,
+                                    model_responses=model_responses,
+                                    tool_input_guardrail_results=tool_input_guardrail_results,
+                                    tool_output_guardrail_results=tool_output_guardrail_results,
+                                    current_turn=current_turn,
                                 )
+                                run_state._current_step = NextStepRunAgain()
+                                run_state.set_tool_use_tracker_snapshot(
+                                    _tool_use_tracker_snapshot()
+                                )
+                            try:
+                                if session_persistence_enabled:
+                                    await save_result_to_session(
+                                        session,
+                                        [],
+                                        partial_result.new_step_items,
+                                        run_state,
+                                        response_id=partial_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                        resumed_write_state=run_state,
+                                    )
                             except Exception:
                                 logger.warning("Failed to save completed tools after a tool error")
                         raise

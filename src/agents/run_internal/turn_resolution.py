@@ -937,8 +937,8 @@ async def execute_tools_and_side_effects(
                         pre_step_items=pre_step_items,
                         new_step_items=retained_items,
                         next_step=NextStepRunAgain(),
-                        tool_input_guardrail_results=[],
-                        tool_output_guardrail_results=[],
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
                     )
                 )
         raise
