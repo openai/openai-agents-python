@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -805,16 +805,30 @@ async def check_for_final_output_from_tools(
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
 
 
+def _snapshot_tool_outputs(items: list[RunItem], live_outputs: list[RunItem]) -> list[RunItem]:
+    """Detach failed-run replay data from finalizers that may still be running."""
+    # Provider-owned and prior-turn items retain their established response identities.
+    live_output_ids = {id(item) for item in live_outputs}
+    snapshots: list[RunItem] = []
+    for item in items:
+        if isinstance(item, ToolCallOutputItem) and id(item) in live_output_ids:
+            # A shallow copy preserves occurrence markers and opaque application output.
+            # Only provider payloads and SDK metadata belong to this recovery snapshot.
+            snapshot = copy(item)
+            snapshot.raw_item = deepcopy(item.raw_item)
+            snapshot.custom_data = deepcopy(item.custom_data)
+            snapshots.append(snapshot)
+        else:
+            snapshots.append(item)
+    return snapshots
+
+
 def _completed_tool_step_items(
     pre_step_items: list[RunItem], model_items: list[RunItem], outputs: list[RunItem]
 ) -> list[RunItem]:
     """Keep accepted call/output pairs in model order and their preceding reasoning."""
-    outputs_by_call_id = {
-        extract_tool_call_id(item.raw_item): item
-        for item in outputs
-        if not (isinstance(item, ToolCallOutputItem) and item._custom_data_pending)
-    }
-    finalized_output_ids = {id(item) for item in outputs_by_call_id.values()}
+    outputs_by_call_id = {extract_tool_call_id(item.raw_item): item for item in outputs}
+    accepted_output_ids = {id(item) for item in outputs_by_call_id.values()}
     model_output_ids = {id(item) for item in model_items if isinstance(item, ToolCallOutputItem)}
     retained: list[RunItem] = []
     ordered_outputs: list[RunItem] = []
@@ -830,7 +844,7 @@ def _completed_tool_step_items(
         ):
             retained.extend(reasoning)
             retained.append(item)
-        elif isinstance(item, ToolCallOutputItem) and id(item) in finalized_output_ids:
+        elif isinstance(item, ToolCallOutputItem) and id(item) in accepted_output_ids:
             retained.extend(reasoning)
             retained.append(item)
         elif isinstance(item, ToolCallItem):
@@ -943,7 +957,11 @@ async def execute_tools_and_side_effects(
     prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
     prior_output_results = list(run_state._tool_output_guardrail_results) if run_state else []
 
+    accepting_outputs = True
+
     def _commit_accepted_response_tool_output(item: RunItem) -> None:
+        if not accepting_outputs:
+            return
         completed_outputs.append(item)
         if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
             return
@@ -966,10 +984,14 @@ async def execute_tools_and_side_effects(
         ]
 
     def _publish_completed_tools() -> None:
-        # Accepted server responses already have their own resumable checkpoint.
+        nonlocal accepting_outputs
+        accepting_outputs = False
+        # Server-managed continuation retains its separate recovery path.
         if on_tool_execution_error is not None and not server_manages_conversation:
-            retained_items = _completed_tool_step_items(
-                pre_step_items, new_step_items, completed_outputs
+            model_item_ids = {id(item) for item in new_step_items}
+            retained_items = _snapshot_tool_outputs(
+                _completed_tool_step_items(pre_step_items, new_step_items, completed_outputs),
+                [item for item in completed_outputs if id(item) not in model_item_ids],
             )
             if retained_items:
                 on_tool_execution_error(
@@ -2710,7 +2732,11 @@ async def resolve_interrupted_turn(
     prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
     prior_output_results = list(run_state._tool_output_guardrail_results) if run_state else []
 
+    accepting_outputs = True
+
     def _commit_tool_output(item: RunItem) -> None:
+        if not accepting_outputs:
+            return
         if any(existing is item for existing in committed_tool_outputs):
             return
         committed_tool_outputs.append(item)
@@ -2754,25 +2780,33 @@ async def resolve_interrupted_turn(
             )
         _register_tool_call_items(context_wrapper, [item])
 
-    (
-        function_results,
-        tool_input_guardrail_results,
-        tool_output_guardrail_results,
-        computer_results,
-        custom_tool_results,
-        shell_results,
-        apply_patch_results,
-        _local_shell_results,
-    ) = await _execute_tool_plan(
-        plan=plan,
-        bindings=bindings,
-        hooks=hooks,
-        context_wrapper=context_wrapper,
-        run_config=run_config,
-        tool_output_committer=_commit_tool_output,
-        tool_input_guardrail_results=tool_input_guardrail_results,
-        tool_output_guardrail_results=tool_output_guardrail_results,
-    )
+    try:
+        (
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+            computer_results,
+            custom_tool_results,
+            shell_results,
+            apply_patch_results,
+            _local_shell_results,
+        ) = await _execute_tool_plan(
+            plan=plan,
+            bindings=bindings,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_output_committer=_commit_tool_output,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
+        )
+    except BaseException:
+        accepting_outputs = False
+        if run_state is not None and not server_manages_conversation:
+            run_state._generated_items = _snapshot_tool_outputs(
+                run_state._generated_items, committed_tool_outputs
+            )
+        raise
 
     for interruption in _collect_tool_interruptions(
         function_results=function_results,

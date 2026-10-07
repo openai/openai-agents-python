@@ -448,11 +448,8 @@ class ToolCallOutputItem(RunItemBase[Any]):
     """SDK-only custom data attached to this tool output.
 
     This data is not part of ``raw_item`` and is not sent back to the model when the output item is
-    replayed as input.
+    replayed as input. On a failed run, unfinished custom-data extraction may leave this unset.
     """
-
-    _custom_data_pending: bool = field(default=False, init=False, repr=False, compare=False)
-    """Live finalization state; excluded from fresh partial history, not serialized to RunState."""
 
     @property
     def call_id(self) -> str | None:

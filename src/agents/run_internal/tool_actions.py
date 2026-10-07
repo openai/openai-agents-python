@@ -181,8 +181,7 @@ class ComputerAction:
                 raw_item=raw_item,
             )
 
-            # Preserve the pre-metadata recovery checkpoint for approved/server-owned calls.
-            output_item._custom_data_pending = True
+            # Record accepted output before optional metadata and end hooks.
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
@@ -198,7 +197,6 @@ class ComputerAction:
                     ),
                 )
                 output_item.custom_data = custom_data
-                output_item._custom_data_pending = False
 
                 await gather_with_cancel(
                     hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
@@ -829,8 +827,7 @@ class CustomToolAction:
                 raw_item=raw_item,
             )
 
-            # Preserve the pre-metadata recovery checkpoint for approved/server-owned calls.
-            output_item._custom_data_pending = True
+            # Record accepted output before optional metadata and end hooks.
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
@@ -846,7 +843,6 @@ class CustomToolAction:
                     ),
                 )
                 output_item.custom_data = custom_data
-                output_item._custom_data_pending = False
 
                 await gather_with_cancel(
                     hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
@@ -1074,8 +1070,7 @@ class ApplyPatchAction:
                 raw_item=raw_item,
             )
 
-            # Preserve the pre-metadata recovery checkpoint for approved/server-owned calls.
-            output_item._custom_data_pending = True
+            # Record accepted output before optional metadata and end hooks.
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
@@ -1092,7 +1087,6 @@ class ApplyPatchAction:
                     ),
                 )
                 output_item.custom_data = custom_data
-                output_item._custom_data_pending = False
 
                 await gather_with_cancel(
                     hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),

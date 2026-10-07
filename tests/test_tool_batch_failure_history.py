@@ -546,10 +546,11 @@ async def test_streamed_partial_history_waits_for_input_verdict(monkeypatch, ver
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_function_partial_history_excludes_pending_custom_data(monkeypatch, streaming):
-    from agents.run_internal import tool_execution
-
+@pytest.mark.parametrize("kind", ["function", "native"])
+@pytest.mark.parametrize("approved", [False, True])
+async def test_partial_history_freezes_accepted_output_before_metadata(streaming, kind, approved):
     from .model_test_helpers import get_exact_output_stream_step
+    from .test_native_tool_failure_history import _native_tool
 
     extracting = asyncio.Event()
     release = asyncio.Event()
@@ -559,35 +560,58 @@ async def test_function_partial_history_excludes_pending_custom_data(monkeypatch
     async def extract(context):
         extracting.set()
         try:
-            await release.wait()
+            # Deliberately finish after cancellation and failed-run publication.
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    pass
+            context.raw_item["output"] = "extractor-local mutation"
             return {"ticket": "T-1"}
         finally:
             settled.set()
 
-    @tool(custom_data_extractor=extract)
+    @tool(custom_data_extractor=extract, needs_approval=approved)
     async def create_ticket() -> str:
         effects.append("ticket")
         return "created"
 
-    @tool(failure_error_function=None)
+    @tool(failure_error_function=None, needs_approval=approved)
     async def fail() -> str:
         await extracting.wait()
         raise ValueError("synthetic sibling failure")
 
-    monkeypatch.setattr(tool_execution, "_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS", 0.001)
-    calls = [
-        function_call("create_ticket", {}, call_id="ticket"),
-        function_call("fail", {}, call_id="fail"),
-    ]
-    model = ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls])
-    agent = Agent(name="metadata", model=model, tools=[create_ticket, fail])
-    session = SQLiteSession("pending-function-metadata")
+    if kind == "native":
+        completed_tool, completed_call = _native_tool("custom", extract, effects)
+        completed_tool.needs_approval = approved
+        expected_output = "completed"
+    else:
+        completed_tool = create_ticket
+        completed_call = function_call("create_ticket", {}, call_id="ticket")
+        expected_output = "created"
+    calls = [completed_call, function_call("fail", {}, call_id="fail")]
+    model = ScriptedModel(
+        [
+            get_exact_output_stream_step(calls) if streaming and not approved else calls,
+            [assistant_message("done")],
+        ]
+    )
+    agent = Agent(name="metadata", model=model, tools=[completed_tool, fail])
+    session = SQLiteSession("pending-metadata")
     result = None
+    state = None
     outputs = []
+    run_input = "go"
     try:
-        with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+        if approved:
+            interrupted = await Runner.run(agent, run_input, session=session)
+            state = interrupted.to_state()
+            for item in interrupted.interruptions:
+                state.approve(item)
+            run_input = state
+        with pytest.raises((UserError, ValueError), match="synthetic sibling failure") as caught:
             if streaming:
-                result = Runner.run_streamed(agent, "go", session=session)
+                result = Runner.run_streamed(agent, run_input, session=session)
                 async for event in result.stream_events():
                     if (
                         event.type == "run_item_stream_event"
@@ -595,22 +619,49 @@ async def test_function_partial_history_excludes_pending_custom_data(monkeypatch
                     ):
                         outputs.append(event.item)
             else:
-                await Runner.run(agent, "go", session=session)
-        assert effects == ["ticket"]
+                await Runner.run(agent, run_input, session=session)
+        assert len(effects) == 1
         assert not settled.is_set()
-        assert caught.value.run_data is not None
-        assert caught.value.run_data.new_items == []
-        assert _shape(await session.get_items()) == ["user"]
-        if result is not None:
-            assert outputs == []
-            restored = await RunState.from_json(agent, result.to_state().to_json())
-            assert restored._generated_items == []
+        if state is not None:
+            items = state._generated_items
+        else:
+            assert caught.value.run_data is not None
+            items = caught.value.run_data.new_items
+        accepted = [item for item in items if item.type == "tool_call_output_item"]
+        assert len(accepted) == 1
+        assert accepted[0].raw_item["output"] == expected_output
+        assert accepted[0].custom_data is None
+        if not approved:
+            saved = await session.get_items()
+            assert saved[-1]["output"] == expected_output
+            if result is not None:
+                assert len(outputs) == 1
+                state = result.to_state()
+        serialized = state.to_json() if state is not None else None
         release.set()
         await asyncio.wait_for(settled.wait(), 2)
-        assert caught.value.run_data.new_items == []
+        # Let the extractor's owner perform its assignment after extract() returns.
+        await asyncio.sleep(0)
+        assert accepted[0].custom_data is None
+        assert accepted[0].raw_item["output"] == expected_output
+        if state is not None:
+            assert state.to_json() == serialized
+            restored = await RunState.from_json(agent, serialized)
+            restored_output = next(
+                item for item in restored._generated_items if item.type == "tool_call_output_item"
+            )
+            assert restored_output.custom_data is None
+        if not approved:
+            assert await session.get_items() == saved
+            if outputs:
+                assert outputs[0].custom_data is None
+            continuation = await Runner.run(agent, "continue", session=session)
+            assert continuation.final_output == "done"
+            assert len(effects) == 1
     finally:
         release.set()
-        await asyncio.wait_for(settled.wait(), 2)
+        if extracting.is_set():
+            await asyncio.wait_for(settled.wait(), 2)
         session.close()
 
 

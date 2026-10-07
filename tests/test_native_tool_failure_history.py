@@ -210,9 +210,7 @@ async def test_native_finalization_survives_sibling_failure(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stop", ["parent_cancel", "drain_timeout"])
-async def test_native_finalization_does_not_delay_parent_or_publish_unfinished_output(
-    monkeypatch, stop
-):
+async def test_native_finalization_preserves_output_without_delaying_parent(monkeypatch, stop):
     from agents.run_internal import tool_execution
 
     entered = asyncio.Event()
@@ -259,9 +257,14 @@ async def test_native_finalization_does_not_delay_parent_or_publish_unfinished_o
             assert exited.is_set()
             assert not release.is_set()
             assert caught.value.run_data is not None
-            assert caught.value.run_data.new_items == []
+            assert caught.value.run_data.new_items[-1].raw_item["output"] == "completed"
+            assert caught.value.run_data.new_items[-1].custom_data is None
         assert effects == ["custom"]
-        assert [item.get("role") for item in await session.get_items()] == ["user"]
+        saved = await session.get_items()
+        if stop == "parent_cancel":
+            assert [item.get("role") for item in saved] == ["user"]
+        else:
+            assert saved[-1]["output"] == "completed"
     finally:
         release.set()
         if not task.done():
