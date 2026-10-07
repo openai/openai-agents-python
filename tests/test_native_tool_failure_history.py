@@ -256,11 +256,9 @@ async def test_native_finalization_does_not_delay_parent_or_publish_unfinished_o
         else:
             with pytest.raises(UserError, match="synthetic sibling failure") as caught:
                 await asyncio.wait_for(task, timeout=5)
-            assert not exited.is_set()
+            assert exited.is_set()
+            assert not release.is_set()
             assert caught.value.run_data is not None
-            assert caught.value.run_data.new_items == []
-            release.set()
-            await asyncio.wait_for(exited.wait(), timeout=5)
             assert caught.value.run_data.new_items == []
         assert effects == ["custom"]
         assert [item.get("role") for item in await session.get_items()] == ["user"]

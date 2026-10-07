@@ -898,7 +898,12 @@ async def execute_tools_and_side_effects(
         skipped_raw_item_ids=skipped_raw_item_ids,
     )
 
-    completed_outputs: list[RunItem] = []
+    completed_outputs: list[RunItem] = [
+        item
+        for item in new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and get_mapping_or_attr(item.raw_item, "status") == "completed"
+    ]
     tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
     prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
@@ -1016,16 +1021,16 @@ async def execute_tools_and_side_effects(
             processed_response=processed_response,
         )
 
-    await _append_mcp_callback_results(
-        agent=public_agent,
-        requests=plan.mcp_requests_with_callback,
-        context_wrapper=context_wrapper,
-        append_item=new_step_items.append,
-    )
-    _register_tool_call_items(context_wrapper, new_step_items)
+    try:
+        await _append_mcp_callback_results(
+            agent=public_agent,
+            requests=plan.mcp_requests_with_callback,
+            context_wrapper=context_wrapper,
+            append_item=new_step_items.append,
+        )
+        _register_tool_call_items(context_wrapper, new_step_items)
 
-    if run_handoffs := processed_response.handoffs:
-        try:
+        if run_handoffs := processed_response.handoffs:
             return await execute_handoffs_call(
                 public_agent=public_agent,
                 original_input=original_input,
@@ -1040,9 +1045,9 @@ async def execute_tools_and_side_effects(
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             )
-        except Exception:
-            _publish_completed_tools()
-            raise
+    except Exception:
+        _publish_completed_tools()
+        raise
 
     tool_final_output = await _maybe_finalize_from_tool_results(
         public_agent=public_agent,

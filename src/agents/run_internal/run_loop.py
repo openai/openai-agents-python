@@ -2062,6 +2062,8 @@ async def start_streaming(
                                 item
                                 for item in partial_result.new_step_items
                                 if item.type == "tool_call_output_item"
+                                # Model-provided outputs were already emitted before execution.
+                                and _stream_event_item_occurrence_key(item) is None
                             ],
                             streamed_result._event_queue,
                         )

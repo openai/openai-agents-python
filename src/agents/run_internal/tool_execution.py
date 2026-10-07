@@ -2387,7 +2387,13 @@ async def run_native_tool_post_invoke(
     except asyncio.CancelledError:
         if sibling_category_failure.is_set():
             try:
-                await asyncio.wait((task,), timeout=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS)
+                _, pending = await asyncio.wait(
+                    (task,), timeout=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS
+                )
+                if pending:
+                    task.cancel()
+                    # Bound cancellation cleanup too: application hooks may suppress cancellation.
+                    await asyncio.wait((task,), timeout=_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS)
             except BaseException:
                 task.cancel()
                 raise
