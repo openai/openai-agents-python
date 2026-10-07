@@ -875,8 +875,8 @@ class MCPServer(abc.ABC):
         return bool(policy)
 
     def _get_failure_error_function(
-        self, agent_failure_error_function: ToolErrorFunction | None | object
-    ) -> ToolErrorFunction | None | object:
+        self, agent_failure_error_function: ToolErrorFunction | None
+    ) -> ToolErrorFunction | None:
         """Return the effective error handler for MCP tool failures."""
         if self._failure_error_function is _UNSET:
             return agent_failure_error_function

@@ -469,7 +469,9 @@ class RunConfig:
 
     For ordinary function-tool exceptions, this callback applies only when the tool uses
     the implicit default failure handler. Explicit per-tool handlers, including ``None``
-    (propagate errors), take precedence. Timeouts, cancellation, and schema-backed
+    (propagate errors), take precedence. Tools created by ``Agent.as_tool()`` and local MCP
+    factories retain their existing ``failure_error_function`` policies; this callback
+    does not format their exceptions. Timeouts, cancellation, and schema-backed
     program-call failures retain their existing policies. A callback failure falls back
     to the default message. Returned messages may enter model input, history, and traces;
     return only application-approved details.

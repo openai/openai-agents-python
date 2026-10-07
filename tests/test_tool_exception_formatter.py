@@ -345,7 +345,7 @@ async def test_schema_backed_tool_retains_program_failure_policy(program_call: b
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("policy", ["omitted", "custom", "explicit-default", "propagate"])
-async def test_agent_tool_preserves_omitted_failure_policy(
+async def test_agent_tool_retains_factory_failure_policy(
     policy: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     async def extract(result: Any) -> str:
@@ -382,14 +382,14 @@ async def test_agent_tool_preserves_omitted_failure_policy(
         assert (
             model_output(model)
             == {
-                "omitted": APPROVED,
+                "omitted": GENERIC,
                 "custom": "per-tool",
                 "explicit-default": GENERIC,
             }[policy]
         )
         if policy == "omitted":
             assert_redacted(caplog, result, model)
-    assert called == (["child"] if policy == "omitted" else [])
+    assert not called
 
 
 @pytest.mark.asyncio
@@ -405,7 +405,7 @@ async def test_agent_tool_preserves_omitted_failure_policy(
         ("server", "propagate"),
     ],
 )
-async def test_mcp_tool_preserves_omitted_failure_policy(
+async def test_mcp_tool_retains_factory_failure_policy(
     level: str, policy: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     from agents.exceptions import AgentsException
@@ -450,14 +450,14 @@ async def test_mcp_tool_preserves_omitted_failure_policy(
         assert (
             model_output(model)
             == {
-                "omitted": APPROVED,
+                "omitted": GENERIC,
                 "custom": "per-tool",
                 "explicit-default": GENERIC,
             }[policy]
         )
         if policy == "omitted":
             assert_redacted(caplog, result, model)
-    assert called == (["lookup"] if policy == "omitted" else [])
+    assert not called
 
 
 @pytest.mark.asyncio
