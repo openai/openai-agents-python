@@ -1789,6 +1789,7 @@ async def start_streaming(
                 )
                 if current_turn_span is not None:
                     current_turn_span.start(mark_as_current=True)
+                partial_tool_results: list[SingleStepResult] = []
                 try:
                     if (
                         session is not None
@@ -1818,7 +1819,52 @@ async def start_streaming(
                         on_response_accepted=_commit_pending_server_response,
                         on_response_hooks_started=_mark_response_hooks_started,
                         run_state=run_state,
+                        on_tool_execution_error=partial_tool_results.append,
                     )
+                except Exception as tool_error:
+                    input_task = streamed_result._input_guardrails_task
+                    input_accepted = input_task is None or (
+                        input_task.done()
+                        and not input_task.cancelled()
+                        and input_task.exception() is None
+                    )
+                    if (
+                        partial_tool_results
+                        and input_accepted
+                        and not any(
+                            result.output.tripwire_triggered
+                            for result in streamed_result.input_guardrail_results
+                        )
+                    ):
+                        partial_result = partial_tool_results[0]
+                        streamed_result._model_input_items.extend(partial_result.new_step_items)
+                        streamed_result.new_items.extend(partial_result.new_step_items)
+                        streamed_result.raw_responses.append(partial_result.model_response)
+                        if run_state is not None:
+                            run_state._current_step = NextStepRunAgain()
+                            run_state._generated_items = list(streamed_result._model_input_items)
+                            run_state._session_items = list(streamed_result.new_items)
+                            run_state._model_responses = list(streamed_result.raw_responses)
+                        stream_step_items_to_queue(
+                            [
+                                item
+                                for item in partial_result.new_step_items
+                                if item.type == "tool_call_output_item"
+                            ],
+                            streamed_result._event_queue,
+                        )
+                        _mark_error_to_drain_stream_events(tool_error)
+                        try:
+                            await _save_stream_items_with_count(
+                                partial_result.new_step_items,
+                                partial_result.model_response.response_id,
+                                current_agent.model_settings.resolve(
+                                    run_config.model_settings
+                                ).store,
+                            )
+                        except Exception:
+                            logger.warning("Failed to save completed tools after a tool error")
+                    raise
                 finally:
                     if current_turn_span is not None:
                         attach_usage_to_span(
@@ -2114,6 +2160,7 @@ async def run_single_turn_streamed(
     on_response_accepted: Callable[[ModelResponse, ProcessedResponse | None], bool] | None = None,
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -2438,6 +2485,7 @@ async def run_single_turn_streamed(
         after_invocation_validation=after_invocation_validation,
         before_side_effects=check_input_guardrails_before_side_effects,
         run_state=run_state,
+        on_tool_execution_error=on_tool_execution_error,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
@@ -2473,6 +2521,7 @@ async def run_single_turn(
     on_response_accepted: Callable[[ModelResponse, ProcessedResponse | None], bool] | None = None,
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -2585,6 +2634,7 @@ async def run_single_turn(
         server_manages_conversation=server_conversation_tracker is not None,
         after_invocation_validation=after_invocation_validation,
         run_state=run_state,
+        on_tool_execution_error=on_tool_execution_error,
     )
 
 

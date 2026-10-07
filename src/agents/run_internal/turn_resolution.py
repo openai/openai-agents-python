@@ -793,6 +793,25 @@ async def check_for_final_output_from_tools(
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
 
 
+def _completed_tool_step_items(model_items: list[RunItem], outputs: list[RunItem]) -> list[RunItem]:
+    """Keep accepted call/output pairs in model order and their preceding reasoning."""
+    outputs_by_call_id = {extract_tool_call_id(item.raw_item): item for item in outputs}
+    retained: list[RunItem] = []
+    ordered_outputs: list[RunItem] = []
+    reasoning: list[RunItem] = []
+    for item in model_items:
+        if isinstance(item, ReasoningItem):
+            reasoning.append(item)
+        elif isinstance(item, ToolCallItem):
+            output = outputs_by_call_id.get(extract_tool_call_id(item.raw_item))
+            if output is not None:
+                retained.extend(reasoning)
+                reasoning.clear()
+                retained.append(item)
+                ordered_outputs.append(output)
+    return [*retained, *ordered_outputs]
+
+
 async def execute_tools_and_side_effects(
     *,
     bindings: AgentBindings[TContext],
@@ -808,6 +827,7 @@ async def execute_tools_and_side_effects(
     server_manages_conversation: bool = False,
     precomputed_skipped_raw_item_ids: set[int] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
@@ -849,7 +869,10 @@ async def execute_tools_and_side_effects(
         skipped_raw_item_ids=skipped_raw_item_ids,
     )
 
+    completed_outputs: list[RunItem] = []
+
     def _commit_accepted_response_tool_output(item: RunItem) -> None:
+        completed_outputs.append(item)
         if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
             return
         if not run_state._current_step.response_accepted:
@@ -858,23 +881,41 @@ async def execute_tools_and_side_effects(
             if item not in target:
                 target.append(item)
 
-    (
-        function_results,
-        tool_input_guardrail_results,
-        tool_output_guardrail_results,
-        computer_results,
-        custom_tool_results,
-        shell_results,
-        apply_patch_results,
-        local_shell_results,
-    ) = await _execute_tool_plan(
-        plan=plan,
-        bindings=bindings,
-        hooks=hooks,
-        context_wrapper=context_wrapper,
-        run_config=run_config,
-        tool_output_committer=_commit_accepted_response_tool_output,
-    )
+    try:
+        (
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+            computer_results,
+            custom_tool_results,
+            shell_results,
+            apply_patch_results,
+            local_shell_results,
+        ) = await _execute_tool_plan(
+            plan=plan,
+            bindings=bindings,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_output_committer=_commit_accepted_response_tool_output,
+        )
+    except Exception:
+        # Accepted server responses already have their own resumable checkpoint.
+        if on_tool_execution_error is not None and not server_manages_conversation:
+            retained_items = _completed_tool_step_items(new_step_items, completed_outputs)
+            if retained_items:
+                on_tool_execution_error(
+                    SingleStepResult(
+                        original_input=original_input,
+                        model_response=new_response,
+                        pre_step_items=pre_step_items,
+                        new_step_items=retained_items,
+                        next_step=NextStepRunAgain(),
+                        tool_input_guardrail_results=[],
+                        tool_output_guardrail_results=[],
+                    )
+                )
+        raise
     new_step_items.extend(
         _build_tool_result_items(
             function_results=function_results,
@@ -3682,6 +3723,7 @@ async def get_single_step_result_from_response(
     | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     try:
@@ -3744,4 +3786,5 @@ async def get_single_step_result_from_response(
         server_manages_conversation=server_manages_conversation,
         precomputed_skipped_raw_item_ids=skipped_raw_item_ids,
         run_state=run_state,
+        on_tool_execution_error=on_tool_execution_error,
     )

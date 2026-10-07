@@ -135,6 +135,7 @@ from .run_internal.run_steps import (
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
+    SingleStepResult,
 )
 from .run_internal.session_persistence import (
     _session_get_items,
@@ -1709,6 +1710,7 @@ class AgentRunner:
                     )
                     if current_turn_span is not None:
                         current_turn_span.start(mark_as_current=True)
+                    partial_tool_results: list[SingleStepResult] = []
                     try:
                         if current_turn <= 1:
                             try:
@@ -1758,6 +1760,7 @@ class AgentRunner:
                                     on_response_accepted=_commit_pending_server_response,
                                     on_response_hooks_started=_mark_response_hooks_started,
                                     run_state=run_state,
+                                    on_tool_execution_error=partial_tool_results.append,
                                 )
                             )
 
@@ -1832,7 +1835,31 @@ class AgentRunner:
                                 on_response_accepted=_commit_pending_server_response,
                                 on_response_hooks_started=_mark_response_hooks_started,
                                 run_state=run_state,
+                                on_tool_execution_error=partial_tool_results.append,
                             )
+                    except Exception:
+                        input_accepted = len(_attempt_input_guardrail_results()) >= len(
+                            all_input_guardrails
+                        ) and not input_guardrails_triggered(_attempt_input_guardrail_results())
+                        if partial_tool_results and input_accepted:
+                            partial_result = partial_tool_results[0]
+                            generated_items.extend(partial_result.new_step_items)
+                            session_items.extend(partial_result.new_step_items)
+                            model_responses.append(partial_result.model_response)
+                            try:
+                                await save_turn_items_if_needed(
+                                    session=session,
+                                    run_state=run_state,
+                                    session_persistence_enabled=session_persistence_enabled,
+                                    input_guardrail_results=input_guardrail_results,
+                                    items=partial_result.new_step_items,
+                                    response_id=partial_result.model_response.response_id,
+                                    store=store_setting,
+                                    wrapper=context_wrapper,
+                                )
+                            except Exception:
+                                logger.warning("Failed to save completed tools after a tool error")
+                        raise
                     finally:
                         if current_turn_span is not None:
                             attach_usage_to_span(
