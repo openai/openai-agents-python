@@ -10,6 +10,7 @@ from collections.abc import Callable
 from typing import Any, TypeVar, cast
 
 import pytest
+from openai.types.responses import ResponseCompletedEvent
 from openai.types.responses.computer_action import (
     Click as BatchedClick,
     Screenshot as BatchedScreenshot,
@@ -40,15 +41,17 @@ from agents import (
     RunContextWrapper,
     RunHooks,
     Runner,
+    UserError,
     set_tracing_disabled,
     trace,
 )
 from agents.items import ToolCallOutputItem
 from agents.run_internal import run_loop
 from agents.run_internal.run_loop import ComputerAction, ToolRunComputerAction
-from agents.testing import ScriptedModel
+from agents.testing import ModelStep, ScriptedModel
 from agents.tool import ComputerToolSafetyCheckData
 
+from .model_test_helpers import get_response_obj
 from .test_responses import get_text_message
 from .testing_processor import SPAN_PROCESSOR_TESTING
 
@@ -784,3 +787,94 @@ async def test_pending_safety_check_acknowledged() -> None:
     assert raw.get("acknowledged_safety_checks") == [{"id": "sc", "code": "c", "message": "m"}]
     assert len(called) == 1
     assert called[0].safety_check.id == "sc"
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    ("handler", "has_checks"),
+    [("missing", True), ("missing", False), ("accept", True), ("reject", True)],
+)
+@pytest.mark.asyncio
+async def test_runner_warns_for_unhandled_computer_safety_checks(
+    caplog: pytest.LogCaptureFixture, stream: bool, handler: str, has_checks: bool
+) -> None:
+    should_warn = has_checks and handler == "missing"
+
+    def safety_warnings() -> list[logging.LogRecord]:
+        return [
+            record
+            for record in caplog.records
+            if record.name == "openai.agents" and "no on_safety_check" in record.getMessage()
+        ]
+
+    class WarningOrderComputer(LoggingComputer):
+        def click(self, x: int, y: int, button: str, *, keys: list[str] | None = None) -> None:
+            assert bool(safety_warnings()) is should_warn
+            super().click(x, y, button, keys=keys)
+
+    computer = WarningOrderComputer(screenshot_return="synthetic screenshot")
+    checks = [
+        PendingSafetyCheck(id=f"check-{index}", code=code, message="synthetic private message")
+        for index, code in enumerate(
+            ["malicious_instructions", "irrelevant_domain", "sensitive_domain", "future_check"]
+        )
+    ]
+    tool_call = ResponseComputerToolCall(
+        id="computer-call",
+        type="computer_call",
+        action=ActionClick(type="click", x=1, y=2, button="left"),
+        call_id="computer-call",
+        pending_safety_checks=checks if has_checks else [],
+        status="completed",
+    )
+    # Computer calls need explicit stream events in ScriptedModel.
+    step = ModelStep.stream(
+        [
+            ResponseCompletedEvent(
+                type="response.completed",
+                response=get_response_obj([tool_call]),
+                sequence_number=0,
+            )
+        ],
+        output=[tool_call],
+    )
+    model = ScriptedModel(steps=[step, [get_text_message("done")]])
+    tool = ComputerTool(
+        computer=computer,
+        on_safety_check=None if handler == "missing" else lambda _: handler == "accept",
+    )
+    agent = Agent(name="Computer safety checks", model=model, tools=[tool])
+
+    async def run_agent():
+        config = RunConfig(tracing_disabled=True)
+        if stream:
+            result = Runner.run_streamed(agent, "start", run_config=config)
+            async for _ in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, "start", run_config=config)
+
+    with caplog.at_level(logging.WARNING, logger="openai.agents"):
+        if handler == "reject":
+            with pytest.raises(UserError, match="safety check was not acknowledged"):
+                await run_agent()
+            assert computer.calls == []
+        else:
+            result = await run_agent()
+            assert result.final_output == "done"
+            assert computer.calls == [("click", (1, 2, "left")), ("screenshot", ())]
+            output = next(item for item in result.new_items if isinstance(item, ToolCallOutputItem))
+            raw = cast(dict[str, Any], output.raw_item)
+            if handler == "accept":
+                assert raw["acknowledged_safety_checks"] == [check.model_dump() for check in checks]
+            else:
+                assert raw.get("acknowledged_safety_checks") is None
+
+    warnings = safety_warnings()
+    assert len(warnings) == int(should_warn)
+    if warnings:
+        assert warnings[0].levelno == logging.WARNING
+        assert "proceed without acknowledging" in warnings[0].getMessage()
+        assert "Configure ComputerTool.on_safety_check" in warnings[0].getMessage()
+        assert warnings[0].args == ()
+        assert "synthetic private message" not in warnings[0].getMessage()

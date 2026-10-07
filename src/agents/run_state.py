@@ -110,6 +110,7 @@ from .logger import (
 from .run_context import RunContextWrapper, _ApprovalRecord, _FunctionToolApprovalKey
 from .run_internal.items import (
     NestedHistoryOwnedItemRef,
+    ReasoningItemIdPolicy,
     digest_input_item,
     ensure_nested_history_run_item_occurrence_key,
     nested_history_run_item_occurrence_key,
@@ -168,6 +169,13 @@ RunStateValidationErrorFactory = Callable[
 ]
 
 
+class _HeldCurrentResponse(TypedDict):
+    """The current logical turn's suffix within an ordered withheld batch."""
+
+    turn: int
+    start: int
+
+
 class _SessionCompactionModelExchange(TypedDict):
     """Digests of one successful model exchange and its resolved replay policy."""
 
@@ -176,12 +184,35 @@ class _SessionCompactionModelExchange(TypedDict):
 
 
 class _PendingSessionWrite(TypedDict):
-    """One canonical resumed-output append awaiting acknowledgement."""
+    """One canonical resumed-output append awaiting acknowledgement.
+
+    ``held`` marks a batch the interruption park withheld because the agent's output
+    guardrails had not approved the turn yet. A held batch was never offered to the
+    Session, so ``before`` stays ``None`` until a gate-legal exit starts settling it;
+    from that point it is an ordinary pending write and the digest reconciliation
+    recovers a half-acknowledged append. Absent or ``False`` keeps the released
+    meaning: an append already approved for eager settlement on resume entry.
+
+    ``response_id`` records the model response the withheld batch belongs to, and
+    ``store`` the store setting that response was produced under, so the settle runs
+    the same compaction bookkeeping the ordinary persistence path would have run for
+    it instead of appending behind its back.
+
+    ``reasoning_item_id_policy`` records how the batch's items were converted, so a
+    detached re-park folds new items under the same conversion: a Conversations-origin
+    batch preserves server reasoning ids even when the resuming run's own policy would
+    omit them, and an id stripped at registration cannot be restored at the settle.
+
+    ``current_response`` identifies the suffix owned by the current logical turn.
+    Filtering or reconstructing that response must not alter earlier held history.
+    The boundary survives rejected approvals and serialized retries.
+    """
 
     session_id: str
     items: list[TResponseInputItem]
     before: list[str] | None
     persisted_count: int
+    held: NotRequired[bool]
     # Once acknowledged, only compaction remains; its replacement can change the history.
     append_acknowledged: NotRequired[bool]
     compaction_model_exchange: NotRequired[_SessionCompactionModelExchange]
@@ -193,6 +224,8 @@ class _PendingSessionWrite(TypedDict):
     response_id: NotRequired[str | None]
     store: NotRequired[bool | None]
     has_local_tool_outputs: NotRequired[bool]
+    reasoning_item_id_policy: NotRequired[ReasoningItemIdPolicy | None]
+    current_response: NotRequired[_HeldCurrentResponse]
 
 
 def _default_run_state_validation_error(
@@ -209,10 +242,13 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.18"
+CURRENT_SCHEMA_VERSION = "1.20"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
+_PENDING_WRITE_COMPACTION_MIN_SCHEMA_VERSION = "1.18"
+_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION = "1.19"
+_TOOL_OUTPUT_GUARDRAIL_BOUNDARY_MIN_SCHEMA_VERSION = "1.20"
 # Keep this mapping in chronological order. Every schema bump must add a one-line summary here.
 SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
     "1.0": "Initial RunState snapshot format for HITL pause/resume flows.",
@@ -254,6 +290,15 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "decisions to their owning agent, and retains compaction metadata for pending "
         "Session writes, including acknowledgement and model-exchange evidence for "
         "compaction retry, and records named Vercel sandboxes alongside exact execution IDs."
+    ),
+    "1.19": (
+        "Persists the interrupted turn's withheld Session write as a held pending write, "
+        "with the conversion policy its items were registered under and the current-response "
+        "boundary, so an approval resume can settle it under the output-guardrail gate."
+    ),
+    "1.20": (
+        "Persists the pending tool output guardrail result boundary so a resumed run withholds "
+        "current-response diagnostics until its terminal guardrails complete."
     ),
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
@@ -2035,7 +2080,7 @@ class RunState(Generic[TContext, TAgent]):
             if isinstance(interruption, ToolApprovalItem)
         ]
 
-        return {
+        result: dict[str, Any] = {
             "new_items": [
                 self._serialize_item(item, agent_identity_keys_by_id=agent_identity_keys_by_id)
                 for item in processed_response.new_items
@@ -2048,6 +2093,11 @@ class RunState(Generic[TContext, TAgent]):
                 for call_id, binding in processed_response.mcp_tool_bindings.items()
             },
         }
+        if processed_response.tool_output_guardrail_result_start is not None:
+            result["tool_output_guardrail_result_start"] = (
+                processed_response.tool_output_guardrail_result_start
+            )
+        return result
 
     def _serialize_current_step(self) -> dict[str, Any] | None:
         """Serialize the current resumable step."""
@@ -3511,6 +3561,10 @@ async def _deserialize_processed_response(
         if isinstance(binding, list)
     }
 
+    guardrail_start = processed_response_data.get("tool_output_guardrail_result_start")
+    if guardrail_start is not None and (type(guardrail_start) is not int or guardrail_start < 0):
+        raise validation_error_factory("Invalid tool output guardrail result boundary", UserError)
+
     return ProcessedResponse(
         new_items=new_items,
         handoffs=handoffs,
@@ -3524,6 +3578,7 @@ async def _deserialize_processed_response(
         mcp_approval_requests=mcp_approval_requests,
         interruptions=interruptions,
         mcp_tool_bindings=mcp_tool_bindings,
+        tool_output_guardrail_result_start=guardrail_start,
     )
 
 
@@ -4294,6 +4349,16 @@ async def _build_run_state_from_json(
 
     last_processed_response_data = state_json.get("last_processed_response")
     if last_processed_response_data and state._context is not None:
+        if last_processed_response_data.get("tool_output_guardrail_result_start") is not None and (
+            schema_major,
+            schema_minor,
+        ) < tuple(
+            int(part)
+            for part in _TOOL_OUTPUT_GUARDRAIL_BOUNDARY_MIN_SCHEMA_VERSION.split(".", maxsplit=1)
+        ):
+            raise validation_error_factory(
+                "Run state tool output guardrail result boundary requires schema 1.20.", UserError
+            )
         program_call_ids, completed_program_call_ids = _run_state_program_call_ids(state_json)
         state._last_processed_response = await _deserialize_processed_response(
             last_processed_response_data,
@@ -4458,9 +4523,20 @@ async def _build_run_state_from_json(
     state._tool_input_guardrail_results = _deserialize_tool_input_guardrail_results(
         state_json.get("tool_input_guardrail_results", [])
     )
+    serialized_tool_output_results = state_json.get("tool_output_guardrail_results", []) or []
     state._tool_output_guardrail_results = _deserialize_tool_output_guardrail_results(
-        state_json.get("tool_output_guardrail_results", [])
+        serialized_tool_output_results
     )
+    if state._last_processed_response is not None:
+        result_start = state._last_processed_response.tool_output_guardrail_result_start
+        if result_start is not None and (
+            result_start > len(state._tool_output_guardrail_results)
+            or len(state._tool_output_guardrail_results) != len(serialized_tool_output_results)
+        ):
+            # Dropping a serialized entry shifts every following result's boundary.
+            raise validation_error_factory(
+                "Invalid tool output guardrail result boundary", UserError
+            )
 
     current_step_data = state_json.get("current_step")
     if current_step_data and current_step_data.get("type") == "next_step_run_again":
@@ -4523,10 +4599,19 @@ async def _build_run_state_from_json(
     if pending_write is not None:
         from .run_internal.run_steps import NextStepInterruption, NextStepRunAgain
 
-        required_pending_write_keys = {"session_id", "items", "before", "persisted_count"}
-        # Released schema 1.17 wrote exactly four keys. Compaction metadata belongs to 1.18;
-        # older checkpoints remain readable without claiming the newer recovery behavior.
-        optional_pending_write_keys = (
+        # Released readers validate this object by exact key set, so every key is gated
+        # to the version that introduced it and a payload keeps exactly the keys its own
+        # label defined. 1.17 defined the four base keys. 1.18 (v0.23.0) added the
+        # compaction metadata. The held keys arrived after that release, so writing them
+        # under the 1.18 label would emit checkpoints the released reader rejects; they
+        # require 1.19, while a 1.18 payload with compaction metadata keeps loading.
+        def _at_least(minimum: str) -> bool:
+            return (schema_major, schema_minor) >= tuple(
+                int(part) for part in minimum.split(".", maxsplit=1)
+            )
+
+        base_keys = {"session_id", "items", "before", "persisted_count"}
+        compaction_keys = (
             {
                 "response_id",
                 "store",
@@ -4534,7 +4619,12 @@ async def _build_run_state_from_json(
                 "append_acknowledged",
                 "compaction_model_exchange",
             }
-            if (schema_major, schema_minor) >= (1, 18)
+            if _at_least(_PENDING_WRITE_COMPACTION_MIN_SCHEMA_VERSION)
+            else set()
+        )
+        held_keys = (
+            {"held", "reasoning_item_id_policy", "current_response"}
+            if _at_least(_HELD_PENDING_SESSION_WRITE_MIN_SCHEMA_VERSION)
             else set()
         )
         compaction_exchange = (
@@ -4546,8 +4636,38 @@ async def _build_run_state_from_json(
             (schema_major, schema_minor) < (1, 17)
             or not isinstance(state._current_step, NextStepRunAgain | NextStepInterruption)
             or not isinstance(pending_write, dict)
-            or not required_pending_write_keys <= set(pending_write)
-            or not set(pending_write) <= required_pending_write_keys | optional_pending_write_keys
+            or set(pending_write) - compaction_keys - held_keys != base_keys
+            or ("held" in pending_write and type(pending_write["held"]) is not bool)
+            or (pending_write.get("held") is True and pending_write.get("before") is not None)
+            or (pending_write.get("held") is True and "current_response" not in pending_write)
+            or (
+                "reasoning_item_id_policy" in pending_write
+                and pending_write["reasoning_item_id_policy"] not in (None, "preserve", "omit")
+            )
+            or (
+                "current_response" in pending_write
+                and (
+                    not isinstance(pending_write["current_response"], dict)
+                    or set(pending_write["current_response"]) != {"turn", "start"}
+                    or type(pending_write["current_response"]["turn"]) is not int
+                    or not 0 <= pending_write["current_response"]["turn"] <= state._current_turn
+                    or type(pending_write["current_response"]["start"]) is not int
+                    or not isinstance(pending_write.get("items"), list)
+                    or not 0
+                    <= pending_write["current_response"]["start"]
+                    <= len(pending_write["items"])
+                )
+            )
+            # These keys describe the withheld batch, so they are meaningless on an
+            # ordinary pending write and are refused there rather than restored as
+            # state nothing consumes.
+            or (
+                not pending_write.get("held")
+                and (
+                    "reasoning_item_id_policy" in pending_write
+                    or "current_response" in pending_write
+                )
+            )
             or not isinstance(pending_write.get("session_id"), str)
             or not isinstance(pending_write.get("items"), list)
             or not pending_write["items"]
@@ -5358,12 +5478,21 @@ def _restore_current_response_item_identities(
     if not all(isinstance(item, ToolApprovalItem) for item in restored_interruptions):
         return
 
-    # The complete current response must be the same terminal suffix in both histories.
-    session_start = len(state._session_items) - len(restored_current_response_items)
+    # A callback can fail after a local output is committed to execution history,
+    # before that output reaches public history. All other current-response items
+    # must still be the same terminal suffix in both histories.
+    session_item_ids = {id(item) for item in state._session_items}
+    public_current_response_items: list[RunItem] = []
+    for index, item in enumerate(restored_current_response_items):
+        if id(item) in session_item_ids:
+            public_current_response_items.append(item)
+        elif index < processed_item_count or not isinstance(item, ToolCallOutputItem):
+            return
+    session_start = len(state._session_items) - len(public_current_response_items)
     if session_start < 0 or any(
         generated_item is not session_item
         for generated_item, session_item in zip(
-            restored_current_response_items,
+            public_current_response_items,
             state._session_items[session_start:],
             strict=True,
         )
@@ -5394,6 +5523,8 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
         "Run state agent not found in agent map",
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
+        "Invalid tool output guardrail result boundary",
+        "Run state tool output guardrail result boundary requires schema 1.20.",
         "Run state terminal marker is invalid",
         "Run state references an agent identity that is not present in the restored graph",
         (

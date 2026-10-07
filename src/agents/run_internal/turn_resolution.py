@@ -48,7 +48,11 @@ from .._tool_identity import (
     restore_tool_call_routing_identity,
     should_allow_bare_name_approval_alias,
 )
-from .._tool_invocation import tool_invocation_call_id, tool_invocation_identity_and_scope
+from .._tool_invocation import (
+    tool_invocation_call_id,
+    tool_invocation_identity_and_scope,
+    tool_output_identity,
+)
 from ..agent import Agent, ToolsToFinalOutputResult
 from ..agent_output import AgentOutputSchemaBase
 from ..agent_tool_state import (
@@ -122,6 +126,7 @@ from ..util._approvals import evaluate_needs_approval_setting
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
 from .agent_tool_configuration import register_agent_tool_configuration
+from .blocked_output import _current_response_boundary
 from .error_handlers import (
     build_run_error_data,
     create_message_output_item,
@@ -135,6 +140,7 @@ from .items import (
     apply_patch_rejection_item,
     extract_mcp_request_id_from_run,
     function_rejection_item,
+    order_current_turn_tool_outputs,
     shell_rejection_item,
 )
 from .run_steps import (
@@ -155,6 +161,7 @@ from .run_steps import (
     ToolRunMCPApprovalRequest,
     ToolRunShellCall,
 )
+from .session_persistence import extend_held_session_write
 from .tool_caller import ensure_programmatic_tool_call_parent, ensure_tool_caller_allowed
 from .tool_execution import (
     build_litellm_json_tool_call,
@@ -755,6 +762,7 @@ async def execute_handoffs(
         tool_output_guardrail_results=list(tool_output_guardrail_results or []),
         session_step_items=session_step_items,
         nested_history_owned_items=nested_history_owned_items,
+        handoff_input_filtered=input_filter is not None,
     )
 
 
@@ -870,6 +878,10 @@ async def execute_tools_and_side_effects(
     )
 
     completed_outputs: list[RunItem] = []
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+    prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
+    prior_output_results = list(run_state._tool_output_guardrail_results) if run_state else []
 
     def _commit_accepted_response_tool_output(item: RunItem) -> None:
         completed_outputs.append(item)
@@ -877,9 +889,21 @@ async def execute_tools_and_side_effects(
             return
         if not run_state._current_step.response_accepted:
             return
-        for target in (run_state._generated_items, run_state._session_items):
-            if item not in target:
-                target.append(item)
+        if (
+            tool_output_guardrail_results
+            and processed_response.tool_output_guardrail_result_start is None
+        ):
+            processed_response.tool_output_guardrail_result_start = len(prior_output_results)
+        if item not in run_state._generated_items:
+            run_state._generated_items.append(item)
+        run_state._tool_input_guardrail_results = [
+            *prior_input_results,
+            *tool_input_guardrail_results,
+        ]
+        run_state._tool_output_guardrail_results = [
+            *prior_output_results,
+            *tool_output_guardrail_results,
+        ]
 
     try:
         (
@@ -898,6 +922,8 @@ async def execute_tools_and_side_effects(
             context_wrapper=context_wrapper,
             run_config=run_config,
             tool_output_committer=_commit_accepted_response_tool_output,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
     except Exception:
         # Accepted server responses already have their own resumable checkpoint.
@@ -916,6 +942,7 @@ async def execute_tools_and_side_effects(
                     )
                 )
         raise
+
     new_step_items.extend(
         _build_tool_result_items(
             function_results=function_results,
@@ -1204,6 +1231,34 @@ async def resolve_interrupted_turn(
     public_agent = bindings.public_agent
     execution_agent = bindings.execution_agent
     output_index = _build_tool_output_index(original_pre_step_items)
+    response_boundary = _current_response_boundary((), processed_response, run_state)
+    generated_output_start = response_boundary.generated_start
+    session_output_start = response_boundary.session_start
+    if generated_output_start is not None:
+        generated_output_start += len(response_boundary.processed_items)
+    if session_output_start is not None:
+        session_output_start += len(response_boundary.processed_items)
+
+    # Accepted outputs can outlive a failing callback without having reached public
+    # history. Recover only this response's locally appended outputs, not provider
+    # items in its immutable prefix or history omitted by an earlier input filter.
+    recovered_outputs: list[RunItem] = []
+    if (
+        run_state is not None
+        and generated_output_start is not None
+        and session_output_start is not None
+    ):
+        public_outputs = {
+            tool_output_identity(item.raw_item)
+            for item in run_state._session_items[session_output_start:]
+            if isinstance(item, ToolCallOutputItem)
+        }
+        recovered_outputs = [
+            item
+            for item in original_pre_step_items[generated_output_start:]
+            if isinstance(item, ToolCallOutputItem)
+            and tool_output_identity(item.raw_item) not in public_outputs
+        ]
 
     current_step = run_state._current_step if run_state is not None else None
     if (
@@ -2580,19 +2635,53 @@ async def resolve_interrupted_turn(
             next_call_position += 1
 
     committed_tool_outputs: list[RunItem] = []
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+    prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
+    prior_output_results = list(run_state._tool_output_guardrail_results) if run_state else []
 
     def _commit_tool_output(item: RunItem) -> None:
         if any(existing is item for existing in committed_tool_outputs):
             return
         committed_tool_outputs.append(item)
-        committed_tool_outputs.sort(
-            key=lambda output: call_positions.get(
-                extract_tool_call_id(getattr(output, "raw_item", None)) or "",
-                len(call_positions),
-            )
-        )
         if run_state is not None:
-            run_state._generated_items = [*original_pre_step_items, *committed_tool_outputs]
+            if not response_boundary.proven:
+                # Keep failed callbacks closed until this response returns successfully.
+                run_state._terminal_unrecoverable = True
+            if (
+                tool_output_guardrail_results
+                and processed_response.tool_output_guardrail_result_start is None
+            ):
+                processed_response.tool_output_guardrail_result_start = len(prior_output_results)
+            run_state._generated_items = order_current_turn_tool_outputs(
+                [*original_pre_step_items, *committed_tool_outputs],
+                start=generated_output_start,
+                call_positions=call_positions,
+                published_items=(
+                    run_state._session_items[session_output_start:]
+                    if session_output_start is not None
+                    else ()
+                ),
+            )
+            run_state._tool_input_guardrail_results = [
+                *prior_input_results,
+                *tool_input_guardrail_results,
+            ]
+            run_state._tool_output_guardrail_results = [
+                *prior_output_results,
+                *tool_output_guardrail_results,
+            ]
+            # The approved tool's side effect is done and its output is committed, so
+            # the withheld batch takes it at this boundary rather than at the turn
+            # exit. A post-output callback that raises (``custom_data_extractor``,
+            # ``on_tool_end``) leaves a retry that skips the completed invocation and
+            # produces no new session items, and the batch would otherwise settle, or
+            # be discarded as an emptied turn, without the output the tool produced.
+            extend_held_session_write(
+                run_state,
+                run_items=committed_tool_outputs,
+                reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            )
         _register_tool_call_items(context_wrapper, [item])
 
     (
@@ -2611,6 +2700,8 @@ async def resolve_interrupted_turn(
         context_wrapper=context_wrapper,
         run_config=run_config,
         tool_output_committer=_commit_tool_output,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
     )
 
     for interruption in _collect_tool_interruptions(
@@ -2621,7 +2712,15 @@ async def resolve_interrupted_turn(
     ):
         _add_pending_interruption(interruption)
 
+    # Planning used the complete checkpoint to skip completed calls. Move recovered
+    # outputs into this turn's delta so normal filtering, persistence and events own them.
+    recovered_ids = {id(item) for item in recovered_outputs}
+    original_pre_step_items = [
+        item for item in original_pre_step_items if id(item) not in recovered_ids
+    ]
     new_items, append_if_new = _make_unique_item_appender(original_pre_step_items)
+    for item in recovered_outputs:
+        append_if_new(item)
 
     function_result_items = _build_tool_result_items(
         function_results=function_results,
@@ -2668,12 +2767,29 @@ async def resolve_interrupted_turn(
 
     def _checkpoint_new_items() -> None:
         if run_state is not None:
-            run_state._generated_items = [*original_pre_step_items, *new_items]
+            run_state._generated_items = order_current_turn_tool_outputs(
+                [*original_pre_step_items, *new_items],
+                start=generated_output_start,
+                call_positions=call_positions,
+                published_items=(
+                    run_state._session_items[session_output_start:]
+                    if session_output_start is not None
+                    else ()
+                ),
+            )
+            # A retry skips checkpointed results, including hosted approval responses.
+            # Retain them in the withheld batch before later callbacks can fail.
+            extend_held_session_write(
+                run_state,
+                run_items=new_items,
+                reasoning_item_id_policy=run_state._reasoning_item_id_policy,
+            )
         _register_tool_call_items(context_wrapper, new_items)
 
     _checkpoint_new_items()
 
     def _commit_missing_state(result: SingleStepResult) -> SingleStepResult:
+        result.has_recovered_tool_outputs = bool(recovered_outputs)
         _checkpoint_new_items()
         if missing_function_call_ids:
             processed_response.functions = [
@@ -2683,6 +2799,8 @@ async def resolve_interrupted_turn(
             ]
         for call in missing_state_calls:
             _drop_stable_nested_result(call)
+        if run_state is not None and committed_tool_outputs and not response_boundary.proven:
+            run_state._terminal_unrecoverable = False
         return result
 
     processed_response.interruptions = pending_interruptions

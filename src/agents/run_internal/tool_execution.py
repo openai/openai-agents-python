@@ -1558,6 +1558,8 @@ class _FunctionToolBatchExecutor:
         isolate_parallel_failures: bool | None,
         sibling_category_failure: asyncio.Event | None,
         tool_output_committer: Callable[[RunItem], None] | None,
+        tool_input_guardrail_results: list[ToolInputGuardrailResult] | None,
+        tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None,
     ) -> None:
         self.execution_agent = bindings.execution_agent
         self.public_agent = bindings.public_agent
@@ -1570,8 +1572,12 @@ class _FunctionToolBatchExecutor:
         )
         self.sibling_category_failure = sibling_category_failure
         self.tool_output_committer = tool_output_committer
-        self.tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
-        self.tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
+        self.tool_input_guardrail_results = (
+            tool_input_guardrail_results if tool_input_guardrail_results is not None else []
+        )
+        self.tool_output_guardrail_results = (
+            tool_output_guardrail_results if tool_output_guardrail_results is not None else []
+        )
         self.tool_state_scope_id = get_agent_tool_state_scope(context_wrapper)
         self.task_states: dict[asyncio.Task[Any], _FunctionToolTaskState] = {}
         self.teardown_cancelled_tasks: set[asyncio.Task[Any]] = set()
@@ -2337,6 +2343,8 @@ async def execute_function_tool_calls(
     isolate_parallel_failures: bool | None = None,
     sibling_category_failure: asyncio.Event | None = None,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
 ) -> tuple[
     list[FunctionToolResult], list[ToolInputGuardrailResult], list[ToolOutputGuardrailResult]
 ]:
@@ -2350,6 +2358,8 @@ async def execute_function_tool_calls(
         isolate_parallel_failures=isolate_parallel_failures,
         sibling_category_failure=sibling_category_failure,
         tool_output_committer=tool_output_committer,
+        tool_input_guardrail_results=tool_input_guardrail_results,
+        tool_output_guardrail_results=tool_output_guardrail_results,
     ).execute()
 
 
@@ -2504,6 +2514,12 @@ async def execute_computer_actions(
                     )
                 else:
                     raise UserError("Computer tool safety check was not acknowledged")
+        elif action.tool_call.pending_safety_checks:
+            logger.warning(
+                "Computer call has pending safety checks, but no on_safety_check handler is "
+                "configured. The action will proceed without acknowledging the checks. "
+                "Configure ComputerTool.on_safety_check to review or reject them."
+            )
 
         results.append(
             await ComputerAction.execute(

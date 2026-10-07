@@ -6,6 +6,7 @@ import pytest
 from agents import Agent, RunContextWrapper, Runner, RunState, UserError, handoff
 from agents.decorators import tool
 from agents.items import ToolCallItem, ToolCallOutputItem
+from agents.run_state import CURRENT_SCHEMA_VERSION
 from agents.testing import ScriptedModel
 from agents.tool import ToolOrigin, ToolOriginType
 
@@ -139,7 +140,7 @@ async def test_serialized_mcp_approval_preserves_recipient(streaming: bool, list
     state.approve(first.interruptions[0])
     snapshot = state.to_string()
     payload = json.loads(snapshot)
-    assert payload["$schemaVersion"] == "1.18"
+    assert payload["$schemaVersion"] == CURRENT_SCHEMA_VERSION
     assert payload["last_processed_response"]["mcp_tool_bindings"][
         first.interruptions[0].raw_item.call_id
     ] == [
@@ -257,8 +258,13 @@ async def test_mcp_resume_rejects_different_raw_tool_on_same_server():
     assert server.tool_calls == []
 
 
+def _schema_tuple(schema_version: str) -> tuple[int, int]:
+    major, minor = schema_version.split(".", maxsplit=1)
+    return int(major), int(minor)
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("schema_version", ["1.14", "1.17", "1.18"])
+@pytest.mark.parametrize("schema_version", ["1.14", "1.17", "1.18", "1.19"])
 async def test_completed_mcp_sibling_does_not_block_function_approval(schema_version: str):
     function_calls: list[str] = []
 
@@ -289,11 +295,11 @@ async def test_completed_mcp_sibling_does_not_block_function_approval(schema_ver
     state = result.to_state()
     state.approve(result.interruptions[0])
     snapshot = state.to_json()
-    if schema_version != "1.18":
+    if _schema_tuple(schema_version) < (1, 18):
         for entry in snapshot["context"].pop("function_tool_approvals", []):
             snapshot["context"]["approvals"][entry["tool_key"]] = entry["decision"]
     snapshot["$schemaVersion"] = schema_version
-    if schema_version != "1.18":
+    if _schema_tuple(schema_version) < (1, 18):
         snapshot["last_processed_response"].pop("mcp_tool_bindings", None)
     if schema_version == "1.14":
         snapshot["context"].pop("tool_invocations", None)

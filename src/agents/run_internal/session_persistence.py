@@ -10,16 +10,18 @@ import copy
 import hashlib
 import inspect
 import json
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Sequence
 from typing import Any, cast
 
 from .. import _debug
+from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..exceptions import UserError
 from ..items import (
     HandoffOutputItem,
     InputItem,
     ItemHelpers,
+    MCPApprovalResponseItem,
     ModelResponse,
     RunItem,
     ToolCallOutputItem,
@@ -41,8 +43,10 @@ from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..memory.session import _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
-from ..run_state import RunState
+from ..run_state import RunState, _PendingSessionWrite
+from .blocked_output import _current_response_boundary, _identity_sequence_start
 from .items import (
+    _TOOL_CALL_TO_OUTPUT_TYPE,
     NestedHistoryOwnedItem,
     NestedHistoryOwnedItemRef,
     ReasoningItemIdPolicy,
@@ -56,6 +60,7 @@ from .items import (
     fingerprint_input_item,
     nested_history_run_item_occurrence_key,
     normalize_input_items_for_api,
+    order_current_turn_tool_outputs,
     reconcile_nested_history_owned_input_after_rewrite,
     run_item_to_input_item,
     strip_internal_input_item_metadata,
@@ -68,6 +73,7 @@ from .run_steps import (
     ProcessedResponse,
     SingleStepResult,
 )
+from .tool_execution import extract_tool_call_id
 
 __all__ = [
     "admit_pending_input",
@@ -80,6 +86,10 @@ __all__ = [
     "resumed_turn_items",
     "save_result_to_session",
     "save_resumed_turn_items",
+    "defer_interrupted_session_write",
+    "extend_held_session_write",
+    "take_held_session_write",
+    "persist_resumed_turn",
     "resume_pending_session_write",
     "update_run_state_after_resume",
     "rewind_session_items",
@@ -88,6 +98,15 @@ __all__ = [
 
 
 _SESSION_LIMIT_UNSET = object()
+
+# Serialized item types produced locally as the continuation of a model response: the
+# output kinds of the canonical call-to-output map, plus the hosted MCP approval
+# response, which is the locally produced half of its approval pair. Compaction for
+# the response that carried the request must be deferred while any of these still
+# needs to be associated with that response chain.
+_LOCAL_CONTINUATION_OUTPUT_TYPES = frozenset(_TOOL_CALL_TO_OUTPUT_TYPE.values()) | {
+    "mcp_approval_response"
+}
 
 
 def prepare_compaction_model_input(
@@ -603,11 +622,36 @@ def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
     return list(items)
 
 
-def resumed_turn_items(turn_result: SingleStepResult) -> tuple[list[RunItem], list[RunItem]]:
-    """Return generated and session items for a resumed turn."""
+def resumed_turn_items(
+    turn_result: SingleStepResult, session_items: list[RunItem], run_state: RunState
+) -> tuple[list[RunItem], list[RunItem], list[RunItem]]:
+    """Order this attempt's pending outputs and preserve previously published history."""
+    boundary = _current_response_boundary((), run_state._last_processed_response, run_state)
+    call_positions: dict[str, int] = {}
+    for index, output in enumerate(turn_result.model_response.output):
+        if (call_id := extract_tool_call_id(output)) is not None:
+            call_positions.setdefault(call_id, index)
     generated_items = list(turn_result.pre_step_items) + list(turn_result.new_step_items)
-    turn_session_items = session_items_for_turn(turn_result)
-    return generated_items, turn_session_items
+    # A handoff may filter model history, so locate its remaining response anchors again.
+    generated_output_start = _identity_sequence_start(generated_items, boundary.processed_items)
+    session_output_start = boundary.session_start
+    if generated_output_start is not None:
+        generated_output_start += len(boundary.processed_items)
+    if session_output_start is not None:
+        session_output_start += len(boundary.processed_items)
+    generated_items = order_current_turn_tool_outputs(
+        generated_items,
+        start=generated_output_start,
+        call_positions=call_positions,
+        published_items=(
+            session_items[session_output_start:] if session_output_start is not None else ()
+        ),
+    )
+    turn_session_items = order_current_turn_tool_outputs(
+        session_items_for_turn(turn_result), start=0, call_positions=call_positions
+    )
+    session_items = [*session_items, *turn_session_items]
+    return generated_items, session_items, turn_session_items
 
 
 def update_run_state_after_resume(
@@ -707,13 +751,22 @@ async def save_result_to_session(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     resumed_write_state: RunState | None = None,
+    settling_held_batch: bool = False,
 ) -> int:
     """
     Persist a turn to the session store, keeping track of what was already saved so retries
     during streaming do not duplicate tool outputs or inputs.
 
+    ``settling_held_batch`` marks the calls that carry a withheld batch through
+    ``original_input``; only those look for local tool outputs in that slot, because on
+    an ordinary save the same slot holds the caller's own input. Those calls also count
+    the batch items this append actually wrote, which is not the batch's raw length: a
+    resolved turn re-delivers the outputs the batch already folded in and they dedup
+    away here.
+
     Returns:
-        The number of new run items persisted for this call.
+        The number of new run items persisted for this call, plus the settled batch
+        items when ``settling_held_batch`` is set.
     """
     already_persisted = run_state._current_turn_persisted_item_count if run_state is not None else 0
 
@@ -804,8 +857,13 @@ async def save_result_to_session(
         return saved_run_items_count
 
     has_local_tool_outputs = any(
-        isinstance(item, ToolCallOutputItem | HandoffOutputItem) for item in new_items
+        isinstance(item, ToolCallOutputItem | HandoffOutputItem | MCPApprovalResponseItem)
+        for item in new_items
+    ) or (
+        settling_held_batch
+        and any(item.get("type") in _LOCAL_CONTINUATION_OUTPUT_TYPES for item in items_to_save)
     )
+    settled_batch_items = len(items_to_save) - saved_run_items_count if settling_held_batch else 0
 
     if resumed_write_state is not None:
         if resumed_write_state._pending_session_write is not None:
@@ -815,7 +873,9 @@ async def save_result_to_session(
             "items": copy.deepcopy(items_to_save),
             "before": None,
             "persisted_count": (
-                resumed_write_state._current_turn_persisted_item_count + saved_run_items_count
+                resumed_write_state._current_turn_persisted_item_count
+                + saved_run_items_count
+                + settled_batch_items
             ),
             "response_id": response_id,
             "store": store,
@@ -850,7 +910,7 @@ async def save_result_to_session(
             wrapper=compaction_wrapper,
         )
 
-    return saved_run_items_count
+    return saved_run_items_count + settled_batch_items
 
 
 async def save_resumed_turn_items(
@@ -863,27 +923,487 @@ async def save_resumed_turn_items(
     store: bool | None = None,
     wrapper: RunContextWrapper[Any] | None = None,
     run_state: RunState | None = None,
+    held_write: _PendingSessionWrite | None = None,
+    claim_held: bool = False,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
 ) -> int:
-    """Persist resumed turn items and return the updated persisted count."""
-    if session is None or not items:
+    """Persist resumed turn items and return the updated persisted count.
+
+    ``held_write`` carries a claimed held batch (see ``take_held_session_write``) into
+    the same append as the resolved turn's items, ahead of them. One ordered write
+    keeps the interrupted ``function_call`` before its output and lets the whole batch
+    register as the one pending append with digest-based crash recovery; settling the
+    batch separately would either trip the single-slot rule or advance the persisted
+    count and slice the resolved items out of their own save.
+    """
+    if session is None:
         return persisted_count
+    if claim_held:
+        held_write = take_held_session_write(run_state)
+    settling_held = held_write is not None
+    held_input = held_session_items_for_save(
+        held_write,
+        run_state,
+        items,
+        handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+    )
+    if session is None or (not items and not held_input):
+        return persisted_count
+    if held_input:
+        held_input = _held_items_safe_to_settle(
+            held_input,
+            items,
+            reasoning_item_id_policy,
+            pending_call_ids=_pending_approval_call_ids(run_state),
+        )
     saved_count = await save_result_to_session(
         session,
-        [],
+        list(held_input) if held_input else [],
         list(items),
         None,
         response_id=response_id,
         reasoning_item_id_policy=reasoning_item_id_policy,
         store=store,
         wrapper=wrapper,
+        settling_held_batch=settling_held,
         resumed_write_state=(
             run_state
             if run_state is not None
-            and isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+            and (
+                isinstance(run_state._current_step, NextStepRunAgain | NextStepInterruption)
+                # A settling held batch always registers, so a crash inside the append
+                # fails closed with the batch recorded instead of silently losing the
+                # only copy of an approved tool's call and output.
+                or settling_held
+            )
             else None
         ),
     )
+    # Settled held items are this turn's persisted items too. Leaving them uncounted
+    # would let a later gate-enabled resume pass the resumed-safety validation with a
+    # zero count and re-append the stored calls through the final sweep; counting them
+    # makes that resume fail fast on the existing persisted-items refusal instead. The
+    # append reports them itself, because the raw batch length overcounts whatever the
+    # dedup dropped and this count slices a later save of the same turn.
     return persisted_count + saved_count
+
+
+def resumed_response_store(
+    run_state: RunState | None, response_id: str | None, store: bool | None
+) -> bool | None:
+    """Resolve response-owned storage before settlement or redaction claims its batch."""
+    pending = run_state._pending_session_write if run_state is not None else None
+    if pending is not None and pending.get("held") and pending.get("response_id") == response_id:
+        return pending.get("store", store)
+    return store
+
+
+async def persist_resumed_turn(
+    *,
+    run_state: RunState | None,
+    session: Session | None,
+    items: list[RunItem],
+    persisted_count: int,
+    response_id: str | None,
+    defer_settlement: bool = False,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    store: bool | None = None,
+    wrapper: RunContextWrapper[Any] | None = None,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
+    current_response_items: Sequence[RunItem] = (),
+) -> int:
+    """Fold, defer, or settle a resumed turn's authoritative Session view.
+
+    Detached turns retain the view for reattachment. A gated re-interruption keeps
+    deferring its write. Every other attached exit settles through the canonical
+    append path, even when a filter emptied the turn: earlier accepted history can
+    still remain in the held batch.
+    """
+    if handoff_input_filtered:
+        # Only survivors of this response can retain its held payload. An earlier
+        # response may contain identical text, including when a filter copies items.
+        current_keys = {
+            nested_history_run_item_occurrence_key(item) for item in current_response_items
+        } - {None}
+        filtered_context_items = [
+            item
+            for item in filtered_context_items or ()
+            if nested_history_run_item_occurrence_key(item) in current_keys
+        ]
+    if session is None:
+        extend_held_session_write(
+            run_state,
+            run_items=items,
+            run_items_are_the_session_view=True,
+            handoff_input_filtered=handoff_input_filtered,
+            filtered_context_items=filtered_context_items,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+        )
+        return persisted_count
+    if defer_settlement and run_state is not None:
+        defer_interrupted_session_write(
+            run_state,
+            session,
+            run_items=items,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+            response_id=response_id,
+            store=store,
+        )
+        return persisted_count
+    return await save_resumed_turn_items(
+        run_state=run_state,
+        session=session,
+        items=items,
+        claim_held=True,
+        handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
+        persisted_count=persisted_count,
+        response_id=response_id,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+        store=store,
+        wrapper=wrapper,
+    )
+
+
+def _held_pair_identity(item: TResponseInputItem | None) -> tuple[str, str] | None:
+    """Return the pairing key a held request kind must find an output for.
+
+    The tool-call families come from the canonical ``_TOOL_CALL_TO_OUTPUT_TYPE`` map
+    in ``run_internal.items``, which owns the call-to-output pairing rule; hosted MCP
+    approvals pair outside that map, keyed by the canonical request identity with the
+    response pointing back via ``approval_request_id``.
+    """
+    if not isinstance(item, dict):
+        return None
+    item_type = item.get("type")
+    if item_type == "mcp_approval_request":
+        identity = get_hosted_mcp_approval_request_identity(item)
+        request_id = identity.request_id if identity is not None else None
+        return (item_type, request_id) if request_id else None
+    if item_type not in _TOOL_CALL_TO_OUTPUT_TYPE:
+        return None
+    call_id = item.get("call_id")
+    return (item_type, call_id) if isinstance(call_id, str) and call_id else None
+
+
+def _pending_approval_call_ids(run_state: RunState | None) -> set[str]:
+    """Return the ids still awaiting approval on the state's current step."""
+    if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
+        return set()
+    ids: set[str] = set()
+    for approval in run_state._current_step.interruptions:
+        raw = getattr(approval, "raw_item", None)
+        for field in ("call_id", "id"):
+            value = raw.get(field) if isinstance(raw, dict) else getattr(raw, field, None)
+            if isinstance(value, str) and value:
+                ids.add(value)
+    return ids
+
+
+def _held_items_safe_to_settle(
+    held_items: Sequence[TResponseInputItem],
+    run_items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None,
+    *,
+    pending_call_ids: set[str] | None = None,
+) -> list[TResponseInputItem]:
+    """Drop held calls whose outputs did not survive into the settling batch.
+
+    A handoff ``input_filter`` may drop some resolved outputs while keeping others, so
+    the settling batch being non-empty does not make it safe: a held ``function_call``
+    settled without its output poisons the Session exactly as the orphaned output does.
+    Pairing is the safety predicate, and for outputs folded on the current turn the
+    pairing evidence comes from the resolved session view, not from the batch: the
+    claim (``take_held_session_write``) and the detached merge drop those copies
+    before this guard runs, so here a dropped output takes its call with it and a
+    kept output keeps its call. Outputs folded on earlier turns are carried history
+    and settle under the plain pairing rules, exactly as the eager path cannot
+    unpersist earlier turns.
+
+    ``pending_call_ids`` names calls whose approvals are still open on the current
+    step: their outputs are missing because they have not run yet, not because a
+    filter removed them, so they settle now and pair up at a later exit, exactly as a
+    non-deferred park persists a call before its output exists.
+    """
+    pending_call_ids = pending_call_ids or set()
+    working: list[TResponseInputItem] = list(held_items)
+    # A call whose approval is still open is exempt from the orphan prune; the prune
+    # only understands outputs, so the exemption rides in as a placeholder output that
+    # is discarded with the rest of the context below.
+    for item in held_items:
+        key = _held_pair_identity(item)
+        if key is not None and key[1] in pending_call_ids and key[0] != "mcp_approval_request":
+            working.append(
+                cast(
+                    TResponseInputItem,
+                    {"type": _TOOL_CALL_TO_OUTPUT_TYPE[key[0]], "call_id": key[1]},
+                )
+            )
+    for run_item in run_items:
+        converted = run_item_to_input_item(run_item, reasoning_item_id_policy)
+        if converted is not None:
+            working.append(converted)
+    pruned = drop_orphan_function_calls(working)
+    surviving = {id(item) for item in pruned}
+
+    # Hosted MCP approvals pair outside the canonical map: a request settles only with
+    # its response present or its approval still open.
+    mcp_response_ids = {
+        item.get("approval_request_id")
+        for item in working
+        if isinstance(item, dict) and item.get("type") == "mcp_approval_response"
+    } | pending_call_ids
+
+    kept: list[TResponseInputItem] = []
+    for item in held_items:
+        if isinstance(item, dict) and item.get("type") == "mcp_approval_request":
+            key = _held_pair_identity(item)
+            if key is not None and key[1] not in mcp_response_ids:
+                continue
+            kept.append(item)
+        elif id(item) in surviving:
+            kept.append(item)
+    return kept
+
+
+def _held_current_response_start(pending: _PendingSessionWrite, current_turn: int) -> int:
+    boundary = pending.get("current_response")
+    if boundary is None or boundary["turn"] != current_turn:
+        return len(pending["items"])
+    return boundary["start"]
+
+
+def _held_view_fingerprint(item: TResponseInputItem) -> str:
+    # Compare the persistence view on both sides. A detached resume still carries
+    # provider IDs that a Conversations-backed park already removed.
+    return _fingerprint_or_repr(
+        _sanitize_openai_conversation_item(item), ignore_ids_for_matching=True
+    )
+
+
+def held_session_items_for_save(
+    pending: _PendingSessionWrite | None,
+    run_state: RunState | None,
+    items: Sequence[RunItem],
+    *,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+) -> list[TResponseInputItem]:
+    """Reconcile only the current response; earlier held turns are already accepted.
+
+    The park records the response boundary before any approval executes. It therefore
+    covers rejected approvals and outputs completed before the park as well as resumed
+    tool outputs. A guarded final sweep replaces this suffix, not the whole record.
+    """
+    if pending is None:
+        return []
+    current_turn = run_state._current_turn if run_state is not None else 0
+    start = _held_current_response_start(pending, current_turn)
+    prior, current = pending["items"][:start], pending["items"][start:]
+    policy = pending.get("reasoning_item_id_policy", reasoning_item_id_policy)
+    converted = [
+        value for item in items if (value := run_item_to_input_item(item, policy)) is not None
+    ]
+    current_requests = {key for item in current if (key := _held_pair_identity(item)) is not None}
+    final_requests = {key for item in converted if (key := _held_pair_identity(item)) is not None}
+    if current_requests and current_requests <= final_requests:
+        return list(prior)
+    if handoff_input_filtered:
+        view = [
+            *converted,
+            *[
+                value
+                for item in filtered_context_items or ()
+                if (value := run_item_to_input_item(item, policy)) is not None
+            ],
+        ]
+        retained = Counter(_held_view_fingerprint(item) for item in view)
+        kept = []
+        for item in current:
+            if _held_pair_identity(item) is not None:
+                kept.append(item)
+                continue
+            fingerprint = _held_view_fingerprint(item)
+            if retained[fingerprint]:
+                kept.append(item)
+                retained[fingerprint] -= 1
+        current = kept
+    return [*prior, *current]
+
+
+def defer_interrupted_session_write(
+    run_state: RunState,
+    session: Session | None,
+    *,
+    run_items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    response_id: str | None = None,
+    store: bool | None = None,
+    run_items_are_the_session_view: bool = False,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
+) -> None:
+    """Register the interruption's withheld batch as a held pending Session write.
+
+    Registering is not writing: this touches only the checkpoint, never the Session,
+    so the output-guardrail persistence gate stays intact. The batch settles, extends
+    or is discarded only at a gate-legal point of a later resume. A standing held
+    record is replaced by the superset of both batches, so a repeated park (a partial
+    approval interrupting again) keeps one canonical batch. A standing record that is
+    not held means a resumed append is mid-flight, which the existing single-slot rule
+    treats as a caller bug.
+
+    Items are converted and deduplicated with the same helpers the real save uses, and
+    the count is taken over the converted items: approval placeholders drop out in
+    conversion, so counting the raw run items would corrupt the persisted count. A
+    detached re-park has no Session and takes its ``session_id`` from the standing
+    declaration.
+
+    The batch carries only the withheld response: run input is never registered here,
+    because the gate withholds model output, not the user's accepted input, and a
+    tripwire discards the batch without inspecting it.
+    """
+    pending = run_state._pending_session_write
+    if pending is not None and not pending.get("held"):
+        raise UserError("Resolve the pending Session write before saving another batch")
+
+    # The normal persistence path forces the reasoning-id policy to ``None`` for a
+    # Conversations backend so a server-identified reasoning item stays persistable;
+    # the registration conversion must match or the sanitization later drops it. A
+    # standing record owns the policy its items were converted under, so a re-park
+    # folds new items under the same conversion instead of the resuming run's own.
+    if isinstance(session, OpenAIConversationsSession):
+        reasoning_item_id_policy = None
+    if pending is not None and "reasoning_item_id_policy" in pending:
+        reasoning_item_id_policy = pending["reasoning_item_id_policy"]
+    converted_run_items: list[TResponseInputItem] = []
+    for run_item in run_items:
+        as_input = run_item_to_input_item(run_item, reasoning_item_id_policy)
+        if as_input is None:
+            continue
+        converted_run_items.append(ensure_input_item_format(as_input))
+
+    base_items = list(pending["items"]) if pending is not None else []
+    current_start = (
+        _held_current_response_start(pending, run_state._current_turn) if pending is not None else 0
+    )
+    if run_items_are_the_session_view and handoff_input_filtered:
+        base_items = held_session_items_for_save(
+            pending,
+            run_state,
+            run_items,
+            handoff_input_filtered=True,
+            filtered_context_items=filtered_context_items,
+            reasoning_item_id_policy=reasoning_item_id_policy,
+        )
+    prior = base_items[:current_start]
+    current = deduplicate_input_items_preferring_latest(
+        base_items[current_start:] + converted_run_items
+    )
+    if isinstance(session, OpenAIConversationsSession):
+        current = [_sanitize_openai_conversation_item(item) for item in current]
+        current = [item for item in current if not _is_unpersistable_for_openai_conversation(item)]
+    items = prior + current
+    if not items:
+        return
+
+    session_id = (
+        session.session_id
+        if session is not None
+        else (pending["session_id"] if pending is not None else None)
+    )
+    if session_id is None:
+        return
+    # Storage belongs to the response, not the later run resolving approvals.
+    # A fresh parked response advances the frontier; extensions retain its setting.
+    if (
+        pending is not None
+        and pending.get("current_response", {}).get("turn") == run_state._current_turn
+    ):
+        response_id = pending.get("response_id", response_id)
+        store = pending.get("store", store)
+    record: _PendingSessionWrite = {
+        "session_id": session_id,
+        "items": copy.deepcopy(items),
+        "before": None,
+        "persisted_count": (
+            run_state._current_turn_persisted_item_count + len(converted_run_items)
+        ),
+        "held": True,
+        "response_id": response_id,
+        "store": store,
+        "reasoning_item_id_policy": reasoning_item_id_policy,
+    }
+    record["current_response"] = {"turn": run_state._current_turn, "start": len(prior)}
+    run_state._pending_session_write = record
+
+
+def extend_held_session_write(
+    run_state: RunState | None,
+    *,
+    run_items: Sequence[RunItem],
+    reasoning_item_id_policy: ReasoningItemIdPolicy | None = None,
+    response_id: str | None = None,
+    store: bool | None = None,
+    run_items_are_the_session_view: bool = False,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: Sequence[RunItem] | None = None,
+) -> None:
+    """Fold a detached exit's resolved items into the standing held batch.
+
+    With no Session attached the resolved turn's save is a no-op, so the executed
+    tool output exists only in this process; folding it into the held batch lets the
+    reattaching resume settle call and output together. Does nothing when no held
+    batch stands. The fold converts under the batch's registration policy, not the
+    caller's: a detached run cannot see the original backend, and a server reasoning
+    id stripped here could not be restored at the settle.
+    """
+    if run_state is None or run_state._pending_session_write is None:
+        return
+    if not run_state._pending_session_write.get("held"):
+        return
+    defer_interrupted_session_write(
+        run_state,
+        None,
+        run_items=run_items,
+        reasoning_item_id_policy=reasoning_item_id_policy,
+        response_id=response_id,
+        store=store,
+        run_items_are_the_session_view=run_items_are_the_session_view,
+        handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
+    )
+
+
+def discard_held_current_response(run_state: RunState | None) -> None:
+    """Remove blocked current-response items while retaining accepted prior turns."""
+    if run_state is None:
+        return
+    pending = run_state._pending_session_write
+    if pending is None or not pending.get("held"):
+        return
+    start = _held_current_response_start(pending, run_state._current_turn)
+    if start == 0:
+        run_state._pending_session_write = None
+        return
+    pending["items"] = pending["items"][:start]
+    pending["current_response"] = {"turn": run_state._current_turn, "start": start}
+
+
+def take_held_session_write(run_state: RunState | None) -> _PendingSessionWrite | None:
+    """Claim the withheld record, retaining its response boundary until settlement."""
+    if run_state is None:
+        return None
+    pending = run_state._pending_session_write
+    if pending is None or not pending.get("held"):
+        return None
+    run_state._pending_session_write = None
+    return pending
 
 
 async def resume_pending_session_write(
@@ -900,6 +1420,53 @@ async def resume_pending_session_write(
     """
     pending = run_state._pending_session_write
     if pending is None:
+        return
+    if pending.get("held"):
+        # A held batch is the write the interruption park withheld under the
+        # output-guardrail gate, and resume entry is not a gate-legal settle point, so
+        # the declaration rides the checkpoint untouched; in particular a detached
+        # resume must not fail the boot over a batch it cannot settle. An attached
+        # Session must still be the declared one, and must fail here at boot: letting
+        # the run proceed would execute the approved tool and settle the batch into
+        # the wrong conversation. The exception to riding is a run-again checkpoint:
+        # the parked response's outputs already went back to the model, which only
+        # happens after the gate stopped applying to that response, so the batch
+        # settles here, before the next model call. This is also the only settle
+        # point such a checkpoint will ever reach, because the run-again turn's saves
+        # never arm ``resumed_write_state``.
+        if session is not None and session.session_id != pending["session_id"]:
+            raise UserError(
+                "Resume the pending Session write with the original Session and session ID"
+            )
+        if session is None or not isinstance(run_state._current_step, NextStepRunAgain):
+            return
+        # The entry settle offers the batch with no accompanying resolved items, so the
+        # pairing contract applies against the batch alone: a call whose output a
+        # detached handoff filter dropped must not land dangling here either.
+        settling = _held_items_safe_to_settle(pending["items"], [], None)
+        response_id = pending.get("response_id")
+        settle_store = pending.get("store")
+        run_state._pending_session_write = None
+        if not settling:
+            return
+        # Settle through the canonical persistence path rather than appending behind
+        # its back: it owns the Conversations sanitization, the ordered dedup, the
+        # pending-write registration that makes a failed append recoverable, and the
+        # compaction bookkeeping for the response this batch belongs to. The slot is
+        # released first, so the re-entry this causes (``save_result_to_session``
+        # registers the batch and calls back into here) sees an ordinary pending write
+        # and takes the append-and-reconcile path below, never this branch again.
+        await save_result_to_session(
+            session,
+            settling,
+            [],
+            run_state,
+            response_id=response_id,
+            store=settle_store,
+            wrapper=wrapper,
+            settling_held_batch=True,
+            resumed_write_state=run_state,
+        )
         return
     if run_state._session_write_in_progress:
         raise UserError("The pending Session write is already in progress for this RunState")

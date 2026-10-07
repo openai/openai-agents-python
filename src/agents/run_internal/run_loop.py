@@ -145,6 +145,7 @@ from .items import (
     copy_input_items,
     deduplicate_input_items_preferring_latest,
     ensure_input_item_format,
+    ensure_nested_history_run_item_occurrence_key,
     normalize_resumed_input,
     prepare_model_input_items,
     reconcile_nested_history_owned_input_after_rewrite,
@@ -177,17 +178,23 @@ from .session_persistence import (
     _session_get_items,
     admit_pending_input,
     commit_server_pending_input,
+    defer_interrupted_session_write,
+    discard_held_current_response,
+    extend_held_session_write,
+    persist_resumed_turn,
     persist_session_items_for_guardrail_trip,
     prepare_compaction_model_input,
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     record_compaction_model_response,
     resume_pending_session_write,
+    resumed_response_store,
     resumed_turn_items,
     rewind_session_items,
     save_result_to_session,
     save_resumed_turn_items,
     session_items_for_turn,
+    take_held_session_write,
     update_run_state_after_resume,
 )
 from .streaming import stream_step_items_to_queue, stream_step_result_to_queue
@@ -353,6 +360,8 @@ def _complete_stream_interruption(
     interruptions: list[ToolApprovalItem],
     processed_response: ProcessedResponse | None,
 ) -> None:
+    if processed_response is not None:
+        processed_response.tool_output_guardrail_result_start = None
     streamed_result.interruptions = interruptions
     streamed_result._last_processed_response = processed_response
     streamed_result.is_complete = True
@@ -381,6 +390,40 @@ def _publish_streamed_result_agent(
     streamed_result._current_agent_output_schema = get_output_schema(agent)
 
 
+def _publish_resumed_stream_turn(
+    streamed_result: RunResultStreaming,
+    run_state: RunState[Any],
+    turn_result: SingleStepResult,
+    generated_items: list[RunItem],
+    session_items: list[RunItem],
+) -> None:
+    input_before_turn_rewrite = streamed_result.input
+    streamed_result.input = turn_result.original_input
+    streamed_result._original_input = copy_input_items(turn_result.original_input)
+    streamed_result.new_items = session_items
+    streamed_result._model_input_items = generated_items
+    if turn_result.nested_history_owned_items is not None:
+        owned_refs = reconcile_nested_history_owned_session_item_refs(
+            streamed_result.new_items,
+            streamed_result._nested_history_owned_session_item_refs,
+            input_before_turn_rewrite,
+            turn_result.original_input,
+            turn_result.nested_history_owned_items,
+        )
+        streamed_result._nested_history_owned_session_item_refs = owned_refs
+        run_state._nested_history_owned_session_item_refs = list(owned_refs)
+    streamed_result._replay_from_model_input_items = generated_items != streamed_result.new_items
+    update_run_state_after_resume(
+        run_state,
+        turn_result=turn_result,
+        generated_items=generated_items,
+        session_items=streamed_result.new_items,
+    )
+    run_state._current_turn_persisted_item_count = (
+        streamed_result._current_turn_persisted_item_count
+    )
+
+
 async def _save_resumed_stream_items(
     *,
     session: Session | None,
@@ -390,17 +433,30 @@ async def _save_resumed_stream_items(
     items: list[RunItem],
     response_id: str | None,
     store: bool | None = None,
+    handoff_input_filtered: bool = False,
+    filtered_context_items: list[RunItem] | None = None,
 ) -> None:
     if not await _should_persist_stream_items(
         session=session,
         server_conversation_tracker=server_conversation_tracker,
         streamed_result=streamed_result,
     ):
+        if session is not None:
+            # Nothing of this run may persist (an input guardrail tripped), so the
+            # held batch must not outlive the run either; a detached run keeps it
+            # riding for the reattach instead.
+            take_held_session_write(run_state)
         return
     streamed_result._current_turn_persisted_item_count = await save_resumed_turn_items(
         run_state=run_state,
         session=session,
         items=items,
+        # This callback saves a completed resumed turn. A retry can finalize from
+        # checkpointed tool outputs without producing new items, so it must still
+        # settle any held history after the persistence and guardrail gates permit it.
+        claim_held=True,
+        handoff_input_filtered=handoff_input_filtered,
+        filtered_context_items=filtered_context_items,
         persisted_count=streamed_result._current_turn_persisted_item_count,
         response_id=response_id,
         reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
@@ -510,6 +566,8 @@ async def _finalize_streamed_final_output(
     response_id: str | None,
     store_setting: bool | None,
     on_persisted_after_guardrails: Callable[[bool], None] | None = None,
+    stream_items_after_guardrails: bool = False,
+    retry_on_guardrail_error: bool = False,
 ) -> None:
     output_guardrail_result_start = len(streamed_result.output_guardrail_results)
     redacted_persistence_error: BaseException | None = None
@@ -565,6 +623,9 @@ async def _finalize_streamed_final_output(
             owner_starts=owner_starts,
             blocked_message=blocked_message,
         )
+        # Only this response is blocked. Preserve accepted earlier held history
+        # for the same recoverable append as the sanitized current response.
+        discard_held_current_response(streamed_result._state)
         if retained_items:
             try:
                 await save_items(retained_items, response_id, store_setting)
@@ -584,6 +645,11 @@ async def _finalize_streamed_final_output(
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
         if guardrail_error_is_redacted:
             _detach_data_redacted_error_traceback(guardrail_error)
+        if retry_on_guardrail_error:
+            # A recovered callback output remains pending, including its held
+            # Session write, so a retry checks the same accepted output again.
+            del streamed_result.output_guardrail_results[output_guardrail_result_start:]
+            raise
         try:
             final_turn_items = _final_turn_items_for_persistence(
                 items,
@@ -656,6 +722,8 @@ async def _finalize_streamed_final_output(
     if streamed_result._state is not None:
         streamed_result._state._terminal_unrecoverable = False
 
+    if stream_items_after_guardrails:
+        stream_step_items_to_queue(items, streamed_result._event_queue)
     streamed_result.final_output = output
     if on_persisted_after_guardrails is not None:
         on_persisted_after_guardrails(True)
@@ -766,8 +834,19 @@ async def finalize_max_turns_handler_output(
     output_guardrail_results: list[OutputGuardrailResult],
     save_items_after_guardrails: Callable[[list[RunItem]], Awaitable[None]],
     include_in_history: bool,
+    run_state: RunState | None = None,
 ) -> tuple[Any, RunItem]:
-    """Validate and finalize one synthesized max-turn handler output."""
+    """Validate and finalize one synthesized max-turn handler output.
+
+    A max-turn handler ends the run, so a held Session write still standing here has
+    no later gate-legal exit to settle it: it is discarded, exactly as a detached
+    completion discards it, so the finished run's checkpoint stays loadable and both
+    runners report the same terminal state. The discard waits for the run to actually
+    end, which is either a completed finalization or a decided blocked outcome:
+    validation, the final-output hooks and the guardrails can all raise, and a run that
+    raises may still be retried or reattached, with the executed tool's call and output
+    reachable only through this batch.
+    """
     validated_output = validate_handler_final_output(agent, output)
     output_text = format_final_output_text(agent, validated_output)
     synthesized_item = create_message_output_item(agent, output_text)
@@ -784,6 +863,9 @@ async def finalize_max_turns_handler_output(
             output_guardrail_results,
         )
     except OutputGuardrailTripwireTriggered:
+        # A blocked outcome is decided and nothing of the withheld batch may reach the
+        # Session, exactly as every other tripwire path disposes of it.
+        take_held_session_write(run_state)
         raise
     except Exception as guardrail_error:
         guardrail_error_is_redacted = _is_error_data_redacted(guardrail_error)
@@ -800,6 +882,7 @@ async def finalize_max_turns_handler_output(
 
     if redacted_persistence_error is not None:
         raise redacted_persistence_error from None
+    take_held_session_write(run_state)
     return validated_output, synthesized_item
 
 
@@ -842,6 +925,7 @@ def _accumulate_tool_guardrail_results(
     *,
     accepted_input_results: list[ToolInputGuardrailResult],
     accepted_output_results: list[ToolOutputGuardrailResult],
+    publish_output_results: bool = True,
 ) -> None:
     """Carry a turn's tool guardrail results onto the streamed result.
 
@@ -851,9 +935,11 @@ def _accumulate_tool_guardrail_results(
     streamed_result.tool_input_guardrail_results = (
         streamed_result.tool_input_guardrail_results + turn_result.tool_input_guardrail_results
     )
-    streamed_result.tool_output_guardrail_results = (
-        streamed_result.tool_output_guardrail_results + turn_result.tool_output_guardrail_results
-    )
+    if publish_output_results:
+        streamed_result.tool_output_guardrail_results = (
+            streamed_result.tool_output_guardrail_results
+            + turn_result.tool_output_guardrail_results
+        )
     if isinstance(turn_result.next_step, NextStepRunAgain | NextStepHandoff):
         accepted_input_results.extend(turn_result.tool_input_guardrail_results)
         accepted_output_results.extend(turn_result.tool_output_guardrail_results)
@@ -1130,7 +1216,11 @@ async def start_streaming(
                 streamed_result._original_input_for_persistence = session_items_snapshot
 
         async def _save_resumed_items(
-            items: list[RunItem], response_id: str | None, store_setting: bool | None
+            items: list[RunItem],
+            response_id: str | None,
+            store_setting: bool | None,
+            handoff_input_filtered: bool = False,
+            filtered_context_items: list[RunItem] | None = None,
         ) -> None:
             await _save_resumed_stream_items(
                 session=session,
@@ -1138,9 +1228,40 @@ async def start_streaming(
                 streamed_result=streamed_result,
                 run_state=run_state,
                 items=items,
+                handoff_input_filtered=handoff_input_filtered,
+                filtered_context_items=filtered_context_items,
                 response_id=response_id,
                 store=store_setting,
             )
+
+        async def _persist_resumed_items(
+            turn_result: SingleStepResult, *, defer_settlement: bool = False
+        ) -> None:
+            if session is not None and not await _should_persist_stream_items(
+                session=session,
+                server_conversation_tracker=server_conversation_tracker,
+                streamed_result=streamed_result,
+            ):
+                take_held_session_write(run_state)
+                return
+            streamed_result._current_turn_persisted_item_count = await persist_resumed_turn(
+                run_state=run_state,
+                session=session,
+                items=turn_session_items,
+                defer_settlement=defer_settlement,
+                handoff_input_filtered=turn_result.handoff_input_filtered,
+                filtered_context_items=turn_result.pre_step_items,
+                current_response_items=resumed_response_boundary.items,
+                persisted_count=streamed_result._current_turn_persisted_item_count,
+                response_id=turn_result.model_response.response_id,
+                reasoning_item_id_policy=streamed_result._reasoning_item_id_policy,
+                store=store_setting,
+                wrapper=streamed_result.context_wrapper,
+            )
+            if run_state is not None:
+                run_state._current_turn_persisted_item_count = (
+                    streamed_result._current_turn_persisted_item_count
+                )
 
         async def _save_stream_items_with_count(
             items: list[RunItem], response_id: str | None, store_setting: bool | None
@@ -1321,35 +1442,68 @@ async def start_streaming(
                         run_state._last_processed_response,
                         run_state,
                     )
+                    for item in resumed_response_boundary.items:
+                        ensure_nested_history_run_item_occurrence_key(item)
+                    guardrail_result_start = (
+                        run_state._last_processed_response.tool_output_guardrail_result_start
+                    )
                     blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                         run_state_generated_items=resumed_response_boundary.generated_start,
                         run_state_session_items=resumed_response_boundary.session_start,
                         run_state_model_responses=len(run_state._model_responses) - 1,
-                        run_state_tool_output_guardrail_results=len(
-                            run_state._tool_output_guardrail_results
+                        run_state_tool_output_guardrail_results=(
+                            guardrail_result_start
+                            if guardrail_result_start is not None
+                            else len(run_state._tool_output_guardrail_results)
                         ),
                         streamed_new_items=resumed_response_boundary.session_start,
                         streamed_model_input_items=resumed_response_boundary.generated_start,
                         streamed_raw_responses=len(streamed_result.raw_responses) - 1,
-                        streamed_tool_output_guardrail_results=len(
-                            streamed_result.tool_output_guardrail_results
+                        streamed_tool_output_guardrail_results=(
+                            guardrail_result_start
+                            if guardrail_result_start is not None
+                            else len(streamed_result.tool_output_guardrail_results)
                         ),
                     )
 
-                    turn_result = await resolve_interrupted_turn(
-                        agent_span=current_span,
-                        bindings=current_bindings,
-                        original_input=run_state._original_input,
-                        original_pre_step_items=run_state._generated_items,
-                        new_response=last_model_response,
-                        processed_response=run_state._last_processed_response,
-                        hooks=hooks,
-                        context_wrapper=context_wrapper,
-                        run_config=run_config,
-                        server_manages_conversation=server_conversation_tracker is not None,
-                        run_state=run_state,
-                        error_handlers=error_handlers,
-                    )
+                    # The resolver can checkpoint outputs before callbacks finish.
+                    # Append this attempt's new items to its starting history only.
+                    base_session_items = list(run_state._session_items)
+                    try:
+                        turn_result = await resolve_interrupted_turn(
+                            agent_span=current_span,
+                            bindings=current_bindings,
+                            original_input=run_state._original_input,
+                            original_pre_step_items=run_state._generated_items,
+                            new_response=last_model_response,
+                            processed_response=run_state._last_processed_response,
+                            hooks=hooks,
+                            context_wrapper=context_wrapper,
+                            run_config=run_config,
+                            server_manages_conversation=server_conversation_tracker is not None,
+                            run_state=run_state,
+                            error_handlers=error_handlers,
+                        )
+                    except (Exception, asyncio.CancelledError) as exc:
+                        # Private resumable state follows the source checkpoint even when
+                        # a callback propagates a redacted error from a nested run.
+                        streamed_result._model_input_items = list(run_state._generated_items)
+                        streamed_result._last_processed_response = (
+                            run_state._last_processed_response
+                        )
+                        streamed_result._replay_from_model_input_items = (
+                            streamed_result._model_input_items != streamed_result.new_items
+                        )
+                        if not _is_error_data_redacted(exc):
+                            streamed_result.tool_input_guardrail_results = list(
+                                run_state._tool_input_guardrail_results
+                            )
+                            processed = run_state._last_processed_response
+                            result_start = processed.tool_output_guardrail_result_start
+                            streamed_result.tool_output_guardrail_results = list(
+                                run_state._tool_output_guardrail_results
+                            )[:result_start]
+                        raise
 
                     tool_use_tracker.record_processed_response(
                         current_agent, run_state._last_processed_response
@@ -1363,56 +1517,55 @@ async def start_streaming(
                         ),
                     )
 
-                    input_before_turn_rewrite = streamed_result.input
-                    streamed_result.input = turn_result.original_input
-                    streamed_result._original_input = copy_input_items(turn_result.original_input)
-                    generated_items, turn_session_items = resumed_turn_items(turn_result)
-                    base_session_items = (
-                        list(run_state._session_items) if run_state is not None else []
+                    generated_items, resumed_session_items, turn_session_items = resumed_turn_items(
+                        turn_result, base_session_items, run_state
                     )
-                    streamed_result._model_input_items = generated_items
-                    streamed_result.new_items = base_session_items + list(turn_session_items)
-                    if turn_result.nested_history_owned_items is not None:
-                        owned_refs = reconcile_nested_history_owned_session_item_refs(
-                            streamed_result.new_items,
-                            streamed_result._nested_history_owned_session_item_refs,
-                            input_before_turn_rewrite,
-                            turn_result.original_input,
-                            turn_result.nested_history_owned_items,
+                    retry_terminal_output = (
+                        isinstance(turn_result.next_step, NextStepFinalOutput)
+                        and turn_result.has_recovered_tool_outputs
+                    )
+                    if retry_terminal_output:
+                        # Keep approval anchors in the pending checkpoint. The
+                        # finalized history drops them and is published after allow.
+                        streamed_result._model_input_items = list(run_state._generated_items)
+                        streamed_result._replay_from_model_input_items = (
+                            streamed_result._model_input_items != streamed_result.new_items
                         )
-                        streamed_result._nested_history_owned_session_item_refs = owned_refs
-                        if run_state is not None:
-                            run_state._nested_history_owned_session_item_refs = list(owned_refs)
-                    streamed_result._replay_from_model_input_items = list(
-                        streamed_result._model_input_items
-                    ) != list(streamed_result.new_items)
-                    if run_state is not None:
-                        update_run_state_after_resume(
+                    else:
+                        _publish_resumed_stream_turn(
+                            streamed_result,
                             run_state,
-                            turn_result=turn_result,
-                            generated_items=generated_items,
-                            session_items=streamed_result.new_items,
-                        )
-                        run_state._current_turn_persisted_item_count = (
-                            streamed_result._current_turn_persisted_item_count
+                            turn_result,
+                            generated_items,
+                            resumed_session_items,
                         )
 
-                    stream_step_items_to_queue(
-                        list(turn_session_items), streamed_result._event_queue
+                    if not isinstance(turn_result.next_step, NextStepFinalOutput):
+                        if guardrail_result_start is not None:
+                            streamed_result.tool_output_guardrail_results.extend(
+                                accepted_tool_output_guardrail_results[guardrail_result_start:]
+                            )
+                        stream_step_items_to_queue(
+                            list(turn_session_items), streamed_result._event_queue
+                        )
+                    store_setting = resumed_response_store(
+                        run_state,
+                        turn_result.model_response.response_id,
+                        current_agent.model_settings.resolve(run_config.model_settings).store,
                     )
-                    store_setting = current_agent.model_settings.resolve(
-                        run_config.model_settings
-                    ).store
 
-                    # The non-streaming resume path extends its run-wide lists before finalizing
-                    # but skips a resumed turn that loops back to the model, so a guardrail that
-                    # re-runs for the same tool call on resume is not counted twice.
-                    if not isinstance(turn_result.next_step, NextStepRunAgain):
+                    if (
+                        not isinstance(turn_result.next_step, NextStepRunAgain)
+                        or turn_result.has_recovered_tool_outputs
+                    ):
                         _accumulate_tool_guardrail_results(
                             streamed_result,
                             turn_result,
                             accepted_input_results=accepted_tool_input_guardrail_results,
                             accepted_output_results=accepted_tool_output_guardrail_results,
+                            publish_output_results=not isinstance(
+                                turn_result.next_step, NextStepFinalOutput
+                            ),
                         )
 
                     if isinstance(turn_result.next_step, NextStepInterruption):
@@ -1425,19 +1578,14 @@ async def start_streaming(
                                 *accepted_tool_output_guardrail_results,
                                 *turn_result.tool_output_guardrail_results,
                             ]
-                        await _finalize_streamed_interruption(
-                            streamed_result=streamed_result,
-                            save_items=_save_resumed_items,
-                            items=(
-                                []
-                                if _should_defer_interrupted_session_items(
-                                    current_agent,
-                                    run_config,
-                                )
-                                else list(turn_session_items)
+                        await _persist_resumed_items(
+                            turn_result,
+                            defer_settlement=_should_defer_interrupted_session_items(
+                                current_agent, run_config
                             ),
-                            response_id=turn_result.model_response.response_id,
-                            store_setting=store_setting,
+                        )
+                        _complete_stream_interruption(
+                            streamed_result,
                             interruptions=approvals_from_step(turn_result.next_step),
                             processed_response=run_state._last_processed_response,
                         )
@@ -1457,11 +1605,7 @@ async def start_streaming(
                         if run_state is not None:
                             run_state._current_agent = current_agent
                         _publish_streamed_result_agent(streamed_result, current_agent)
-                        await _save_resumed_items(
-                            list(turn_session_items),
-                            turn_result.model_response.response_id,
-                            store_setting,
-                        )
+                        await _persist_resumed_items(turn_result)
                         if current_span is not None:
                             current_span.finish(reset_current=True)
                         current_span = None
@@ -1476,6 +1620,11 @@ async def start_streaming(
                         continue
 
                     if isinstance(turn_result.next_step, NextStepFinalOutput):
+                        streamed_result._last_processed_response = (
+                            turn_result.processed_response
+                            if turn_result.processed_response is not None
+                            else run_state._last_processed_response
+                        )
                         await _finalize_streamed_final_output(
                             streamed_result=streamed_result,
                             agent=current_agent,
@@ -1485,26 +1634,45 @@ async def start_streaming(
                             save_items=_save_resumed_items,
                             items=list(turn_session_items),
                             model_response=turn_result.model_response,
-                            processed_response=(
-                                turn_result.processed_response
-                                if turn_result.processed_response is not None
-                                else run_state._last_processed_response
-                            ),
+                            processed_response=streamed_result._last_processed_response,
                             owner_starts=blocked_output_owner_starts,
                             response_id=turn_result.model_response.response_id,
                             store_setting=store_setting,
+                            stream_items_after_guardrails=True,
+                            retry_on_guardrail_error=retry_terminal_output,
                         )
                         if streamed_result._stored_exception is not None:
                             break
+                        if retry_terminal_output:
+                            _publish_resumed_stream_turn(
+                                streamed_result,
+                                run_state,
+                                turn_result,
+                                generated_items,
+                                resumed_session_items,
+                            )
+                        if guardrail_result_start is not None:
+                            streamed_result.tool_output_guardrail_results.extend(
+                                accepted_tool_output_guardrail_results[guardrail_result_start:]
+                            )
+                        streamed_result.tool_output_guardrail_results.extend(
+                            turn_result.tool_output_guardrail_results
+                        )
+                        if session is None:
+                            # A detached final output has no Session to settle against
+                            # and the run ends here, so the batch is discarded rather
+                            # than left to invalidate the completed run's checkpoint.
+                            # Only here, though: the finalization above runs the hooks,
+                            # the guardrails and the final save, any of which can raise,
+                            # and a run that raises may still be retried or reattached
+                            # with the executed tool's call and output reachable only
+                            # through this batch.
+                            take_held_session_write(run_state)
                         run_state._current_step = None
                         break
 
                     if isinstance(turn_result.next_step, NextStepRunAgain):
-                        await _save_resumed_items(
-                            list(turn_session_items),
-                            turn_result.model_response.response_id,
-                            store_setting,
-                        )
+                        await _persist_resumed_items(turn_result)
                         run_state._current_step = NextStepRunAgain()
                         if await _wait_for_streamed_turn_events_and_stop_if_cancelled(
                             streamed_result
@@ -1695,6 +1863,11 @@ async def start_streaming(
                     break
                 streamed_result._max_turns_handled = True
                 streamed_result.current_turn = max_turns
+                # A max-turn handler ends the run, so a held Session write still
+                # standing has no later gate-legal exit to settle it. Discarding it
+                # keeps the finished run's checkpoint loadable and matches the
+                # non-streaming runner, which reports the same terminal state.
+                take_held_session_write(run_state)
                 if run_state is not None and not is_resumed_state:
                     run_state._current_turn = max_turns
                     run_state._current_step = None
@@ -2000,6 +2173,15 @@ async def start_streaming(
                     )
                     if streamed_result._stored_exception is not None:
                         break
+                    if session is None:
+                        # A detached completion has no Session to settle against and
+                        # the run ends here, so the batch is discarded rather than
+                        # left to invalidate the completed run's checkpoint. Only here,
+                        # though: the finalization above runs the hooks, the guardrails
+                        # and the final save, any of which can raise, and a run that
+                        # raises may still be retried or reattached with the executed
+                        # tool's call and output reachable only through this batch.
+                        take_held_session_write(run_state)
                     if run_state is not None:
                         run_state._current_step = None
                     break
@@ -2018,17 +2200,44 @@ async def start_streaming(
                         run_state._current_turn_persisted_item_count = (
                             streamed_result._current_turn_persisted_item_count
                         )
+                    parked_items_deferred = _should_defer_interrupted_session_items(
+                        current_agent,
+                        run_config,
+                    )
+                    if session is None:
+                        # A fresh park during a detached resume cannot write, but a
+                        # standing held declaration carries the session identity: the
+                        # new parked call folds into it so the reattach does not
+                        # settle its output orphaned.
+                        extend_held_session_write(
+                            run_state,
+                            run_items=turn_session_items,
+                            response_id=turn_result.model_response.response_id,
+                            store=store_setting,
+                            run_items_are_the_session_view=True,
+                            handoff_input_filtered=turn_result.handoff_input_filtered,
+                            reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
+                        )
+                    elif parked_items_deferred and await _should_persist_stream_items(
+                        session=session,
+                        server_conversation_tracker=server_conversation_tracker,
+                        streamed_result=streamed_result,
+                    ):
+                        # The gate withholds this write until the output guardrails
+                        # decide; declaring the batch on the checkpoint lets a resume
+                        # settle it at a gate-legal exit instead of losing it.
+                        defer_interrupted_session_write(
+                            run_state,
+                            session,
+                            run_items=turn_session_items,
+                            reasoning_item_id_policy=(streamed_result._reasoning_item_id_policy),
+                            response_id=turn_result.model_response.response_id,
+                            store=store_setting,
+                        )
                     await _finalize_streamed_interruption(
                         streamed_result=streamed_result,
                         save_items=_save_stream_items_with_count,
-                        items=(
-                            []
-                            if _should_defer_interrupted_session_items(
-                                current_agent,
-                                run_config,
-                            )
-                            else turn_session_items
-                        ),
+                        items=([] if parked_items_deferred else turn_session_items),
                         response_id=turn_result.model_response.response_id,
                         store_setting=store_setting,
                         interruptions=approvals_from_step(turn_result.next_step),

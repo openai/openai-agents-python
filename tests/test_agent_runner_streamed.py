@@ -2704,6 +2704,7 @@ async def test_serialized_later_turn_approval_with_output_guardrail_resumes(
         "missing",
         "invalid",
         "missing-current",
+        "missing-approval",
         "prefix-anchor",
         "nonterminal-session",
     ],
@@ -2767,6 +2768,9 @@ async def test_serialized_mixed_approval_guardrail_preserves_only_accepted_outpu
     elif session_ownership == "missing-current":
         current_start = payload["current_response_generated_item_ownership"]["start"]
         payload["generated_session_item_indexes"][current_start] = None
+    elif session_ownership == "missing-approval":
+        approval_index = payload["current_response_generated_item_ownership"]["interruptions"][0]
+        payload["generated_session_item_indexes"][approval_index] = None
     elif session_ownership == "prefix-anchor":
         earlier_copies = json.loads(json.dumps(payload["last_processed_response"]["new_items"]))
         payload["session_items"][:0] = earlier_copies
@@ -4301,8 +4305,9 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
     state.approve(first.interruptions[0])
 
     observed_counts: list[int] = []
-    run_loop_any = cast(Any, run_loop)
-    real_save_resumed = run_loop_any.save_resumed_turn_items
+    from agents.run_internal import session_persistence
+
+    real_save_resumed = session_persistence.save_resumed_turn_items
 
     async def save_wrapper(
         *,
@@ -4314,6 +4319,10 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
         store: bool | None = None,
         wrapper: RunContextWrapper[Any] | None = None,
         run_state: RunState | None = None,
+        held_write: Any = None,
+        claim_held: bool = False,
+        handoff_input_filtered: bool = False,
+        filtered_context_items: Any = None,
     ) -> int:
         observed_counts.append(persisted_count)
         result = await real_save_resumed(
@@ -4325,10 +4334,14 @@ async def test_streaming_resume_carries_persisted_count(monkeypatch: pytest.Monk
             store=store,
             wrapper=wrapper,
             run_state=run_state,
+            held_write=held_write,
+            claim_held=claim_held,
+            handoff_input_filtered=handoff_input_filtered,
+            filtered_context_items=filtered_context_items,
         )
         return int(result)
 
-    monkeypatch.setattr(run_loop_any, "save_resumed_turn_items", save_wrapper)
+    monkeypatch.setattr(session_persistence, "save_resumed_turn_items", save_wrapper)
 
     resumed = Runner.run_streamed(agent, state, session=session)
     await consume_stream(resumed)

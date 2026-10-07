@@ -473,7 +473,10 @@ async def test_runner_resume_preserves_guardrail_results_on_reinterruption(
     )
 
     model_response = ModelResponse(output=[], usage=Usage(), response_id="resp-interrupted")
-    processed_response = cast(Any, SimpleNamespace(tools_used=[], new_items=[]))
+    processed_response = cast(
+        Any,
+        SimpleNamespace(tools_used=[], new_items=[], tool_output_guardrail_result_start=None),
+    )
 
     run_state = RunState(
         context=context_wrapper,

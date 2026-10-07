@@ -74,10 +74,7 @@ class TestViewImageTool:
         tool = ViewImageTool(session=session)
 
         with pytest.raises(InvalidManifestPathError):
-            await tool.on_invoke_tool(
-                cast(ToolContext[object], None),
-                '{"path":"/shared/dot.png"}',
-            )
+            await tool.run(ViewImageArgs(path="/shared/dot.png"))
 
         assert session.calls == ()
 

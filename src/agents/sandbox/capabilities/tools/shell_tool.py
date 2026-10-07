@@ -7,15 +7,21 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ....run_context import RunContextWrapper
 from ....tool import FunctionTool
-from ...errors import ExecTimeoutError, ExecTransportError, PtySessionNotFoundError
+from ...errors import (
+    ExecTimeoutError,
+    ExecTransportError,
+    InvalidManifestPathError,
+    PtySessionNotFoundError,
+)
 from ...session.base_sandbox_session import BaseSandboxSession
 from ...types import User
 from ...util.token_truncation import formatted_truncate_text_with_token_count
 from ...workspace_paths import SandboxWorkspaceScope, coerce_posix_path, sandbox_path_str
+from ._input_errors import format_invalid_arguments
 
 _DEFAULT_EXEC_YIELD_TIME_MS = 10_000
 _DEFAULT_WRITE_STDIN_YIELD_TIME_MS = 250
@@ -196,17 +202,30 @@ class ExecCommandTool(FunctionTool):
         )
 
     async def _invoke(self, _: object, raw_input: str) -> str:
-        return await self.run(self.args_model.model_validate_json(raw_input))
+        try:
+            args = self.args_model.model_validate_json(raw_input)
+        except ValidationError as exc:
+            return format_invalid_arguments(exc, self.args_model)
+        try:
+            command = self._prepare_command(args)
+        except InvalidManifestPathError:
+            return "Invalid workdir. Use a path within the workspace or an explicitly granted path."
+        return await self._run(args, command)
 
     async def run(self, args: ExecCommandArgs) -> str:
-        start = time.perf_counter()
-        timeout_s = args.yield_time_ms / 1000
-        wrapped_command = _resolve_workdir_command(
+        return await self._run(args, self._prepare_command(args))
+
+    def _prepare_command(self, args: ExecCommandArgs) -> str:
+        return _resolve_workdir_command(
             session=self.session,
             workspace_scope=self.workspace_scope,
             command=args.cmd,
             workdir=args.workdir,
         )
+
+    async def _run(self, args: ExecCommandArgs, wrapped_command: str) -> str:
+        start = time.perf_counter()
+        timeout_s = args.yield_time_ms / 1000
         shell = _resolve_shell(args.shell, args.login)
         fallback_notice: str | None = None
 
@@ -297,7 +316,11 @@ class WriteStdinTool(FunctionTool):
         )
 
     async def _invoke(self, _: object, raw_input: str) -> str:
-        return await self.run(self.args_model.model_validate_json(raw_input))
+        try:
+            args = self.args_model.model_validate_json(raw_input)
+        except ValidationError as exc:
+            return format_invalid_arguments(exc, self.args_model)
+        return await self.run(args)
 
     async def run(self, args: WriteStdinArgs) -> str:
         if not self.session.supports_pty():

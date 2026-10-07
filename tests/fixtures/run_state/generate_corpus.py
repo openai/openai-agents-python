@@ -30,6 +30,20 @@ state = RunState(
 )
 """
 
+# v0.23.0 is the first release whose writer emits schema 1.18, so its tag commit is the
+# historical writer for that version. The held pending write arrived after that release
+# and introduced 1.19; its writer is this pull request's own bump commit, which the
+# generator archives to emit the 1.19 fixtures.
+#
+# That 1.19 commit lives on the pull request branch, and this repository squash-merges,
+# so the SHA below stops resolving once the branch is merged and `git archive` fails for
+# the two 1.19 fixtures. Re-pin it to the squashed merge commit, which emits the same
+# payloads, when that commit exists. The same already happened to the entry this one
+# replaces: 821afdc3, recorded as the unreleased 1.17 writer, is no longer reachable
+# from main either.
+RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
+HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
+
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
     "The release-boundary schema renumbering introduced this reader version without a writer "
     "that emitted it. The recorded writer emitted 1.9; only the schema label is changed to "
@@ -460,6 +474,71 @@ state._sandbox = {
             "reader while preserving the Docker session payload."
         ),
     ),
+    Scenario(
+        "1.18",
+        RELEASED_1_18_WRITER,
+        "compaction_metadata",
+        """
+from agents.run_internal.run_steps import NextStepRunAgain
+
+state._current_step = NextStepRunAgain()
+state._pending_session_write = {
+    "session_id": "session-118",
+    "items": [
+        {
+            "type": "function_call",
+            "call_id": "call_compacted_1",
+            "name": "write_thing",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_compacted_1", "output": "wrote"},
+    ],
+    "before": ["digest-1", "digest-2"],
+    "persisted_count": 2,
+    "response_id": "resp_118",
+    "store": False,
+    "has_local_tool_outputs": True,
+    "append_acknowledged": True,
+    "compaction_model_exchange": {
+        "item_digests": ["digest-1", "digest-2"],
+        "reasoning_item_id_policy": None,
+    },
+}
+""",
+    ),
+    Scenario(
+        "1.19",
+        HELD_WRITE_1_19_WRITER,
+        "held_pending_session_write",
+        """
+from agents.run_internal.run_steps import NextStepRunAgain
+
+state._current_step = NextStepRunAgain()
+state._pending_session_write = {
+    "session_id": "session-118",
+    "items": [
+        {
+            "type": "function_call",
+            "call_id": "call_held_1",
+            "name": "write_thing",
+            "arguments": "{}",
+        },
+        {"type": "function_call_output", "call_id": "call_held_1", "output": "wrote"},
+    ],
+    "before": None,
+    "persisted_count": 2,
+    "held": True,
+    "current_response": {"turn": state._current_turn, "start": 0},
+}
+""",
+        provenance="canonical_compatibility",
+        emitted_version="1.19",
+        note=(
+            "The unreleased held-write scenario includes the current-response boundary. "
+            "The recorded 1.19 writer serializes this canonical scenario payload without "
+            "interpretation; this is not a historical checkpoint from a released version."
+        ),
+    ),
 )
 
 
@@ -488,6 +567,20 @@ MINIMAL_SCENARIOS = (
             "The labels implementation was first emitted with the unreleased 1.16 writer. "
             "The fixture changes only the schema label to exercise the 1.17 compatibility "
             "reader while preserving older payload compatibility."
+        ),
+    ),
+    Scenario("1.18", RELEASED_1_18_WRITER, "minimal", ""),
+    Scenario(
+        "1.19",
+        HELD_WRITE_1_19_WRITER,
+        "minimal",
+        "",
+        provenance="canonical_compatibility",
+        emitted_version="1.19",
+        note=(
+            "The held pending Session write introduced 1.19 after v0.23.0 released 1.18. "
+            "The recorded 1.19 writer is this pull request's own commit; the fixture is the "
+            "minimal payload it emits, not a historical checkpoint from a released version."
         ),
     ),
 )
