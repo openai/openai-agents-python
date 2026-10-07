@@ -337,10 +337,10 @@ class TestOpenAIConversationsSessionBasicOperations:
             conversation_id="test_id", openai_client=mock_openai_client
         )
 
-        # Mock get_items to return one item
+        # Mock the already-locked read to return one item
         latest_item = {"id": "item_123", "role": "assistant", "content": "Latest message"}
 
-        with patch.object(session, "get_items", return_value=[latest_item]):
+        with patch.object(session, "_get_items", return_value=[latest_item]):
             popped_item = await session.pop_item()
 
             assert popped_item == latest_item
@@ -355,8 +355,8 @@ class TestOpenAIConversationsSessionBasicOperations:
             conversation_id="test_id", openai_client=mock_openai_client
         )
 
-        # Mock get_items to return empty list
-        with patch.object(session, "get_items", return_value=[]):
+        # Mock the already-locked read to return empty list
+        with patch.object(session, "_get_items", return_value=[]):
             popped_item = await session.pop_item()
 
             assert popped_item is None
@@ -571,8 +571,8 @@ class TestOpenAIConversationsSessionBasicOperations:
 
 class TestOpenAIConversationsSessionBatches:
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("mutation", ["add", "pop", "clear"])
-    async def test_mutations_wait_for_complete_append(self, mock_openai_client, mutation: str):
+    @pytest.mark.parametrize("mutation", ["add", "pop", "clear", "read"])
+    async def test_operations_wait_for_complete_append(self, mock_openai_client, mutation: str):
         stored: list[TResponseInputItem] = []
         first_started = asyncio.Event()
         release_first = asyncio.Event()
@@ -602,38 +602,49 @@ class TestOpenAIConversationsSessionBatches:
         session = OpenAIConversationsSession(
             conversation_id="conv_test", openai_client=mock_openai_client
         )
-        with patch.object(session, "get_items", side_effect=lambda limit: stored[-limit:]):
 
-            async def mutate():
-                other_started.set()
-                if mutation == "add":
-                    await session.add_items([other])
-                elif mutation == "pop":
-                    return await session.pop_item()
-                else:
-                    await session.clear_session()
-                return None
+        async def list_items(*, conversation_id, order):
+            snapshot = stored[:] if order == "asc" else list(reversed(stored))
+            for item in snapshot:
+                yield MagicMock(model_dump=MagicMock(return_value=item))
 
-            append = asyncio.create_task(session.add_items(items))
-            follower = None
-            try:
-                await asyncio.wait_for(first_started.wait(), timeout=5)
-                follower = asyncio.create_task(mutate())
-                await asyncio.wait_for(other_started.wait(), timeout=5)
-                assert not follower.done()
-                assert stored == items[:20]
-                release_first.set()
-                await append
-                result = await follower
-            finally:
-                release_first.set()
-                tasks = [append] + ([follower] if follower is not None else [])
-                for task in tasks:
-                    task.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+        mock_openai_client.conversations.items.list = MagicMock(side_effect=list_items)
+
+        async def mutate():
+            other_started.set()
+            if mutation == "add":
+                await session.add_items([other])
+            elif mutation == "pop":
+                return await session.pop_item()
+            elif mutation == "read":
+                return await session.get_items()
+            else:
+                await session.clear_session()
+            return None
+
+        append = asyncio.create_task(session.add_items(items))
+        follower = None
+        try:
+            await asyncio.wait_for(first_started.wait(), timeout=5)
+            follower = asyncio.create_task(mutate())
+            await asyncio.wait_for(other_started.wait(), timeout=5)
+            assert not follower.done()
+            assert stored == items[:20]
+            release_first.set()
+            await append
+            result = await asyncio.wait_for(follower, timeout=5)
+        finally:
+            release_first.set()
+            tasks = [append] + ([follower] if follower is not None else [])
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
         if mutation == "add":
             assert stored == items + [other]
+        elif mutation == "read":
+            assert result == items
+            assert stored == items
         elif mutation == "pop":
             assert result == items[-1]
             assert stored == items[:-1]
@@ -948,7 +959,7 @@ class TestOpenAIConversationsSessionErrorHandling:
         # Mock item without ID
         invalid_item = {"role": "assistant", "content": "No ID"}
 
-        with patch.object(session, "get_items", return_value=[invalid_item]):
+        with patch.object(session, "_get_items", return_value=[invalid_item]):
             # This should raise a KeyError because 'id' field is missing
             with pytest.raises(KeyError, match="'id'"):
                 await session.pop_item()

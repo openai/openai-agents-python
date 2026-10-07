@@ -84,6 +84,11 @@ class OpenAIConversationsSession(SessionABC):
         self._session_id = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async with self._mutation_lock:
+            return await self._get_items(limit)
+
+    async def _get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        """Read history while the caller holds the instance's mutation lock."""
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -115,7 +120,7 @@ class OpenAIConversationsSession(SessionABC):
     async def add_items(self, items: list[TResponseInputItem]) -> None:
         """Append items in order, in requests of at most 20 items each.
 
-        Mutations through this session instance are serialized. Separate instances
+        Reads and mutations through this session instance are serialized. Separate instances
         or external writers require application-level coordination.
 
         Writes spanning multiple requests are not atomic. If a request fails or
@@ -139,7 +144,7 @@ class OpenAIConversationsSession(SessionABC):
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
             session_id = await self._get_session_id()
-            items = await self.get_items(limit=1)
+            items = await self._get_items(limit=1)
             if not items:
                 return None
             item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
