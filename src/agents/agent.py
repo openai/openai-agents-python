@@ -44,6 +44,7 @@ from .prompts import DynamicPromptFunction, Prompt, PromptUtil
 from .run_context import RunContextWrapper, TContext
 from .strict_schema import ensure_strict_json_schema
 from .tool import (
+    _UNSET_FAILURE_ERROR_FUNCTION,
     FunctionTool,
     FunctionToolResult,
     Tool,
@@ -54,7 +55,6 @@ from .tool import (
     _build_wrapped_function_tool,
     _log_function_tool_invocation,
     _parse_function_tool_json_input,
-    default_tool_error_function,
     prune_orphaned_tool_search_tools,
 )
 from .tool_context import ToolContext
@@ -265,7 +265,7 @@ class AgentBase(Generic[TContext]):
 
         convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
         failure_error_function = self.mcp_config.get(
-            "failure_error_function", default_tool_error_function
+            "failure_error_function", _UNSET_FAILURE_ERROR_FUNCTION
         )
         include_server_in_tool_names = self.mcp_config.get("include_server_in_tool_names", False)
         reserved_tool_names = (
@@ -619,7 +619,7 @@ class Agent(AgentBase, Generic[TContext]):
         previous_response_id: str | None = None,
         conversation_id: str | None = None,
         session: Session | None = None,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
         needs_approval: bool
         | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
         parameters: type[Any] | None = None,

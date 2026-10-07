@@ -21,6 +21,7 @@ from ..logger import log_tool_action_error, logger
 from ..run_context import RunContextWrapper
 from ..strict_schema import _copy_json_schema, ensure_strict_json_schema
 from ..tool import (
+    _UNSET_FAILURE_ERROR_FUNCTION,
     FunctionTool,
     Tool,
     ToolErrorFunction,
@@ -30,7 +31,6 @@ from ..tool import (
     ToolOutputTextDict,
     _build_handled_function_tool_error_handler,
     _build_wrapped_function_tool,
-    default_tool_error_function,
 )
 from ..tool_context import ToolContext
 from ..tracing import FunctionSpanData, get_current_span, mcp_tools_span
@@ -269,7 +269,7 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
         include_server_in_tool_names: bool = False,
         reserved_tool_names: set[str] | None = None,
     ) -> list[Tool]:
@@ -359,7 +359,7 @@ class MCPUtil:
         server: MCPServer,
         convert_schemas_to_strict: bool,
         agent: AgentBase,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
         tool_name_overrides: list[str] | None = None,
         server_index: int = 0,
     ) -> list[Tool]:
@@ -389,7 +389,7 @@ class MCPUtil:
         convert_schemas_to_strict: bool,
         run_context: RunContextWrapper[Any],
         agent: AgentBase,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
         include_server_in_tool_names: bool = False,
         tool_name_override: Callable[[MCPTool], str] | None = None,
         reserved_tool_names: set[str] | None = None,
@@ -521,7 +521,7 @@ class MCPUtil:
         server: MCPServer,
         convert_schemas_to_strict: bool,
         agent: AgentBase | None = None,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
+        failure_error_function: ToolErrorFunction | None | object = _UNSET_FAILURE_ERROR_FUNCTION,
         tool_name_override: str | None = None,
     ) -> FunctionTool:
         """Convert an MCP tool to an Agents SDK function tool.

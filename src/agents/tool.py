@@ -73,7 +73,7 @@ from ._tool_identity import (
 )
 from .computer import AsyncComputer, Computer
 from .editor import ApplyPatchEditor, ApplyPatchOperation
-from .exceptions import ModelBehaviorError, ToolTimeoutError, UserError
+from .exceptions import MCPToolCancellationError, ModelBehaviorError, ToolTimeoutError, UserError
 from .function_schema import DocstringStyle, function_schema, generate_func_documentation
 from .logger import log_tool_action_warning, logger
 from .run_context import RunContextWrapper
@@ -2088,6 +2088,7 @@ async def maybe_invoke_function_tool_failure_error_function(
         setattr(context, _DEFAULT_FAILURE_HANDLED_ATTR, True)
         if (
             isinstance(error, Exception)
+            and not isinstance(error, MCPToolCancellationError)
             and context.run_config is not None
             and context.run_config.tool_error_formatter is not None
         ):
@@ -2100,7 +2101,7 @@ async def maybe_invoke_function_tool_failure_error_function(
                     ToolErrorFormatterArgs(
                         kind="tool_exception",
                         tool_type="function",
-                        tool_name=context.tool_name,
+                        tool_name=context.qualified_tool_name,
                         call_id=context.tool_call_id,
                         default_message=result,
                         run_context=context,

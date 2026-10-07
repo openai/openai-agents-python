@@ -341,3 +341,213 @@ async def test_schema_backed_tool_retains_program_failure_policy(program_call: b
         await Runner.run(agent, "start", run_config=config)
         assert len(called) == 1
         assert model_output(model) == APPROVED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["omitted", "custom", "explicit-default", "propagate"])
+async def test_agent_tool_preserves_omitted_failure_policy(
+    policy: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def extract(result: Any) -> str:
+        raise ValueError(SECRET)
+
+    options: dict[str, Any] = {}
+    if policy != "omitted":
+        options["failure_error_function"] = (
+            (lambda ctx, error: "per-tool")
+            if policy == "custom"
+            else default_tool_error_function
+            if policy == "explicit-default"
+            else None
+        )
+    child = Agent(name="child", model=ScriptedModel([[get_text_message("child done")]]))
+    child_tool = child.as_tool("child", "Run child", custom_output_extractor=extract, **options)
+    model = ScriptedModel(
+        [[get_function_tool_call("child", '{"input":"task"}')], [get_text_message("done")]]
+    )
+    called: list[str] = []
+
+    def formatter(args: ToolErrorFormatterArgs[Any]) -> str:
+        called.append(args.tool_name)
+        return APPROVED
+
+    agent = Agent(name="parent", model=model, tools=[child_tool])
+    config = RunConfig(tool_error_formatter=formatter, trace_include_sensitive_data=True)
+    if policy == "propagate":
+        with pytest.raises(UserError, match=SECRET):
+            await Runner.run(agent, "start", run_config=config)
+    else:
+        with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+            result = await Runner.run(agent, "start", run_config=config)
+        assert (
+            model_output(model)
+            == {
+                "omitted": APPROVED,
+                "custom": "per-tool",
+                "explicit-default": GENERIC,
+            }[policy]
+        )
+        if policy == "omitted":
+            assert_redacted(caplog, result, model)
+    assert called == (["child"] if policy == "omitted" else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "level,policy",
+    [
+        ("agent", "omitted"),
+        ("agent", "custom"),
+        ("agent", "explicit-default"),
+        ("agent", "propagate"),
+        ("server", "custom"),
+        ("server", "explicit-default"),
+        ("server", "propagate"),
+    ],
+)
+async def test_mcp_tool_preserves_omitted_failure_policy(
+    level: str, policy: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    from agents.exceptions import AgentsException
+
+    from .mcp.helpers import FakeMCPServer
+
+    class FailingServer(FakeMCPServer):
+        async def call_tool(self, tool_name: str, arguments: Any, **kwargs: Any) -> Any:
+            raise ValueError(SECRET)
+
+    handler = (
+        (lambda ctx, error: "per-tool")
+        if policy == "custom"
+        else default_tool_error_function
+        if policy == "explicit-default"
+        else None
+    )
+    server_options = {"failure_error_function": handler} if level == "server" else {}
+    server = FailingServer(**server_options)
+    server.add_tool("lookup", {})
+    mcp_config: Any = {}
+    if level == "server":
+        # Server policy must win over an agent-wide MCP policy as well as the run formatter.
+        mcp_config["failure_error_function"] = lambda ctx, error: "agent policy"
+    elif policy != "omitted":
+        mcp_config["failure_error_function"] = handler
+    model = make_model("lookup")
+    agent = Agent(name="test", model=model, mcp_servers=[server], mcp_config=mcp_config)
+    called: list[str] = []
+
+    def formatter(args: ToolErrorFormatterArgs[Any]) -> str:
+        called.append(args.tool_name)
+        return APPROVED
+
+    config = RunConfig(tool_error_formatter=formatter, trace_include_sensitive_data=True)
+    if policy == "propagate":
+        with pytest.raises(AgentsException, match=SECRET):
+            await Runner.run(agent, "start", run_config=config)
+    else:
+        with caplog.at_level(logging.DEBUG, logger="openai.agents"):
+            result = await Runner.run(agent, "start", run_config=config)
+        assert (
+            model_output(model)
+            == {
+                "omitted": APPROVED,
+                "custom": "per-tool",
+                "explicit-default": GENERIC,
+            }[policy]
+        )
+        if policy == "omitted":
+            assert_redacted(caplog, result, model)
+    assert called == (["lookup"] if policy == "omitted" else [])
+
+
+@pytest.mark.asyncio
+async def test_run_formatter_uses_qualified_tool_identity() -> None:
+    from agents import tool_namespace
+
+    @tool
+    async def lookup() -> str:
+        raise ValueError(SECRET)
+
+    tools = [
+        *tool_namespace(name="crm", description="CRM", tools=[lookup]),
+        *tool_namespace(name="billing", description="Billing", tools=[lookup]),
+    ]
+    model = ScriptedModel(
+        [
+            [
+                get_function_tool_call("lookup", "{}", namespace="crm", call_id="crm-call"),
+                get_function_tool_call("lookup", "{}", namespace="billing", call_id="billing-call"),
+            ],
+            [get_text_message("done")],
+        ]
+    )
+
+    def formatter(args: ToolErrorFormatterArgs[Any]) -> str | None:
+        return APPROVED if args.tool_name == "crm.lookup" else None
+
+    await Runner.run(
+        Agent(name="test", model=model, tools=tools),
+        "start",
+        run_config=RunConfig(tool_error_formatter=formatter),
+    )
+    items = model.calls[-1].input
+    assert isinstance(items, list)
+    assert {
+        item["call_id"]: item["output"]
+        for item in items
+        if item.get("type") == "function_call_output"
+    } == {
+        "crm-call": APPROVED,
+        "billing-call": GENERIC,
+    }
+
+
+@pytest.mark.asyncio
+async def test_run_formatter_collapses_deferred_top_level_namespace() -> None:
+    @tool(defer_loading=True)
+    async def lookup() -> str:
+        raise ValueError(SECRET)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("lookup", "{}", namespace="lookup")],
+            [get_text_message("done")],
+        ]
+    )
+
+    def formatter(args: ToolErrorFormatterArgs[Any]) -> str | None:
+        return APPROVED if args.tool_name == "lookup" else None
+
+    await Runner.run(
+        Agent(name="test", model=model, tools=[lookup]),
+        "start",
+        run_config=RunConfig(tool_error_formatter=formatter),
+    )
+    assert model_output(model) == APPROVED
+
+
+@pytest.mark.asyncio
+async def test_mcp_cancellation_keeps_existing_failure_policy() -> None:
+    from .mcp.helpers import FakeMCPServer
+
+    class CancelledServer(FakeMCPServer):
+        async def call_tool(self, tool_name: str, arguments: Any, **kwargs: Any) -> Any:
+            raise asyncio.CancelledError(SECRET)
+
+    server = CancelledServer()
+    server.add_tool("lookup", {})
+    called: list[ToolErrorFormatterArgs[Any]] = []
+
+    def formatter(args: ToolErrorFormatterArgs[Any]) -> str:
+        called.append(args)
+        return APPROVED
+
+    model = make_model("lookup")
+    result = await Runner.run(
+        Agent(name="test", model=model, mcp_servers=[server]),
+        "start",
+        run_config=RunConfig(tool_error_formatter=formatter),
+    )
+    assert result.final_output == "done"
+    assert not called
+    assert model_output(model) == GENERIC
