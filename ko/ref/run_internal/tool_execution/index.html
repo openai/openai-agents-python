@@ -4971,26 +4971,44 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
       module-attribute
    (agents.items.RunItem)" href="../../../../ref/items/#agents.items.RunItem">RunItem</a></span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span>
 </span><span id="__span-0-11"><a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><span title="tuple">tuple</span></span><span class="p">[</span>
-</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>    <span class="n"><span title="list">list</span></span><span class="p">[</span><span class="n"><a class="autorefs autorefs-internal" title="FunctionToolResult
+</span><span id="__span-0-12"><a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">tool_input_guardrail_results</span><span class="p">:</span> <span class="n"><span title="list">list</span></span><span class="p">[</span>
+</span><span id="__span-0-13"><a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="n"><a class="autorefs autorefs-internal" title="ToolInputGuardrailResult
+
+
+  
+      dataclass
+   (agents.tool_guardrails.ToolInputGuardrailResult)" href="../../../../ref/tool_guardrails/#agents.tool_guardrails.ToolInputGuardrailResult">ToolInputGuardrailResult</a></span>
+</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="p">]</span>
+</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>    <span class="n">tool_output_guardrail_results</span><span class="p">:</span> <span class="n"><span title="list">list</span></span><span class="p">[</span>
+</span><span id="__span-0-17"><a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>        <span class="n"><a class="autorefs autorefs-internal" title="ToolOutputGuardrailResult
+
+
+  
+      dataclass
+   (agents.tool_guardrails.ToolOutputGuardrailResult)" href="../../../../ref/tool_guardrails/#agents.tool_guardrails.ToolOutputGuardrailResult">ToolOutputGuardrailResult</a></span>
+</span><span id="__span-0-18"><a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>    <span class="p">]</span>
+</span><span id="__span-0-19"><a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>    <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-20"><a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><span title="tuple">tuple</span></span><span class="p">[</span>
+</span><span id="__span-0-21"><a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>    <span class="n"><span title="list">list</span></span><span class="p">[</span><span class="n"><a class="autorefs autorefs-internal" title="FunctionToolResult
 
 
   
       dataclass
    (agents.tool.FunctionToolResult)" href="../../../../ref/tool/#agents.tool.FunctionToolResult">FunctionToolResult</a></span><span class="p">],</span>
-</span><span id="__span-0-14"><a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>    <span class="n"><span title="list">list</span></span><span class="p">[</span><span class="n"><a class="autorefs autorefs-internal" title="ToolInputGuardrailResult
+</span><span id="__span-0-22"><a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>    <span class="n"><span title="list">list</span></span><span class="p">[</span><span class="n"><a class="autorefs autorefs-internal" title="ToolInputGuardrailResult
 
 
   
       dataclass
    (agents.tool_guardrails.ToolInputGuardrailResult)" href="../../../../ref/tool_guardrails/#agents.tool_guardrails.ToolInputGuardrailResult">ToolInputGuardrailResult</a></span><span class="p">],</span>
-</span><span id="__span-0-15"><a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>    <span class="n"><span title="list">list</span></span><span class="p">[</span><span class="n"><a class="autorefs autorefs-internal" title="ToolOutputGuardrailResult
+</span><span id="__span-0-23"><a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="n"><span title="list">list</span></span><span class="p">[</span><span class="n"><a class="autorefs autorefs-internal" title="ToolOutputGuardrailResult
 
 
   
       dataclass
    (agents.tool_guardrails.ToolOutputGuardrailResult)" href="../../../../ref/tool_guardrails/#agents.tool_guardrails.ToolOutputGuardrailResult">ToolOutputGuardrailResult</a></span><span class="p">],</span>
-</span><span id="__span-0-16"><a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="p">]</span>
+</span><span id="__span-0-24"><a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="p">]</span>
 </span></code></pre></div>
 
     <div class="doc doc-contents ">
@@ -5000,13 +5018,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2330">2330</a></span>
-<span class="normal"><a href="#__codelineno-0-2331">2331</a></span>
-<span class="normal"><a href="#__codelineno-0-2332">2332</a></span>
-<span class="normal"><a href="#__codelineno-0-2333">2333</a></span>
-<span class="normal"><a href="#__codelineno-0-2334">2334</a></span>
-<span class="normal"><a href="#__codelineno-0-2335">2335</a></span>
-<span class="normal"><a href="#__codelineno-0-2336">2336</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2336">2336</a></span>
 <span class="normal"><a href="#__codelineno-0-2337">2337</a></span>
 <span class="normal"><a href="#__codelineno-0-2338">2338</a></span>
 <span class="normal"><a href="#__codelineno-0-2339">2339</a></span>
@@ -5023,30 +5035,44 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2350">2350</a></span>
 <span class="normal"><a href="#__codelineno-0-2351">2351</a></span>
 <span class="normal"><a href="#__codelineno-0-2352">2352</a></span>
-<span class="normal"><a href="#__codelineno-0-2353">2353</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2330"><a id="__codelineno-0-2330" name="__codelineno-0-2330"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_function_tool_calls</span><span class="p">(</span>
-</span><span id="__span-0-2331"><a id="__codelineno-0-2331" name="__codelineno-0-2331"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2332"><a id="__codelineno-0-2332" name="__codelineno-0-2332"></a>    <span class="n">bindings</span><span class="p">:</span> <span class="n">AgentBindings</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2333"><a id="__codelineno-0-2333" name="__codelineno-0-2333"></a>    <span class="n">tool_runs</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunFunction</span><span class="p">],</span>
-</span><span id="__span-0-2334"><a id="__codelineno-0-2334" name="__codelineno-0-2334"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2335"><a id="__codelineno-0-2335" name="__codelineno-0-2335"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2336"><a id="__codelineno-0-2336" name="__codelineno-0-2336"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2337"><a id="__codelineno-0-2337" name="__codelineno-0-2337"></a>    <span class="n">isolate_parallel_failures</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2338"><a id="__codelineno-0-2338" name="__codelineno-0-2338"></a>    <span class="n">sibling_category_failure</span><span class="p">:</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Event</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2339"><a id="__codelineno-0-2339" name="__codelineno-0-2339"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2340"><a id="__codelineno-0-2340" name="__codelineno-0-2340"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span>
-</span><span id="__span-0-2341"><a id="__codelineno-0-2341" name="__codelineno-0-2341"></a>    <span class="nb">list</span><span class="p">[</span><span class="n">FunctionToolResult</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolInputGuardrailResult</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolOutputGuardrailResult</span><span class="p">]</span>
-</span><span id="__span-0-2342"><a id="__codelineno-0-2342" name="__codelineno-0-2342"></a><span class="p">]:</span>
-</span><span id="__span-0-2343"><a id="__codelineno-0-2343" name="__codelineno-0-2343"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Execute function tool calls with approvals, guardrails, and hooks.&quot;&quot;&quot;</span>
-</span><span id="__span-0-2344"><a id="__codelineno-0-2344" name="__codelineno-0-2344"></a>    <span class="k">return</span> <span class="k">await</span> <span class="n">_FunctionToolBatchExecutor</span><span class="p">(</span>
-</span><span id="__span-0-2345"><a id="__codelineno-0-2345" name="__codelineno-0-2345"></a>        <span class="n">bindings</span><span class="o">=</span><span class="n">bindings</span><span class="p">,</span>
-</span><span id="__span-0-2346"><a id="__codelineno-0-2346" name="__codelineno-0-2346"></a>        <span class="n">tool_runs</span><span class="o">=</span><span class="n">tool_runs</span><span class="p">,</span>
-</span><span id="__span-0-2347"><a id="__codelineno-0-2347" name="__codelineno-0-2347"></a>        <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2348"><a id="__codelineno-0-2348" name="__codelineno-0-2348"></a>        <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2349"><a id="__codelineno-0-2349" name="__codelineno-0-2349"></a>        <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
-</span><span id="__span-0-2350"><a id="__codelineno-0-2350" name="__codelineno-0-2350"></a>        <span class="n">isolate_parallel_failures</span><span class="o">=</span><span class="n">isolate_parallel_failures</span><span class="p">,</span>
-</span><span id="__span-0-2351"><a id="__codelineno-0-2351" name="__codelineno-0-2351"></a>        <span class="n">sibling_category_failure</span><span class="o">=</span><span class="n">sibling_category_failure</span><span class="p">,</span>
-</span><span id="__span-0-2352"><a id="__codelineno-0-2352" name="__codelineno-0-2352"></a>        <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
-</span><span id="__span-0-2353"><a id="__codelineno-0-2353" name="__codelineno-0-2353"></a>    <span class="p">)</span><span class="o">.</span><span class="n">execute</span><span class="p">()</span>
+<span class="normal"><a href="#__codelineno-0-2353">2353</a></span>
+<span class="normal"><a href="#__codelineno-0-2354">2354</a></span>
+<span class="normal"><a href="#__codelineno-0-2355">2355</a></span>
+<span class="normal"><a href="#__codelineno-0-2356">2356</a></span>
+<span class="normal"><a href="#__codelineno-0-2357">2357</a></span>
+<span class="normal"><a href="#__codelineno-0-2358">2358</a></span>
+<span class="normal"><a href="#__codelineno-0-2359">2359</a></span>
+<span class="normal"><a href="#__codelineno-0-2360">2360</a></span>
+<span class="normal"><a href="#__codelineno-0-2361">2361</a></span>
+<span class="normal"><a href="#__codelineno-0-2362">2362</a></span>
+<span class="normal"><a href="#__codelineno-0-2363">2363</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2336"><a id="__codelineno-0-2336" name="__codelineno-0-2336"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_function_tool_calls</span><span class="p">(</span>
+</span><span id="__span-0-2337"><a id="__codelineno-0-2337" name="__codelineno-0-2337"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2338"><a id="__codelineno-0-2338" name="__codelineno-0-2338"></a>    <span class="n">bindings</span><span class="p">:</span> <span class="n">AgentBindings</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2339"><a id="__codelineno-0-2339" name="__codelineno-0-2339"></a>    <span class="n">tool_runs</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunFunction</span><span class="p">],</span>
+</span><span id="__span-0-2340"><a id="__codelineno-0-2340" name="__codelineno-0-2340"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2341"><a id="__codelineno-0-2341" name="__codelineno-0-2341"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2342"><a id="__codelineno-0-2342" name="__codelineno-0-2342"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2343"><a id="__codelineno-0-2343" name="__codelineno-0-2343"></a>    <span class="n">isolate_parallel_failures</span><span class="p">:</span> <span class="nb">bool</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2344"><a id="__codelineno-0-2344" name="__codelineno-0-2344"></a>    <span class="n">sibling_category_failure</span><span class="p">:</span> <span class="n">asyncio</span><span class="o">.</span><span class="n">Event</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2345"><a id="__codelineno-0-2345" name="__codelineno-0-2345"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2346"><a id="__codelineno-0-2346" name="__codelineno-0-2346"></a>    <span class="n">tool_input_guardrail_results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolInputGuardrailResult</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2347"><a id="__codelineno-0-2347" name="__codelineno-0-2347"></a>    <span class="n">tool_output_guardrail_results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolOutputGuardrailResult</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2348"><a id="__codelineno-0-2348" name="__codelineno-0-2348"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span>
+</span><span id="__span-0-2349"><a id="__codelineno-0-2349" name="__codelineno-0-2349"></a>    <span class="nb">list</span><span class="p">[</span><span class="n">FunctionToolResult</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolInputGuardrailResult</span><span class="p">],</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolOutputGuardrailResult</span><span class="p">]</span>
+</span><span id="__span-0-2350"><a id="__codelineno-0-2350" name="__codelineno-0-2350"></a><span class="p">]:</span>
+</span><span id="__span-0-2351"><a id="__codelineno-0-2351" name="__codelineno-0-2351"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Execute function tool calls with approvals, guardrails, and hooks.&quot;&quot;&quot;</span>
+</span><span id="__span-0-2352"><a id="__codelineno-0-2352" name="__codelineno-0-2352"></a>    <span class="k">return</span> <span class="k">await</span> <span class="n">_FunctionToolBatchExecutor</span><span class="p">(</span>
+</span><span id="__span-0-2353"><a id="__codelineno-0-2353" name="__codelineno-0-2353"></a>        <span class="n">bindings</span><span class="o">=</span><span class="n">bindings</span><span class="p">,</span>
+</span><span id="__span-0-2354"><a id="__codelineno-0-2354" name="__codelineno-0-2354"></a>        <span class="n">tool_runs</span><span class="o">=</span><span class="n">tool_runs</span><span class="p">,</span>
+</span><span id="__span-0-2355"><a id="__codelineno-0-2355" name="__codelineno-0-2355"></a>        <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2356"><a id="__codelineno-0-2356" name="__codelineno-0-2356"></a>        <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2357"><a id="__codelineno-0-2357" name="__codelineno-0-2357"></a>        <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-2358"><a id="__codelineno-0-2358" name="__codelineno-0-2358"></a>        <span class="n">isolate_parallel_failures</span><span class="o">=</span><span class="n">isolate_parallel_failures</span><span class="p">,</span>
+</span><span id="__span-0-2359"><a id="__codelineno-0-2359" name="__codelineno-0-2359"></a>        <span class="n">sibling_category_failure</span><span class="o">=</span><span class="n">sibling_category_failure</span><span class="p">,</span>
+</span><span id="__span-0-2360"><a id="__codelineno-0-2360" name="__codelineno-0-2360"></a>        <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
+</span><span id="__span-0-2361"><a id="__codelineno-0-2361" name="__codelineno-0-2361"></a>        <span class="n">tool_input_guardrail_results</span><span class="o">=</span><span class="n">tool_input_guardrail_results</span><span class="p">,</span>
+</span><span id="__span-0-2362"><a id="__codelineno-0-2362" name="__codelineno-0-2362"></a>        <span class="n">tool_output_guardrail_results</span><span class="o">=</span><span class="n">tool_output_guardrail_results</span><span class="p">,</span>
+</span><span id="__span-0-2363"><a id="__codelineno-0-2363" name="__codelineno-0-2363"></a>    <span class="p">)</span><span class="o">.</span><span class="n">execute</span><span class="p">()</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -5114,17 +5140,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2356">2356</a></span>
-<span class="normal"><a href="#__codelineno-0-2357">2357</a></span>
-<span class="normal"><a href="#__codelineno-0-2358">2358</a></span>
-<span class="normal"><a href="#__codelineno-0-2359">2359</a></span>
-<span class="normal"><a href="#__codelineno-0-2360">2360</a></span>
-<span class="normal"><a href="#__codelineno-0-2361">2361</a></span>
-<span class="normal"><a href="#__codelineno-0-2362">2362</a></span>
-<span class="normal"><a href="#__codelineno-0-2363">2363</a></span>
-<span class="normal"><a href="#__codelineno-0-2364">2364</a></span>
-<span class="normal"><a href="#__codelineno-0-2365">2365</a></span>
-<span class="normal"><a href="#__codelineno-0-2366">2366</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2366">2366</a></span>
 <span class="normal"><a href="#__codelineno-0-2367">2367</a></span>
 <span class="normal"><a href="#__codelineno-0-2368">2368</a></span>
 <span class="normal"><a href="#__codelineno-0-2369">2369</a></span>
@@ -5138,31 +5154,41 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2377">2377</a></span>
 <span class="normal"><a href="#__codelineno-0-2378">2378</a></span>
 <span class="normal"><a href="#__codelineno-0-2379">2379</a></span>
-<span class="normal"><a href="#__codelineno-0-2380">2380</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2356"><a id="__codelineno-0-2356" name="__codelineno-0-2356"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_custom_tool_calls</span><span class="p">(</span>
-</span><span id="__span-0-2357"><a id="__codelineno-0-2357" name="__codelineno-0-2357"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2358"><a id="__codelineno-0-2358" name="__codelineno-0-2358"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2359"><a id="__codelineno-0-2359" name="__codelineno-0-2359"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunCustom</span><span class="p">],</span>
-</span><span id="__span-0-2360"><a id="__codelineno-0-2360" name="__codelineno-0-2360"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2361"><a id="__codelineno-0-2361" name="__codelineno-0-2361"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2362"><a id="__codelineno-0-2362" name="__codelineno-0-2362"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2363"><a id="__codelineno-0-2363" name="__codelineno-0-2363"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2364"><a id="__codelineno-0-2364" name="__codelineno-0-2364"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
-</span><span id="__span-0-2365"><a id="__codelineno-0-2365" name="__codelineno-0-2365"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run Responses custom tool calls serially and wrap outputs.&quot;&quot;&quot;</span>
-</span><span id="__span-0-2366"><a id="__codelineno-0-2366" name="__codelineno-0-2366"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">CustomToolAction</span>
-</span><span id="__span-0-2367"><a id="__codelineno-0-2367" name="__codelineno-0-2367"></a>
-</span><span id="__span-0-2368"><a id="__codelineno-0-2368" name="__codelineno-0-2368"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2369"><a id="__codelineno-0-2369" name="__codelineno-0-2369"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
-</span><span id="__span-0-2370"><a id="__codelineno-0-2370" name="__codelineno-0-2370"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-</span><span id="__span-0-2371"><a id="__codelineno-0-2371" name="__codelineno-0-2371"></a>            <span class="k">await</span> <span class="n">CustomToolAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-</span><span id="__span-0-2372"><a id="__codelineno-0-2372" name="__codelineno-0-2372"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2373"><a id="__codelineno-0-2373" name="__codelineno-0-2373"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
-</span><span id="__span-0-2374"><a id="__codelineno-0-2374" name="__codelineno-0-2374"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2375"><a id="__codelineno-0-2375" name="__codelineno-0-2375"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2376"><a id="__codelineno-0-2376" name="__codelineno-0-2376"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
-</span><span id="__span-0-2377"><a id="__codelineno-0-2377" name="__codelineno-0-2377"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
-</span><span id="__span-0-2378"><a id="__codelineno-0-2378" name="__codelineno-0-2378"></a>            <span class="p">)</span>
-</span><span id="__span-0-2379"><a id="__codelineno-0-2379" name="__codelineno-0-2379"></a>        <span class="p">)</span>
-</span><span id="__span-0-2380"><a id="__codelineno-0-2380" name="__codelineno-0-2380"></a>    <span class="k">return</span> <span class="n">results</span>
+<span class="normal"><a href="#__codelineno-0-2380">2380</a></span>
+<span class="normal"><a href="#__codelineno-0-2381">2381</a></span>
+<span class="normal"><a href="#__codelineno-0-2382">2382</a></span>
+<span class="normal"><a href="#__codelineno-0-2383">2383</a></span>
+<span class="normal"><a href="#__codelineno-0-2384">2384</a></span>
+<span class="normal"><a href="#__codelineno-0-2385">2385</a></span>
+<span class="normal"><a href="#__codelineno-0-2386">2386</a></span>
+<span class="normal"><a href="#__codelineno-0-2387">2387</a></span>
+<span class="normal"><a href="#__codelineno-0-2388">2388</a></span>
+<span class="normal"><a href="#__codelineno-0-2389">2389</a></span>
+<span class="normal"><a href="#__codelineno-0-2390">2390</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2366"><a id="__codelineno-0-2366" name="__codelineno-0-2366"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_custom_tool_calls</span><span class="p">(</span>
+</span><span id="__span-0-2367"><a id="__codelineno-0-2367" name="__codelineno-0-2367"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2368"><a id="__codelineno-0-2368" name="__codelineno-0-2368"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2369"><a id="__codelineno-0-2369" name="__codelineno-0-2369"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunCustom</span><span class="p">],</span>
+</span><span id="__span-0-2370"><a id="__codelineno-0-2370" name="__codelineno-0-2370"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2371"><a id="__codelineno-0-2371" name="__codelineno-0-2371"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2372"><a id="__codelineno-0-2372" name="__codelineno-0-2372"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2373"><a id="__codelineno-0-2373" name="__codelineno-0-2373"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2374"><a id="__codelineno-0-2374" name="__codelineno-0-2374"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
+</span><span id="__span-0-2375"><a id="__codelineno-0-2375" name="__codelineno-0-2375"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run Responses custom tool calls serially and wrap outputs.&quot;&quot;&quot;</span>
+</span><span id="__span-0-2376"><a id="__codelineno-0-2376" name="__codelineno-0-2376"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">CustomToolAction</span>
+</span><span id="__span-0-2377"><a id="__codelineno-0-2377" name="__codelineno-0-2377"></a>
+</span><span id="__span-0-2378"><a id="__codelineno-0-2378" name="__codelineno-0-2378"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2379"><a id="__codelineno-0-2379" name="__codelineno-0-2379"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
+</span><span id="__span-0-2380"><a id="__codelineno-0-2380" name="__codelineno-0-2380"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2381"><a id="__codelineno-0-2381" name="__codelineno-0-2381"></a>            <span class="k">await</span> <span class="n">CustomToolAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+</span><span id="__span-0-2382"><a id="__codelineno-0-2382" name="__codelineno-0-2382"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2383"><a id="__codelineno-0-2383" name="__codelineno-0-2383"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
+</span><span id="__span-0-2384"><a id="__codelineno-0-2384" name="__codelineno-0-2384"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2385"><a id="__codelineno-0-2385" name="__codelineno-0-2385"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2386"><a id="__codelineno-0-2386" name="__codelineno-0-2386"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-2387"><a id="__codelineno-0-2387" name="__codelineno-0-2387"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
+</span><span id="__span-0-2388"><a id="__codelineno-0-2388" name="__codelineno-0-2388"></a>            <span class="p">)</span>
+</span><span id="__span-0-2389"><a id="__codelineno-0-2389" name="__codelineno-0-2389"></a>        <span class="p">)</span>
+</span><span id="__span-0-2390"><a id="__codelineno-0-2390" name="__codelineno-0-2390"></a>    <span class="k">return</span> <span class="n">results</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -5230,17 +5256,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2383">2383</a></span>
-<span class="normal"><a href="#__codelineno-0-2384">2384</a></span>
-<span class="normal"><a href="#__codelineno-0-2385">2385</a></span>
-<span class="normal"><a href="#__codelineno-0-2386">2386</a></span>
-<span class="normal"><a href="#__codelineno-0-2387">2387</a></span>
-<span class="normal"><a href="#__codelineno-0-2388">2388</a></span>
-<span class="normal"><a href="#__codelineno-0-2389">2389</a></span>
-<span class="normal"><a href="#__codelineno-0-2390">2390</a></span>
-<span class="normal"><a href="#__codelineno-0-2391">2391</a></span>
-<span class="normal"><a href="#__codelineno-0-2392">2392</a></span>
-<span class="normal"><a href="#__codelineno-0-2393">2393</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2393">2393</a></span>
 <span class="normal"><a href="#__codelineno-0-2394">2394</a></span>
 <span class="normal"><a href="#__codelineno-0-2395">2395</a></span>
 <span class="normal"><a href="#__codelineno-0-2396">2396</a></span>
@@ -5254,31 +5270,41 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2404">2404</a></span>
 <span class="normal"><a href="#__codelineno-0-2405">2405</a></span>
 <span class="normal"><a href="#__codelineno-0-2406">2406</a></span>
-<span class="normal"><a href="#__codelineno-0-2407">2407</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2383"><a id="__codelineno-0-2383" name="__codelineno-0-2383"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_local_shell_calls</span><span class="p">(</span>
-</span><span id="__span-0-2384"><a id="__codelineno-0-2384" name="__codelineno-0-2384"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2385"><a id="__codelineno-0-2385" name="__codelineno-0-2385"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2386"><a id="__codelineno-0-2386" name="__codelineno-0-2386"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunLocalShellCall</span><span class="p">],</span>
-</span><span id="__span-0-2387"><a id="__codelineno-0-2387" name="__codelineno-0-2387"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2388"><a id="__codelineno-0-2388" name="__codelineno-0-2388"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2389"><a id="__codelineno-0-2389" name="__codelineno-0-2389"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2390"><a id="__codelineno-0-2390" name="__codelineno-0-2390"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2391"><a id="__codelineno-0-2391" name="__codelineno-0-2391"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
-</span><span id="__span-0-2392"><a id="__codelineno-0-2392" name="__codelineno-0-2392"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run local shell tool calls serially and wrap outputs.&quot;&quot;&quot;</span>
-</span><span id="__span-0-2393"><a id="__codelineno-0-2393" name="__codelineno-0-2393"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalShellAction</span>
-</span><span id="__span-0-2394"><a id="__codelineno-0-2394" name="__codelineno-0-2394"></a>
-</span><span id="__span-0-2395"><a id="__codelineno-0-2395" name="__codelineno-0-2395"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2396"><a id="__codelineno-0-2396" name="__codelineno-0-2396"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
-</span><span id="__span-0-2397"><a id="__codelineno-0-2397" name="__codelineno-0-2397"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-</span><span id="__span-0-2398"><a id="__codelineno-0-2398" name="__codelineno-0-2398"></a>            <span class="k">await</span> <span class="n">LocalShellAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-</span><span id="__span-0-2399"><a id="__codelineno-0-2399" name="__codelineno-0-2399"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2400"><a id="__codelineno-0-2400" name="__codelineno-0-2400"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
-</span><span id="__span-0-2401"><a id="__codelineno-0-2401" name="__codelineno-0-2401"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2402"><a id="__codelineno-0-2402" name="__codelineno-0-2402"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2403"><a id="__codelineno-0-2403" name="__codelineno-0-2403"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
-</span><span id="__span-0-2404"><a id="__codelineno-0-2404" name="__codelineno-0-2404"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
-</span><span id="__span-0-2405"><a id="__codelineno-0-2405" name="__codelineno-0-2405"></a>            <span class="p">)</span>
-</span><span id="__span-0-2406"><a id="__codelineno-0-2406" name="__codelineno-0-2406"></a>        <span class="p">)</span>
-</span><span id="__span-0-2407"><a id="__codelineno-0-2407" name="__codelineno-0-2407"></a>    <span class="k">return</span> <span class="n">results</span>
+<span class="normal"><a href="#__codelineno-0-2407">2407</a></span>
+<span class="normal"><a href="#__codelineno-0-2408">2408</a></span>
+<span class="normal"><a href="#__codelineno-0-2409">2409</a></span>
+<span class="normal"><a href="#__codelineno-0-2410">2410</a></span>
+<span class="normal"><a href="#__codelineno-0-2411">2411</a></span>
+<span class="normal"><a href="#__codelineno-0-2412">2412</a></span>
+<span class="normal"><a href="#__codelineno-0-2413">2413</a></span>
+<span class="normal"><a href="#__codelineno-0-2414">2414</a></span>
+<span class="normal"><a href="#__codelineno-0-2415">2415</a></span>
+<span class="normal"><a href="#__codelineno-0-2416">2416</a></span>
+<span class="normal"><a href="#__codelineno-0-2417">2417</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2393"><a id="__codelineno-0-2393" name="__codelineno-0-2393"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_local_shell_calls</span><span class="p">(</span>
+</span><span id="__span-0-2394"><a id="__codelineno-0-2394" name="__codelineno-0-2394"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2395"><a id="__codelineno-0-2395" name="__codelineno-0-2395"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2396"><a id="__codelineno-0-2396" name="__codelineno-0-2396"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunLocalShellCall</span><span class="p">],</span>
+</span><span id="__span-0-2397"><a id="__codelineno-0-2397" name="__codelineno-0-2397"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2398"><a id="__codelineno-0-2398" name="__codelineno-0-2398"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2399"><a id="__codelineno-0-2399" name="__codelineno-0-2399"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2400"><a id="__codelineno-0-2400" name="__codelineno-0-2400"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2401"><a id="__codelineno-0-2401" name="__codelineno-0-2401"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
+</span><span id="__span-0-2402"><a id="__codelineno-0-2402" name="__codelineno-0-2402"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run local shell tool calls serially and wrap outputs.&quot;&quot;&quot;</span>
+</span><span id="__span-0-2403"><a id="__codelineno-0-2403" name="__codelineno-0-2403"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">LocalShellAction</span>
+</span><span id="__span-0-2404"><a id="__codelineno-0-2404" name="__codelineno-0-2404"></a>
+</span><span id="__span-0-2405"><a id="__codelineno-0-2405" name="__codelineno-0-2405"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2406"><a id="__codelineno-0-2406" name="__codelineno-0-2406"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
+</span><span id="__span-0-2407"><a id="__codelineno-0-2407" name="__codelineno-0-2407"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2408"><a id="__codelineno-0-2408" name="__codelineno-0-2408"></a>            <span class="k">await</span> <span class="n">LocalShellAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+</span><span id="__span-0-2409"><a id="__codelineno-0-2409" name="__codelineno-0-2409"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2410"><a id="__codelineno-0-2410" name="__codelineno-0-2410"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
+</span><span id="__span-0-2411"><a id="__codelineno-0-2411" name="__codelineno-0-2411"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2412"><a id="__codelineno-0-2412" name="__codelineno-0-2412"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2413"><a id="__codelineno-0-2413" name="__codelineno-0-2413"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-2414"><a id="__codelineno-0-2414" name="__codelineno-0-2414"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
+</span><span id="__span-0-2415"><a id="__codelineno-0-2415" name="__codelineno-0-2415"></a>            <span class="p">)</span>
+</span><span id="__span-0-2416"><a id="__codelineno-0-2416" name="__codelineno-0-2416"></a>        <span class="p">)</span>
+</span><span id="__span-0-2417"><a id="__codelineno-0-2417" name="__codelineno-0-2417"></a>    <span class="k">return</span> <span class="n">results</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -5346,17 +5372,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2410">2410</a></span>
-<span class="normal"><a href="#__codelineno-0-2411">2411</a></span>
-<span class="normal"><a href="#__codelineno-0-2412">2412</a></span>
-<span class="normal"><a href="#__codelineno-0-2413">2413</a></span>
-<span class="normal"><a href="#__codelineno-0-2414">2414</a></span>
-<span class="normal"><a href="#__codelineno-0-2415">2415</a></span>
-<span class="normal"><a href="#__codelineno-0-2416">2416</a></span>
-<span class="normal"><a href="#__codelineno-0-2417">2417</a></span>
-<span class="normal"><a href="#__codelineno-0-2418">2418</a></span>
-<span class="normal"><a href="#__codelineno-0-2419">2419</a></span>
-<span class="normal"><a href="#__codelineno-0-2420">2420</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2420">2420</a></span>
 <span class="normal"><a href="#__codelineno-0-2421">2421</a></span>
 <span class="normal"><a href="#__codelineno-0-2422">2422</a></span>
 <span class="normal"><a href="#__codelineno-0-2423">2423</a></span>
@@ -5370,31 +5386,41 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2431">2431</a></span>
 <span class="normal"><a href="#__codelineno-0-2432">2432</a></span>
 <span class="normal"><a href="#__codelineno-0-2433">2433</a></span>
-<span class="normal"><a href="#__codelineno-0-2434">2434</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2410"><a id="__codelineno-0-2410" name="__codelineno-0-2410"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_shell_calls</span><span class="p">(</span>
-</span><span id="__span-0-2411"><a id="__codelineno-0-2411" name="__codelineno-0-2411"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2412"><a id="__codelineno-0-2412" name="__codelineno-0-2412"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2413"><a id="__codelineno-0-2413" name="__codelineno-0-2413"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunShellCall</span><span class="p">],</span>
-</span><span id="__span-0-2414"><a id="__codelineno-0-2414" name="__codelineno-0-2414"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2415"><a id="__codelineno-0-2415" name="__codelineno-0-2415"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2416"><a id="__codelineno-0-2416" name="__codelineno-0-2416"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2417"><a id="__codelineno-0-2417" name="__codelineno-0-2417"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2418"><a id="__codelineno-0-2418" name="__codelineno-0-2418"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
-</span><span id="__span-0-2419"><a id="__codelineno-0-2419" name="__codelineno-0-2419"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run shell tool calls serially and wrap outputs.&quot;&quot;&quot;</span>
-</span><span id="__span-0-2420"><a id="__codelineno-0-2420" name="__codelineno-0-2420"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">ShellAction</span>
-</span><span id="__span-0-2421"><a id="__codelineno-0-2421" name="__codelineno-0-2421"></a>
-</span><span id="__span-0-2422"><a id="__codelineno-0-2422" name="__codelineno-0-2422"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2423"><a id="__codelineno-0-2423" name="__codelineno-0-2423"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
-</span><span id="__span-0-2424"><a id="__codelineno-0-2424" name="__codelineno-0-2424"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-</span><span id="__span-0-2425"><a id="__codelineno-0-2425" name="__codelineno-0-2425"></a>            <span class="k">await</span> <span class="n">ShellAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-</span><span id="__span-0-2426"><a id="__codelineno-0-2426" name="__codelineno-0-2426"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2427"><a id="__codelineno-0-2427" name="__codelineno-0-2427"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
-</span><span id="__span-0-2428"><a id="__codelineno-0-2428" name="__codelineno-0-2428"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2429"><a id="__codelineno-0-2429" name="__codelineno-0-2429"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2430"><a id="__codelineno-0-2430" name="__codelineno-0-2430"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
-</span><span id="__span-0-2431"><a id="__codelineno-0-2431" name="__codelineno-0-2431"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
-</span><span id="__span-0-2432"><a id="__codelineno-0-2432" name="__codelineno-0-2432"></a>            <span class="p">)</span>
-</span><span id="__span-0-2433"><a id="__codelineno-0-2433" name="__codelineno-0-2433"></a>        <span class="p">)</span>
-</span><span id="__span-0-2434"><a id="__codelineno-0-2434" name="__codelineno-0-2434"></a>    <span class="k">return</span> <span class="n">results</span>
+<span class="normal"><a href="#__codelineno-0-2434">2434</a></span>
+<span class="normal"><a href="#__codelineno-0-2435">2435</a></span>
+<span class="normal"><a href="#__codelineno-0-2436">2436</a></span>
+<span class="normal"><a href="#__codelineno-0-2437">2437</a></span>
+<span class="normal"><a href="#__codelineno-0-2438">2438</a></span>
+<span class="normal"><a href="#__codelineno-0-2439">2439</a></span>
+<span class="normal"><a href="#__codelineno-0-2440">2440</a></span>
+<span class="normal"><a href="#__codelineno-0-2441">2441</a></span>
+<span class="normal"><a href="#__codelineno-0-2442">2442</a></span>
+<span class="normal"><a href="#__codelineno-0-2443">2443</a></span>
+<span class="normal"><a href="#__codelineno-0-2444">2444</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2420"><a id="__codelineno-0-2420" name="__codelineno-0-2420"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_shell_calls</span><span class="p">(</span>
+</span><span id="__span-0-2421"><a id="__codelineno-0-2421" name="__codelineno-0-2421"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2422"><a id="__codelineno-0-2422" name="__codelineno-0-2422"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2423"><a id="__codelineno-0-2423" name="__codelineno-0-2423"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunShellCall</span><span class="p">],</span>
+</span><span id="__span-0-2424"><a id="__codelineno-0-2424" name="__codelineno-0-2424"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2425"><a id="__codelineno-0-2425" name="__codelineno-0-2425"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2426"><a id="__codelineno-0-2426" name="__codelineno-0-2426"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2427"><a id="__codelineno-0-2427" name="__codelineno-0-2427"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2428"><a id="__codelineno-0-2428" name="__codelineno-0-2428"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
+</span><span id="__span-0-2429"><a id="__codelineno-0-2429" name="__codelineno-0-2429"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run shell tool calls serially and wrap outputs.&quot;&quot;&quot;</span>
+</span><span id="__span-0-2430"><a id="__codelineno-0-2430" name="__codelineno-0-2430"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">ShellAction</span>
+</span><span id="__span-0-2431"><a id="__codelineno-0-2431" name="__codelineno-0-2431"></a>
+</span><span id="__span-0-2432"><a id="__codelineno-0-2432" name="__codelineno-0-2432"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2433"><a id="__codelineno-0-2433" name="__codelineno-0-2433"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
+</span><span id="__span-0-2434"><a id="__codelineno-0-2434" name="__codelineno-0-2434"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2435"><a id="__codelineno-0-2435" name="__codelineno-0-2435"></a>            <span class="k">await</span> <span class="n">ShellAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+</span><span id="__span-0-2436"><a id="__codelineno-0-2436" name="__codelineno-0-2436"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2437"><a id="__codelineno-0-2437" name="__codelineno-0-2437"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
+</span><span id="__span-0-2438"><a id="__codelineno-0-2438" name="__codelineno-0-2438"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2439"><a id="__codelineno-0-2439" name="__codelineno-0-2439"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2440"><a id="__codelineno-0-2440" name="__codelineno-0-2440"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-2441"><a id="__codelineno-0-2441" name="__codelineno-0-2441"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
+</span><span id="__span-0-2442"><a id="__codelineno-0-2442" name="__codelineno-0-2442"></a>            <span class="p">)</span>
+</span><span id="__span-0-2443"><a id="__codelineno-0-2443" name="__codelineno-0-2443"></a>        <span class="p">)</span>
+</span><span id="__span-0-2444"><a id="__codelineno-0-2444" name="__codelineno-0-2444"></a>    <span class="k">return</span> <span class="n">results</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -5462,17 +5488,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2437">2437</a></span>
-<span class="normal"><a href="#__codelineno-0-2438">2438</a></span>
-<span class="normal"><a href="#__codelineno-0-2439">2439</a></span>
-<span class="normal"><a href="#__codelineno-0-2440">2440</a></span>
-<span class="normal"><a href="#__codelineno-0-2441">2441</a></span>
-<span class="normal"><a href="#__codelineno-0-2442">2442</a></span>
-<span class="normal"><a href="#__codelineno-0-2443">2443</a></span>
-<span class="normal"><a href="#__codelineno-0-2444">2444</a></span>
-<span class="normal"><a href="#__codelineno-0-2445">2445</a></span>
-<span class="normal"><a href="#__codelineno-0-2446">2446</a></span>
-<span class="normal"><a href="#__codelineno-0-2447">2447</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2447">2447</a></span>
 <span class="normal"><a href="#__codelineno-0-2448">2448</a></span>
 <span class="normal"><a href="#__codelineno-0-2449">2449</a></span>
 <span class="normal"><a href="#__codelineno-0-2450">2450</a></span>
@@ -5486,31 +5502,41 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2458">2458</a></span>
 <span class="normal"><a href="#__codelineno-0-2459">2459</a></span>
 <span class="normal"><a href="#__codelineno-0-2460">2460</a></span>
-<span class="normal"><a href="#__codelineno-0-2461">2461</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2437"><a id="__codelineno-0-2437" name="__codelineno-0-2437"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_apply_patch_calls</span><span class="p">(</span>
-</span><span id="__span-0-2438"><a id="__codelineno-0-2438" name="__codelineno-0-2438"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2439"><a id="__codelineno-0-2439" name="__codelineno-0-2439"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2440"><a id="__codelineno-0-2440" name="__codelineno-0-2440"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunApplyPatchCall</span><span class="p">],</span>
-</span><span id="__span-0-2441"><a id="__codelineno-0-2441" name="__codelineno-0-2441"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2442"><a id="__codelineno-0-2442" name="__codelineno-0-2442"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2443"><a id="__codelineno-0-2443" name="__codelineno-0-2443"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2444"><a id="__codelineno-0-2444" name="__codelineno-0-2444"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2445"><a id="__codelineno-0-2445" name="__codelineno-0-2445"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
-</span><span id="__span-0-2446"><a id="__codelineno-0-2446" name="__codelineno-0-2446"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run apply_patch tool calls serially and normalize outputs.&quot;&quot;&quot;</span>
-</span><span id="__span-0-2447"><a id="__codelineno-0-2447" name="__codelineno-0-2447"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">ApplyPatchAction</span>
-</span><span id="__span-0-2448"><a id="__codelineno-0-2448" name="__codelineno-0-2448"></a>
-</span><span id="__span-0-2449"><a id="__codelineno-0-2449" name="__codelineno-0-2449"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2450"><a id="__codelineno-0-2450" name="__codelineno-0-2450"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
-</span><span id="__span-0-2451"><a id="__codelineno-0-2451" name="__codelineno-0-2451"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-</span><span id="__span-0-2452"><a id="__codelineno-0-2452" name="__codelineno-0-2452"></a>            <span class="k">await</span> <span class="n">ApplyPatchAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-</span><span id="__span-0-2453"><a id="__codelineno-0-2453" name="__codelineno-0-2453"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2454"><a id="__codelineno-0-2454" name="__codelineno-0-2454"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
-</span><span id="__span-0-2455"><a id="__codelineno-0-2455" name="__codelineno-0-2455"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2456"><a id="__codelineno-0-2456" name="__codelineno-0-2456"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2457"><a id="__codelineno-0-2457" name="__codelineno-0-2457"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
-</span><span id="__span-0-2458"><a id="__codelineno-0-2458" name="__codelineno-0-2458"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
-</span><span id="__span-0-2459"><a id="__codelineno-0-2459" name="__codelineno-0-2459"></a>            <span class="p">)</span>
-</span><span id="__span-0-2460"><a id="__codelineno-0-2460" name="__codelineno-0-2460"></a>        <span class="p">)</span>
-</span><span id="__span-0-2461"><a id="__codelineno-0-2461" name="__codelineno-0-2461"></a>    <span class="k">return</span> <span class="n">results</span>
+<span class="normal"><a href="#__codelineno-0-2461">2461</a></span>
+<span class="normal"><a href="#__codelineno-0-2462">2462</a></span>
+<span class="normal"><a href="#__codelineno-0-2463">2463</a></span>
+<span class="normal"><a href="#__codelineno-0-2464">2464</a></span>
+<span class="normal"><a href="#__codelineno-0-2465">2465</a></span>
+<span class="normal"><a href="#__codelineno-0-2466">2466</a></span>
+<span class="normal"><a href="#__codelineno-0-2467">2467</a></span>
+<span class="normal"><a href="#__codelineno-0-2468">2468</a></span>
+<span class="normal"><a href="#__codelineno-0-2469">2469</a></span>
+<span class="normal"><a href="#__codelineno-0-2470">2470</a></span>
+<span class="normal"><a href="#__codelineno-0-2471">2471</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2447"><a id="__codelineno-0-2447" name="__codelineno-0-2447"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_apply_patch_calls</span><span class="p">(</span>
+</span><span id="__span-0-2448"><a id="__codelineno-0-2448" name="__codelineno-0-2448"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2449"><a id="__codelineno-0-2449" name="__codelineno-0-2449"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2450"><a id="__codelineno-0-2450" name="__codelineno-0-2450"></a>    <span class="n">calls</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunApplyPatchCall</span><span class="p">],</span>
+</span><span id="__span-0-2451"><a id="__codelineno-0-2451" name="__codelineno-0-2451"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2452"><a id="__codelineno-0-2452" name="__codelineno-0-2452"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2453"><a id="__codelineno-0-2453" name="__codelineno-0-2453"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2454"><a id="__codelineno-0-2454" name="__codelineno-0-2454"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2455"><a id="__codelineno-0-2455" name="__codelineno-0-2455"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
+</span><span id="__span-0-2456"><a id="__codelineno-0-2456" name="__codelineno-0-2456"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run apply_patch tool calls serially and normalize outputs.&quot;&quot;&quot;</span>
+</span><span id="__span-0-2457"><a id="__codelineno-0-2457" name="__codelineno-0-2457"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">ApplyPatchAction</span>
+</span><span id="__span-0-2458"><a id="__codelineno-0-2458" name="__codelineno-0-2458"></a>
+</span><span id="__span-0-2459"><a id="__codelineno-0-2459" name="__codelineno-0-2459"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2460"><a id="__codelineno-0-2460" name="__codelineno-0-2460"></a>    <span class="k">for</span> <span class="n">call</span> <span class="ow">in</span> <span class="n">calls</span><span class="p">:</span>
+</span><span id="__span-0-2461"><a id="__codelineno-0-2461" name="__codelineno-0-2461"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2462"><a id="__codelineno-0-2462" name="__codelineno-0-2462"></a>            <span class="k">await</span> <span class="n">ApplyPatchAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+</span><span id="__span-0-2463"><a id="__codelineno-0-2463" name="__codelineno-0-2463"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2464"><a id="__codelineno-0-2464" name="__codelineno-0-2464"></a>                <span class="n">call</span><span class="o">=</span><span class="n">call</span><span class="p">,</span>
+</span><span id="__span-0-2465"><a id="__codelineno-0-2465" name="__codelineno-0-2465"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2466"><a id="__codelineno-0-2466" name="__codelineno-0-2466"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2467"><a id="__codelineno-0-2467" name="__codelineno-0-2467"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-2468"><a id="__codelineno-0-2468" name="__codelineno-0-2468"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
+</span><span id="__span-0-2469"><a id="__codelineno-0-2469" name="__codelineno-0-2469"></a>            <span class="p">)</span>
+</span><span id="__span-0-2470"><a id="__codelineno-0-2470" name="__codelineno-0-2470"></a>        <span class="p">)</span>
+</span><span id="__span-0-2471"><a id="__codelineno-0-2471" name="__codelineno-0-2471"></a>    <span class="k">return</span> <span class="n">results</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -5578,17 +5604,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2464">2464</a></span>
-<span class="normal"><a href="#__codelineno-0-2465">2465</a></span>
-<span class="normal"><a href="#__codelineno-0-2466">2466</a></span>
-<span class="normal"><a href="#__codelineno-0-2467">2467</a></span>
-<span class="normal"><a href="#__codelineno-0-2468">2468</a></span>
-<span class="normal"><a href="#__codelineno-0-2469">2469</a></span>
-<span class="normal"><a href="#__codelineno-0-2470">2470</a></span>
-<span class="normal"><a href="#__codelineno-0-2471">2471</a></span>
-<span class="normal"><a href="#__codelineno-0-2472">2472</a></span>
-<span class="normal"><a href="#__codelineno-0-2473">2473</a></span>
-<span class="normal"><a href="#__codelineno-0-2474">2474</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2474">2474</a></span>
 <span class="normal"><a href="#__codelineno-0-2475">2475</a></span>
 <span class="normal"><a href="#__codelineno-0-2476">2476</a></span>
 <span class="normal"><a href="#__codelineno-0-2477">2477</a></span>
@@ -5634,63 +5650,85 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2517">2517</a></span>
 <span class="normal"><a href="#__codelineno-0-2518">2518</a></span>
 <span class="normal"><a href="#__codelineno-0-2519">2519</a></span>
-<span class="normal"><a href="#__codelineno-0-2520">2520</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2464"><a id="__codelineno-0-2464" name="__codelineno-0-2464"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_computer_actions</span><span class="p">(</span>
-</span><span id="__span-0-2465"><a id="__codelineno-0-2465" name="__codelineno-0-2465"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2466"><a id="__codelineno-0-2466" name="__codelineno-0-2466"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2467"><a id="__codelineno-0-2467" name="__codelineno-0-2467"></a>    <span class="n">actions</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunComputerAction</span><span class="p">],</span>
-</span><span id="__span-0-2468"><a id="__codelineno-0-2468" name="__codelineno-0-2468"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2469"><a id="__codelineno-0-2469" name="__codelineno-0-2469"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2470"><a id="__codelineno-0-2470" name="__codelineno-0-2470"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2471"><a id="__codelineno-0-2471" name="__codelineno-0-2471"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2472"><a id="__codelineno-0-2472" name="__codelineno-0-2472"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
-</span><span id="__span-0-2473"><a id="__codelineno-0-2473" name="__codelineno-0-2473"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run computer actions serially and emit screenshot outputs.&quot;&quot;&quot;</span>
-</span><span id="__span-0-2474"><a id="__codelineno-0-2474" name="__codelineno-0-2474"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">ComputerAction</span>
-</span><span id="__span-0-2475"><a id="__codelineno-0-2475" name="__codelineno-0-2475"></a>
-</span><span id="__span-0-2476"><a id="__codelineno-0-2476" name="__codelineno-0-2476"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2477"><a id="__codelineno-0-2477" name="__codelineno-0-2477"></a>    <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">:</span>
-</span><span id="__span-0-2478"><a id="__codelineno-0-2478" name="__codelineno-0-2478"></a>        <span class="n">context_wrapper</span><span class="o">.</span><span class="n">_mark_tool_invocation_executed</span><span class="p">(</span>
-</span><span id="__span-0-2479"><a id="__codelineno-0-2479" name="__codelineno-0-2479"></a>            <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2480"><a id="__codelineno-0-2480" name="__codelineno-0-2480"></a>            <span class="n">tool_name</span><span class="o">=</span><span class="n">action</span><span class="o">.</span><span class="n">computer_tool</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
-</span><span id="__span-0-2481"><a id="__codelineno-0-2481" name="__codelineno-0-2481"></a>        <span class="p">)</span>
-</span><span id="__span-0-2482"><a id="__codelineno-0-2482" name="__codelineno-0-2482"></a>        <span class="n">acknowledged</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ComputerCallOutputAcknowledgedSafetyCheck</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
-</span><span id="__span-0-2483"><a id="__codelineno-0-2483" name="__codelineno-0-2483"></a>        <span class="k">if</span> <span class="p">(</span>
-</span><span id="__span-0-2484"><a id="__codelineno-0-2484" name="__codelineno-0-2484"></a>            <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">pending_safety_checks</span>
-</span><span id="__span-0-2485"><a id="__codelineno-0-2485" name="__codelineno-0-2485"></a>            <span class="ow">and</span> <span class="n">action</span><span class="o">.</span><span class="n">computer_tool</span><span class="o">.</span><span class="n">on_safety_check</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
-</span><span id="__span-0-2486"><a id="__codelineno-0-2486" name="__codelineno-0-2486"></a>        <span class="p">):</span>
-</span><span id="__span-0-2487"><a id="__codelineno-0-2487" name="__codelineno-0-2487"></a>            <span class="n">acknowledged</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2488"><a id="__codelineno-0-2488" name="__codelineno-0-2488"></a>            <span class="k">for</span> <span class="n">check</span> <span class="ow">in</span> <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">pending_safety_checks</span><span class="p">:</span>
-</span><span id="__span-0-2489"><a id="__codelineno-0-2489" name="__codelineno-0-2489"></a>                <span class="n">data</span> <span class="o">=</span> <span class="n">ComputerToolSafetyCheckData</span><span class="p">(</span>
-</span><span id="__span-0-2490"><a id="__codelineno-0-2490" name="__codelineno-0-2490"></a>                    <span class="n">ctx_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2491"><a id="__codelineno-0-2491" name="__codelineno-0-2491"></a>                    <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2492"><a id="__codelineno-0-2492" name="__codelineno-0-2492"></a>                    <span class="n">tool_call</span><span class="o">=</span><span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2493"><a id="__codelineno-0-2493" name="__codelineno-0-2493"></a>                    <span class="n">safety_check</span><span class="o">=</span><span class="n">check</span><span class="p">,</span>
-</span><span id="__span-0-2494"><a id="__codelineno-0-2494" name="__codelineno-0-2494"></a>                <span class="p">)</span>
-</span><span id="__span-0-2495"><a id="__codelineno-0-2495" name="__codelineno-0-2495"></a>                <span class="n">maybe</span> <span class="o">=</span> <span class="n">action</span><span class="o">.</span><span class="n">computer_tool</span><span class="o">.</span><span class="n">on_safety_check</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
-</span><span id="__span-0-2496"><a id="__codelineno-0-2496" name="__codelineno-0-2496"></a>                <span class="n">ack</span> <span class="o">=</span> <span class="k">await</span> <span class="n">maybe</span> <span class="k">if</span> <span class="n">inspect</span><span class="o">.</span><span class="n">isawaitable</span><span class="p">(</span><span class="n">maybe</span><span class="p">)</span> <span class="k">else</span> <span class="n">maybe</span>
-</span><span id="__span-0-2497"><a id="__codelineno-0-2497" name="__codelineno-0-2497"></a>                <span class="k">if</span> <span class="n">ack</span><span class="p">:</span>
-</span><span id="__span-0-2498"><a id="__codelineno-0-2498" name="__codelineno-0-2498"></a>                    <span class="n">acknowledged</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-</span><span id="__span-0-2499"><a id="__codelineno-0-2499" name="__codelineno-0-2499"></a>                        <span class="n">ComputerCallOutputAcknowledgedSafetyCheck</span><span class="p">(</span>
-</span><span id="__span-0-2500"><a id="__codelineno-0-2500" name="__codelineno-0-2500"></a>                            <span class="nb">id</span><span class="o">=</span><span class="n">check</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
-</span><span id="__span-0-2501"><a id="__codelineno-0-2501" name="__codelineno-0-2501"></a>                            <span class="n">code</span><span class="o">=</span><span class="n">check</span><span class="o">.</span><span class="n">code</span><span class="p">,</span>
-</span><span id="__span-0-2502"><a id="__codelineno-0-2502" name="__codelineno-0-2502"></a>                            <span class="n">message</span><span class="o">=</span><span class="n">check</span><span class="o">.</span><span class="n">message</span><span class="p">,</span>
-</span><span id="__span-0-2503"><a id="__codelineno-0-2503" name="__codelineno-0-2503"></a>                        <span class="p">)</span>
-</span><span id="__span-0-2504"><a id="__codelineno-0-2504" name="__codelineno-0-2504"></a>                    <span class="p">)</span>
-</span><span id="__span-0-2505"><a id="__codelineno-0-2505" name="__codelineno-0-2505"></a>                <span class="k">else</span><span class="p">:</span>
-</span><span id="__span-0-2506"><a id="__codelineno-0-2506" name="__codelineno-0-2506"></a>                    <span class="k">raise</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Computer tool safety check was not acknowledged&quot;</span><span class="p">)</span>
-</span><span id="__span-0-2507"><a id="__codelineno-0-2507" name="__codelineno-0-2507"></a>
-</span><span id="__span-0-2508"><a id="__codelineno-0-2508" name="__codelineno-0-2508"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
-</span><span id="__span-0-2509"><a id="__codelineno-0-2509" name="__codelineno-0-2509"></a>            <span class="k">await</span> <span class="n">ComputerAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
-</span><span id="__span-0-2510"><a id="__codelineno-0-2510" name="__codelineno-0-2510"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
-</span><span id="__span-0-2511"><a id="__codelineno-0-2511" name="__codelineno-0-2511"></a>                <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
-</span><span id="__span-0-2512"><a id="__codelineno-0-2512" name="__codelineno-0-2512"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2513"><a id="__codelineno-0-2513" name="__codelineno-0-2513"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2514"><a id="__codelineno-0-2514" name="__codelineno-0-2514"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
-</span><span id="__span-0-2515"><a id="__codelineno-0-2515" name="__codelineno-0-2515"></a>                <span class="n">acknowledged_safety_checks</span><span class="o">=</span><span class="n">acknowledged</span><span class="p">,</span>
-</span><span id="__span-0-2516"><a id="__codelineno-0-2516" name="__codelineno-0-2516"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
-</span><span id="__span-0-2517"><a id="__codelineno-0-2517" name="__codelineno-0-2517"></a>            <span class="p">)</span>
-</span><span id="__span-0-2518"><a id="__codelineno-0-2518" name="__codelineno-0-2518"></a>        <span class="p">)</span>
-</span><span id="__span-0-2519"><a id="__codelineno-0-2519" name="__codelineno-0-2519"></a>
-</span><span id="__span-0-2520"><a id="__codelineno-0-2520" name="__codelineno-0-2520"></a>    <span class="k">return</span> <span class="n">results</span>
+<span class="normal"><a href="#__codelineno-0-2520">2520</a></span>
+<span class="normal"><a href="#__codelineno-0-2521">2521</a></span>
+<span class="normal"><a href="#__codelineno-0-2522">2522</a></span>
+<span class="normal"><a href="#__codelineno-0-2523">2523</a></span>
+<span class="normal"><a href="#__codelineno-0-2524">2524</a></span>
+<span class="normal"><a href="#__codelineno-0-2525">2525</a></span>
+<span class="normal"><a href="#__codelineno-0-2526">2526</a></span>
+<span class="normal"><a href="#__codelineno-0-2527">2527</a></span>
+<span class="normal"><a href="#__codelineno-0-2528">2528</a></span>
+<span class="normal"><a href="#__codelineno-0-2529">2529</a></span>
+<span class="normal"><a href="#__codelineno-0-2530">2530</a></span>
+<span class="normal"><a href="#__codelineno-0-2531">2531</a></span>
+<span class="normal"><a href="#__codelineno-0-2532">2532</a></span>
+<span class="normal"><a href="#__codelineno-0-2533">2533</a></span>
+<span class="normal"><a href="#__codelineno-0-2534">2534</a></span>
+<span class="normal"><a href="#__codelineno-0-2535">2535</a></span>
+<span class="normal"><a href="#__codelineno-0-2536">2536</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2474"><a id="__codelineno-0-2474" name="__codelineno-0-2474"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_computer_actions</span><span class="p">(</span>
+</span><span id="__span-0-2475"><a id="__codelineno-0-2475" name="__codelineno-0-2475"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2476"><a id="__codelineno-0-2476" name="__codelineno-0-2476"></a>    <span class="n">public_agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2477"><a id="__codelineno-0-2477" name="__codelineno-0-2477"></a>    <span class="n">actions</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunComputerAction</span><span class="p">],</span>
+</span><span id="__span-0-2478"><a id="__codelineno-0-2478" name="__codelineno-0-2478"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2479"><a id="__codelineno-0-2479" name="__codelineno-0-2479"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2480"><a id="__codelineno-0-2480" name="__codelineno-0-2480"></a>    <span class="n">config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2481"><a id="__codelineno-0-2481" name="__codelineno-0-2481"></a>    <span class="n">tool_output_committer</span><span class="p">:</span> <span class="n">Callable</span><span class="p">[[</span><span class="n">RunItem</span><span class="p">],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2482"><a id="__codelineno-0-2482" name="__codelineno-0-2482"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]:</span>
+</span><span id="__span-0-2483"><a id="__codelineno-0-2483" name="__codelineno-0-2483"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Run computer actions serially and emit screenshot outputs.&quot;&quot;&quot;</span>
+</span><span id="__span-0-2484"><a id="__codelineno-0-2484" name="__codelineno-0-2484"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.tool_actions</span><span class="w"> </span><span class="kn">import</span> <span class="n">ComputerAction</span>
+</span><span id="__span-0-2485"><a id="__codelineno-0-2485" name="__codelineno-0-2485"></a>
+</span><span id="__span-0-2486"><a id="__codelineno-0-2486" name="__codelineno-0-2486"></a>    <span class="n">results</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2487"><a id="__codelineno-0-2487" name="__codelineno-0-2487"></a>    <span class="k">for</span> <span class="n">action</span> <span class="ow">in</span> <span class="n">actions</span><span class="p">:</span>
+</span><span id="__span-0-2488"><a id="__codelineno-0-2488" name="__codelineno-0-2488"></a>        <span class="n">context_wrapper</span><span class="o">.</span><span class="n">_mark_tool_invocation_executed</span><span class="p">(</span>
+</span><span id="__span-0-2489"><a id="__codelineno-0-2489" name="__codelineno-0-2489"></a>            <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2490"><a id="__codelineno-0-2490" name="__codelineno-0-2490"></a>            <span class="n">tool_name</span><span class="o">=</span><span class="n">action</span><span class="o">.</span><span class="n">computer_tool</span><span class="o">.</span><span class="n">name</span><span class="p">,</span>
+</span><span id="__span-0-2491"><a id="__codelineno-0-2491" name="__codelineno-0-2491"></a>        <span class="p">)</span>
+</span><span id="__span-0-2492"><a id="__codelineno-0-2492" name="__codelineno-0-2492"></a>        <span class="n">acknowledged</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ComputerCallOutputAcknowledgedSafetyCheck</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span>
+</span><span id="__span-0-2493"><a id="__codelineno-0-2493" name="__codelineno-0-2493"></a>        <span class="k">if</span> <span class="p">(</span>
+</span><span id="__span-0-2494"><a id="__codelineno-0-2494" name="__codelineno-0-2494"></a>            <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">pending_safety_checks</span>
+</span><span id="__span-0-2495"><a id="__codelineno-0-2495" name="__codelineno-0-2495"></a>            <span class="ow">and</span> <span class="n">action</span><span class="o">.</span><span class="n">computer_tool</span><span class="o">.</span><span class="n">on_safety_check</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span>
+</span><span id="__span-0-2496"><a id="__codelineno-0-2496" name="__codelineno-0-2496"></a>        <span class="p">):</span>
+</span><span id="__span-0-2497"><a id="__codelineno-0-2497" name="__codelineno-0-2497"></a>            <span class="n">acknowledged</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2498"><a id="__codelineno-0-2498" name="__codelineno-0-2498"></a>            <span class="k">for</span> <span class="n">check</span> <span class="ow">in</span> <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">pending_safety_checks</span><span class="p">:</span>
+</span><span id="__span-0-2499"><a id="__codelineno-0-2499" name="__codelineno-0-2499"></a>                <span class="n">data</span> <span class="o">=</span> <span class="n">ComputerToolSafetyCheckData</span><span class="p">(</span>
+</span><span id="__span-0-2500"><a id="__codelineno-0-2500" name="__codelineno-0-2500"></a>                    <span class="n">ctx_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2501"><a id="__codelineno-0-2501" name="__codelineno-0-2501"></a>                    <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2502"><a id="__codelineno-0-2502" name="__codelineno-0-2502"></a>                    <span class="n">tool_call</span><span class="o">=</span><span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2503"><a id="__codelineno-0-2503" name="__codelineno-0-2503"></a>                    <span class="n">safety_check</span><span class="o">=</span><span class="n">check</span><span class="p">,</span>
+</span><span id="__span-0-2504"><a id="__codelineno-0-2504" name="__codelineno-0-2504"></a>                <span class="p">)</span>
+</span><span id="__span-0-2505"><a id="__codelineno-0-2505" name="__codelineno-0-2505"></a>                <span class="n">maybe</span> <span class="o">=</span> <span class="n">action</span><span class="o">.</span><span class="n">computer_tool</span><span class="o">.</span><span class="n">on_safety_check</span><span class="p">(</span><span class="n">data</span><span class="p">)</span>
+</span><span id="__span-0-2506"><a id="__codelineno-0-2506" name="__codelineno-0-2506"></a>                <span class="n">ack</span> <span class="o">=</span> <span class="k">await</span> <span class="n">maybe</span> <span class="k">if</span> <span class="n">inspect</span><span class="o">.</span><span class="n">isawaitable</span><span class="p">(</span><span class="n">maybe</span><span class="p">)</span> <span class="k">else</span> <span class="n">maybe</span>
+</span><span id="__span-0-2507"><a id="__codelineno-0-2507" name="__codelineno-0-2507"></a>                <span class="k">if</span> <span class="n">ack</span><span class="p">:</span>
+</span><span id="__span-0-2508"><a id="__codelineno-0-2508" name="__codelineno-0-2508"></a>                    <span class="n">acknowledged</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2509"><a id="__codelineno-0-2509" name="__codelineno-0-2509"></a>                        <span class="n">ComputerCallOutputAcknowledgedSafetyCheck</span><span class="p">(</span>
+</span><span id="__span-0-2510"><a id="__codelineno-0-2510" name="__codelineno-0-2510"></a>                            <span class="nb">id</span><span class="o">=</span><span class="n">check</span><span class="o">.</span><span class="n">id</span><span class="p">,</span>
+</span><span id="__span-0-2511"><a id="__codelineno-0-2511" name="__codelineno-0-2511"></a>                            <span class="n">code</span><span class="o">=</span><span class="n">check</span><span class="o">.</span><span class="n">code</span><span class="p">,</span>
+</span><span id="__span-0-2512"><a id="__codelineno-0-2512" name="__codelineno-0-2512"></a>                            <span class="n">message</span><span class="o">=</span><span class="n">check</span><span class="o">.</span><span class="n">message</span><span class="p">,</span>
+</span><span id="__span-0-2513"><a id="__codelineno-0-2513" name="__codelineno-0-2513"></a>                        <span class="p">)</span>
+</span><span id="__span-0-2514"><a id="__codelineno-0-2514" name="__codelineno-0-2514"></a>                    <span class="p">)</span>
+</span><span id="__span-0-2515"><a id="__codelineno-0-2515" name="__codelineno-0-2515"></a>                <span class="k">else</span><span class="p">:</span>
+</span><span id="__span-0-2516"><a id="__codelineno-0-2516" name="__codelineno-0-2516"></a>                    <span class="k">raise</span> <span class="n">UserError</span><span class="p">(</span><span class="s2">&quot;Computer tool safety check was not acknowledged&quot;</span><span class="p">)</span>
+</span><span id="__span-0-2517"><a id="__codelineno-0-2517" name="__codelineno-0-2517"></a>        <span class="k">elif</span> <span class="n">action</span><span class="o">.</span><span class="n">tool_call</span><span class="o">.</span><span class="n">pending_safety_checks</span><span class="p">:</span>
+</span><span id="__span-0-2518"><a id="__codelineno-0-2518" name="__codelineno-0-2518"></a>            <span class="n">logger</span><span class="o">.</span><span class="n">warning</span><span class="p">(</span>
+</span><span id="__span-0-2519"><a id="__codelineno-0-2519" name="__codelineno-0-2519"></a>                <span class="s2">&quot;Computer call has pending safety checks, but no on_safety_check handler is &quot;</span>
+</span><span id="__span-0-2520"><a id="__codelineno-0-2520" name="__codelineno-0-2520"></a>                <span class="s2">&quot;configured. The action will proceed without acknowledging the checks. &quot;</span>
+</span><span id="__span-0-2521"><a id="__codelineno-0-2521" name="__codelineno-0-2521"></a>                <span class="s2">&quot;Configure ComputerTool.on_safety_check to review or reject them.&quot;</span>
+</span><span id="__span-0-2522"><a id="__codelineno-0-2522" name="__codelineno-0-2522"></a>            <span class="p">)</span>
+</span><span id="__span-0-2523"><a id="__codelineno-0-2523" name="__codelineno-0-2523"></a>
+</span><span id="__span-0-2524"><a id="__codelineno-0-2524" name="__codelineno-0-2524"></a>        <span class="n">results</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+</span><span id="__span-0-2525"><a id="__codelineno-0-2525" name="__codelineno-0-2525"></a>            <span class="k">await</span> <span class="n">ComputerAction</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span>
+</span><span id="__span-0-2526"><a id="__codelineno-0-2526" name="__codelineno-0-2526"></a>                <span class="n">agent</span><span class="o">=</span><span class="n">public_agent</span><span class="p">,</span>
+</span><span id="__span-0-2527"><a id="__codelineno-0-2527" name="__codelineno-0-2527"></a>                <span class="n">action</span><span class="o">=</span><span class="n">action</span><span class="p">,</span>
+</span><span id="__span-0-2528"><a id="__codelineno-0-2528" name="__codelineno-0-2528"></a>                <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2529"><a id="__codelineno-0-2529" name="__codelineno-0-2529"></a>                <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2530"><a id="__codelineno-0-2530" name="__codelineno-0-2530"></a>                <span class="n">config</span><span class="o">=</span><span class="n">config</span><span class="p">,</span>
+</span><span id="__span-0-2531"><a id="__codelineno-0-2531" name="__codelineno-0-2531"></a>                <span class="n">acknowledged_safety_checks</span><span class="o">=</span><span class="n">acknowledged</span><span class="p">,</span>
+</span><span id="__span-0-2532"><a id="__codelineno-0-2532" name="__codelineno-0-2532"></a>                <span class="n">tool_output_committer</span><span class="o">=</span><span class="n">tool_output_committer</span><span class="p">,</span>
+</span><span id="__span-0-2533"><a id="__codelineno-0-2533" name="__codelineno-0-2533"></a>            <span class="p">)</span>
+</span><span id="__span-0-2534"><a id="__codelineno-0-2534" name="__codelineno-0-2534"></a>        <span class="p">)</span>
+</span><span id="__span-0-2535"><a id="__codelineno-0-2535" name="__codelineno-0-2535"></a>
+</span><span id="__span-0-2536"><a id="__codelineno-0-2536" name="__codelineno-0-2536"></a>    <span class="k">return</span> <span class="n">results</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
@@ -5758,23 +5796,7 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 
             <details class="mkdocstrings-source">
               <summary>ソースコード位置： <code>src/agents/run_internal/tool_execution.py</code></summary>
-              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2523">2523</a></span>
-<span class="normal"><a href="#__codelineno-0-2524">2524</a></span>
-<span class="normal"><a href="#__codelineno-0-2525">2525</a></span>
-<span class="normal"><a href="#__codelineno-0-2526">2526</a></span>
-<span class="normal"><a href="#__codelineno-0-2527">2527</a></span>
-<span class="normal"><a href="#__codelineno-0-2528">2528</a></span>
-<span class="normal"><a href="#__codelineno-0-2529">2529</a></span>
-<span class="normal"><a href="#__codelineno-0-2530">2530</a></span>
-<span class="normal"><a href="#__codelineno-0-2531">2531</a></span>
-<span class="normal"><a href="#__codelineno-0-2532">2532</a></span>
-<span class="normal"><a href="#__codelineno-0-2533">2533</a></span>
-<span class="normal"><a href="#__codelineno-0-2534">2534</a></span>
-<span class="normal"><a href="#__codelineno-0-2535">2535</a></span>
-<span class="normal"><a href="#__codelineno-0-2536">2536</a></span>
-<span class="normal"><a href="#__codelineno-0-2537">2537</a></span>
-<span class="normal"><a href="#__codelineno-0-2538">2538</a></span>
-<span class="normal"><a href="#__codelineno-0-2539">2539</a></span>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-2539">2539</a></span>
 <span class="normal"><a href="#__codelineno-0-2540">2540</a></span>
 <span class="normal"><a href="#__codelineno-0-2541">2541</a></span>
 <span class="normal"><a href="#__codelineno-0-2542">2542</a></span>
@@ -5943,192 +5965,208 @@ and traceback are logged only when tool-data logging is explicitly enabled.</p>
 <span class="normal"><a href="#__codelineno-0-2705">2705</a></span>
 <span class="normal"><a href="#__codelineno-0-2706">2706</a></span>
 <span class="normal"><a href="#__codelineno-0-2707">2707</a></span>
-<span class="normal"><a href="#__codelineno-0-2708">2708</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2523"><a id="__codelineno-0-2523" name="__codelineno-0-2523"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_approved_tools</span><span class="p">(</span>
-</span><span id="__span-0-2524"><a id="__codelineno-0-2524" name="__codelineno-0-2524"></a>    <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2525"><a id="__codelineno-0-2525" name="__codelineno-0-2525"></a>    <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2526"><a id="__codelineno-0-2526" name="__codelineno-0-2526"></a>    <span class="n">interruptions</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2527"><a id="__codelineno-0-2527" name="__codelineno-0-2527"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2528"><a id="__codelineno-0-2528" name="__codelineno-0-2528"></a>    <span class="n">generated_items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
-</span><span id="__span-0-2529"><a id="__codelineno-0-2529" name="__codelineno-0-2529"></a>    <span class="n">run_config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
-</span><span id="__span-0-2530"><a id="__codelineno-0-2530" name="__codelineno-0-2530"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
-</span><span id="__span-0-2531"><a id="__codelineno-0-2531" name="__codelineno-0-2531"></a>    <span class="n">all_tools</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Tool</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2532"><a id="__codelineno-0-2532" name="__codelineno-0-2532"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2533"><a id="__codelineno-0-2533" name="__codelineno-0-2533"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Execute tools that have been approved after an interruption (HITL resume path).&quot;&quot;&quot;</span>
-</span><span id="__span-0-2534"><a id="__codelineno-0-2534" name="__codelineno-0-2534"></a>    <span class="n">tool_runs</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunFunction</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
-</span><span id="__span-0-2535"><a id="__codelineno-0-2535" name="__codelineno-0-2535"></a>    <span class="n">tool_map</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">NamedToolLookupKey</span><span class="p">,</span> <span class="n">Tool</span><span class="p">]</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span>
-</span><span id="__span-0-2536"><a id="__codelineno-0-2536" name="__codelineno-0-2536"></a>        <span class="nb">dict</span><span class="p">[</span><span class="n">NamedToolLookupKey</span><span class="p">,</span> <span class="n">Tool</span><span class="p">],</span>
-</span><span id="__span-0-2537"><a id="__codelineno-0-2537" name="__codelineno-0-2537"></a>        <span class="n">build_function_tool_lookup_map</span><span class="p">(</span>
-</span><span id="__span-0-2538"><a id="__codelineno-0-2538" name="__codelineno-0-2538"></a>            <span class="p">[</span><span class="n">tool</span> <span class="k">for</span> <span class="n">tool</span> <span class="ow">in</span> <span class="n">all_tools</span> <span class="ow">or</span> <span class="p">[]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)]</span>
-</span><span id="__span-0-2539"><a id="__codelineno-0-2539" name="__codelineno-0-2539"></a>        <span class="p">),</span>
-</span><span id="__span-0-2540"><a id="__codelineno-0-2540" name="__codelineno-0-2540"></a>    <span class="p">)</span>
-</span><span id="__span-0-2541"><a id="__codelineno-0-2541" name="__codelineno-0-2541"></a>    <span class="k">for</span> <span class="n">tool</span> <span class="ow">in</span> <span class="n">all_tools</span> <span class="ow">or</span> <span class="p">[]:</span>
-</span><span id="__span-0-2542"><a id="__codelineno-0-2542" name="__codelineno-0-2542"></a>        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">):</span>
-</span><span id="__span-0-2543"><a id="__codelineno-0-2543" name="__codelineno-0-2543"></a>            <span class="k">continue</span>
-</span><span id="__span-0-2544"><a id="__codelineno-0-2544" name="__codelineno-0-2544"></a>        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">):</span>
-</span><span id="__span-0-2545"><a id="__codelineno-0-2545" name="__codelineno-0-2545"></a>            <span class="n">tool_name</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2546"><a id="__codelineno-0-2546" name="__codelineno-0-2546"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool_name</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="n">tool_name</span><span class="p">:</span>
-</span><span id="__span-0-2547"><a id="__codelineno-0-2547" name="__codelineno-0-2547"></a>                <span class="n">tool_map</span><span class="p">[</span><span class="n">tool_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">tool</span>
-</span><span id="__span-0-2548"><a id="__codelineno-0-2548" name="__codelineno-0-2548"></a>
-</span><span id="__span-0-2549"><a id="__codelineno-0-2549" name="__codelineno-0-2549"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2550"><a id="__codelineno-0-2550" name="__codelineno-0-2550"></a>        <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-</span><span id="__span-0-2551"><a id="__codelineno-0-2551" name="__codelineno-0-2551"></a>        <span class="o">*</span><span class="p">,</span>
-</span><span id="__span-0-2552"><a id="__codelineno-0-2552" name="__codelineno-0-2552"></a>        <span class="n">tool_call</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
-</span><span id="__span-0-2553"><a id="__codelineno-0-2553" name="__codelineno-0-2553"></a>        <span class="n">tool_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-</span><span id="__span-0-2554"><a id="__codelineno-0-2554" name="__codelineno-0-2554"></a>        <span class="n">call_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
-</span><span id="__span-0-2555"><a id="__codelineno-0-2555" name="__codelineno-0-2555"></a>        <span class="n">tool_origin</span><span class="p">:</span> <span class="n">ToolOrigin</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
-</span><span id="__span-0-2556"><a id="__codelineno-0-2556" name="__codelineno-0-2556"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2557"><a id="__codelineno-0-2557" name="__codelineno-0-2557"></a>        <span class="n">append_approval_error_output</span><span class="p">(</span>
-</span><span id="__span-0-2558"><a id="__codelineno-0-2558" name="__codelineno-0-2558"></a>            <span class="n">message</span><span class="o">=</span><span class="n">message</span><span class="p">,</span>
-</span><span id="__span-0-2559"><a id="__codelineno-0-2559" name="__codelineno-0-2559"></a>            <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2560"><a id="__codelineno-0-2560" name="__codelineno-0-2560"></a>            <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2561"><a id="__codelineno-0-2561" name="__codelineno-0-2561"></a>            <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2562"><a id="__codelineno-0-2562" name="__codelineno-0-2562"></a>            <span class="n">generated_items</span><span class="o">=</span><span class="n">generated_items</span><span class="p">,</span>
-</span><span id="__span-0-2563"><a id="__codelineno-0-2563" name="__codelineno-0-2563"></a>            <span class="n">agent</span><span class="o">=</span><span class="n">agent</span><span class="p">,</span>
-</span><span id="__span-0-2564"><a id="__codelineno-0-2564" name="__codelineno-0-2564"></a>            <span class="n">tool_origin</span><span class="o">=</span><span class="n">tool_origin</span><span class="p">,</span>
-</span><span id="__span-0-2565"><a id="__codelineno-0-2565" name="__codelineno-0-2565"></a>        <span class="p">)</span>
-</span><span id="__span-0-2566"><a id="__codelineno-0-2566" name="__codelineno-0-2566"></a>
-</span><span id="__span-0-2567"><a id="__codelineno-0-2567" name="__codelineno-0-2567"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_tool_run</span><span class="p">(</span>
-</span><span id="__span-0-2568"><a id="__codelineno-0-2568" name="__codelineno-0-2568"></a>        <span class="n">interruption</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
-</span><span id="__span-0-2569"><a id="__codelineno-0-2569" name="__codelineno-0-2569"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ResponseFunctionToolCall</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2570"><a id="__codelineno-0-2570" name="__codelineno-0-2570"></a>        <span class="n">tool_call</span> <span class="o">=</span> <span class="n">interruption</span><span class="o">.</span><span class="n">raw_item</span>
-</span><span id="__span-0-2571"><a id="__codelineno-0-2571" name="__codelineno-0-2571"></a>        <span class="n">tool_name</span> <span class="o">=</span> <span class="n">interruption</span><span class="o">.</span><span class="n">name</span> <span class="ow">or</span> <span class="n">RunContextWrapper</span><span class="o">.</span><span class="n">_resolve_tool_name</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
-</span><span id="__span-0-2572"><a id="__codelineno-0-2572" name="__codelineno-0-2572"></a>        <span class="n">tool_namespace</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">interruption</span><span class="p">,</span> <span class="s2">&quot;tool_namespace&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
-</span><span id="__span-0-2573"><a id="__codelineno-0-2573" name="__codelineno-0-2573"></a>        <span class="n">tool_lookup_key</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span>
-</span><span id="__span-0-2574"><a id="__codelineno-0-2574" name="__codelineno-0-2574"></a>            <span class="n">interruption</span><span class="p">,</span> <span class="s2">&quot;tool_lookup_key&quot;</span><span class="p">,</span> <span class="kc">None</span>
-</span><span id="__span-0-2575"><a id="__codelineno-0-2575" name="__codelineno-0-2575"></a>        <span class="p">)</span> <span class="ow">or</span> <span class="n">get_function_tool_lookup_key</span><span class="p">(</span>
-</span><span id="__span-0-2576"><a id="__codelineno-0-2576" name="__codelineno-0-2576"></a>            <span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2577"><a id="__codelineno-0-2577" name="__codelineno-0-2577"></a>            <span class="n">tool_namespace</span><span class="p">,</span>
-</span><span id="__span-0-2578"><a id="__codelineno-0-2578" name="__codelineno-0-2578"></a>        <span class="p">)</span>
-</span><span id="__span-0-2579"><a id="__codelineno-0-2579" name="__codelineno-0-2579"></a>        <span class="n">approval_key</span> <span class="o">=</span> <span class="n">tool_lookup_key</span>
-</span><span id="__span-0-2580"><a id="__codelineno-0-2580" name="__codelineno-0-2580"></a>        <span class="n">display_tool_name</span> <span class="o">=</span> <span class="n">tool_trace_name</span><span class="p">(</span><span class="n">tool_name</span><span class="p">,</span> <span class="n">tool_namespace</span><span class="p">)</span> <span class="ow">or</span> <span class="n">tool_name</span> <span class="ow">or</span> <span class="s2">&quot;unknown&quot;</span>
-</span><span id="__span-0-2581"><a id="__codelineno-0-2581" name="__codelineno-0-2581"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="n">tool_name</span><span class="p">:</span>
-</span><span id="__span-0-2582"><a id="__codelineno-0-2582" name="__codelineno-0-2582"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2583"><a id="__codelineno-0-2583" name="__codelineno-0-2583"></a>                <span class="n">message</span><span class="o">=</span><span class="s2">&quot;Tool approval item missing tool name.&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2584"><a id="__codelineno-0-2584" name="__codelineno-0-2584"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2585"><a id="__codelineno-0-2585" name="__codelineno-0-2585"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2586"><a id="__codelineno-0-2586" name="__codelineno-0-2586"></a>                <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2587"><a id="__codelineno-0-2587" name="__codelineno-0-2587"></a>            <span class="p">)</span>
-</span><span id="__span-0-2588"><a id="__codelineno-0-2588" name="__codelineno-0-2588"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2589"><a id="__codelineno-0-2589" name="__codelineno-0-2589"></a>
-</span><span id="__span-0-2590"><a id="__codelineno-0-2590" name="__codelineno-0-2590"></a>        <span class="n">call_id</span> <span class="o">=</span> <span class="n">extract_tool_call_id</span><span class="p">(</span><span class="n">tool_call</span><span class="p">)</span>
-</span><span id="__span-0-2591"><a id="__codelineno-0-2591" name="__codelineno-0-2591"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="n">call_id</span><span class="p">:</span>
-</span><span id="__span-0-2592"><a id="__codelineno-0-2592" name="__codelineno-0-2592"></a>            <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">approval_key</span><span class="p">)</span> <span class="k">if</span> <span class="n">approval_key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
-</span><span id="__span-0-2593"><a id="__codelineno-0-2593" name="__codelineno-0-2593"></a>            <span class="k">if</span> <span class="n">resolved_tool</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">tool_namespace</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2594"><a id="__codelineno-0-2594" name="__codelineno-0-2594"></a>                <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">tool_name</span><span class="p">)</span>
-</span><span id="__span-0-2595"><a id="__codelineno-0-2595" name="__codelineno-0-2595"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2596"><a id="__codelineno-0-2596" name="__codelineno-0-2596"></a>                <span class="n">message</span><span class="o">=</span><span class="s2">&quot;Tool approval item missing call ID.&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2597"><a id="__codelineno-0-2597" name="__codelineno-0-2597"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2598"><a id="__codelineno-0-2598" name="__codelineno-0-2598"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2599"><a id="__codelineno-0-2599" name="__codelineno-0-2599"></a>                <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2600"><a id="__codelineno-0-2600" name="__codelineno-0-2600"></a>                <span class="n">tool_origin</span><span class="o">=</span><span class="p">(</span>
-</span><span id="__span-0-2601"><a id="__codelineno-0-2601" name="__codelineno-0-2601"></a>                    <span class="n">get_function_tool_origin</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">)</span>
-</span><span id="__span-0-2602"><a id="__codelineno-0-2602" name="__codelineno-0-2602"></a>                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)</span>
-</span><span id="__span-0-2603"><a id="__codelineno-0-2603" name="__codelineno-0-2603"></a>                    <span class="k">else</span> <span class="kc">None</span>
-</span><span id="__span-0-2604"><a id="__codelineno-0-2604" name="__codelineno-0-2604"></a>                <span class="p">),</span>
-</span><span id="__span-0-2605"><a id="__codelineno-0-2605" name="__codelineno-0-2605"></a>            <span class="p">)</span>
-</span><span id="__span-0-2606"><a id="__codelineno-0-2606" name="__codelineno-0-2606"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2607"><a id="__codelineno-0-2607" name="__codelineno-0-2607"></a>
-</span><span id="__span-0-2608"><a id="__codelineno-0-2608" name="__codelineno-0-2608"></a>        <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">approval_key</span><span class="p">)</span> <span class="k">if</span> <span class="n">approval_key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
-</span><span id="__span-0-2609"><a id="__codelineno-0-2609" name="__codelineno-0-2609"></a>        <span class="k">if</span> <span class="n">resolved_tool</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">tool_namespace</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2610"><a id="__codelineno-0-2610" name="__codelineno-0-2610"></a>            <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">tool_name</span><span class="p">)</span>
-</span><span id="__span-0-2611"><a id="__codelineno-0-2611" name="__codelineno-0-2611"></a>        <span class="n">approval_status</span> <span class="o">=</span> <span class="n">context_wrapper</span><span class="o">.</span><span class="n">get_approval_status</span><span class="p">(</span>
-</span><span id="__span-0-2612"><a id="__codelineno-0-2612" name="__codelineno-0-2612"></a>            <span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2613"><a id="__codelineno-0-2613" name="__codelineno-0-2613"></a>            <span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2614"><a id="__codelineno-0-2614" name="__codelineno-0-2614"></a>            <span class="n">tool_namespace</span><span class="o">=</span><span class="n">tool_namespace</span><span class="p">,</span>
-</span><span id="__span-0-2615"><a id="__codelineno-0-2615" name="__codelineno-0-2615"></a>            <span class="n">existing_pending</span><span class="o">=</span><span class="n">interruption</span><span class="p">,</span>
-</span><span id="__span-0-2616"><a id="__codelineno-0-2616" name="__codelineno-0-2616"></a>            <span class="n">tool_lookup_key</span><span class="o">=</span><span class="n">tool_lookup_key</span><span class="p">,</span>
-</span><span id="__span-0-2617"><a id="__codelineno-0-2617" name="__codelineno-0-2617"></a>        <span class="p">)</span>
-</span><span id="__span-0-2618"><a id="__codelineno-0-2618" name="__codelineno-0-2618"></a>        <span class="k">if</span> <span class="n">approval_status</span> <span class="ow">is</span> <span class="kc">False</span><span class="p">:</span>
-</span><span id="__span-0-2619"><a id="__codelineno-0-2619" name="__codelineno-0-2619"></a>            <span class="n">message</span> <span class="o">=</span> <span class="n">REJECTION_MESSAGE</span>
-</span><span id="__span-0-2620"><a id="__codelineno-0-2620" name="__codelineno-0-2620"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">):</span>
-</span><span id="__span-0-2621"><a id="__codelineno-0-2621" name="__codelineno-0-2621"></a>                <span class="n">message</span> <span class="o">=</span> <span class="k">await</span> <span class="n">resolve_approval_rejection_message</span><span class="p">(</span>
-</span><span id="__span-0-2622"><a id="__codelineno-0-2622" name="__codelineno-0-2622"></a>                    <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2623"><a id="__codelineno-0-2623" name="__codelineno-0-2623"></a>                    <span class="n">run_config</span><span class="o">=</span><span class="n">run_config</span><span class="p">,</span>
-</span><span id="__span-0-2624"><a id="__codelineno-0-2624" name="__codelineno-0-2624"></a>                    <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2625"><a id="__codelineno-0-2625" name="__codelineno-0-2625"></a>                    <span class="n">tool_type</span><span class="o">=</span><span class="s2">&quot;function&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2626"><a id="__codelineno-0-2626" name="__codelineno-0-2626"></a>                    <span class="n">tool_name</span><span class="o">=</span><span class="n">display_tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2627"><a id="__codelineno-0-2627" name="__codelineno-0-2627"></a>                    <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2628"><a id="__codelineno-0-2628" name="__codelineno-0-2628"></a>                    <span class="n">tool_namespace</span><span class="o">=</span><span class="n">tool_namespace</span><span class="p">,</span>
-</span><span id="__span-0-2629"><a id="__codelineno-0-2629" name="__codelineno-0-2629"></a>                    <span class="n">tool_lookup_key</span><span class="o">=</span><span class="n">tool_lookup_key</span><span class="p">,</span>
-</span><span id="__span-0-2630"><a id="__codelineno-0-2630" name="__codelineno-0-2630"></a>                    <span class="n">existing_pending</span><span class="o">=</span><span class="n">interruption</span><span class="p">,</span>
-</span><span id="__span-0-2631"><a id="__codelineno-0-2631" name="__codelineno-0-2631"></a>                <span class="p">)</span>
-</span><span id="__span-0-2632"><a id="__codelineno-0-2632" name="__codelineno-0-2632"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2633"><a id="__codelineno-0-2633" name="__codelineno-0-2633"></a>                <span class="n">message</span><span class="o">=</span><span class="n">message</span><span class="p">,</span>
-</span><span id="__span-0-2634"><a id="__codelineno-0-2634" name="__codelineno-0-2634"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2635"><a id="__codelineno-0-2635" name="__codelineno-0-2635"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2636"><a id="__codelineno-0-2636" name="__codelineno-0-2636"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2637"><a id="__codelineno-0-2637" name="__codelineno-0-2637"></a>                <span class="n">tool_origin</span><span class="o">=</span><span class="p">(</span>
-</span><span id="__span-0-2638"><a id="__codelineno-0-2638" name="__codelineno-0-2638"></a>                    <span class="n">get_function_tool_origin</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">)</span>
-</span><span id="__span-0-2639"><a id="__codelineno-0-2639" name="__codelineno-0-2639"></a>                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)</span>
-</span><span id="__span-0-2640"><a id="__codelineno-0-2640" name="__codelineno-0-2640"></a>                    <span class="k">else</span> <span class="kc">None</span>
-</span><span id="__span-0-2641"><a id="__codelineno-0-2641" name="__codelineno-0-2641"></a>                <span class="p">),</span>
-</span><span id="__span-0-2642"><a id="__codelineno-0-2642" name="__codelineno-0-2642"></a>            <span class="p">)</span>
-</span><span id="__span-0-2643"><a id="__codelineno-0-2643" name="__codelineno-0-2643"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2644"><a id="__codelineno-0-2644" name="__codelineno-0-2644"></a>
-</span><span id="__span-0-2645"><a id="__codelineno-0-2645" name="__codelineno-0-2645"></a>        <span class="k">if</span> <span class="n">approval_status</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">True</span><span class="p">:</span>
-</span><span id="__span-0-2646"><a id="__codelineno-0-2646" name="__codelineno-0-2646"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2647"><a id="__codelineno-0-2647" name="__codelineno-0-2647"></a>                <span class="n">message</span><span class="o">=</span><span class="s2">&quot;Tool approval status unclear.&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2648"><a id="__codelineno-0-2648" name="__codelineno-0-2648"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2649"><a id="__codelineno-0-2649" name="__codelineno-0-2649"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2650"><a id="__codelineno-0-2650" name="__codelineno-0-2650"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2651"><a id="__codelineno-0-2651" name="__codelineno-0-2651"></a>                <span class="n">tool_origin</span><span class="o">=</span><span class="p">(</span>
-</span><span id="__span-0-2652"><a id="__codelineno-0-2652" name="__codelineno-0-2652"></a>                    <span class="n">get_function_tool_origin</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">)</span>
-</span><span id="__span-0-2653"><a id="__codelineno-0-2653" name="__codelineno-0-2653"></a>                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)</span>
-</span><span id="__span-0-2654"><a id="__codelineno-0-2654" name="__codelineno-0-2654"></a>                    <span class="k">else</span> <span class="kc">None</span>
-</span><span id="__span-0-2655"><a id="__codelineno-0-2655" name="__codelineno-0-2655"></a>                <span class="p">),</span>
-</span><span id="__span-0-2656"><a id="__codelineno-0-2656" name="__codelineno-0-2656"></a>            <span class="p">)</span>
-</span><span id="__span-0-2657"><a id="__codelineno-0-2657" name="__codelineno-0-2657"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2658"><a id="__codelineno-0-2658" name="__codelineno-0-2658"></a>
-</span><span id="__span-0-2659"><a id="__codelineno-0-2659" name="__codelineno-0-2659"></a>        <span class="n">tool</span> <span class="o">=</span> <span class="n">resolved_tool</span>
-</span><span id="__span-0-2660"><a id="__codelineno-0-2660" name="__codelineno-0-2660"></a>        <span class="k">if</span> <span class="n">tool</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2661"><a id="__codelineno-0-2661" name="__codelineno-0-2661"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2662"><a id="__codelineno-0-2662" name="__codelineno-0-2662"></a>                <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Tool &#39;</span><span class="si">{</span><span class="n">display_tool_name</span><span class="si">}</span><span class="s2">&#39; not found.&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2663"><a id="__codelineno-0-2663" name="__codelineno-0-2663"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2664"><a id="__codelineno-0-2664" name="__codelineno-0-2664"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2665"><a id="__codelineno-0-2665" name="__codelineno-0-2665"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2666"><a id="__codelineno-0-2666" name="__codelineno-0-2666"></a>            <span class="p">)</span>
-</span><span id="__span-0-2667"><a id="__codelineno-0-2667" name="__codelineno-0-2667"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2668"><a id="__codelineno-0-2668" name="__codelineno-0-2668"></a>
-</span><span id="__span-0-2669"><a id="__codelineno-0-2669" name="__codelineno-0-2669"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">):</span>
-</span><span id="__span-0-2670"><a id="__codelineno-0-2670" name="__codelineno-0-2670"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2671"><a id="__codelineno-0-2671" name="__codelineno-0-2671"></a>                <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Tool &#39;</span><span class="si">{</span><span class="n">display_tool_name</span><span class="si">}</span><span class="s2">&#39; is not a function tool.&quot;</span><span class="p">,</span>
-</span><span id="__span-0-2672"><a id="__codelineno-0-2672" name="__codelineno-0-2672"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2673"><a id="__codelineno-0-2673" name="__codelineno-0-2673"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2674"><a id="__codelineno-0-2674" name="__codelineno-0-2674"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2675"><a id="__codelineno-0-2675" name="__codelineno-0-2675"></a>            <span class="p">)</span>
-</span><span id="__span-0-2676"><a id="__codelineno-0-2676" name="__codelineno-0-2676"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2677"><a id="__codelineno-0-2677" name="__codelineno-0-2677"></a>
-</span><span id="__span-0-2678"><a id="__codelineno-0-2678" name="__codelineno-0-2678"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool_call</span><span class="p">,</span> <span class="n">ResponseFunctionToolCall</span><span class="p">):</span>
-</span><span id="__span-0-2679"><a id="__codelineno-0-2679" name="__codelineno-0-2679"></a>            <span class="n">_append_error</span><span class="p">(</span>
-</span><span id="__span-0-2680"><a id="__codelineno-0-2680" name="__codelineno-0-2680"></a>                <span class="n">message</span><span class="o">=</span><span class="p">(</span>
-</span><span id="__span-0-2681"><a id="__codelineno-0-2681" name="__codelineno-0-2681"></a>                    <span class="sa">f</span><span class="s2">&quot;Tool &#39;</span><span class="si">{</span><span class="n">tool_name</span><span class="si">}</span><span class="s2">&#39; approval item has invalid raw_item type for execution.&quot;</span>
-</span><span id="__span-0-2682"><a id="__codelineno-0-2682" name="__codelineno-0-2682"></a>                <span class="p">),</span>
-</span><span id="__span-0-2683"><a id="__codelineno-0-2683" name="__codelineno-0-2683"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
-</span><span id="__span-0-2684"><a id="__codelineno-0-2684" name="__codelineno-0-2684"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
-</span><span id="__span-0-2685"><a id="__codelineno-0-2685" name="__codelineno-0-2685"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
-</span><span id="__span-0-2686"><a id="__codelineno-0-2686" name="__codelineno-0-2686"></a>            <span class="p">)</span>
-</span><span id="__span-0-2687"><a id="__codelineno-0-2687" name="__codelineno-0-2687"></a>            <span class="k">return</span> <span class="kc">None</span>
-</span><span id="__span-0-2688"><a id="__codelineno-0-2688" name="__codelineno-0-2688"></a>
-</span><span id="__span-0-2689"><a id="__codelineno-0-2689" name="__codelineno-0-2689"></a>        <span class="k">return</span> <span class="n">tool_call</span><span class="p">,</span> <span class="n">tool</span><span class="p">,</span> <span class="n">tool_name</span><span class="p">,</span> <span class="n">call_id</span>
-</span><span id="__span-0-2690"><a id="__codelineno-0-2690" name="__codelineno-0-2690"></a>
-</span><span id="__span-0-2691"><a id="__codelineno-0-2691" name="__codelineno-0-2691"></a>    <span class="k">for</span> <span class="n">interruption</span> <span class="ow">in</span> <span class="n">interruptions</span><span class="p">:</span>
-</span><span id="__span-0-2692"><a id="__codelineno-0-2692" name="__codelineno-0-2692"></a>        <span class="n">resolved</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_resolve_tool_run</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
-</span><span id="__span-0-2693"><a id="__codelineno-0-2693" name="__codelineno-0-2693"></a>        <span class="k">if</span> <span class="n">resolved</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
-</span><span id="__span-0-2694"><a id="__codelineno-0-2694" name="__codelineno-0-2694"></a>            <span class="k">continue</span>
-</span><span id="__span-0-2695"><a id="__codelineno-0-2695" name="__codelineno-0-2695"></a>        <span class="n">tool_call</span><span class="p">,</span> <span class="n">tool</span><span class="p">,</span> <span class="n">tool_name</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">resolved</span>
-</span><span id="__span-0-2696"><a id="__codelineno-0-2696" name="__codelineno-0-2696"></a>        <span class="n">tool_runs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ToolRunFunction</span><span class="p">(</span><span class="n">function_tool</span><span class="o">=</span><span class="n">tool</span><span class="p">,</span> <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">))</span>
-</span><span id="__span-0-2697"><a id="__codelineno-0-2697" name="__codelineno-0-2697"></a>
-</span><span id="__span-0-2698"><a id="__codelineno-0-2698" name="__codelineno-0-2698"></a>    <span class="k">if</span> <span class="n">tool_runs</span><span class="p">:</span>
-</span><span id="__span-0-2699"><a id="__codelineno-0-2699" name="__codelineno-0-2699"></a>        <span class="n">function_results</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="k">await</span> <span class="n">execute_function_tool_calls</span><span class="p">(</span>
-</span><span id="__span-0-2700"><a id="__codelineno-0-2700" name="__codelineno-0-2700"></a>            <span class="n">bindings</span><span class="o">=</span><span class="n">bind_public_agent</span><span class="p">(</span><span class="n">agent</span><span class="p">),</span>
-</span><span id="__span-0-2701"><a id="__codelineno-0-2701" name="__codelineno-0-2701"></a>            <span class="n">tool_runs</span><span class="o">=</span><span class="n">tool_runs</span><span class="p">,</span>
-</span><span id="__span-0-2702"><a id="__codelineno-0-2702" name="__codelineno-0-2702"></a>            <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
-</span><span id="__span-0-2703"><a id="__codelineno-0-2703" name="__codelineno-0-2703"></a>            <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
-</span><span id="__span-0-2704"><a id="__codelineno-0-2704" name="__codelineno-0-2704"></a>            <span class="n">config</span><span class="o">=</span><span class="n">run_config</span><span class="p">,</span>
-</span><span id="__span-0-2705"><a id="__codelineno-0-2705" name="__codelineno-0-2705"></a>        <span class="p">)</span>
-</span><span id="__span-0-2706"><a id="__codelineno-0-2706" name="__codelineno-0-2706"></a>        <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">function_results</span><span class="p">:</span>
-</span><span id="__span-0-2707"><a id="__codelineno-0-2707" name="__codelineno-0-2707"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run_item</span><span class="p">,</span> <span class="n">RunItemBase</span><span class="p">):</span>
-</span><span id="__span-0-2708"><a id="__codelineno-0-2708" name="__codelineno-0-2708"></a>                <span class="n">generated_items</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run_item</span><span class="p">)</span>
+<span class="normal"><a href="#__codelineno-0-2708">2708</a></span>
+<span class="normal"><a href="#__codelineno-0-2709">2709</a></span>
+<span class="normal"><a href="#__codelineno-0-2710">2710</a></span>
+<span class="normal"><a href="#__codelineno-0-2711">2711</a></span>
+<span class="normal"><a href="#__codelineno-0-2712">2712</a></span>
+<span class="normal"><a href="#__codelineno-0-2713">2713</a></span>
+<span class="normal"><a href="#__codelineno-0-2714">2714</a></span>
+<span class="normal"><a href="#__codelineno-0-2715">2715</a></span>
+<span class="normal"><a href="#__codelineno-0-2716">2716</a></span>
+<span class="normal"><a href="#__codelineno-0-2717">2717</a></span>
+<span class="normal"><a href="#__codelineno-0-2718">2718</a></span>
+<span class="normal"><a href="#__codelineno-0-2719">2719</a></span>
+<span class="normal"><a href="#__codelineno-0-2720">2720</a></span>
+<span class="normal"><a href="#__codelineno-0-2721">2721</a></span>
+<span class="normal"><a href="#__codelineno-0-2722">2722</a></span>
+<span class="normal"><a href="#__codelineno-0-2723">2723</a></span>
+<span class="normal"><a href="#__codelineno-0-2724">2724</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-2539"><a id="__codelineno-0-2539" name="__codelineno-0-2539"></a><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">execute_approved_tools</span><span class="p">(</span>
+</span><span id="__span-0-2540"><a id="__codelineno-0-2540" name="__codelineno-0-2540"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2541"><a id="__codelineno-0-2541" name="__codelineno-0-2541"></a>    <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2542"><a id="__codelineno-0-2542" name="__codelineno-0-2542"></a>    <span class="n">interruptions</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2543"><a id="__codelineno-0-2543" name="__codelineno-0-2543"></a>    <span class="n">context_wrapper</span><span class="p">:</span> <span class="n">RunContextWrapper</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2544"><a id="__codelineno-0-2544" name="__codelineno-0-2544"></a>    <span class="n">generated_items</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">RunItem</span><span class="p">],</span>
+</span><span id="__span-0-2545"><a id="__codelineno-0-2545" name="__codelineno-0-2545"></a>    <span class="n">run_config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-2546"><a id="__codelineno-0-2546" name="__codelineno-0-2546"></a>    <span class="n">hooks</span><span class="p">:</span> <span class="n">RunHooks</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-2547"><a id="__codelineno-0-2547" name="__codelineno-0-2547"></a>    <span class="n">all_tools</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">Tool</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2548"><a id="__codelineno-0-2548" name="__codelineno-0-2548"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2549"><a id="__codelineno-0-2549" name="__codelineno-0-2549"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Execute tools that have been approved after an interruption (HITL resume path).&quot;&quot;&quot;</span>
+</span><span id="__span-0-2550"><a id="__codelineno-0-2550" name="__codelineno-0-2550"></a>    <span class="n">tool_runs</span><span class="p">:</span> <span class="nb">list</span><span class="p">[</span><span class="n">ToolRunFunction</span><span class="p">]</span> <span class="o">=</span> <span class="p">[]</span>
+</span><span id="__span-0-2551"><a id="__codelineno-0-2551" name="__codelineno-0-2551"></a>    <span class="n">tool_map</span><span class="p">:</span> <span class="nb">dict</span><span class="p">[</span><span class="n">NamedToolLookupKey</span><span class="p">,</span> <span class="n">Tool</span><span class="p">]</span> <span class="o">=</span> <span class="n">cast</span><span class="p">(</span>
+</span><span id="__span-0-2552"><a id="__codelineno-0-2552" name="__codelineno-0-2552"></a>        <span class="nb">dict</span><span class="p">[</span><span class="n">NamedToolLookupKey</span><span class="p">,</span> <span class="n">Tool</span><span class="p">],</span>
+</span><span id="__span-0-2553"><a id="__codelineno-0-2553" name="__codelineno-0-2553"></a>        <span class="n">build_function_tool_lookup_map</span><span class="p">(</span>
+</span><span id="__span-0-2554"><a id="__codelineno-0-2554" name="__codelineno-0-2554"></a>            <span class="p">[</span><span class="n">tool</span> <span class="k">for</span> <span class="n">tool</span> <span class="ow">in</span> <span class="n">all_tools</span> <span class="ow">or</span> <span class="p">[]</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)]</span>
+</span><span id="__span-0-2555"><a id="__codelineno-0-2555" name="__codelineno-0-2555"></a>        <span class="p">),</span>
+</span><span id="__span-0-2556"><a id="__codelineno-0-2556" name="__codelineno-0-2556"></a>    <span class="p">)</span>
+</span><span id="__span-0-2557"><a id="__codelineno-0-2557" name="__codelineno-0-2557"></a>    <span class="k">for</span> <span class="n">tool</span> <span class="ow">in</span> <span class="n">all_tools</span> <span class="ow">or</span> <span class="p">[]:</span>
+</span><span id="__span-0-2558"><a id="__codelineno-0-2558" name="__codelineno-0-2558"></a>        <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">):</span>
+</span><span id="__span-0-2559"><a id="__codelineno-0-2559" name="__codelineno-0-2559"></a>            <span class="k">continue</span>
+</span><span id="__span-0-2560"><a id="__codelineno-0-2560" name="__codelineno-0-2560"></a>        <span class="k">if</span> <span class="nb">hasattr</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">):</span>
+</span><span id="__span-0-2561"><a id="__codelineno-0-2561" name="__codelineno-0-2561"></a>            <span class="n">tool_name</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="s2">&quot;name&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2562"><a id="__codelineno-0-2562" name="__codelineno-0-2562"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool_name</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="ow">and</span> <span class="n">tool_name</span><span class="p">:</span>
+</span><span id="__span-0-2563"><a id="__codelineno-0-2563" name="__codelineno-0-2563"></a>                <span class="n">tool_map</span><span class="p">[</span><span class="n">tool_name</span><span class="p">]</span> <span class="o">=</span> <span class="n">tool</span>
+</span><span id="__span-0-2564"><a id="__codelineno-0-2564" name="__codelineno-0-2564"></a>
+</span><span id="__span-0-2565"><a id="__codelineno-0-2565" name="__codelineno-0-2565"></a>    <span class="k">def</span><span class="w"> </span><span class="nf">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2566"><a id="__codelineno-0-2566" name="__codelineno-0-2566"></a>        <span class="n">message</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span id="__span-0-2567"><a id="__codelineno-0-2567" name="__codelineno-0-2567"></a>        <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-2568"><a id="__codelineno-0-2568" name="__codelineno-0-2568"></a>        <span class="n">tool_call</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
+</span><span id="__span-0-2569"><a id="__codelineno-0-2569" name="__codelineno-0-2569"></a>        <span class="n">tool_name</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span id="__span-0-2570"><a id="__codelineno-0-2570" name="__codelineno-0-2570"></a>        <span class="n">call_id</span><span class="p">:</span> <span class="nb">str</span><span class="p">,</span>
+</span><span id="__span-0-2571"><a id="__codelineno-0-2571" name="__codelineno-0-2571"></a>        <span class="n">tool_origin</span><span class="p">:</span> <span class="n">ToolOrigin</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-2572"><a id="__codelineno-0-2572" name="__codelineno-0-2572"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2573"><a id="__codelineno-0-2573" name="__codelineno-0-2573"></a>        <span class="n">append_approval_error_output</span><span class="p">(</span>
+</span><span id="__span-0-2574"><a id="__codelineno-0-2574" name="__codelineno-0-2574"></a>            <span class="n">message</span><span class="o">=</span><span class="n">message</span><span class="p">,</span>
+</span><span id="__span-0-2575"><a id="__codelineno-0-2575" name="__codelineno-0-2575"></a>            <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2576"><a id="__codelineno-0-2576" name="__codelineno-0-2576"></a>            <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2577"><a id="__codelineno-0-2577" name="__codelineno-0-2577"></a>            <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2578"><a id="__codelineno-0-2578" name="__codelineno-0-2578"></a>            <span class="n">generated_items</span><span class="o">=</span><span class="n">generated_items</span><span class="p">,</span>
+</span><span id="__span-0-2579"><a id="__codelineno-0-2579" name="__codelineno-0-2579"></a>            <span class="n">agent</span><span class="o">=</span><span class="n">agent</span><span class="p">,</span>
+</span><span id="__span-0-2580"><a id="__codelineno-0-2580" name="__codelineno-0-2580"></a>            <span class="n">tool_origin</span><span class="o">=</span><span class="n">tool_origin</span><span class="p">,</span>
+</span><span id="__span-0-2581"><a id="__codelineno-0-2581" name="__codelineno-0-2581"></a>        <span class="p">)</span>
+</span><span id="__span-0-2582"><a id="__codelineno-0-2582" name="__codelineno-0-2582"></a>
+</span><span id="__span-0-2583"><a id="__codelineno-0-2583" name="__codelineno-0-2583"></a>    <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">_resolve_tool_run</span><span class="p">(</span>
+</span><span id="__span-0-2584"><a id="__codelineno-0-2584" name="__codelineno-0-2584"></a>        <span class="n">interruption</span><span class="p">:</span> <span class="n">Any</span><span class="p">,</span>
+</span><span id="__span-0-2585"><a id="__codelineno-0-2585" name="__codelineno-0-2585"></a>    <span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">tuple</span><span class="p">[</span><span class="n">ResponseFunctionToolCall</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">,</span> <span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2586"><a id="__codelineno-0-2586" name="__codelineno-0-2586"></a>        <span class="n">tool_call</span> <span class="o">=</span> <span class="n">interruption</span><span class="o">.</span><span class="n">raw_item</span>
+</span><span id="__span-0-2587"><a id="__codelineno-0-2587" name="__codelineno-0-2587"></a>        <span class="n">tool_name</span> <span class="o">=</span> <span class="n">interruption</span><span class="o">.</span><span class="n">name</span> <span class="ow">or</span> <span class="n">RunContextWrapper</span><span class="o">.</span><span class="n">_resolve_tool_name</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
+</span><span id="__span-0-2588"><a id="__codelineno-0-2588" name="__codelineno-0-2588"></a>        <span class="n">tool_namespace</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="n">interruption</span><span class="p">,</span> <span class="s2">&quot;tool_namespace&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-2589"><a id="__codelineno-0-2589" name="__codelineno-0-2589"></a>        <span class="n">tool_lookup_key</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span>
+</span><span id="__span-0-2590"><a id="__codelineno-0-2590" name="__codelineno-0-2590"></a>            <span class="n">interruption</span><span class="p">,</span> <span class="s2">&quot;tool_lookup_key&quot;</span><span class="p">,</span> <span class="kc">None</span>
+</span><span id="__span-0-2591"><a id="__codelineno-0-2591" name="__codelineno-0-2591"></a>        <span class="p">)</span> <span class="ow">or</span> <span class="n">get_function_tool_lookup_key</span><span class="p">(</span>
+</span><span id="__span-0-2592"><a id="__codelineno-0-2592" name="__codelineno-0-2592"></a>            <span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2593"><a id="__codelineno-0-2593" name="__codelineno-0-2593"></a>            <span class="n">tool_namespace</span><span class="p">,</span>
+</span><span id="__span-0-2594"><a id="__codelineno-0-2594" name="__codelineno-0-2594"></a>        <span class="p">)</span>
+</span><span id="__span-0-2595"><a id="__codelineno-0-2595" name="__codelineno-0-2595"></a>        <span class="n">approval_key</span> <span class="o">=</span> <span class="n">tool_lookup_key</span>
+</span><span id="__span-0-2596"><a id="__codelineno-0-2596" name="__codelineno-0-2596"></a>        <span class="n">display_tool_name</span> <span class="o">=</span> <span class="n">tool_trace_name</span><span class="p">(</span><span class="n">tool_name</span><span class="p">,</span> <span class="n">tool_namespace</span><span class="p">)</span> <span class="ow">or</span> <span class="n">tool_name</span> <span class="ow">or</span> <span class="s2">&quot;unknown&quot;</span>
+</span><span id="__span-0-2597"><a id="__codelineno-0-2597" name="__codelineno-0-2597"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="n">tool_name</span><span class="p">:</span>
+</span><span id="__span-0-2598"><a id="__codelineno-0-2598" name="__codelineno-0-2598"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2599"><a id="__codelineno-0-2599" name="__codelineno-0-2599"></a>                <span class="n">message</span><span class="o">=</span><span class="s2">&quot;Tool approval item missing tool name.&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2600"><a id="__codelineno-0-2600" name="__codelineno-0-2600"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2601"><a id="__codelineno-0-2601" name="__codelineno-0-2601"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2602"><a id="__codelineno-0-2602" name="__codelineno-0-2602"></a>                <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2603"><a id="__codelineno-0-2603" name="__codelineno-0-2603"></a>            <span class="p">)</span>
+</span><span id="__span-0-2604"><a id="__codelineno-0-2604" name="__codelineno-0-2604"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2605"><a id="__codelineno-0-2605" name="__codelineno-0-2605"></a>
+</span><span id="__span-0-2606"><a id="__codelineno-0-2606" name="__codelineno-0-2606"></a>        <span class="n">call_id</span> <span class="o">=</span> <span class="n">extract_tool_call_id</span><span class="p">(</span><span class="n">tool_call</span><span class="p">)</span>
+</span><span id="__span-0-2607"><a id="__codelineno-0-2607" name="__codelineno-0-2607"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="n">call_id</span><span class="p">:</span>
+</span><span id="__span-0-2608"><a id="__codelineno-0-2608" name="__codelineno-0-2608"></a>            <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">approval_key</span><span class="p">)</span> <span class="k">if</span> <span class="n">approval_key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+</span><span id="__span-0-2609"><a id="__codelineno-0-2609" name="__codelineno-0-2609"></a>            <span class="k">if</span> <span class="n">resolved_tool</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">tool_namespace</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2610"><a id="__codelineno-0-2610" name="__codelineno-0-2610"></a>                <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">tool_name</span><span class="p">)</span>
+</span><span id="__span-0-2611"><a id="__codelineno-0-2611" name="__codelineno-0-2611"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2612"><a id="__codelineno-0-2612" name="__codelineno-0-2612"></a>                <span class="n">message</span><span class="o">=</span><span class="s2">&quot;Tool approval item missing call ID.&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2613"><a id="__codelineno-0-2613" name="__codelineno-0-2613"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2614"><a id="__codelineno-0-2614" name="__codelineno-0-2614"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2615"><a id="__codelineno-0-2615" name="__codelineno-0-2615"></a>                <span class="n">call_id</span><span class="o">=</span><span class="s2">&quot;unknown&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2616"><a id="__codelineno-0-2616" name="__codelineno-0-2616"></a>                <span class="n">tool_origin</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-2617"><a id="__codelineno-0-2617" name="__codelineno-0-2617"></a>                    <span class="n">get_function_tool_origin</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">)</span>
+</span><span id="__span-0-2618"><a id="__codelineno-0-2618" name="__codelineno-0-2618"></a>                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)</span>
+</span><span id="__span-0-2619"><a id="__codelineno-0-2619" name="__codelineno-0-2619"></a>                    <span class="k">else</span> <span class="kc">None</span>
+</span><span id="__span-0-2620"><a id="__codelineno-0-2620" name="__codelineno-0-2620"></a>                <span class="p">),</span>
+</span><span id="__span-0-2621"><a id="__codelineno-0-2621" name="__codelineno-0-2621"></a>            <span class="p">)</span>
+</span><span id="__span-0-2622"><a id="__codelineno-0-2622" name="__codelineno-0-2622"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2623"><a id="__codelineno-0-2623" name="__codelineno-0-2623"></a>
+</span><span id="__span-0-2624"><a id="__codelineno-0-2624" name="__codelineno-0-2624"></a>        <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">approval_key</span><span class="p">)</span> <span class="k">if</span> <span class="n">approval_key</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="k">else</span> <span class="kc">None</span>
+</span><span id="__span-0-2625"><a id="__codelineno-0-2625" name="__codelineno-0-2625"></a>        <span class="k">if</span> <span class="n">resolved_tool</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="n">tool_namespace</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2626"><a id="__codelineno-0-2626" name="__codelineno-0-2626"></a>            <span class="n">resolved_tool</span> <span class="o">=</span> <span class="n">tool_map</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="n">tool_name</span><span class="p">)</span>
+</span><span id="__span-0-2627"><a id="__codelineno-0-2627" name="__codelineno-0-2627"></a>        <span class="n">approval_status</span> <span class="o">=</span> <span class="n">context_wrapper</span><span class="o">.</span><span class="n">get_approval_status</span><span class="p">(</span>
+</span><span id="__span-0-2628"><a id="__codelineno-0-2628" name="__codelineno-0-2628"></a>            <span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2629"><a id="__codelineno-0-2629" name="__codelineno-0-2629"></a>            <span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2630"><a id="__codelineno-0-2630" name="__codelineno-0-2630"></a>            <span class="n">tool_namespace</span><span class="o">=</span><span class="n">tool_namespace</span><span class="p">,</span>
+</span><span id="__span-0-2631"><a id="__codelineno-0-2631" name="__codelineno-0-2631"></a>            <span class="n">existing_pending</span><span class="o">=</span><span class="n">interruption</span><span class="p">,</span>
+</span><span id="__span-0-2632"><a id="__codelineno-0-2632" name="__codelineno-0-2632"></a>            <span class="n">tool_lookup_key</span><span class="o">=</span><span class="n">tool_lookup_key</span><span class="p">,</span>
+</span><span id="__span-0-2633"><a id="__codelineno-0-2633" name="__codelineno-0-2633"></a>        <span class="p">)</span>
+</span><span id="__span-0-2634"><a id="__codelineno-0-2634" name="__codelineno-0-2634"></a>        <span class="k">if</span> <span class="n">approval_status</span> <span class="ow">is</span> <span class="kc">False</span><span class="p">:</span>
+</span><span id="__span-0-2635"><a id="__codelineno-0-2635" name="__codelineno-0-2635"></a>            <span class="n">message</span> <span class="o">=</span> <span class="n">REJECTION_MESSAGE</span>
+</span><span id="__span-0-2636"><a id="__codelineno-0-2636" name="__codelineno-0-2636"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">):</span>
+</span><span id="__span-0-2637"><a id="__codelineno-0-2637" name="__codelineno-0-2637"></a>                <span class="n">message</span> <span class="o">=</span> <span class="k">await</span> <span class="n">resolve_approval_rejection_message</span><span class="p">(</span>
+</span><span id="__span-0-2638"><a id="__codelineno-0-2638" name="__codelineno-0-2638"></a>                    <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2639"><a id="__codelineno-0-2639" name="__codelineno-0-2639"></a>                    <span class="n">run_config</span><span class="o">=</span><span class="n">run_config</span><span class="p">,</span>
+</span><span id="__span-0-2640"><a id="__codelineno-0-2640" name="__codelineno-0-2640"></a>                    <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2641"><a id="__codelineno-0-2641" name="__codelineno-0-2641"></a>                    <span class="n">tool_type</span><span class="o">=</span><span class="s2">&quot;function&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2642"><a id="__codelineno-0-2642" name="__codelineno-0-2642"></a>                    <span class="n">tool_name</span><span class="o">=</span><span class="n">display_tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2643"><a id="__codelineno-0-2643" name="__codelineno-0-2643"></a>                    <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2644"><a id="__codelineno-0-2644" name="__codelineno-0-2644"></a>                    <span class="n">tool_namespace</span><span class="o">=</span><span class="n">tool_namespace</span><span class="p">,</span>
+</span><span id="__span-0-2645"><a id="__codelineno-0-2645" name="__codelineno-0-2645"></a>                    <span class="n">tool_lookup_key</span><span class="o">=</span><span class="n">tool_lookup_key</span><span class="p">,</span>
+</span><span id="__span-0-2646"><a id="__codelineno-0-2646" name="__codelineno-0-2646"></a>                    <span class="n">existing_pending</span><span class="o">=</span><span class="n">interruption</span><span class="p">,</span>
+</span><span id="__span-0-2647"><a id="__codelineno-0-2647" name="__codelineno-0-2647"></a>                <span class="p">)</span>
+</span><span id="__span-0-2648"><a id="__codelineno-0-2648" name="__codelineno-0-2648"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2649"><a id="__codelineno-0-2649" name="__codelineno-0-2649"></a>                <span class="n">message</span><span class="o">=</span><span class="n">message</span><span class="p">,</span>
+</span><span id="__span-0-2650"><a id="__codelineno-0-2650" name="__codelineno-0-2650"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2651"><a id="__codelineno-0-2651" name="__codelineno-0-2651"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2652"><a id="__codelineno-0-2652" name="__codelineno-0-2652"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2653"><a id="__codelineno-0-2653" name="__codelineno-0-2653"></a>                <span class="n">tool_origin</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-2654"><a id="__codelineno-0-2654" name="__codelineno-0-2654"></a>                    <span class="n">get_function_tool_origin</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">)</span>
+</span><span id="__span-0-2655"><a id="__codelineno-0-2655" name="__codelineno-0-2655"></a>                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)</span>
+</span><span id="__span-0-2656"><a id="__codelineno-0-2656" name="__codelineno-0-2656"></a>                    <span class="k">else</span> <span class="kc">None</span>
+</span><span id="__span-0-2657"><a id="__codelineno-0-2657" name="__codelineno-0-2657"></a>                <span class="p">),</span>
+</span><span id="__span-0-2658"><a id="__codelineno-0-2658" name="__codelineno-0-2658"></a>            <span class="p">)</span>
+</span><span id="__span-0-2659"><a id="__codelineno-0-2659" name="__codelineno-0-2659"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2660"><a id="__codelineno-0-2660" name="__codelineno-0-2660"></a>
+</span><span id="__span-0-2661"><a id="__codelineno-0-2661" name="__codelineno-0-2661"></a>        <span class="k">if</span> <span class="n">approval_status</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">True</span><span class="p">:</span>
+</span><span id="__span-0-2662"><a id="__codelineno-0-2662" name="__codelineno-0-2662"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2663"><a id="__codelineno-0-2663" name="__codelineno-0-2663"></a>                <span class="n">message</span><span class="o">=</span><span class="s2">&quot;Tool approval status unclear.&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2664"><a id="__codelineno-0-2664" name="__codelineno-0-2664"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2665"><a id="__codelineno-0-2665" name="__codelineno-0-2665"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2666"><a id="__codelineno-0-2666" name="__codelineno-0-2666"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2667"><a id="__codelineno-0-2667" name="__codelineno-0-2667"></a>                <span class="n">tool_origin</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-2668"><a id="__codelineno-0-2668" name="__codelineno-0-2668"></a>                    <span class="n">get_function_tool_origin</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">)</span>
+</span><span id="__span-0-2669"><a id="__codelineno-0-2669" name="__codelineno-0-2669"></a>                    <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">resolved_tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">)</span>
+</span><span id="__span-0-2670"><a id="__codelineno-0-2670" name="__codelineno-0-2670"></a>                    <span class="k">else</span> <span class="kc">None</span>
+</span><span id="__span-0-2671"><a id="__codelineno-0-2671" name="__codelineno-0-2671"></a>                <span class="p">),</span>
+</span><span id="__span-0-2672"><a id="__codelineno-0-2672" name="__codelineno-0-2672"></a>            <span class="p">)</span>
+</span><span id="__span-0-2673"><a id="__codelineno-0-2673" name="__codelineno-0-2673"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2674"><a id="__codelineno-0-2674" name="__codelineno-0-2674"></a>
+</span><span id="__span-0-2675"><a id="__codelineno-0-2675" name="__codelineno-0-2675"></a>        <span class="n">tool</span> <span class="o">=</span> <span class="n">resolved_tool</span>
+</span><span id="__span-0-2676"><a id="__codelineno-0-2676" name="__codelineno-0-2676"></a>        <span class="k">if</span> <span class="n">tool</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2677"><a id="__codelineno-0-2677" name="__codelineno-0-2677"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2678"><a id="__codelineno-0-2678" name="__codelineno-0-2678"></a>                <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Tool &#39;</span><span class="si">{</span><span class="n">display_tool_name</span><span class="si">}</span><span class="s2">&#39; not found.&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2679"><a id="__codelineno-0-2679" name="__codelineno-0-2679"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2680"><a id="__codelineno-0-2680" name="__codelineno-0-2680"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2681"><a id="__codelineno-0-2681" name="__codelineno-0-2681"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2682"><a id="__codelineno-0-2682" name="__codelineno-0-2682"></a>            <span class="p">)</span>
+</span><span id="__span-0-2683"><a id="__codelineno-0-2683" name="__codelineno-0-2683"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2684"><a id="__codelineno-0-2684" name="__codelineno-0-2684"></a>
+</span><span id="__span-0-2685"><a id="__codelineno-0-2685" name="__codelineno-0-2685"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool</span><span class="p">,</span> <span class="n">FunctionTool</span><span class="p">):</span>
+</span><span id="__span-0-2686"><a id="__codelineno-0-2686" name="__codelineno-0-2686"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2687"><a id="__codelineno-0-2687" name="__codelineno-0-2687"></a>                <span class="n">message</span><span class="o">=</span><span class="sa">f</span><span class="s2">&quot;Tool &#39;</span><span class="si">{</span><span class="n">display_tool_name</span><span class="si">}</span><span class="s2">&#39; is not a function tool.&quot;</span><span class="p">,</span>
+</span><span id="__span-0-2688"><a id="__codelineno-0-2688" name="__codelineno-0-2688"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2689"><a id="__codelineno-0-2689" name="__codelineno-0-2689"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2690"><a id="__codelineno-0-2690" name="__codelineno-0-2690"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2691"><a id="__codelineno-0-2691" name="__codelineno-0-2691"></a>            <span class="p">)</span>
+</span><span id="__span-0-2692"><a id="__codelineno-0-2692" name="__codelineno-0-2692"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2693"><a id="__codelineno-0-2693" name="__codelineno-0-2693"></a>
+</span><span id="__span-0-2694"><a id="__codelineno-0-2694" name="__codelineno-0-2694"></a>        <span class="k">if</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">tool_call</span><span class="p">,</span> <span class="n">ResponseFunctionToolCall</span><span class="p">):</span>
+</span><span id="__span-0-2695"><a id="__codelineno-0-2695" name="__codelineno-0-2695"></a>            <span class="n">_append_error</span><span class="p">(</span>
+</span><span id="__span-0-2696"><a id="__codelineno-0-2696" name="__codelineno-0-2696"></a>                <span class="n">message</span><span class="o">=</span><span class="p">(</span>
+</span><span id="__span-0-2697"><a id="__codelineno-0-2697" name="__codelineno-0-2697"></a>                    <span class="sa">f</span><span class="s2">&quot;Tool &#39;</span><span class="si">{</span><span class="n">tool_name</span><span class="si">}</span><span class="s2">&#39; approval item has invalid raw_item type for execution.&quot;</span>
+</span><span id="__span-0-2698"><a id="__codelineno-0-2698" name="__codelineno-0-2698"></a>                <span class="p">),</span>
+</span><span id="__span-0-2699"><a id="__codelineno-0-2699" name="__codelineno-0-2699"></a>                <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">,</span>
+</span><span id="__span-0-2700"><a id="__codelineno-0-2700" name="__codelineno-0-2700"></a>                <span class="n">tool_name</span><span class="o">=</span><span class="n">tool_name</span><span class="p">,</span>
+</span><span id="__span-0-2701"><a id="__codelineno-0-2701" name="__codelineno-0-2701"></a>                <span class="n">call_id</span><span class="o">=</span><span class="n">call_id</span><span class="p">,</span>
+</span><span id="__span-0-2702"><a id="__codelineno-0-2702" name="__codelineno-0-2702"></a>            <span class="p">)</span>
+</span><span id="__span-0-2703"><a id="__codelineno-0-2703" name="__codelineno-0-2703"></a>            <span class="k">return</span> <span class="kc">None</span>
+</span><span id="__span-0-2704"><a id="__codelineno-0-2704" name="__codelineno-0-2704"></a>
+</span><span id="__span-0-2705"><a id="__codelineno-0-2705" name="__codelineno-0-2705"></a>        <span class="k">return</span> <span class="n">tool_call</span><span class="p">,</span> <span class="n">tool</span><span class="p">,</span> <span class="n">tool_name</span><span class="p">,</span> <span class="n">call_id</span>
+</span><span id="__span-0-2706"><a id="__codelineno-0-2706" name="__codelineno-0-2706"></a>
+</span><span id="__span-0-2707"><a id="__codelineno-0-2707" name="__codelineno-0-2707"></a>    <span class="k">for</span> <span class="n">interruption</span> <span class="ow">in</span> <span class="n">interruptions</span><span class="p">:</span>
+</span><span id="__span-0-2708"><a id="__codelineno-0-2708" name="__codelineno-0-2708"></a>        <span class="n">resolved</span> <span class="o">=</span> <span class="k">await</span> <span class="n">_resolve_tool_run</span><span class="p">(</span><span class="n">interruption</span><span class="p">)</span>
+</span><span id="__span-0-2709"><a id="__codelineno-0-2709" name="__codelineno-0-2709"></a>        <span class="k">if</span> <span class="n">resolved</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-2710"><a id="__codelineno-0-2710" name="__codelineno-0-2710"></a>            <span class="k">continue</span>
+</span><span id="__span-0-2711"><a id="__codelineno-0-2711" name="__codelineno-0-2711"></a>        <span class="n">tool_call</span><span class="p">,</span> <span class="n">tool</span><span class="p">,</span> <span class="n">tool_name</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="n">resolved</span>
+</span><span id="__span-0-2712"><a id="__codelineno-0-2712" name="__codelineno-0-2712"></a>        <span class="n">tool_runs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">ToolRunFunction</span><span class="p">(</span><span class="n">function_tool</span><span class="o">=</span><span class="n">tool</span><span class="p">,</span> <span class="n">tool_call</span><span class="o">=</span><span class="n">tool_call</span><span class="p">))</span>
+</span><span id="__span-0-2713"><a id="__codelineno-0-2713" name="__codelineno-0-2713"></a>
+</span><span id="__span-0-2714"><a id="__codelineno-0-2714" name="__codelineno-0-2714"></a>    <span class="k">if</span> <span class="n">tool_runs</span><span class="p">:</span>
+</span><span id="__span-0-2715"><a id="__codelineno-0-2715" name="__codelineno-0-2715"></a>        <span class="n">function_results</span><span class="p">,</span> <span class="n">_</span><span class="p">,</span> <span class="n">_</span> <span class="o">=</span> <span class="k">await</span> <span class="n">execute_function_tool_calls</span><span class="p">(</span>
+</span><span id="__span-0-2716"><a id="__codelineno-0-2716" name="__codelineno-0-2716"></a>            <span class="n">bindings</span><span class="o">=</span><span class="n">bind_public_agent</span><span class="p">(</span><span class="n">agent</span><span class="p">),</span>
+</span><span id="__span-0-2717"><a id="__codelineno-0-2717" name="__codelineno-0-2717"></a>            <span class="n">tool_runs</span><span class="o">=</span><span class="n">tool_runs</span><span class="p">,</span>
+</span><span id="__span-0-2718"><a id="__codelineno-0-2718" name="__codelineno-0-2718"></a>            <span class="n">hooks</span><span class="o">=</span><span class="n">hooks</span><span class="p">,</span>
+</span><span id="__span-0-2719"><a id="__codelineno-0-2719" name="__codelineno-0-2719"></a>            <span class="n">context_wrapper</span><span class="o">=</span><span class="n">context_wrapper</span><span class="p">,</span>
+</span><span id="__span-0-2720"><a id="__codelineno-0-2720" name="__codelineno-0-2720"></a>            <span class="n">config</span><span class="o">=</span><span class="n">run_config</span><span class="p">,</span>
+</span><span id="__span-0-2721"><a id="__codelineno-0-2721" name="__codelineno-0-2721"></a>        <span class="p">)</span>
+</span><span id="__span-0-2722"><a id="__codelineno-0-2722" name="__codelineno-0-2722"></a>        <span class="k">for</span> <span class="n">result</span> <span class="ow">in</span> <span class="n">function_results</span><span class="p">:</span>
+</span><span id="__span-0-2723"><a id="__codelineno-0-2723" name="__codelineno-0-2723"></a>            <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run_item</span><span class="p">,</span> <span class="n">RunItemBase</span><span class="p">):</span>
+</span><span id="__span-0-2724"><a id="__codelineno-0-2724" name="__codelineno-0-2724"></a>                <span class="n">generated_items</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="n">result</span><span class="o">.</span><span class="n">run_item</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
