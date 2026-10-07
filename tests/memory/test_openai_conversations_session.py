@@ -716,39 +716,108 @@ class TestOpenAIConversationsSessionBatches:
         assert saved == items[:20] + items[40:]
 
     @pytest.mark.asyncio
-    async def test_cancellation_preserves_prefix_and_stops(self):
+    @pytest.mark.parametrize("request_fails", [False, True])
+    async def test_cancelled_batch_settles_before_queued_writer(self, request_fails: bool):
         batches: list[list[dict[str, Any]]] = []
         saved: list[dict[str, Any]] = []
         second_started = asyncio.Event()
+        release_request = asyncio.Event()
+        follower_started = asyncio.Event()
+        remote_tasks: list[asyncio.Task[None]] = []
+
+        async def remote_commit(batch: list[dict[str, Any]]) -> None:
+            await release_request.wait()
+            if not request_fails:
+                saved.extend(batch)
 
         async def capture(request: httpx.Request) -> httpx.Response:
             batch = json.loads(request.content)["items"]
             batches.append(batch)
             if len(batches) == 2:
+                # An accepted server mutation survives cancellation of the HTTP caller.
+                remote = asyncio.create_task(remote_commit(batch))
+                remote_tasks.append(remote)
                 second_started.set()
-                await asyncio.Future()
-            saved.extend(batch)
+                await asyncio.shield(remote)
+                if request_fails:
+                    return httpx.Response(400, json={"error": {"message": "synthetic failure"}})
+            else:
+                saved.extend(batch)
             return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
 
         items: list[TResponseInputItem] = [
             {"role": "user", "content": f"message {i}"} for i in range(41)
         ]
+        survivor: list[TResponseInputItem] = [{"role": "user", "content": "queued writer"}]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+
+            async def append_survivor() -> None:
+                follower_started.set()
+                await session.add_items(survivor)
+
+            write = asyncio.create_task(session.add_items(items))
+            follower = None
+            try:
+                await asyncio.wait_for(second_started.wait(), timeout=5)
+                follower = asyncio.create_task(append_survivor())
+                await asyncio.wait_for(follower_started.wait(), timeout=5)
+                write.cancel("original cancellation")
+                await asyncio.sleep(0)
+                write.cancel("repeated cancellation")
+                await asyncio.sleep(0)
+                assert not write.done()
+                assert not follower.done()
+                assert saved == items[:20]
+                assert batches == [items[:20], items[20:40]]
+                release_request.set()
+                with pytest.raises(asyncio.CancelledError) as cancelled:
+                    await asyncio.wait_for(write, timeout=5)
+                assert cancelled.value.args == ("original cancellation",)
+                await asyncio.wait_for(follower, timeout=5)
+            finally:
+                release_request.set()
+                await asyncio.gather(
+                    write,
+                    *([follower] if follower is not None else []),
+                    *remote_tasks,
+                    return_exceptions=True,
+                )
+
+        assert batches == [items[:20], items[20:40], survivor]
+        assert saved == (items[:20] if request_fails else items[:40]) + survivor
+
+    @pytest.mark.asyncio
+    async def test_single_request_cancellation_does_not_wait_for_response(self):
+        started = asyncio.Event()
+        release_request = asyncio.Event()
+
+        async def capture(request: httpx.Request) -> httpx.Response:
+            started.set()
+            await release_request.wait()
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
         async with AsyncOpenAI(
             api_key="test-placeholder",
             http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
         ) as client:
             session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
-            write = asyncio.create_task(session.add_items(items))
+            write = asyncio.create_task(
+                session.add_items([{"role": "user", "content": "message"}] * 20)
+            )
             try:
-                await asyncio.wait_for(second_started.wait(), timeout=5)
-            finally:
+                await asyncio.wait_for(started.wait(), timeout=5)
                 write.cancel()
-                with pytest.raises(asyncio.CancelledError):
-                    await write
-            await session.add_items(items[40:])
-
-        assert batches == [items[:20], items[20:40], items[40:]]
-        assert saved == items[:20] + items[40:]
+                done, _ = await asyncio.wait({write}, timeout=5)
+                assert write in done
+                assert write.cancelled()
+            finally:
+                release_request.set()
+                await asyncio.gather(write, return_exceptions=True)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("stream", [False, True])

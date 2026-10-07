@@ -127,7 +127,10 @@ class OpenAIConversationsSession(SessionABC):
 
         Writes spanning multiple requests are not atomic. If a request fails or
         is cancelled, earlier batches remain saved and later batches are not
-        sent. The original exception propagates. Before retrying, callers must
+        sent. For multi-request writes, cancellation waits for the current request
+        to complete or fail before releasing the instance lock and propagating
+        cancellation. Single-request writes retain their existing cancellation behavior.
+        The original exception propagates. Before retrying, callers must
         reconcile the remote history; retrying the entire list can duplicate
         items that were already saved, including an unacknowledged request.
         """
@@ -138,10 +141,14 @@ class OpenAIConversationsSession(SessionABC):
             session_id = await self._get_session_id()
             # The Conversations items-create endpoint accepts up to 20 items per request.
             for offset in range(0, len(items), _MAX_ITEMS_PER_REQUEST):
-                await self._openai_client.conversations.items.create(
+                request = self._openai_client.conversations.items.create(
                     conversation_id=session_id,
                     items=items[offset : offset + _MAX_ITEMS_PER_REQUEST],
                 )
+                if len(items) > _MAX_ITEMS_PER_REQUEST:
+                    await _await_mutation(request)
+                else:
+                    await request
 
     async def pop_item(self) -> TResponseInputItem | None:
         async with self._mutation_lock:
