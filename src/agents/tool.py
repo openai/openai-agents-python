@@ -2086,6 +2086,35 @@ async def maybe_invoke_function_tool_failure_error_function(
         result = await result
     if function_tool._use_default_failure_error_function and isinstance(context, ToolContext):
         setattr(context, _DEFAULT_FAILURE_HANDLED_ATTR, True)
+        if (
+            isinstance(error, Exception)
+            and context.run_config is not None
+            and context.run_config.tool_error_formatter is not None
+        ):
+            # Keep the default failure policy identity: approving model feedback must not
+            # opt the original exception into handled-error traces.
+            from .run_config import ToolErrorFormatterArgs
+
+            try:
+                message = context.run_config.tool_error_formatter(
+                    ToolErrorFormatterArgs(
+                        kind="tool_exception",
+                        tool_type="function",
+                        tool_name=context.tool_name,
+                        call_id=context.tool_call_id,
+                        default_message=result,
+                        run_context=context,
+                        error=error,
+                    )
+                )
+                message = await message if inspect.isawaitable(message) else message
+            except Exception as exc:
+                log_tool_action_warning(logger, "Tool error formatter failed", exc)
+            else:
+                if isinstance(message, str):
+                    return message
+                if message is not None:
+                    logger.warning("Tool error formatter returned a non-string value")
     return result
 
 
