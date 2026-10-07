@@ -11,11 +11,25 @@ import pytest
 from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
 
 import agents.run as run_module
-from agents import Agent, AgentUpdatedStreamEvent, Runner, function_tool, handoff, output_guardrail
-from agents.agent import ToolsToFinalOutputResult
+from agents import (
+    Agent,
+    AgentUpdatedStreamEvent,
+    Runner,
+    ShellTool,
+    ToolExecutionConfig,
+    function_tool,
+    handoff,
+    output_guardrail,
+)
+from agents.agent import StopAtTools, ToolsToFinalOutputResult
 from agents.agent_output import AgentOutputSchema
 from agents.decorators import tool, tool_input_guardrail, tool_output_guardrail
-from agents.exceptions import InputGuardrailTripwireTriggered, UserError
+from agents.exceptions import (
+    InputGuardrailTripwireTriggered,
+    OutputGuardrailTripwireTriggered,
+    UserError,
+    _is_error_data_redacted,
+)
 from agents.guardrail import GuardrailFunctionOutput, input_guardrail
 from agents.handoffs import HandoffInputData
 from agents.items import (
@@ -28,6 +42,7 @@ from agents.items import (
 )
 from agents.lifecycle import RunHooks
 from agents.memory import OpenAIResponsesCompactionSession, Session, SQLiteSession
+from agents.result import RunResultStreaming, ToInputListMode
 from agents.run import RunConfig
 from agents.run_context import RunContextWrapper
 from agents.run_internal import run_loop, turn_resolution
@@ -55,6 +70,7 @@ from tests.utils.hitl import (
     make_agent,
     make_context_wrapper,
     make_model_and_agent,
+    make_shell_call,
     queue_function_call_and_text,
 )
 from tests.utils.simple_session import SimpleListSession
@@ -143,14 +159,987 @@ async def _run_session_resume(
     session: Session | None,
     streamed: bool,
     hooks: RunHooks[Any] | None = None,
+    events: list[Any] | None = None,
 ):
     config = RunConfig(tracing_disabled=True)
     if not streamed:
         return await Runner.run(agent, value, session=session, run_config=config, hooks=hooks)
     result = Runner.run_streamed(agent, value, session=session, run_config=config, hooks=hooks)
+    async for event in result.stream_events():
+        if events is not None:
+            events.append(event)
+    return result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+@pytest.mark.parametrize("failure", ["extractor", "end_hook"])
+async def test_callback_retry_preserves_tool_output_in_result_history(
+    streamed: bool, round_trip: bool, failure: str
+) -> None:
+    effects: list[str] = []
+    callback_calls: list[str] = []
+
+    def fail_callback() -> None:
+        callback_calls.append(failure)
+        raise RuntimeError("post-tool callback failed")
+
+    def extract_custom_data(_context: Any) -> dict[str, Any]:
+        fail_callback()
+        return {}
+
+    @tool_input_guardrail
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="input checked")
+
+    @tool_output_guardrail
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="output checked")
+
+    class FailingEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            fail_callback()
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=extract_custom_data if failure == "extractor" else None,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("charge", "{}", call_id="charge-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=(
+            StopAtTools(stop_at_tool_names=["charge"])
+            if failure == "extractor"
+            else "run_llm_again"
+        ),
+    )
+    hooks = FailingEndHook() if failure == "end_hook" else None
+    paused = await _run_session_resume(agent, "charge once", None, streamed, hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    events: list[Any] = []
+    if streamed:
+        failed = Runner.run_streamed(
+            agent, state, run_config=RunConfig(tracing_disabled=True), hooks=hooks
+        )
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            async for event in failed.stream_events():
+                events.append(event)
+        state = failed.to_state()
+    else:
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            await _run_session_resume(agent, state, None, streamed, hooks)
+
+    assert [
+        item.output for item in state._generated_items if isinstance(item, ToolCallOutputItem)
+    ] == ["receipt-7"]
+    assert [result.output.output_info for result in state._tool_input_guardrail_results] == [
+        "input checked"
+    ]
+    assert [result.output.output_info for result in state._tool_output_guardrail_results] == [
+        "output checked"
+    ]
+
+    if round_trip:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    result = await _run_session_resume(agent, state, None, streamed, hooks, events)
+
+    assert effects == ["charged"]
+    assert callback_calls == [failure]
+    assert [result.output.output_info for result in result.tool_input_guardrail_results] == [
+        "input checked"
+    ]
+    assert [result.output.output_info for result in result.tool_output_guardrail_results] == [
+        "output checked"
+    ]
+    if streamed:
+        assert [
+            event.item.output
+            for event in events
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+        ] == ["receipt-7"]
+    assert result.final_output == ("receipt-7" if failure == "extractor" else "done")
+    assert [item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)] == [
+        "receipt-7"
+    ]
+    assert _call_pair(result.to_input_list(), "charge-1") == [
+        "function_call",
+        "function_call_output",
+    ]
+    restored = await RunState.from_json(agent, result.to_state().to_json())
+    assert [
+        item.output for item in restored._session_items if isinstance(item, ToolCallOutputItem)
+    ] == ["receipt-7"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("previously_published", [False, True], ids=["pending", "published"])
+async def test_callback_retry_keeps_current_response_tool_order(
+    streamed: bool, previously_published: bool
+) -> None:
+    effects: list[str] = []
+    session = SimpleListSession()
+    events: list[Any] = []
+
+    @tool_input_guardrail
+    def check_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.context.tool_call_id)
+
+    @tool_output_guardrail
+    def check_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        needs_approval=True,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
+    )
+    async def left() -> str:
+        effects.append("left")
+        return "left-result"
+
+    @function_tool(
+        needs_approval=True,
+        tool_input_guardrails=[check_input],
+        tool_output_guardrails=[check_output],
+    )
+    async def right() -> str:
+        effects.append("right")
+        return "right-result"
+
+    class FailingEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            if tool.name == ("left" if previously_published else "right"):
+                raise RuntimeError("tool callback failed")
+
+    agent = Agent(
+        name="parallel",
+        model=ScriptedModel(
+            [
+                [
+                    get_function_tool_call("left", "{}", call_id="left-1"),
+                    get_function_tool_call("right", "{}", call_id="right-1"),
+                ],
+                [get_text_message("done")],
+            ]
+        ),
+        tools=[left, right],
+    )
+    hooks = FailingEndHook()
+    paused = await _run_session_resume(agent, "run both", session, streamed, hooks)
+    state = paused.to_state()
+    left_approval, right_approval = state.get_interruptions()
+    state.approve(right_approval)
+    if previously_published:
+        partial = await _run_session_resume(agent, state, session, streamed, hooks)
+        assert [r.output.output_info for r in partial.tool_output_guardrail_results] == [
+            "right-result"
+        ]
+        assert [
+            item.get("call_id")
+            for item in await session.get_items()
+            if item.get("type") == "function_call_output"
+        ] == ["right-1"]
+        state = partial.to_state()
+        state.approve(state.get_interruptions()[0])
+    if streamed:
+        failed = Runner.run_streamed(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+            hooks=hooks,
+        )
+        with pytest.raises(UserError, match="tool callback failed"):
+            async for _ in failed.stream_events():
+                pass
+        failed_output_results = failed.tool_output_guardrail_results
+    else:
+        with pytest.raises(UserError, match="tool callback failed") as caught:
+            await _run_session_resume(agent, state, session, streamed, hooks)
+        assert caught.value.run_data is not None
+        failed_output_results = caught.value.run_data.tool_output_guardrail_results
+    assert [r.output.output_info for r in failed_output_results] == (
+        ["right-result"] if previously_published else []
+    )
+
+    state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    state.approve(left_approval)
+    result = await _run_session_resume(agent, state, session, streamed, hooks, events)
+    assert effects == ["right", "left"]
+    assert result.final_output == "done"
+    expected_ids = ["right-1", "left-1"] if previously_published else ["left-1", "right-1"]
+    expected_outputs = (
+        ["right-result", "left-result"] if previously_published else ["left-result", "right-result"]
+    )
+    assert [
+        item.output for item in result.new_items if isinstance(item, ToolCallOutputItem)
+    ] == expected_outputs
+    assert [
+        item.get("call_id")
+        for item in result.to_input_list()
+        if item.get("type") == "function_call_output"
+    ] == expected_ids
+    assert [
+        item.get("call_id")
+        for item in cast(ScriptedModel, agent.model).calls[-1].input
+        if item.get("type") == "function_call_output"
+    ] == expected_ids
+    restored = await RunState.from_json(agent, result.to_state().to_json())
+    for history in (restored._session_items, restored._generated_items):
+        assert [
+            item.output for item in history if isinstance(item, ToolCallOutputItem)
+        ] == expected_outputs
+
+    assert [
+        item.get("call_id")
+        for item in await session.get_items()
+        if item.get("type") == "function_call_output"
+    ] == expected_ids
+    assert [r.output.output_info for r in result.tool_input_guardrail_results] == [
+        "right-1",
+        "left-1",
+    ]
+    assert [r.output.output_info for r in result.tool_output_guardrail_results] == [
+        "right-result",
+        "left-result",
+    ]
+    if streamed:
+        assert [
+            event.item.output
+            for event in events
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+        ] == (["left-result"] if previously_published else expected_outputs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("round_trip", [False, True], ids=["live", "json"])
+async def test_callback_retry_preserves_hosted_output_before_local_result(
+    streamed: bool, round_trip: bool
+) -> None:
+    effects: list[str] = []
+
+    @function_tool
+    async def prelude() -> str:
+        return "prefix"
+
+    @function_tool(needs_approval=True)
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    class FailingChargeEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            if tool.name == "charge":
+                raise RuntimeError("charge callback failed")
+
+    @output_guardrail
+    async def allowed(
+        context: RunContextWrapper[Any], agent: Agent[Any], output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    agent = Agent(
+        name="hosted-shell",
+        model=ScriptedModel(
+            [
+                [get_function_tool_call("prelude", "{}", call_id="prelude")],
+                [
+                    get_function_tool_call("charge", "{}", call_id="charge"),
+                    make_shell_call("shell-1", id_value="sh-hosted", commands=["echo hi"]),
+                    cast(
+                        Any,
+                        {
+                            "type": "shell_call_output",
+                            "id": "sh-out-hosted",
+                            "call_id": "shell-1",
+                            "status": "completed",
+                            "output": [
+                                {
+                                    "stdout": "hi",
+                                    "stderr": "",
+                                    "outcome": {"type": "exit", "exit_code": 0},
+                                }
+                            ],
+                        },
+                    ),
+                ],
+                [get_text_message("done")],
+            ]
+        ),
+        tools=[prelude, charge, ShellTool(environment={"type": "container_auto"})],
+        output_guardrails=[allowed],
+    )
+    hooks = FailingChargeEndHook()
+    # ScriptedModel does not stream mapping-shaped hosted output items.
+    paused = await _run_session_resume(agent, "prepare and charge", None, False, hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    with pytest.raises(UserError, match="charge callback failed"):
+        await _run_session_resume(agent, state, None, streamed, hooks)
+
+    if round_trip:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+    result = await _run_session_resume(agent, state, None, streamed, hooks)
+    assert result.final_output == "done"
+    assert effects == ["charged"]
+    assert [
+        item.get("call_id")
+        for item in result.to_input_list()
+        if item.get("type") in {"function_call_output", "shell_call_output"}
+    ] == ["prelude", "shell-1", "charge"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "guardrail_outcome,prior_turn,with_session,retry_mode",
+    [
+        pytest.param("allowed", False, False, "streamed-live", id="first-turn-allowed"),
+        pytest.param("blocked", False, False, "streamed-live", id="first-turn-blocked"),
+        pytest.param("error", False, False, "streamed-json", id="first-turn-error"),
+        pytest.param("allowed", True, False, "streamed-json", id="prior-turn-allowed"),
+        pytest.param("blocked", True, False, "streamed-json", id="prior-turn-blocked"),
+        pytest.param("error", True, False, "streamed-json", id="prior-turn-error"),
+        pytest.param("error", True, True, "streamed-json", id="prior-turn-error-sqlite"),
+        pytest.param("error", True, True, "run-live", id="prior-turn-error-sqlite-run-live"),
+        pytest.param("error", True, True, "run-json", id="prior-turn-error-sqlite-run-json"),
+    ],
+)
+async def test_failed_approval_callback_defers_stream_output_until_retry_guardrail(
+    guardrail_outcome: str,
+    prior_turn: bool,
+    with_session: bool,
+    retry_mode: Literal["streamed-live", "streamed-json", "run-live", "run-json"],
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    effects: list[str] = []
+    callbacks: list[str] = []
+    guardrail_outputs: list[str] = []
+    guardrail_entered = asyncio.Event()
+    release_guardrail = asyncio.Event()
+    failed_outputs: list[str] = []
+    retry_outputs: list[str] = []
+    config = RunConfig(tracing_disabled=True)
+    session = SQLiteSession("approval-retry", tmp_path / "session.db") if with_session else None
+    if session is not None:
+        request.addfinalizer(session.close)
+
+    def input_outputs(result: RunResultStreaming) -> dict[str, list[Any]]:
+        modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+        return {
+            mode: [
+                item.get("output")
+                for item in result.to_input_list(mode=mode)
+                if item.get("type") == "function_call_output"
+            ]
+            for mode in modes
+        }
+
+    def fail_after_execution(_context: Any) -> dict[str, Any]:
+        callbacks.append("extractor")
+        raise RuntimeError("post-tool callback failed")
+
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(tool_output_guardrails=[record_output])
+    async def prelude() -> str:
+        return "earlier-result"
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=fail_after_execution,
+        tool_output_guardrails=[record_output],
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    async def record_terminal_candidate(
+        _context: Any, _agent: Any, output: Any
+    ) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=False)
+
+    @output_guardrail
+    async def terminal_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        guardrail_outputs.append(output)
+        guardrail_entered.set()
+        await release_guardrail.wait()
+        if guardrail_outcome == "error" and len(guardrail_outputs) == 1:
+            if retry_mode in {"run-live", "run-json"}:
+                raise UserError("policy temporarily unavailable")
+            raise RuntimeError("policy temporarily unavailable")
+        return GuardrailFunctionOutput(
+            output_info=None, tripwire_triggered=guardrail_outcome == "blocked"
+        )
+
+    model = ScriptedModel(
+        ([[get_function_tool_call("prelude", "{}", call_id="prelude-1")]] if prior_turn else [])
+        + [[get_function_tool_call("charge", "{}", call_id="charge-1")]]
+    )
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[prelude, charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[record_terminal_candidate, terminal_policy],
+    )
+    paused = await Runner.run(agent, "charge once", session=session, run_config=config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    prior_metadata = ["earlier-result"] if prior_turn else []
+    withheld_inputs = dict.fromkeys(("preserve_all", "normalized"), prior_metadata)
+
+    failed = Runner.run_streamed(agent, state, session=session, run_config=config)
+    with pytest.raises(UserError, match="post-tool callback failed"):
+        async for event in failed.stream_events():
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+                # Copy the value at emission, so later owner replacements cannot hide a leak.
+                failed_outputs.append(event.item.output)
+    assert not guardrail_outputs
+    failed_metadata = [result.output.output_info for result in failed.tool_output_guardrail_results]
+    failed_input_outputs = input_outputs(failed)
+
+    if retry_mode != "streamed-live":
+        # Exercise the documented failed-result resume path and supported durable state format.
+        state = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    # For live retries, reuse the same approved state that was passed to the failed stream.
+    assert [result.output.output_info for result in state._tool_output_guardrail_results] == [
+        *prior_metadata,
+        "receipt-7",
+    ]
+    retry = (
+        Runner.run_streamed(agent, state, session=session, run_config=config)
+        if retry_mode in {"streamed-live", "streamed-json"}
+        else None
+    )
+    initial_retry_metadata = (
+        [result.output.output_info for result in retry.tool_output_guardrail_results]
+        if retry is not None
+        else None
+    )
+    initial_retry_inputs = input_outputs(retry) if retry is not None else None
+
+    async def collect_retry() -> None:
+        if retry is None:
+            # Runner.run fails without returning a result; the caller resumes its same RunState.
+            await Runner.run(agent, state, session=session, run_config=config)
+            return
+        async for event in retry.stream_events():
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+                retry_outputs.append(event.item.output)
+
+    consumer = asyncio.create_task(collect_retry())
+    try:
+        await asyncio.wait_for(guardrail_entered.wait(), timeout=5)
+        # Let the waiting stream consumer drain anything the producer queued before its await.
+        for _ in range(3):
+            await asyncio.sleep(0)
+        outputs_before_allow = list(retry_outputs)
+        metadata_before_allow = (
+            [result.output.output_info for result in retry.tool_output_guardrail_results]
+            if retry is not None
+            else None
+        )
+        pending_metadata = [
+            result.output.output_info for result in state._tool_output_guardrail_results
+        ]
+        public_new_outputs = (
+            [item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)]
+            if retry is not None
+            else None
+        )
+        public_input_outputs = input_outputs(retry) if retry is not None else None
+        stored_before_allow = await session.get_items() if session is not None else None
+    finally:
+        release_guardrail.set()
+
+    if guardrail_outcome == "blocked":
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            await consumer
+    elif guardrail_outcome == "error":
+        if retry is None:
+            with pytest.raises(UserError, match="policy temporarily unavailable") as error:
+                await consumer
+            run_data = error.value.run_data
+            assert run_data is not None
+            assert [
+                result.output.output_info for result in run_data.tool_output_guardrail_results
+            ] == prior_metadata
+            assert [
+                item.output for item in run_data.new_items if isinstance(item, ToolCallOutputItem)
+            ] == prior_metadata
+            assert run_data.output_guardrail_results == []
+        else:
+            with pytest.raises(RuntimeError, match="policy temporarily unavailable"):
+                await consumer
+    else:
+        await consumer
+
+    # Assertions at the end ensure the failed snapshot really reaches the retry guardrail.
+    if guardrail_outcome == "error" and session is not None:
+        assert "function_call_output" not in _call_pair(await session.get_items(), "charge-1")
+    assert effects == ["charged"]
+    assert callbacks == ["extractor"]
+    assert guardrail_outputs == ["receipt-7"]
+    assert failed_outputs == [], "callback failure exposed unchecked terminal output"
+    assert failed_metadata == prior_metadata, (
+        "callback failure exposed unchecked guardrail metadata"
+    )
+    assert failed_input_outputs == withheld_inputs, "callback failure exposed unchecked model input"
+    assert outputs_before_allow == [], "retry exposed output while its guardrail was pending"
+    assert pending_metadata == [*prior_metadata, "receipt-7"]
+    if retry is not None:
+        assert initial_retry_metadata == prior_metadata, (
+            "retry exposed metadata before its guardrail"
+        )
+        assert initial_retry_inputs == withheld_inputs, "retry exposed model input before starting"
+        assert metadata_before_allow == prior_metadata, (
+            "retry exposed metadata during its guardrail"
+        )
+        assert public_new_outputs == prior_metadata, "retry exposed history during its guardrail"
+        assert public_input_outputs == withheld_inputs, (
+            "retry exposed model input during its guardrail"
+        )
+    assert len(model.calls) == (2 if prior_turn else 1)
+    if stored_before_allow is not None:
+        assert "function_call_output" not in _call_pair(stored_before_allow, "charge-1")
+    if guardrail_outcome == "error":
+        assert retry_outputs == []
+        if retry is not None:
+            assert retry.output_guardrail_results == []
+            assert [
+                result.output.output_info for result in retry.tool_output_guardrail_results
+            ] == prior_metadata
+            assert input_outputs(retry) == withheld_inputs, (
+                "guardrail error exposed unchecked input"
+            )
+            state = retry.to_state()
+        restored = state
+        if retry_mode != "run-live":
+            restored = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+        assert [
+            result.output.output_info for result in restored._tool_output_guardrail_results
+        ] == [*prior_metadata, "receipt-7"]
+        guardrail_entered.clear()
+        release_guardrail.clear()
+        retry = Runner.run_streamed(agent, restored, session=session, run_config=config)
+        assert [
+            result.output.output_info for result in retry.tool_output_guardrail_results
+        ] == prior_metadata
+        consumer = asyncio.create_task(collect_retry())
+        try:
+            await asyncio.wait_for(guardrail_entered.wait(), timeout=5)
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert retry_outputs == [], (
+                "second retry exposed output before its guardrail allowed it"
+            )
+            assert [
+                result.output.output_info for result in retry.tool_output_guardrail_results
+            ] == prior_metadata
+            assert [
+                item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)
+            ] == prior_metadata
+            assert input_outputs(retry) == withheld_inputs
+            if session is not None:
+                assert "function_call_output" not in _call_pair(
+                    await session.get_items(), "charge-1"
+                )
+        finally:
+            release_guardrail.set()
+            await consumer
+
+        assert guardrail_outputs == ["receipt-7", "receipt-7"]
+        assert len(model.calls) == (2 if prior_turn else 1)
+        assert effects == ["charged"]
+        assert callbacks == ["extractor"]
+        if session is not None:
+            assert _call_pair(await session.get_items(), "charge-1") == [
+                "function_call",
+                "function_call_output",
+            ]
+    elif guardrail_outcome == "blocked":
+        assert retry is not None
+        assert retry_outputs == []
+        assert all(
+            result.output.output_info != "receipt-7"
+            for result in retry.tool_output_guardrail_results
+        )
+        assert "receipt-7" not in state.to_string()
+        assert input_outputs(retry) == dict.fromkeys(
+            ("preserve_all", "normalized"),
+            [*prior_metadata, run_loop._OUTPUT_GUARDRAIL_BLOCKED_TOOL_OUTPUT],
+        )
+    if guardrail_outcome != "blocked":
+        assert retry is not None
+        assert retry_outputs == ["receipt-7"]
+        assert retry.final_output == "receipt-7"
+        assert [result.output.output_info for result in retry.tool_output_guardrail_results] == [
+            *prior_metadata,
+            "receipt-7",
+        ]
+        assert [
+            item.output for item in retry.new_items if isinstance(item, ToolCallOutputItem)
+        ] == [*prior_metadata, "receipt-7"]
+        assert input_outputs(retry) == dict.fromkeys(
+            ("preserve_all", "normalized"), [*prior_metadata, "receipt-7"]
+        )
+        restored = await RunState.from_json(agent, retry.to_state().to_json())
+        assert [
+            item.output for item in restored._session_items if isinstance(item, ToolCallOutputItem)
+        ] == [*prior_metadata, "receipt-7"]
+    assert input_outputs(failed) == withheld_inputs, (
+        "later retries changed the failed stream's public output"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["extractor", "end_hook"])
+@pytest.mark.parametrize("with_output_guardrail", [True, False])
+async def test_redacted_callback_preserves_private_failed_stream_checkpoint(
+    failure: str, with_output_guardrail: bool
+) -> None:
+    config = RunConfig(tracing_disabled=True)
+    modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+    effects: list[str] = []
+    callback_calls: list[str] = []
+    checked: list[str] = []
+    emitted: list[Any] = []
+
+    @output_guardrail
+    def inner_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        return GuardrailFunctionOutput(output_info=output, tripwire_triggered=True)
+
+    @function_tool
+    def inspect_callback() -> str:
+        return "inner-private-candidate"
+
+    inner_model = ScriptedModel(
+        [[get_function_tool_call("inspect_callback", "{}", call_id="inner-1")]]
+    )
+    inner = Agent(
+        name="inner",
+        model=inner_model,
+        tools=[inspect_callback],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["inspect_callback"]),
+        output_guardrails=[inner_policy],
+    )
+
+    async def nested_callback() -> None:
+        callback_calls.append(failure)
+        await Runner.run(inner, "check callback", run_config=config)
+
+    async def extract_custom_data(_context: Any) -> dict[str, Any]:
+        await nested_callback()
+        return {}
+
+    class EndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            await nested_callback()
+
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @tool_input_guardrail
+    def record_input(data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="approval input checked")
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=extract_custom_data if failure == "extractor" else None,
+        tool_input_guardrails=[record_input],
+        tool_output_guardrails=[record_output] if with_output_guardrail else [],
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    def outer_policy(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        checked.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[outer_policy],
+    )
+    hooks = EndHook() if failure == "end_hook" else None
+    paused = await Runner.run(agent, "charge once", run_config=config, hooks=hooks)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+    failed = Runner.run_streamed(agent, state, run_config=config, hooks=hooks)
+    with pytest.raises(OutputGuardrailTripwireTriggered) as caught:
+        async for event in failed.stream_events():
+            if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+                emitted.append(event.item.output)
+
+    assert _is_error_data_redacted(caught.value)
+    assert caught.value.run_data is None
+    assert "inner-private-candidate" not in str(caught.value)
+    assert emitted == []
+    assert checked == []
+    assert failed.tool_output_guardrail_results == []
+    assert not any(isinstance(item, ToolCallOutputItem) for item in failed.new_items)
+
+    for mode in modes:
+        assert not any(
+            item.get("type") == "function_call_output" for item in failed.to_input_list(mode=mode)
+        )
+    restored = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    assert [result.output.output_info for result in restored._tool_input_guardrail_results] == [
+        "approval input checked"
+    ]
+    retry = Runner.run_streamed(agent, restored, run_config=config, hooks=hooks)
+    async for event in retry.stream_events():
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem):
+            emitted.append(event.item.output)
+    assert checked == ["receipt-7"]
+    assert retry.final_output == "receipt-7"
+    assert effects == ["charged"]
+    assert callback_calls == [failure]
+    assert len(model.calls) == 1
+    assert len(inner_model.calls) == 1
+    assert emitted == ["receipt-7"]
+    assert [result.output.output_info for result in retry.tool_output_guardrail_results] == (
+        ["receipt-7"] if with_output_guardrail else []
+    )
+    assert [result.output.output_info for result in retry.tool_input_guardrail_results] == [
+        "approval input checked"
+    ]
+    assert not any(isinstance(item, ToolCallOutputItem) for item in failed.new_items)
+    for mode in modes:
+        assert not any(
+            item.get("type") == "function_call_output" for item in failed.to_input_list(mode=mode)
+        )
+
+
+@pytest.mark.asyncio
+async def test_streamed_preapproval_checkpoint_preserves_input_guardrail_results() -> None:
+    @tool_input_guardrail
+    def check_input(_data: ToolInputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info="input checked before approval")
+
+    @function_tool(needs_approval=True, tool_input_guardrails=[check_input])
+    def charge() -> str:
+        raise AssertionError("An unapproved tool must not run")
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(name="agent", model=model, tools=[charge])
+    result = Runner.run_streamed(
+        agent,
+        "charge once",
+        run_config=RunConfig(
+            tracing_disabled=True,
+            tool_execution=ToolExecutionConfig(pre_approval_tool_input_guardrails=True),
+        ),
+    )
     async for _ in result.stream_events():
         pass
-    return result
+    assert len(result.interruptions) == 1
+    restored = await RunState.from_json(agent, json.loads(json.dumps(result.to_state().to_json())))
+    assert [item.output.output_info for item in restored._tool_input_guardrail_results] == [
+        "input checked before approval"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_approval_callback_stream_checkpoint_retries_accepted_output() -> None:
+    effects: list[str] = []
+    callbacks: list[str] = []
+    checked_outputs: list[str] = []
+
+    def cancel_after_execution(_context: Any) -> dict[str, Any]:
+        callbacks.append("extractor")
+        raise asyncio.CancelledError("post-tool callback cancelled")
+
+    @tool_output_guardrail
+    def record_output(data: ToolOutputGuardrailData) -> ToolGuardrailFunctionOutput:
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=cancel_after_execution,
+        tool_output_guardrails=[record_output],
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    async def allow_output(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        checked_outputs.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel([[get_function_tool_call("charge", "{}", call_id="charge-1")]])
+    agent = Agent(
+        name="agent",
+        model=model,
+        tools=[charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[allow_output],
+    )
+    config = RunConfig(tracing_disabled=True)
+    paused = await Runner.run(agent, "charge once", run_config=config)
+    state = paused.to_state()
+    state.approve(state.get_interruptions()[0])
+
+    failed = Runner.run_streamed(agent, state, run_config=config)
+    failed_outputs = [
+        event.item.output
+        async for event in failed.stream_events()
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+    ]
+    # Background cancellation completes the stream silently; consumer cancellation still raises.
+    assert failed.is_complete
+    assert failed.run_loop_exception is None
+    assert failed.final_output is None
+    assert failed_outputs == []
+    assert checked_outputs == []
+    assert failed.tool_output_guardrail_results == []
+
+    restored = await RunState.from_json(agent, json.loads(json.dumps(failed.to_state().to_json())))
+    assert [
+        item.output for item in restored._generated_items if isinstance(item, ToolCallOutputItem)
+    ] == ["receipt-7"]
+    assert [result.output.output_info for result in restored._tool_output_guardrail_results] == [
+        "receipt-7"
+    ]
+
+    retry = Runner.run_streamed(agent, restored, run_config=config)
+    retry_outputs = [
+        event.item.output
+        async for event in retry.stream_events()
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+    ]
+    assert retry.final_output == "receipt-7"
+    assert retry_outputs == ["receipt-7"]
+    assert checked_outputs == ["receipt-7"]
+    assert effects == ["charged"]
+    assert callbacks == ["extractor"]
+    assert len(model.calls) == 1
+    assert _call_pair(retry.to_input_list(), "charge-1") == [
+        "function_call",
+        "function_call_output",
+    ]
+    assert [result.output.output_info for result in retry.tool_output_guardrail_results] == [
+        "receipt-7"
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing_streamed,retry_streamed,round_trip,retry_append",
+    [
+        (False, False, False, "success"),
+        (True, True, True, "success"),
+        (False, True, True, "lost-ack"),
+        (True, False, False, "lost-ack"),
+    ],
+    ids=["run-live", "stream-json", "run-to-stream-lost-ack", "stream-to-run-lost-ack"],
+)
+async def test_callback_failure_retry_delivers_output_to_session(
+    failing_streamed: bool,
+    retry_streamed: bool,
+    round_trip: bool,
+    retry_append: str,
+) -> None:
+    agent, model, session, state, effects = await _approved_session_state(failing_streamed)
+    callback_calls: list[str] = []
+
+    class FailingEndHook(RunHooks[Any]):
+        async def on_tool_end(
+            self, context: RunContextWrapper[Any], agent: Agent[Any], tool: Tool, result: Any
+        ) -> None:
+            callback_calls.append(tool.name)
+            raise RuntimeError("post-tool callback failed")
+
+    hooks = FailingEndHook()
+    if failing_streamed:
+        failed = Runner.run_streamed(
+            agent,
+            state,
+            session=session,
+            run_config=RunConfig(tracing_disabled=True),
+            hooks=hooks,
+        )
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            async for _ in failed.stream_events():
+                pass
+        state = failed.to_state()
+    else:
+        with pytest.raises(UserError, match="post-tool callback failed"):
+            await _run_session_resume(agent, state, session, False, hooks)
+
+    assert effects == [7]
+    assert callback_calls == ["charge"]
+    assert len(model.calls) == 1
+    assert _charge_pair(await session.get_items()) == ["function_call"]
+
+    if round_trip:
+        state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+
+    if retry_append == "lost-ack":
+        session.failure = "after"
+        with pytest.raises(RuntimeError) as error:
+            await _run_session_resume(agent, state, session, retry_streamed, hooks)
+        assert error.value is session.error
+        assert len(model.calls) == 1
+        assert effects == [7]
+        assert callback_calls == ["charge"]
+        assert _charge_pair(await session.get_items()) == [
+            "function_call",
+            "function_call_output",
+        ]
+        # Also serialize while the Session acknowledgement is outstanding.
+        if round_trip:
+            state = await RunState.from_json(agent, json.loads(json.dumps(state.to_json())))
+
+    result = await _run_session_resume(agent, state, session, retry_streamed, hooks)
+    expected_pair = ["function_call", "function_call_output"]
+    assert result.final_output == "done"
+    assert effects == [7]
+    assert callback_calls == ["charge"]
+    assert _charge_pair(result.to_input_list()) == expected_pair
+    assert _charge_pair(await session.get_items()) == expected_pair
+    assert _charge_pair(model.calls[-1].input) == expected_pair
+
+    await _run_session_resume(agent, "What was the receipt?", session, retry_streamed)
+    assert _charge_pair(model.calls[-1].input) == expected_pair
+    assert effects == [7]
 
 
 async def _approved_session_state(streamed: bool, session: Session | None = None):
@@ -2488,3 +3477,188 @@ async def test_max_turns_guardrail_failure_leaves_the_state_retryable() -> None:
     # The retry reports the real guardrail failure rather than a fail-closed rejection.
     with pytest.raises(RuntimeError, match="guardrail exploded"):
         await Runner.run(agent, state, session=session, run_config=config, error_handlers=handlers)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("guardrail_blocks", [False, True], ids=["allowed", "blocked"])
+@pytest.mark.parametrize(
+    "published_sibling", [False, True], ids=["no-prior-output", "prior-output"]
+)
+async def test_legacy_first_turn_callback_failure_withholds_normalized_output(
+    guardrail_blocks: bool,
+    published_sibling: bool,
+) -> None:
+    effects: list[str] = []
+    checked: list[str] = []
+    config = RunConfig(tracing_disabled=True)
+
+    def fail_after_execution(_context: Any) -> dict[str, Any]:
+        raise RuntimeError("post-tool callback failed")
+
+    @function_tool(needs_approval=True, custom_data_extractor=fail_after_execution)
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    @output_guardrail
+    def terminal(_context: Any, _agent: Any, output: Any) -> GuardrailFunctionOutput:
+        checked.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=guardrail_blocks)
+
+    @function_tool(needs_approval=True)
+    async def prelude() -> str:
+        return "published-receipt"
+
+    calls = [get_function_tool_call("charge", "{}", call_id="charge-1")]
+    if published_sibling:
+        calls.insert(0, get_function_tool_call("prelude", "{}", call_id="prelude-1"))
+    model = ScriptedModel([calls])
+    agent = Agent(
+        name="legacy-retry",
+        model=model,
+        tools=[prelude, charge],
+        tool_use_behavior=StopAtTools(stop_at_tool_names=["charge"]),
+        output_guardrails=[terminal],
+    )
+    paused = await Runner.run(agent, "charge once", run_config=config)
+    if published_sibling:
+        partial_state = paused.to_state()
+        partial_state.approve(partial_state.get_interruptions()[0])
+        paused = await Runner.run(agent, partial_state, run_config=config)
+    payload = json.loads(paused.to_state().to_string())
+    # Schema 1.16 predates current-response ownership and held Session writes.
+    payload["$schemaVersion"] = "1.16"
+    payload["context"].pop("function_tool_approvals", None)
+    payload.pop("generated_session_item_indexes", None)
+    payload.pop("current_response_generated_item_ownership", None)
+    payload.pop("pending_session_write", None)
+    state = await RunState.from_json(agent, payload)
+    state.approve(state.get_interruptions()[0])
+
+    failed = Runner.run_streamed(agent, state, run_config=config)
+    with pytest.raises(UserError, match="post-tool callback failed"):
+        async for _ in failed.stream_events():
+            pass
+    assert effects == ["charged"]
+    assert checked == []
+    modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+    for mode in modes:
+        assert [
+            item.get("output")
+            for item in failed.to_input_list(mode=mode)
+            if item.get("type") == "function_call_output"
+        ] == (["published-receipt"] if published_sibling else [])
+
+    # Resume the same source so later public reads cannot borrow its mutated boundary.
+    retry = Runner.run_streamed(agent, state, run_config=config)
+    events = []
+    if guardrail_blocks:
+        with pytest.raises(OutputGuardrailTripwireTriggered):
+            async for event in retry.stream_events():
+                events.append(event)
+    else:
+        async for event in retry.stream_events():
+            events.append(event)
+        assert retry.final_output == "receipt-7"
+    assert checked == ["receipt-7"]
+    assert effects == ["charged"]
+    assert [
+        event.item.output
+        for event in events
+        if event.type == "run_item_stream_event" and isinstance(event.item, ToolCallOutputItem)
+    ] == ([] if guardrail_blocks else ["receipt-7"])
+    for mode in modes:
+        assert [
+            item.get("output")
+            for item in failed.to_input_list(mode=mode)
+            if item.get("type") == "function_call_output"
+        ] == (["published-receipt"] if published_sibling else [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "streamed"])
+@pytest.mark.parametrize("failure", ["extractor", "tool_use_behavior"])
+async def test_legacy_later_turn_callback_failure_rejects_incomplete_retry(
+    streamed: bool,
+    failure: str,
+) -> None:
+    effects: list[str] = []
+    charged_decisions: list[str] = []
+
+    def fail_after_execution(_context: Any) -> dict[str, Any]:
+        raise RuntimeError("post-tool callback failed")
+
+    @function_tool
+    async def before() -> str:
+        return "before-ok"
+
+    @function_tool(
+        needs_approval=True,
+        custom_data_extractor=fail_after_execution if failure == "extractor" else None,
+    )
+    async def charge() -> str:
+        effects.append("charged")
+        return "receipt-7"
+
+    def decide_final_output(_context: Any, results: list[Any]) -> ToolsToFinalOutputResult:
+        if any(result.tool.name == "charge" for result in results):
+            charged_decisions.append("charge")
+            if len(charged_decisions) == 1:
+                raise RuntimeError("post-tool callback failed")
+        return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("before", "{}", call_id="before-1")],
+            [get_function_tool_call("charge", "{}", call_id="charge-1")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="legacy-later-turn",
+        model=model,
+        tools=[before, charge],
+        tool_use_behavior=decide_final_output
+        if failure == "tool_use_behavior"
+        else "run_llm_again",
+    )
+    paused = await _run_session_resume(agent, "charge once", None, False)
+    assert [item.output for item in paused.new_items if isinstance(item, ToolCallOutputItem)] == [
+        "before-ok"
+    ]
+    payload = json.loads(paused.to_state().to_string())
+    # Schema 1.16 cannot prove which saved items belong to a later model response.
+    payload["$schemaVersion"] = "1.16"
+    payload["context"].pop("function_tool_approvals", None)
+    payload.pop("generated_session_item_indexes", None)
+    payload.pop("current_response_generated_item_ownership", None)
+    payload.pop("pending_session_write", None)
+    state = await RunState.from_json(agent, payload)
+    state.approve(state.get_interruptions()[0])
+
+    callback_error = UserError if failure == "extractor" else RuntimeError
+    if streamed:
+        failed = Runner.run_streamed(agent, state, run_config=RunConfig(tracing_disabled=True))
+        with pytest.raises(callback_error, match="post-tool callback failed"):
+            async for _ in failed.stream_events():
+                pass
+        modes: tuple[ToInputListMode, ...] = ("preserve_all", "normalized")
+        for mode in modes:
+            assert [
+                item.get("output")
+                for item in failed.to_input_list(mode=mode)
+                if item.get("type") == "function_call_output"
+            ] == ["before-ok"]
+        state = failed.to_state()
+    else:
+        with pytest.raises(callback_error, match="post-tool callback failed"):
+            await _run_session_resume(agent, state, None, streamed)
+    assert effects == ["charged"]
+    assert len(model.calls) == 2
+
+    restored = await RunState.from_json(agent, json.loads(state.to_string()))
+    with pytest.raises(UserError, match="cannot be resumed"):
+        await _run_session_resume(agent, restored, None, not streamed)
+    assert effects == ["charged"]
+    assert charged_decisions == (["charge"] if failure == "tool_use_behavior" else [])
+    assert len(model.calls) == 2

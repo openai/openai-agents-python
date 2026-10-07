@@ -17,6 +17,7 @@ from openai.types.responses import ResponseFunctionToolCall
 from pydantic import BaseModel
 
 from .._tool_identity import get_hosted_mcp_approval_request_identity
+from .._tool_invocation import tool_output_identity
 from ..agent_tool_state import drop_agent_tool_run_result
 from ..items import ItemHelpers, RunItem, ToolCallOutputItem, TResponseInputItem
 from ..models.fake_id import FAKE_RESPONSES_ID
@@ -68,6 +69,7 @@ __all__ = [
     "prepare_model_input_items",
     "run_item_to_input_item",
     "run_items_to_input_items",
+    "order_current_turn_tool_outputs",
     "normalize_input_items_for_api",
     "normalize_resumed_input",
     "fingerprint_input_item",
@@ -88,6 +90,44 @@ __all__ = [
     "extract_mcp_request_id",
     "extract_mcp_request_id_from_run",
 ]
+
+
+def order_current_turn_tool_outputs(
+    items: Sequence[RunItem],
+    *,
+    start: int | None,
+    call_positions: dict[str, int],
+    published_items: Sequence[RunItem] = (),
+) -> list[RunItem]:
+    """Order pending local outputs without moving the response or published history."""
+    ordered_items = list(items)
+    if start is None:
+        return ordered_items
+    published_ids = {
+        identity
+        for item in published_items
+        if isinstance(item, ToolCallOutputItem)
+        and (identity := tool_output_identity(item.raw_item)) is not None
+    }
+    for index in range(start, len(ordered_items)):
+        if (
+            isinstance(ordered_items[index], ToolCallOutputItem)
+            and tool_output_identity(ordered_items[index].raw_item) in published_ids
+        ):
+            start = index + 1
+    slots = [
+        index
+        for index in range(start, len(ordered_items))
+        if isinstance(item := ordered_items[index], ToolCallOutputItem)
+        and item.call_id in call_positions
+    ]
+    outputs = sorted(
+        (ordered_items[index] for index in slots),
+        key=lambda item: call_positions[cast(ToolCallOutputItem, item).call_id or ""],
+    )
+    for index, output in zip(slots, outputs, strict=True):
+        ordered_items[index] = output
+    return ordered_items
 
 
 @dataclass(frozen=True)

@@ -748,13 +748,13 @@ def _prepare_blocked_output_owner_plan(
             public_results,
             slice(len(prefixes.streamed_tool_output_guardrail_results), None),
         )
-    elif run_state is not None:
+    else:
+        current_results = []
+    if not current_results and run_state is not None:
         current_results = list.__getitem__(
             run_state._tool_output_guardrail_results,
             slice(len(prefixes.run_state_tool_output_guardrail_results), None),
         )
-    else:
-        current_results = []
     safe_tool_output_guardrail_results = _data_free_tool_output_guardrail_results(
         current_results,
         blocked_message,

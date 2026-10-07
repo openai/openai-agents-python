@@ -1157,6 +1157,8 @@ class AgentRunner:
                             )
                             for item in resumed_response_boundary.items:
                                 ensure_nested_history_run_item_occurrence_key(item)
+                            processed = run_state._last_processed_response
+                            guardrail_result_start = processed.tool_output_guardrail_result_start
                             blocked_output_owner_starts = _BlockedOutputOwnerStarts(
                                 nonstreamed_session_items=(resumed_response_boundary.session_start),
                                 run_state_generated_items=(
@@ -1164,8 +1166,10 @@ class AgentRunner:
                                 ),
                                 run_state_session_items=resumed_response_boundary.session_start,
                                 run_state_model_responses=len(run_state._model_responses) - 1,
-                                run_state_tool_output_guardrail_results=len(
-                                    run_state._tool_output_guardrail_results
+                                run_state_tool_output_guardrail_results=(
+                                    guardrail_result_start
+                                    if guardrail_result_start is not None
+                                    else len(run_state._tool_output_guardrail_results)
                                 ),
                             )
 
@@ -1198,8 +1202,13 @@ class AgentRunner:
 
                             input_before_turn_rewrite = original_input
                             original_input = turn_result.original_input
-                            generated_items, turn_session_items = resumed_turn_items(turn_result)
-                            session_items.extend(turn_session_items)
+                            generated_items, session_items, turn_session_items = resumed_turn_items(
+                                turn_result, session_items, run_state
+                            )
+                            retry_terminal_output = (
+                                isinstance(turn_result.next_step, NextStepFinalOutput)
+                                and turn_result.has_recovered_tool_outputs
+                            )
                             if run_state is not None:
                                 if turn_result.nested_history_owned_items is not None:
                                     run_state._nested_history_owned_session_item_refs = (
@@ -1211,12 +1220,13 @@ class AgentRunner:
                                             turn_result.nested_history_owned_items,
                                         )
                                     )
-                                update_run_state_after_resume(
-                                    run_state,
-                                    turn_result=turn_result,
-                                    generated_items=generated_items,
-                                    session_items=session_items,
-                                )
+                                if not retry_terminal_output:
+                                    update_run_state_after_resume(
+                                        run_state,
+                                        turn_result=turn_result,
+                                        generated_items=generated_items,
+                                        session_items=session_items,
+                                    )
                                 if isinstance(
                                     turn_result.next_step,
                                     NextStepInterruption | NextStepHandoff,
@@ -1313,6 +1323,13 @@ class AgentRunner:
                                 return _finalize_result(result)
 
                             if isinstance(turn_result.next_step, NextStepRunAgain):
+                                if turn_result.has_recovered_tool_outputs:
+                                    tool_input_guardrail_results.extend(
+                                        turn_result.tool_input_guardrail_results
+                                    )
+                                    tool_output_guardrail_results.extend(
+                                        turn_result.tool_output_guardrail_results
+                                    )
                                 continue
 
                             append_model_response_if_new(
@@ -1416,6 +1433,12 @@ class AgentRunner:
                                         ) from None
                                     raise
                                 except (Exception, asyncio.CancelledError) as guardrail_error:
+                                    if retry_terminal_output:
+                                        # Keep accepted execution private and retryable until
+                                        # the final guardrails permit delivery.
+                                        del output_guardrail_results[output_guardrail_result_start:]
+                                        session_items = list(run_state._session_items)
+                                        raise
                                     if not isinstance(
                                         guardrail_error, asyncio.CancelledError
                                     ) or not _is_terminal_tool_output_response(
@@ -1444,6 +1467,13 @@ class AgentRunner:
                                         )
                                     raise
 
+                                if retry_terminal_output:
+                                    update_run_state_after_resume(
+                                        run_state,
+                                        turn_result=turn_result,
+                                        generated_items=generated_items,
+                                        session_items=session_items,
+                                    )
                                 final_turn_items = _final_turn_items_for_persistence(
                                     list(turn_session_items),
                                     current_processed_response,
@@ -2297,6 +2327,17 @@ class AgentRunner:
                     )
                     if isinstance(exc, AgentsException):
                         _clear_data_redacted_error_traceback(exc)
+                        public_tool_output_results = tool_output_guardrail_results
+                        if (
+                            run_state is not None
+                            and isinstance(run_state._current_step, NextStepInterruption)
+                            and run_state._last_processed_response is not None
+                        ):
+                            # Pending execution records belong only to the retry checkpoint.
+                            processed = run_state._last_processed_response
+                            public_tool_output_results = tool_output_guardrail_results[
+                                : processed.tool_output_guardrail_result_start
+                            ]
                         exc.run_data = RunErrorDetails(
                             input=original_input,
                             new_items=session_items,
@@ -2306,7 +2347,7 @@ class AgentRunner:
                             input_guardrail_results=input_guardrail_results,
                             output_guardrail_results=output_guardrail_results,
                             tool_input_guardrail_results=tool_input_guardrail_results,
-                            tool_output_guardrail_results=tool_output_guardrail_results,
+                            tool_output_guardrail_results=public_tool_output_results,
                         )
                 raise
             finally:
@@ -2683,7 +2724,14 @@ class AgentRunner:
                     else []
                 ),
                 tool_output_guardrail_results=(
-                    list(getattr(run_state, "_tool_output_guardrail_results", []))
+                    list(run_state._tool_output_guardrail_results)[
+                        : (
+                            run_state._last_processed_response.tool_output_guardrail_result_start
+                            if isinstance(run_state._current_step, NextStepInterruption)
+                            and run_state._last_processed_response is not None
+                            else None
+                        )
+                    ]
                     if run_state is not None
                     else []
                 ),

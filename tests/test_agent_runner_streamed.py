@@ -2704,6 +2704,7 @@ async def test_serialized_later_turn_approval_with_output_guardrail_resumes(
         "missing",
         "invalid",
         "missing-current",
+        "missing-approval",
         "prefix-anchor",
         "nonterminal-session",
     ],
@@ -2767,6 +2768,9 @@ async def test_serialized_mixed_approval_guardrail_preserves_only_accepted_outpu
     elif session_ownership == "missing-current":
         current_start = payload["current_response_generated_item_ownership"]["start"]
         payload["generated_session_item_indexes"][current_start] = None
+    elif session_ownership == "missing-approval":
+        approval_index = payload["current_response_generated_item_ownership"]["interruptions"][0]
+        payload["generated_session_item_indexes"][approval_index] = None
     elif session_ownership == "prefix-anchor":
         earlier_copies = json.loads(json.dumps(payload["last_processed_response"]["new_items"]))
         payload["session_items"][:0] = earlier_copies

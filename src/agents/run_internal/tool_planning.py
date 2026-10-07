@@ -957,6 +957,8 @@ async def _execute_tool_plan(
     run_config,
     parallel: bool = True,
     tool_output_committer: Callable[[RunItem], None] | None = None,
+    tool_input_guardrail_results: list[ToolInputGuardrailResult] | None = None,
+    tool_output_guardrail_results: list[ToolOutputGuardrailResult] | None = None,
 ) -> tuple[
     list[Any],
     list[ToolInputGuardrailResult],
@@ -998,6 +1000,8 @@ async def _execute_tool_plan(
                 isolate_parallel_failures=isolate_function_tool_failures,
                 sibling_category_failure=sibling_category_failure,
                 tool_output_committer=tool_output_committer,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
             ),
             execute_computer_actions(
                 public_agent=public_agent,
@@ -1054,6 +1058,8 @@ async def _execute_tool_plan(
             config=run_config,
             isolate_parallel_failures=isolate_function_tool_failures,
             tool_output_committer=tool_output_committer,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
         )
         computer_results = await execute_computer_actions(
             public_agent=public_agent,

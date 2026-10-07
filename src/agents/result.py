@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
 
+from ._tool_invocation import tool_output_identity
 from .agent import Agent
 from .agent_output import AgentOutputSchemaBase
 from .exceptions import (
@@ -29,6 +30,7 @@ from .items import (
     ModelResponse,
     RunItem,
     ToolApprovalItem,
+    ToolCallOutputItem,
     TResponseInputItem,
 )
 from .logger import log_tool_action_warning, logger
@@ -291,6 +293,52 @@ def _input_items_for_result(
     model_input_items = getattr(result, "_model_input_items", None)
     if not isinstance(model_input_items, list):
         return session_items
+
+    if isinstance(result, RunResultStreaming):
+        # Execution checkpoints can contain accepted outputs that final guardrails
+        # have not released. Keep them private in every public history view.
+        from .run_internal.blocked_output import (
+            _current_response_boundary,
+            _identity_sequence_start,
+        )
+
+        processed = result._last_processed_response
+        if processed is None and isinstance(result._state, RunState):
+            processed = result._state._last_processed_response
+        if processed is not None:
+            legacy_public_outputs: set[tuple[str, str]] = set()
+            start = _identity_sequence_start(model_input_items, processed.new_items)
+            if start is None and isinstance(result._state, RunState):
+                # Legacy first-turn checkpoints have no shared processed-item identities.
+                # Prove their boundary against this result's captured history, since the
+                # caller can resume the source RunState before inspecting an earlier result.
+                boundary_state = copy.copy(result._state)
+                boundary_state._generated_items = model_input_items
+                boundary_state._session_items = result.new_items
+                boundary_state._current_turn = result.current_turn
+                boundary = _current_response_boundary((), processed, boundary_state)
+                start = boundary.generated_start
+                if start is None and boundary_state._terminal_unrecoverable:
+                    return session_items
+                if start is not None and boundary.session_start is not None:
+                    public_start = boundary.session_start + len(boundary.processed_items)
+                    legacy_public_outputs = {
+                        identity
+                        for item in result.new_items[public_start:]
+                        if isinstance(item, ToolCallOutputItem)
+                        and (identity := tool_output_identity(item.raw_item)) is not None
+                    }
+            if start is not None:
+                output_start = start + len(processed.new_items)
+                public_items = {id(item) for item in result.new_items}
+                model_input_items = [
+                    item
+                    for index, item in enumerate(model_input_items)
+                    if index < output_start
+                    or not isinstance(item, ToolCallOutputItem)
+                    or id(item) in public_items
+                    or tool_output_identity(item.raw_item) in legacy_public_outputs
+                ]
 
     # When the runner marks a divergence, generated_items already reflect the continuation input
     # chosen for the next local run after applying handoff/input filtering.
@@ -1257,5 +1305,20 @@ class RunResultStreaming(RunResultBase):
             previous_response_id=self._previous_response_id,
             auto_previous_response_id=self._auto_previous_response_id,
         )
+        if (
+            isinstance(self._state, RunState)
+            and self._last_processed_response is not None
+            and self._state._last_processed_response is self._last_processed_response
+        ):
+            # The checkpoint retains records withheld from the public result until guardrails pass.
+            error = self.run_loop_exception
+            if error is not None and _is_error_data_redacted(error):
+                state._tool_input_guardrail_results = list(
+                    self._state._tool_input_guardrail_results
+                )
+            if self._last_processed_response.tool_output_guardrail_result_start is not None:
+                state._tool_output_guardrail_results = list(
+                    self._state._tool_output_guardrail_results
+                )
         _copy_pending_nested_agent_tool_states(state, self)
         return state
