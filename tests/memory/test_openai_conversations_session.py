@@ -571,6 +571,77 @@ class TestOpenAIConversationsSessionBasicOperations:
 
 class TestOpenAIConversationsSessionBatches:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("mutation", ["add", "pop", "clear"])
+    async def test_mutations_wait_for_complete_append(self, mock_openai_client, mutation: str):
+        stored: list[TResponseInputItem] = []
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        other_started = asyncio.Event()
+        items: list[TResponseInputItem] = [
+            cast(TResponseInputItem, {"role": "user", "content": f"message {i}", "id": f"msg_{i}"})
+            for i in range(21)
+        ]
+        other: TResponseInputItem = {"role": "user", "content": "other"}
+
+        async def create(*, conversation_id, items):
+            stored.extend(items)
+            if len(stored) == 20:
+                first_started.set()
+                await release_first.wait()
+
+        async def delete_item(*, conversation_id, item_id):
+            assert stored[-1]["id"] == item_id
+            stored.pop()
+
+        async def delete_conversation(*, conversation_id):
+            stored.clear()
+
+        mock_openai_client.conversations.items.create.side_effect = create
+        mock_openai_client.conversations.items.delete.side_effect = delete_item
+        mock_openai_client.conversations.delete.side_effect = delete_conversation
+        session = OpenAIConversationsSession(
+            conversation_id="conv_test", openai_client=mock_openai_client
+        )
+        with patch.object(session, "get_items", side_effect=lambda limit: stored[-limit:]):
+
+            async def mutate():
+                other_started.set()
+                if mutation == "add":
+                    await session.add_items([other])
+                elif mutation == "pop":
+                    return await session.pop_item()
+                else:
+                    await session.clear_session()
+                return None
+
+            append = asyncio.create_task(session.add_items(items))
+            follower = None
+            try:
+                await asyncio.wait_for(first_started.wait(), timeout=5)
+                follower = asyncio.create_task(mutate())
+                await asyncio.wait_for(other_started.wait(), timeout=5)
+                assert not follower.done()
+                assert stored == items[:20]
+                release_first.set()
+                await append
+                result = await follower
+            finally:
+                release_first.set()
+                tasks = [append] + ([follower] if follower is not None else [])
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+        if mutation == "add":
+            assert stored == items + [other]
+        elif mutation == "pop":
+            assert result == items[-1]
+            assert stored == items[:-1]
+        else:
+            assert stored == []
+            assert session._session_id is None
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         ("count", "expected_sizes"), [(0, []), (20, [20]), (21, [20, 1]), (41, [20, 20, 1])]
     )
@@ -619,9 +690,10 @@ class TestOpenAIConversationsSessionBatches:
             with pytest.raises(BadRequestError, match="synthetic failure") as caught:
                 await session.add_items(items)
             assert caught.value.status_code == 400
+            await session.add_items(items[40:])
 
-        assert batches == [items[:20], items[20:40]]
-        assert saved == items[:20]
+        assert batches == [items[:20], items[20:40], items[40:]]
+        assert saved == items[:20] + items[40:]
 
     @pytest.mark.asyncio
     async def test_cancellation_preserves_prefix_and_stops(self):
@@ -653,9 +725,10 @@ class TestOpenAIConversationsSessionBatches:
                 write.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await write
+            await session.add_items(items[40:])
 
-        assert batches == [items[:20], items[20:40]]
-        assert saved == items[:20]
+        assert batches == [items[:20], items[20:40], items[40:]]
+        assert saved == items[:20] + items[40:]
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("stream", [False, True])
