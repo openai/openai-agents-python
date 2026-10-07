@@ -115,7 +115,7 @@ print(result.final_output)
 
 What to know:
 
--   Hosted tool search is available only with OpenAI Responses models. The current Python SDK support depends on `openai>=2.25.0`.
+-   Hosted tool search is available only with OpenAI Responses models.
 -   Add exactly one `ToolSearchTool()` when you configure deferred-loading surfaces on an agent.
 -   Searchable surfaces include `@function_tool(defer_loading=True)`, `tool_namespace(name=..., description=..., tools=[...])`, and `HostedMCPTool(tool_config={..., "defer_loading": True})`.
 -   Deferred-loading function tools must be paired with `ToolSearchTool()`. Namespace-only setups may also use `ToolSearchTool()` to let the model load the right group on demand.
