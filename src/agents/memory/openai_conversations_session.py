@@ -112,14 +112,24 @@ class OpenAIConversationsSession(SessionABC):
         return all_items  # type: ignore
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        """Append items in order, in requests of at most 20 items each.
+
+        Writes spanning multiple requests are not atomic. If a request fails or
+        is cancelled, earlier batches remain saved and later batches are not
+        sent. The original exception propagates. Before retrying, callers must
+        reconcile the remote history; retrying the entire list can duplicate
+        items that were already saved, including an unacknowledged request.
+        """
         if not items:
             return
 
         session_id = await self._get_session_id()
-        await self._openai_client.conversations.items.create(
-            conversation_id=session_id,
-            items=items,
-        )
+        # The Conversations items-create endpoint accepts up to 20 items per request.
+        for offset in range(0, len(items), 20):
+            await self._openai_client.conversations.items.create(
+                conversation_id=session_id,
+                items=items[offset : offset + 20],
+            )
 
     async def pop_item(self) -> TResponseInputItem | None:
         session_id = await self._get_session_id()

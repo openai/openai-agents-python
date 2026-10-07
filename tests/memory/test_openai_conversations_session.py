@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from openai import AsyncOpenAI, BadRequestError
 from openai.types.responses.response_output_item import Program, ProgramOutput
 
 from agents import (
     Agent,
     ProgrammaticToolCallingTool,
+    RunConfig,
     Runner,
     TResponseInputItem,
     function_tool,
@@ -563,6 +567,142 @@ class TestOpenAIConversationsSessionBasicOperations:
         assert new_id == "new_id"
         assert session._session_id == "new_id"
         mock_openai_client.conversations.create.assert_called_once_with(items=[])
+
+
+class TestOpenAIConversationsSessionBatches:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("count", "expected_sizes"), [(0, []), (20, [20]), (21, [20, 1]), (41, [20, 20, 1])]
+    )
+    async def test_request_sizes_and_order(self, count: int, expected_sizes: list[int]):
+        batches: list[list[dict[str, Any]]] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            assert request.url.path == "/v1/conversations/conv_test/items"
+            batches.append(json.loads(request.content)["items"])
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(count)
+        ]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            await session.add_items(items)
+
+        assert [len(batch) for batch in batches] == expected_sizes
+        assert [item for batch in batches for item in batch] == items
+
+    @pytest.mark.asyncio
+    async def test_later_failure_preserves_prefix_and_stops(self):
+        batches: list[list[dict[str, Any]]] = []
+        saved: list[dict[str, Any]] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            batch = json.loads(request.content)["items"]
+            batches.append(batch)
+            if len(batches) == 2:
+                return httpx.Response(400, json={"error": {"message": "synthetic failure"}})
+            saved.extend(batch)
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(41)
+        ]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            with pytest.raises(BadRequestError, match="synthetic failure") as caught:
+                await session.add_items(items)
+            assert caught.value.status_code == 400
+
+        assert batches == [items[:20], items[20:40]]
+        assert saved == items[:20]
+
+    @pytest.mark.asyncio
+    async def test_cancellation_preserves_prefix_and_stops(self):
+        batches: list[list[dict[str, Any]]] = []
+        saved: list[dict[str, Any]] = []
+        second_started = asyncio.Event()
+
+        async def capture(request: httpx.Request) -> httpx.Response:
+            batch = json.loads(request.content)["items"]
+            batches.append(batch)
+            if len(batches) == 2:
+                second_started.set()
+                await asyncio.Future()
+            saved.extend(batch)
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(41)
+        ]
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+            write = asyncio.create_task(session.add_items(items))
+            try:
+                await asyncio.wait_for(second_started.wait(), timeout=5)
+            finally:
+                write.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await write
+
+        assert batches == [items[:20], items[20:40]]
+        assert saved == items[:20]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_runner_batches_input_with_lazy_creation(self, stream: bool):
+        requests: list[tuple[str, str]] = []
+        batches: list[list[dict[str, Any]]] = []
+
+        def capture(request: httpx.Request) -> httpx.Response:
+            requests.append((request.method, request.url.path))
+            if request.url.path == "/v1/conversations":
+                assert json.loads(request.content) == {"items": []}
+                return httpx.Response(
+                    200, json={"id": "conv_test", "object": "conversation", "created_at": 0}
+                )
+            assert request.url.path == "/v1/conversations/conv_test/items"
+            if request.method == "POST":
+                batches.append(json.loads(request.content)["items"])
+            return httpx.Response(200, json={"object": "list", "data": [], "has_more": False})
+
+        items: list[TResponseInputItem] = [
+            {"role": "user", "content": f"message {i}"} for i in range(41)
+        ]
+        model = ScriptedModel()
+        model.enqueue([get_text_message("done")])
+        agent = Agent(name="test", model=model)
+        async with AsyncOpenAI(
+            api_key="test-placeholder",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(capture)),
+        ) as client:
+            session = OpenAIConversationsSession(openai_client=client)
+            if stream:
+                result = Runner.run_streamed(
+                    agent, items, session=session, run_config=RunConfig(tracing_disabled=True)
+                )
+                async for _ in result.stream_events():
+                    pass
+                assert result.final_output == "done"
+            else:
+                result_sync = await Runner.run(
+                    agent, items, session=session, run_config=RunConfig(tracing_disabled=True)
+                )
+                assert result_sync.final_output == "done"
+
+        assert requests.count(("POST", "/v1/conversations")) == 1
+        assert [len(batch) for batch in batches] == [20, 20, 1, 1]
+        assert [item for batch in batches[:3] for item in batch] == items
+        assert batches[3][0]["content"][0]["text"] == "done"
 
 
 class TestOpenAIConversationsSessionRunnerIntegration:
