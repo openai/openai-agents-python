@@ -83,7 +83,7 @@ ToolNameCollisionPolicy = Literal["warn", "error"]
 class ToolErrorFormatterArgs(Generic[TContext]):
     """Data passed to ``RunConfig.tool_error_formatter`` callbacks."""
 
-    kind: Literal["approval_rejected", "tool_not_found"]
+    kind: Literal["approval_rejected", "tool_not_found", "tool_exception"]
     """The category of tool error being formatted."""
 
     tool_type: Literal["function", "computer", "shell", "apply_patch", "custom"]
@@ -100,6 +100,13 @@ class ToolErrorFormatterArgs(Generic[TContext]):
 
     run_context: RunContextWrapper[TContext]
     """The active run context for the current execution."""
+
+    error: Exception | None = None
+    """The original exception for ``tool_exception``; otherwise ``None``.
+
+    This exception can contain sensitive data. Return only application-approved details;
+    the SDK does not include the original exception in handled-error traces for this policy.
+    """
 
 
 ToolErrorFormatter = Callable[[ToolErrorFormatterArgs[Any]], MaybeAwaitable[str | None]]
@@ -459,6 +466,15 @@ class RunConfig:
     """Optional callback that formats tool error messages returned to the model.
 
     Returning ``None`` falls back to the SDK default message.
+
+    For ordinary function-tool exceptions, this callback applies only when the tool uses
+    the implicit default failure handler. Explicit per-tool handlers, including ``None``
+    (propagate errors), take precedence. Tools created by ``Agent.as_tool()`` and local MCP
+    factories retain their existing ``failure_error_function`` policies; this callback
+    does not format their exceptions. Timeouts, cancellation, and schema-backed
+    program-call failures retain their existing policies. A callback failure falls back
+    to the default message. Returned messages may enter model input, history, and traces;
+    return only application-approved details.
     """
 
     session_settings: SessionSettings | None = None
