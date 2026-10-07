@@ -2171,6 +2171,7 @@ class _FunctionToolBatchExecutor:
                 agent=self.public_agent,
                 tool_origin=get_function_tool_origin(func_tool),
             )
+            output_item._custom_data_pending = True
             self.output_items_by_tool_run[id(task_state.tool_run)] = output_item
             if self.tool_output_committer is not None:
                 self.tool_output_committer(output_item)
@@ -2188,6 +2189,8 @@ class _FunctionToolBatchExecutor:
             self.custom_data_by_tool_run[id(task_state.tool_run)] = custom_data
             if output_item is not None:
                 output_item.custom_data = custom_data
+        if output_item is not None:
+            output_item._custom_data_pending = False
 
         await gather_with_cancel(
             self.hooks.on_tool_end(tool_context, self.public_agent, func_tool, final_result),

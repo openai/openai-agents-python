@@ -530,3 +530,172 @@ async def test_streamed_partial_history_waits_for_input_verdict(monkeypatch, ver
             consumer.cancel()
         await asyncio.gather(consumer, return_exceptions=True)
         session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_function_partial_history_excludes_pending_custom_data(monkeypatch, streaming):
+    from agents.run_internal import tool_execution
+
+    from .model_test_helpers import get_exact_output_stream_step
+
+    extracting = asyncio.Event()
+    release = asyncio.Event()
+    settled = asyncio.Event()
+    effects = []
+
+    async def extract(context):
+        extracting.set()
+        try:
+            await release.wait()
+            return {"ticket": "T-1"}
+        finally:
+            settled.set()
+
+    @tool(custom_data_extractor=extract)
+    async def create_ticket() -> str:
+        effects.append("ticket")
+        return "created"
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await extracting.wait()
+        raise ValueError("synthetic sibling failure")
+
+    monkeypatch.setattr(tool_execution, "_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS", 0.001)
+    calls = [
+        function_call("create_ticket", {}, call_id="ticket"),
+        function_call("fail", {}, call_id="fail"),
+    ]
+    model = ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls])
+    agent = Agent(name="metadata", model=model, tools=[create_ticket, fail])
+    session = SQLiteSession("pending-function-metadata")
+    result = None
+    outputs = []
+    try:
+        with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+            if streaming:
+                result = Runner.run_streamed(agent, "go", session=session)
+                async for event in result.stream_events():
+                    if (
+                        event.type == "run_item_stream_event"
+                        and event.item.type == "tool_call_output_item"
+                    ):
+                        outputs.append(event.item)
+            else:
+                await Runner.run(agent, "go", session=session)
+        assert effects == ["ticket"]
+        assert not settled.is_set()
+        assert caught.value.run_data is not None
+        assert caught.value.run_data.new_items == []
+        assert _shape(await session.get_items()) == ["user"]
+        if result is not None:
+            assert outputs == []
+            restored = await RunState.from_json(agent, result.to_state().to_json())
+            assert restored._generated_items == []
+        release.set()
+        await asyncio.wait_for(settled.wait(), 2)
+        assert caught.value.run_data.new_items == []
+    finally:
+        release.set()
+        await asyncio.wait_for(settled.wait(), 2)
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verdict", ["pass", "reject", "error", "cancel", "cancel_at_verdict"])
+async def test_nonstreamed_partial_history_waits_for_input_verdict(monkeypatch, verdict):
+    completed = asyncio.Event()
+    release = asyncio.Event()
+    waiting = asyncio.Event()
+    guardrail_exited = asyncio.Event()
+    original_wait = asyncio.wait
+
+    async def observe_wait(tasks, *args, **kwargs):
+        if len(tasks) == 1 and any(
+            isinstance(task, asyncio.Task) and task.get_coro().__name__ == "run_input_guardrails"
+            for task in tasks
+        ):
+            waiting.set()
+        return await original_wait(tasks, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", observe_wait)
+
+    @input_guardrail
+    async def delayed(context, agent, input):
+        try:
+            await release.wait()
+            if verdict == "error":
+                raise ValueError("synthetic verdict failure")
+            return GuardrailFunctionOutput(
+                output_info="checked", tripwire_triggered=verdict == "reject"
+            )
+        finally:
+            guardrail_exited.set()
+
+    @tool
+    async def done() -> str:
+        return "completed"
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await completed.wait()
+        raise ValueError("synthetic sibling failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            completed.set()
+
+    agent = Agent(
+        name="admission",
+        tools=[done, fail],
+        input_guardrails=[delayed],
+        model=ScriptedModel(
+            [[function_call("done", {}, call_id="done"), function_call("fail", {}, call_id="fail")]]
+        ),
+    )
+    session = SQLiteSession("nonstreamed-delayed-verdict")
+    run_task = asyncio.create_task(Runner.run(agent, "go", session=session, hooks=Hooks()))
+    waiting_task = asyncio.create_task(waiting.wait())
+    try:
+        await original_wait(
+            (run_task, waiting_task), timeout=5, return_when=asyncio.FIRST_COMPLETED
+        )
+        assert waiting.is_set()
+        assert not run_task.done()
+        assert _shape(await session.get_items()) == ["user"]
+        if verdict in ("cancel", "cancel_at_verdict"):
+            if verdict == "cancel_at_verdict":
+                verdict_task = next(
+                    task
+                    for task in asyncio.all_tasks()
+                    if task.get_coro().__name__ == "run_input_guardrails"
+                )
+                verdict_task.add_done_callback(lambda _: run_task.cancel())
+                release.set()
+            else:
+                run_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await run_task
+        else:
+            release.set()
+            with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+                await run_task
+            assert caught.value.run_data is not None
+            expected = (
+                ["function_call:done", "function_call_output:done"] if verdict == "pass" else []
+            )
+            assert (
+                _shape([item.to_input_item() for item in caught.value.run_data.new_items])
+                == expected
+            )
+        assert guardrail_exited.is_set()
+        expected = ["function_call:done", "function_call_output:done"] if verdict == "pass" else []
+        assert _shape(await session.get_items()) == ["user", *expected]
+    finally:
+        release.set()
+        for task in (run_task, waiting_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(run_task, waiting_task, return_exceptions=True)
+        session.close()

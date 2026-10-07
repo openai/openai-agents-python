@@ -38,9 +38,12 @@ from .test_tool_batch_failure_history import _shape
     "boundary",
     [
         "provider",
+        "provider_final_hook",
         "provider_shell",
         "handoff",
         "mcp_callback",
+        "tool_behavior",
+        "final_hook",
         "tool_cancel",
         "native_cancel",
         "parent_cancel",
@@ -78,6 +81,19 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
             if tool.name == "create_ticket":
                 completed.set()
 
+        async def on_agent_end(self, context, agent, output):
+            if boundary == "provider_final_hook" or (
+                boundary == "final_hook" and effects == ["ticket"]
+            ):
+                raise UserError("final hook failure")
+
+    async def fail_tool_behavior(context, results):
+        if results:
+            raise UserError("tool behavior failure")
+        from agents import ToolsToFinalOutputResult
+
+        return ToolsToFinalOutputResult(is_final_output=False, final_output=None)
+
     async def fail_handoff(context):
         assert effects == ["ticket"]
         raise UserError("handoff failure")
@@ -94,7 +110,7 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
             ),
             function_call("fail", {}, call_id="fail"),
         ]
-        if boundary == "provider"
+        if boundary in ("provider", "provider_final_hook")
         else [
             function_call("create_ticket", {}, call_id="ticket"),
             function_call(
@@ -102,6 +118,8 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
             ),
         ]
     )
+    if boundary == "provider_final_hook":
+        calls[-1] = assistant_message("done")
     if boundary == "native_cancel":
         calls[-1] = ResponseCustomToolCall(
             type="custom_tool_call", name="native", call_id="fail", input="synthetic"
@@ -155,6 +173,8 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
             arguments="{}",
             name="synthetic",
         )
+    if boundary in ("tool_behavior", "final_hook"):
+        calls = calls[:1]
     model = ScriptedModel(
         [get_exact_output_stream_step(calls) if streaming else calls, [assistant_message("done")]]
     )
@@ -164,6 +184,10 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
         tools=[create_ticket, fail, native, hosted_mcp, hosted_shell],
         handoffs=[transfer],
     )
+    if boundary == "tool_behavior":
+        agent.tool_use_behavior = fail_tool_behavior
+    elif boundary == "final_hook":
+        agent.tool_use_behavior = "stop_on_first_tool"
     session = SQLiteSession("failure-boundaries")
     result = None
     caught = None
@@ -207,7 +231,7 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
             []
             if boundary == "parent_cancel"
             else ["web_search_call"]
-            if boundary == "provider"
+            if boundary in ("provider", "provider_final_hook")
             else ["shell_call:shell", "shell_call_output:shell"]
             if boundary == "provider_shell"
             else ["function_call:ticket", "function_call_output:ticket"]
@@ -227,6 +251,8 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
         if boundary != "parent_cancel":
             await Runner.run(agent, "continue", session=session)
             assert _shape(model.calls[-1].input)[1:-1] == expected
-        assert effects == ([] if boundary in ("provider", "provider_shell") else ["ticket"])
+        assert effects == (
+            [] if boundary in ("provider", "provider_final_hook", "provider_shell") else ["ticket"]
+        )
     finally:
         session.close()

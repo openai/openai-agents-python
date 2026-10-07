@@ -23,6 +23,7 @@ from .exceptions import (
     _clear_data_redacted_error_traceback,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
@@ -1846,18 +1847,23 @@ class AgentRunner:
                                         )
                                     )
                                     raise
-                                except BaseException:
-                                    # A non-tripwire failure (the model turn raising, or a
-                                    # guardrail raising a non-tripwire error) propagates from
-                                    # gather without cancelling the sibling task. Cancel and drain
-                                    # whichever side is still pending so it is not left running
-                                    # after the run has failed and its exception is not swallowed.
-                                    for pending_task in (guardrail_task, model_task):
-                                        if not pending_task.done():
-                                            pending_task.cancel()
-                                    await asyncio.gather(
-                                        guardrail_task, model_task, return_exceptions=True
-                                    )
+                                except BaseException as error:
+                                    try:
+                                        if partial_tool_results and (
+                                            not isinstance(error, asyncio.CancelledError)
+                                            or _is_tool_local_cancellation(error)
+                                        ):
+                                            # Settle admission without replacing the selected tool
+                                            # error. Only successful verdicts admit partial history.
+                                            await asyncio.wait((guardrail_task,))
+                                    finally:
+                                        # Parent cancellation still cancels and drains both tasks.
+                                        for pending_task in (guardrail_task, model_task):
+                                            if not pending_task.done():
+                                                pending_task.cancel()
+                                        await asyncio.gather(
+                                            guardrail_task, model_task, return_exceptions=True
+                                        )
                                     raise
                             else:
                                 turn_result = await model_task
@@ -1887,7 +1893,11 @@ class AgentRunner:
                                 run_state=run_state,
                                 on_tool_execution_error=partial_tool_results.append,
                             )
-                    except (Exception, asyncio.CancelledError):
+                    except (Exception, asyncio.CancelledError) as error:
+                        if isinstance(
+                            error, asyncio.CancelledError
+                        ) and not _is_tool_local_cancellation(error):
+                            raise
                         if not partial_tool_results:
                             raise
                         input_accepted = len(_attempt_input_guardrail_results()) >= len(
