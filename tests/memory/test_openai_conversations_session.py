@@ -760,7 +760,17 @@ class TestOpenAIConversationsSessionBatches:
                 follower_started.set()
                 await session.add_items(survivor)
 
-            write = asyncio.create_task(session.add_items(items))
+            cancellations: list[asyncio.CancelledError] = []
+
+            async def append_cancelled() -> None:
+                try:
+                    await session.add_items(items)
+                except asyncio.CancelledError as exc:
+                    # Python 3.10 can drop the message when a task exposes cancellation.
+                    cancellations.append(exc)
+                    raise
+
+            write = asyncio.create_task(append_cancelled())
             follower = None
             try:
                 await asyncio.wait_for(second_started.wait(), timeout=5)
@@ -775,9 +785,10 @@ class TestOpenAIConversationsSessionBatches:
                 assert saved == items[:20]
                 assert batches == [items[:20], items[20:40]]
                 release_request.set()
-                with pytest.raises(asyncio.CancelledError) as cancelled:
+                with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(write, timeout=5)
-                assert cancelled.value.args == ("original cancellation",)
+                assert len(cancellations) == 1
+                assert cancellations[0].args == ("original cancellation",)
                 await asyncio.wait_for(follower, timeout=5)
             finally:
                 release_request.set()
