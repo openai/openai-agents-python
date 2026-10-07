@@ -91,6 +91,7 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
             [
                 ResponseReasoningItem(id="rs_before", type="reasoning", summary=[]),
                 function_call("send_email", {}, call_id="email"),
+                ResponseReasoningItem(id="rs_ticket", type="reasoning", summary=[]),
                 function_call("create_ticket", {}, call_id="ticket"),
                 ResponseReasoningItem(id="rs_after", type="reasoning", summary=[]),
             ],
@@ -125,11 +126,11 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
             else:
                 await Runner.run(agent, "go", session=session, hooks=Hooks())
         assert effects == ["ticket"]
-        expected = ["reasoning"]
+        expected = []
         if failure == "hook":
             # An end hook runs after the output has passed its tool guardrails.
-            expected += ["function_call:email"]
-        expected += ["function_call:ticket"]
+            expected += ["reasoning", "function_call:email"]
+        expected += ["reasoning", "function_call:ticket"]
         if failure == "hook":
             expected += ["function_call_output:email"]
         expected += ["function_call_output:ticket"]
@@ -146,7 +147,10 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
         assert _shape([i.to_input_item() for i in caught.value.run_data.new_items]) == expected
         history = await session.get_items()
         assert _shape(history) == ["user", *expected]
-        assert history[1]["id"] == "rs_before"
+        expected_reasoning = ["rs_before", "rs_ticket"] if failure == "hook" else ["rs_ticket"]
+        assert [
+            item["id"] for item in history if item.get("type") == "reasoning"
+        ] == expected_reasoning
         assert history[-1]["output"] == "ticket T-1"
         if result is not None:
             assert _shape(output_events) == [
@@ -164,11 +168,19 @@ async def test_completed_sibling_survives_tool_batch_failure(failure: str, strea
             assert replay_model.last_call is not None
             assert replay_model.last_call.model_settings.tool_choice is None
             assert _shape(replay_model.last_call.input) == ["user", *expected]
+            assert [
+                item["id"]
+                for item in replay_model.last_call.input
+                if item.get("type") == "reasoning"
+            ] == expected_reasoning
             assert effects == ["ticket"]
             agent.model = model
         await Runner.run(agent, "finish", session=session)
         assert model.last_call is not None
         assert _shape(model.last_call.input) == ["user", *expected, "user"]
+        assert [
+            item["id"] for item in model.last_call.input if item.get("type") == "reasoning"
+        ] == expected_reasoning
         assert effects == ["ticket"]
     finally:
         session.close()

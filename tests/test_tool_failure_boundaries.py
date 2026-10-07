@@ -256,3 +256,192 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
         )
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("scenario", ["completed", "anonymous", "incomplete"])
+async def test_completed_provider_tool_search_survives_local_failure(streaming, scenario):
+    from openai.types.responses import ResponseToolSearchCall, ResponseToolSearchOutputItem
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        raise ValueError("synthetic sibling failure")
+
+    call_id = None if scenario == "anonymous" else "search"
+    search_call = ResponseToolSearchCall(
+        id="search_call",
+        call_id=call_id,
+        type="tool_search_call",
+        execution="server",
+        status="completed",
+        arguments={"query": "synthetic lookup"},
+    )
+    search_output = ResponseToolSearchOutputItem(
+        id="search_output",
+        call_id=call_id,
+        type="tool_search_output",
+        execution="server",
+        status="incomplete" if scenario == "incomplete" else "completed",
+        tools=[
+            {
+                "type": "function",
+                "name": "lookup",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ],
+        created_by="synthetic_provider",
+    )
+    calls = [search_call, search_output, function_call("fail", {}, call_id="fail")]
+    model = ScriptedModel(
+        [get_exact_output_stream_step(calls) if streaming else calls, [assistant_message("done")]]
+    )
+    agent = Agent(name="search", model=model, tools=[fail])
+    session = SQLiteSession("search-failure")
+    result = None
+    events = []
+    expected = (
+        []
+        if scenario == "incomplete"
+        else [
+            search_call.model_dump(exclude_unset=True),
+            {
+                key: value
+                for key, value in search_output.model_dump(exclude_unset=True).items()
+                if key != "created_by"
+            },
+        ]
+    )
+    try:
+        with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+            if streaming:
+                result = Runner.run_streamed(agent, "go", session=session)
+                async for event in result.stream_events():
+                    if event.type == "run_item_stream_event" and event.name in (
+                        "tool_search_called",
+                        "tool_search_output_created",
+                    ):
+                        events.append(event.name)
+            else:
+                await Runner.run(agent, "go", session=session)
+        assert caught.value.run_data is not None
+        assert [item.to_input_item() for item in caught.value.run_data.new_items] == expected
+        assert (await session.get_items())[1:] == expected
+        if result is not None:
+            # Provider events already emitted before local execution must not be emitted twice.
+            assert events == ["tool_search_called", "tool_search_output_created"]
+            assert result.to_input_list()[1:] == expected
+            restored = await RunState.from_json(agent, result.to_state().to_json())
+            assert [item.to_input_item() for item in restored._generated_items] == expected
+            await Runner.run(agent, restored)
+            assert model.calls[-1].input[1:] == expected
+        else:
+            await Runner.run(agent, "continue", session=session)
+            assert model.calls[-1].input[1:-1] == expected
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("completed_on_followup", [False, True])
+async def test_completed_program_child_retains_parent_after_sibling_failure(
+    streaming, completed_on_followup
+):
+    from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
+    from openai.types.responses.response_function_tool_call import CallerProgram
+    from openai.types.responses.response_output_item import Program, ProgramOutput
+
+    from agents import ProgrammaticToolCallingTool
+
+    completed = asyncio.Event()
+    effects = []
+
+    @tool(allowed_callers=["programmatic"])
+    async def lookup() -> str:
+        effects.append("lookup")
+        return "found"
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await completed.wait()
+        raise ValueError("synthetic sibling failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            completed.set()
+
+    reasoning = ResponseReasoningItem(id="program_reasoning", type="reasoning", summary=[])
+    program = Program(
+        id="program_item",
+        call_id="program",
+        code="lookup()",
+        fingerprint="synthetic",
+        type="program",
+    )
+    caller = CallerProgram(type="program", caller_id="program")
+    child = ResponseFunctionToolCall(
+        id="child",
+        call_id="lookup",
+        name="lookup",
+        arguments="{}",
+        caller=caller,
+        type="function_call",
+    )
+    program_output = ProgramOutput(
+        id="program_output",
+        call_id="program",
+        result="found",
+        status="completed",
+        type="program_output",
+    )
+    fail_call = function_call("fail", {}, call_id="fail")
+    first = [reasoning, program, child]
+    failure_step = [program_output, fail_call] if completed_on_followup else [*first, fail_call]
+    steps = [first, failure_step] if completed_on_followup else [failure_step]
+    continuation = (
+        [assistant_message("done")]
+        if completed_on_followup
+        else [program_output, assistant_message("done")]
+    )
+    model = ScriptedModel(
+        [
+            *(get_exact_output_stream_step(step) if streaming else step for step in steps),
+            continuation,
+        ]
+    )
+    agent = Agent(name="program", model=model, tools=[ProgrammaticToolCallingTool(), lookup, fail])
+    session = SQLiteSession("program-failure")
+    result = None
+    try:
+        with pytest.raises(UserError, match="synthetic sibling failure") as caught:
+            if streaming:
+                result = Runner.run_streamed(agent, "go", session=session, hooks=Hooks())
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, "go", session=session, hooks=Hooks())
+        expected = [
+            reasoning.model_dump(exclude_unset=True),
+            program.model_dump(exclude_unset=True),
+            child.model_dump(exclude_unset=True),
+            {
+                "type": "function_call_output",
+                "call_id": "lookup",
+                "output": "found",
+                "caller": caller.model_dump(exclude_unset=True),
+            },
+        ]
+        if completed_on_followup:
+            expected.append(program_output.model_dump(exclude_unset=True))
+        assert caught.value.run_data is not None
+        assert [item.to_input_item() for item in caught.value.run_data.new_items] == expected
+        assert (await session.get_items())[1:] == expected
+        if result is not None:
+            restored = await RunState.from_json(agent, result.to_state().to_json())
+            continued = await Runner.run(agent, restored)
+            assert model.calls[-1].input[1:] == expected
+            assert continued.final_output == "done"
+        assert effects == ["lookup"]
+    finally:
+        session.close()

@@ -140,9 +140,11 @@ from .items import (
     REJECTION_MESSAGE,
     NestedHistoryOwnedItem,
     apply_patch_rejection_item,
+    drop_orphan_function_calls,
     extract_mcp_request_id_from_run,
     function_rejection_item,
     order_current_turn_tool_outputs,
+    run_item_to_input_item,
     shell_rejection_item,
 )
 from .run_steps import (
@@ -803,19 +805,34 @@ async def check_for_final_output_from_tools(
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
 
 
-def _completed_tool_step_items(model_items: list[RunItem], outputs: list[RunItem]) -> list[RunItem]:
+def _completed_tool_step_items(
+    pre_step_items: list[RunItem], model_items: list[RunItem], outputs: list[RunItem]
+) -> list[RunItem]:
     """Keep accepted call/output pairs in model order and their preceding reasoning."""
     outputs_by_call_id = {
         extract_tool_call_id(item.raw_item): item
         for item in outputs
         if not (isinstance(item, ToolCallOutputItem) and item._custom_data_pending)
     }
+    finalized_output_ids = {id(item) for item in outputs_by_call_id.values()}
+    model_output_ids = {id(item) for item in model_items if isinstance(item, ToolCallOutputItem)}
     retained: list[RunItem] = []
     ordered_outputs: list[RunItem] = []
     reasoning: list[RunItem] = []
     for item in model_items:
         if isinstance(item, ReasoningItem):
             reasoning.append(item)
+            continue
+        if (
+            isinstance(item, (ToolSearchCallItem, ToolSearchOutputItem))
+            and get_mapping_or_attr(item.raw_item, "execution") == "server"
+            and get_mapping_or_attr(item.raw_item, "status") == "completed"
+        ):
+            retained.extend(reasoning)
+            retained.append(item)
+        elif isinstance(item, ToolCallOutputItem) and id(item) in finalized_output_ids:
+            retained.extend(reasoning)
+            retained.append(item)
         elif isinstance(item, ToolCallItem):
             output = outputs_by_call_id.get(extract_tool_call_id(item.raw_item))
             provider_completed = (
@@ -831,13 +848,30 @@ def _completed_tool_step_items(model_items: list[RunItem], outputs: list[RunItem
                 )
                 and item.raw_item.status == "completed"
             )
-            if output is not None or provider_completed:
+            if output is not None or provider_completed or isinstance(item.raw_item, Program):
                 retained.extend(reasoning)
-                reasoning.clear()
                 retained.append(item)
-                if output is not None:
+                if output is not None and id(output) not in model_output_ids:
                     ordered_outputs.append(output)
-    return [*retained, *ordered_outputs]
+        # Reasoning belongs to the next model item, even when that item is omitted.
+        reasoning.clear()
+    candidates = [*retained, *ordered_outputs]
+    inputs = [item.to_input_item() for item in candidates]
+    prior_inputs = [
+        payload for item in pre_step_items if (payload := run_item_to_input_item(item)) is not None
+    ]
+    replayable_inputs = {
+        id(item)
+        for item in drop_orphan_function_calls(
+            [*prior_inputs, *inputs],
+            output_pruning_indexes=set(range(len(prior_inputs), len(prior_inputs) + len(inputs))),
+        )
+    }
+    return [
+        item
+        for item, payload in zip(candidates, inputs, strict=True)
+        if id(payload) in replayable_inputs
+    ]
 
 
 async def execute_tools_and_side_effects(
@@ -934,7 +968,9 @@ async def execute_tools_and_side_effects(
     def _publish_completed_tools() -> None:
         # Accepted server responses already have their own resumable checkpoint.
         if on_tool_execution_error is not None and not server_manages_conversation:
-            retained_items = _completed_tool_step_items(new_step_items, completed_outputs)
+            retained_items = _completed_tool_step_items(
+                pre_step_items, new_step_items, completed_outputs
+            )
             if retained_items:
                 on_tool_execution_error(
                     SingleStepResult(
