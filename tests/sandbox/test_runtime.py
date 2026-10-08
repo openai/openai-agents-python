@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import io
 import json
 import logging
@@ -5123,6 +5124,38 @@ async def test_unix_local_exec_confines_commands_to_workspace_root() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.requires_native_macos_sandbox
+@pytest.mark.skipif(
+    sys.platform != "darwin" or shutil.which("sandbox-exec") is None,
+    reason="sandbox-exec is only available on macOS when installed",
+)
+async def test_unix_local_exec_denies_launch_services(tmp_path: Path) -> None:
+    # Query the OS decision without depending on a GUI session or launching a host app.
+    sandbox_check = ctypes.CDLL("/usr/lib/libsandbox.1.dylib").sandbox_check
+    sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+    sandbox_check.restype = ctypes.c_int
+    assert sandbox_check(os.getpid(), b"lsopen", 0) == 0
+
+    check_launch_services = """
+import ctypes
+import os
+
+sandbox_check = ctypes.CDLL("/usr/lib/libsandbox.1.dylib").sandbox_check
+sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
+sandbox_check.restype = ctypes.c_int
+print(sandbox_check(os.getpid(), b"lsopen", 0))
+"""
+    client = UnixLocalSandboxClient(inherit_host_environment=False)
+    async with await client.create(manifest=Manifest(root=str(tmp_path / "workspace"))) as session:
+        result = await session.exec(
+            sys.executable, "-I", "-c", check_launch_services, shell=False, timeout=10
+        )
+
+    assert result.ok(), result.stderr.decode("utf-8", errors="replace")
+    assert int(result.stdout.strip()) > 0
+
+
+@pytest.mark.asyncio
 async def test_unix_local_exec_rejects_when_confinement_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5265,6 +5298,7 @@ def test_unix_local_confined_exec_command_allows_common_darwin_interpreter_roots
     profile = command[2]
 
     assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert "(deny lsopen)" in profile
     assert '(allow file-read-data file-read-metadata (subpath "/opt/homebrew"))' in profile
     assert '(allow file-read-data file-read-metadata (subpath "/usr/local"))' in profile
     assert (
