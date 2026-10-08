@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.23.2](https://github.com/openai/openai-agents-python/compare/v0.23.1...v0.23.2) (2026-10-05)
+
+
+### Bug Fixes
+
+* **examples:** render realtime tool events as text ([#5283](https://github.com/openai/openai-agents-python/issues/5283)) ([81f0ccf](https://github.com/openai/openai-agents-python/commit/81f0ccf20c6e24063b9da36fa37f2bdb6a43d8d3))
+* honor Runner tracing opt-out inside caller traces ([#5296](https://github.com/openai/openai-agents-python/issues/5296)) ([8c4aa08](https://github.com/openai/openai-agents-python/commit/8c4aa0814fa19fb9f20f6f020d860b8439e60d64))
+* trace approved tools inside the resumed agent span ([#5294](https://github.com/openai/openai-agents-python/issues/5294)) ([cf89d7e](https://github.com/openai/openai-agents-python/commit/cf89d7ebdae8641bfca8f0152e08f62b12396c10))
+* **tracing:** omit caller data from lifecycle debug logs ([#5299](https://github.com/openai/openai-agents-python/issues/5299)) ([d27abe8](https://github.com/openai/openai-agents-python/commit/d27abe8972408a638e97422e9fd8066445bb7b21))
+
 ## [0.23.1](https://github.com/openai/openai-agents-python/compare/v0.23.0...v0.23.1) (2026-10-02)
 
 
