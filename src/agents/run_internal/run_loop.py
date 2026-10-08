@@ -42,6 +42,7 @@ from ..exceptions import (
     _copy_data_redacted_process_control_error,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _mark_error_data_redacted,
     _mark_error_to_drain_stream_events,
     _prepare_data_redacted_error,
@@ -964,6 +965,23 @@ async def _finalize_streamed_interruption(
 
 
 T = TypeVar("T")
+
+
+class _ToolTaskCancellation(Exception):
+    """Carry selected tool cancellation across Task on Python versions that replace it."""
+
+    def __init__(self, error: asyncio.CancelledError) -> None:
+        super().__init__()
+        self.error = error
+
+
+async def preserve_tool_task_cancellation(awaitable: Awaitable[T]) -> T:
+    try:
+        return await awaitable
+    except asyncio.CancelledError as error:
+        if _is_tool_local_cancellation(error):
+            raise _ToolTaskCancellation(error) from None
+        raise
 
 
 async def start_streaming(
@@ -1962,6 +1980,7 @@ async def start_streaming(
                 )
                 if current_turn_span is not None:
                     current_turn_span.start(mark_as_current=True)
+                partial_tool_results: list[SingleStepResult] = []
                 try:
                     if (
                         session is not None
@@ -1991,7 +2010,93 @@ async def start_streaming(
                         on_response_accepted=_commit_pending_server_response,
                         on_response_hooks_started=_mark_response_hooks_started,
                         run_state=run_state,
+                        on_tool_execution_error=partial_tool_results.append,
                     )
+                except (Exception, asyncio.CancelledError) as tool_error:
+                    if not partial_tool_results:
+                        raise
+                    input_task = streamed_result._input_guardrails_task
+                    if partial_tool_results and input_task is not None and not input_task.done():
+                        # The finalizer already waits for this verdict. Settle it before
+                        # publishing, without letting a late verdict replace the tool error.
+                        streamed_result._tool_error_selected = True
+                        try:
+                            await input_guardrail_tripwire_triggered_for_stream(
+                                streamed_result, ignore_cancelled=True
+                            )
+                        except Exception:
+                            pass
+                    input_accepted = input_task is None or (
+                        input_task.done()
+                        and not input_task.cancelled()
+                        and input_task.exception() is None
+                    )
+                    if (
+                        partial_tool_results
+                        and input_accepted
+                        and not any(
+                            result.output.tripwire_triggered
+                            for result in streamed_result.input_guardrail_results
+                        )
+                    ):
+                        partial_result = partial_tool_results[0]
+                        streamed_result._model_input_items.extend(partial_result.new_step_items)
+                        streamed_result.new_items.extend(partial_result.new_step_items)
+                        streamed_result.raw_responses.append(partial_result.model_response)
+                        _accumulate_tool_guardrail_results(
+                            streamed_result,
+                            partial_result,
+                            accepted_input_results=accepted_tool_input_guardrail_results,
+                            accepted_output_results=accepted_tool_output_guardrail_results,
+                        )
+                        streamed_result._tool_use_tracker_snapshot = serialize_tool_use_tracker(
+                            tool_use_tracker,
+                            starting_agent=(
+                                run_state._starting_agent
+                                if run_state is not None and run_state._starting_agent is not None
+                                else starting_agent
+                            ),
+                        )
+                        if run_state is not None:
+                            _synchronize_accepted_run_state(
+                                run_state,
+                                generated_items=streamed_result._model_input_items,
+                                session_items=streamed_result.new_items,
+                                model_responses=streamed_result.raw_responses,
+                                tool_input_guardrail_results=(
+                                    streamed_result.tool_input_guardrail_results
+                                ),
+                                tool_output_guardrail_results=(
+                                    streamed_result.tool_output_guardrail_results
+                                ),
+                                current_turn=current_turn,
+                            )
+                            run_state._current_step = NextStepRunAgain()
+                            run_state.set_tool_use_tracker_snapshot(
+                                streamed_result._tool_use_tracker_snapshot
+                            )
+                        stream_step_items_to_queue(
+                            [
+                                item
+                                for item in partial_result.new_step_items
+                                if item.type == "tool_call_output_item"
+                                # Model-provided outputs were already emitted before execution.
+                                and _stream_event_item_occurrence_key(item) is None
+                            ],
+                            streamed_result._event_queue,
+                        )
+                        _mark_error_to_drain_stream_events(tool_error)
+                        try:
+                            await _save_stream_items_without_count(
+                                partial_result.new_step_items,
+                                partial_result.model_response.response_id,
+                                current_agent.model_settings.resolve(
+                                    run_config.model_settings
+                                ).store,
+                            )
+                        except Exception:
+                            logger.warning("Failed to save completed tools after a tool error")
+                    raise
                 finally:
                     if current_turn_span is not None:
                         attach_usage_to_span(
@@ -2323,6 +2428,7 @@ async def run_single_turn_streamed(
     on_response_accepted: Callable[[ModelResponse, ProcessedResponse | None], bool] | None = None,
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
 ) -> SingleStepResult:
     """Run a single streamed turn and emit events as results arrive."""
     public_agent = bindings.public_agent
@@ -2630,6 +2736,10 @@ async def run_single_turn_streamed(
     async def check_input_guardrails_before_side_effects() -> None:
         await raise_if_input_guardrail_tripwire_known()
 
+    def on_tool_error_selected() -> None:
+        # The category has selected its failure, before draining native finalization.
+        streamed_result._tool_error_selected = True
+
     single_step_result = await get_single_step_result_from_response(
         bindings=bindings,
         original_input=streamed_result.input,
@@ -2647,6 +2757,8 @@ async def run_single_turn_streamed(
         after_invocation_validation=after_invocation_validation,
         before_side_effects=check_input_guardrails_before_side_effects,
         run_state=run_state,
+        on_tool_execution_error=on_tool_execution_error,
+        on_tool_error_selected=on_tool_error_selected,
     )
 
     items_to_filter = session_items_for_turn(single_step_result)
@@ -2682,6 +2794,7 @@ async def run_single_turn(
     on_response_accepted: Callable[[ModelResponse, ProcessedResponse | None], bool] | None = None,
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -2794,6 +2907,7 @@ async def run_single_turn(
         server_manages_conversation=server_conversation_tracker is not None,
         after_invocation_validation=after_invocation_validation,
         run_state=run_state,
+        on_tool_execution_error=on_tool_execution_error,
     )
 
 

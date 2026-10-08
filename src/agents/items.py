@@ -448,7 +448,7 @@ class ToolCallOutputItem(RunItemBase[Any]):
     """SDK-only custom data attached to this tool output.
 
     This data is not part of ``raw_item`` and is not sent back to the model when the output item is
-    replayed as input.
+    replayed as input. On a failed run, unfinished custom-data extraction may leave this unset.
     """
 
     @property

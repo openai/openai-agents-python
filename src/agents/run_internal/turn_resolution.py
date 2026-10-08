@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Container, Mapping, Sequence
-from copy import deepcopy
+from copy import copy, deepcopy
 from dataclasses import replace
 from typing import Any, Literal, cast
 
@@ -70,6 +71,7 @@ from ..exceptions import (
     UserError,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _mark_error_data_redacted,
 )
 from ..handoffs import Handoff, HandoffInputData, HandoffInputFilter, nest_handoff_history
@@ -138,9 +140,11 @@ from .items import (
     REJECTION_MESSAGE,
     NestedHistoryOwnedItem,
     apply_patch_rejection_item,
+    drop_orphan_function_calls,
     extract_mcp_request_id_from_run,
     function_rejection_item,
     order_current_turn_tool_outputs,
+    run_item_to_input_item,
     shell_rejection_item,
 )
 from .run_steps import (
@@ -801,6 +805,89 @@ async def check_for_final_output_from_tools(
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
 
 
+def _snapshot_tool_outputs(items: list[RunItem], live_outputs: list[RunItem]) -> list[RunItem]:
+    """Detach failed-run replay data from finalizers that may still be running."""
+    # Provider-owned and prior-turn items retain their established response identities.
+    live_output_ids = {id(item) for item in live_outputs}
+    snapshots: list[RunItem] = []
+    for item in items:
+        if isinstance(item, ToolCallOutputItem) and id(item) in live_output_ids:
+            # A shallow copy preserves occurrence markers and opaque application output.
+            # Only provider payloads and SDK metadata belong to this recovery snapshot.
+            snapshot = copy(item)
+            snapshot.raw_item = deepcopy(item.raw_item)
+            snapshot.custom_data = deepcopy(item.custom_data)
+            snapshots.append(snapshot)
+        else:
+            snapshots.append(item)
+    return snapshots
+
+
+def _completed_tool_step_items(
+    pre_step_items: list[RunItem], model_items: list[RunItem], outputs: list[RunItem]
+) -> list[RunItem]:
+    """Keep accepted call/output pairs in model order and their preceding reasoning."""
+    outputs_by_call_id = {extract_tool_call_id(item.raw_item): item for item in outputs}
+    accepted_output_ids = {id(item) for item in outputs_by_call_id.values()}
+    model_output_ids = {id(item) for item in model_items if isinstance(item, ToolCallOutputItem)}
+    retained: list[RunItem] = []
+    ordered_outputs: list[RunItem] = []
+    reasoning: list[RunItem] = []
+    for item in model_items:
+        if isinstance(item, ReasoningItem):
+            reasoning.append(item)
+            continue
+        if (
+            isinstance(item, (ToolSearchCallItem, ToolSearchOutputItem))
+            and get_mapping_or_attr(item.raw_item, "execution") == "server"
+            and get_mapping_or_attr(item.raw_item, "status") == "completed"
+        ):
+            retained.extend(reasoning)
+            retained.append(item)
+        elif isinstance(item, ToolCallOutputItem) and id(item) in accepted_output_ids:
+            retained.extend(reasoning)
+            retained.append(item)
+        elif isinstance(item, ToolCallItem):
+            output = outputs_by_call_id.get(extract_tool_call_id(item.raw_item))
+            provider_completed = (
+                isinstance(
+                    item.raw_item,
+                    (
+                        ResponseFileSearchToolCall,
+                        ResponseFunctionWebSearch,
+                        ResponseCodeInterpreterToolCall,
+                        ImageGenerationCall,
+                        McpCall,
+                    ),
+                )
+                and item.raw_item.status == "completed"
+            )
+            if output is not None or provider_completed or isinstance(item.raw_item, Program):
+                retained.extend(reasoning)
+                retained.append(item)
+                if output is not None and id(output) not in model_output_ids:
+                    ordered_outputs.append(output)
+        # Reasoning belongs to the next model item, even when that item is omitted.
+        reasoning.clear()
+    candidates = [*retained, *ordered_outputs]
+    inputs = [item.to_input_item() for item in candidates]
+    prior_inputs = [
+        payload for item in pre_step_items if (payload := run_item_to_input_item(item)) is not None
+    ]
+    replayable_inputs = {
+        id(item)
+        for item in drop_orphan_function_calls(
+            [*prior_inputs, *inputs],
+            output_pruning_indexes=set(range(len(prior_inputs), len(prior_inputs) + len(inputs))),
+        )
+    }
+    return [
+        item
+        for item, payload in zip(candidates, inputs, strict=True)
+        if id(payload) in replayable_inputs
+    ]
+
+
 async def execute_tools_and_side_effects(
     *,
     bindings: AgentBindings[TContext],
@@ -816,6 +903,8 @@ async def execute_tools_and_side_effects(
     server_manages_conversation: bool = False,
     precomputed_skipped_raw_item_ids: set[int] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     """Run one turn of the loop, coordinating tools, approvals, guardrails, and handoffs."""
     public_agent = bindings.public_agent
@@ -857,12 +946,23 @@ async def execute_tools_and_side_effects(
         skipped_raw_item_ids=skipped_raw_item_ids,
     )
 
+    completed_outputs: list[RunItem] = [
+        item
+        for item in new_step_items
+        if isinstance(item, ToolCallOutputItem)
+        and get_mapping_or_attr(item.raw_item, "status") == "completed"
+    ]
     tool_input_guardrail_results: list[ToolInputGuardrailResult] = []
     tool_output_guardrail_results: list[ToolOutputGuardrailResult] = []
     prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
     prior_output_results = list(run_state._tool_output_guardrail_results) if run_state else []
 
+    accepting_outputs = True
+
     def _commit_accepted_response_tool_output(item: RunItem) -> None:
+        if not accepting_outputs:
+            return
+        completed_outputs.append(item)
         if run_state is None or not isinstance(run_state._current_step, NextStepInterruption):
             return
         if not run_state._current_step.response_accepted:
@@ -883,25 +983,55 @@ async def execute_tools_and_side_effects(
             *tool_output_guardrail_results,
         ]
 
-    (
-        function_results,
-        tool_input_guardrail_results,
-        tool_output_guardrail_results,
-        computer_results,
-        custom_tool_results,
-        shell_results,
-        apply_patch_results,
-        local_shell_results,
-    ) = await _execute_tool_plan(
-        plan=plan,
-        bindings=bindings,
-        hooks=hooks,
-        context_wrapper=context_wrapper,
-        run_config=run_config,
-        tool_output_committer=_commit_accepted_response_tool_output,
-        tool_input_guardrail_results=tool_input_guardrail_results,
-        tool_output_guardrail_results=tool_output_guardrail_results,
-    )
+    def _publish_completed_tools() -> None:
+        nonlocal accepting_outputs
+        accepting_outputs = False
+        # Server-managed continuation retains its separate recovery path.
+        if on_tool_execution_error is not None and not server_manages_conversation:
+            model_item_ids = {id(item) for item in new_step_items}
+            retained_items = _snapshot_tool_outputs(
+                _completed_tool_step_items(pre_step_items, new_step_items, completed_outputs),
+                [item for item in completed_outputs if id(item) not in model_item_ids],
+            )
+            if retained_items:
+                on_tool_execution_error(
+                    SingleStepResult(
+                        original_input=original_input,
+                        model_response=new_response,
+                        pre_step_items=pre_step_items,
+                        new_step_items=retained_items,
+                        next_step=NextStepRunAgain(),
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
+                    )
+                )
+
+    try:
+        (
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+            computer_results,
+            custom_tool_results,
+            shell_results,
+            apply_patch_results,
+            local_shell_results,
+        ) = await _execute_tool_plan(
+            plan=plan,
+            bindings=bindings,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_output_committer=_commit_accepted_response_tool_output,
+            on_tool_error_selected=on_tool_error_selected,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
+        )
+    except (Exception, asyncio.CancelledError) as error:
+        if not isinstance(error, asyncio.CancelledError) or _is_tool_local_cancellation(error):
+            _publish_completed_tools()
+        raise
+
     new_step_items.extend(
         _build_tool_result_items(
             function_results=function_results,
@@ -949,104 +1079,119 @@ async def execute_tools_and_side_effects(
             processed_response=processed_response,
         )
 
-    await _append_mcp_callback_results(
-        agent=public_agent,
-        requests=plan.mcp_requests_with_callback,
-        context_wrapper=context_wrapper,
-        append_item=new_step_items.append,
-    )
-    _register_tool_call_items(context_wrapper, new_step_items)
+    try:
+        await _append_mcp_callback_results(
+            agent=public_agent,
+            requests=plan.mcp_requests_with_callback,
+            context_wrapper=context_wrapper,
+            append_item=new_step_items.append,
+        )
+        _register_tool_call_items(context_wrapper, new_step_items)
 
-    if run_handoffs := processed_response.handoffs:
-        return await execute_handoffs_call(
+        if run_handoffs := processed_response.handoffs:
+            return await execute_handoffs_call(
+                public_agent=public_agent,
+                original_input=original_input,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                new_response=new_response,
+                run_handoffs=run_handoffs,
+                hooks=hooks,
+                context_wrapper=context_wrapper,
+                run_config=run_config,
+                server_manages_conversation=server_manages_conversation,
+                tool_input_guardrail_results=tool_input_guardrail_results,
+                tool_output_guardrail_results=tool_output_guardrail_results,
+            )
+        tool_final_output = await _maybe_finalize_from_tool_results(
             public_agent=public_agent,
             original_input=original_input,
+            new_response=new_response,
             pre_step_items=pre_step_items,
             new_step_items=new_step_items,
-            new_response=new_response,
-            run_handoffs=run_handoffs,
+            function_results=function_results,
             hooks=hooks,
             context_wrapper=context_wrapper,
-            run_config=run_config,
-            server_manages_conversation=server_manages_conversation,
             tool_input_guardrail_results=tool_input_guardrail_results,
             tool_output_guardrail_results=tool_output_guardrail_results,
         )
-
-    tool_final_output = await _maybe_finalize_from_tool_results(
-        public_agent=public_agent,
-        original_input=original_input,
-        new_response=new_response,
-        pre_step_items=pre_step_items,
-        new_step_items=new_step_items,
-        function_results=function_results,
-        hooks=hooks,
-        context_wrapper=context_wrapper,
-        tool_input_guardrail_results=tool_input_guardrail_results,
-        tool_output_guardrail_results=tool_output_guardrail_results,
-    )
-    if tool_final_output is not None:
-        return tool_final_output
-
-    message_items = [item for item in new_step_items if isinstance(item, MessageOutputItem)]
-    refusal = ItemHelpers.extract_refusal(message_items[-1].raw_item) if message_items else None
-    potential_final_output_text = (
-        ItemHelpers.extract_text(message_items[-1].raw_item) if message_items else None
-    )
-
-    if not processed_response.has_tools_or_approvals_to_run():
-        has_tool_activity_without_message = not message_items and bool(
-            processed_response.tools_used or skipped_raw_item_ids
+        if tool_final_output is not None:
+            return tool_final_output
+        message_items = [item for item in new_step_items if isinstance(item, MessageOutputItem)]
+        refusal = ItemHelpers.extract_refusal(message_items[-1].raw_item) if message_items else None
+        potential_final_output_text = (
+            ItemHelpers.extract_text(message_items[-1].raw_item) if message_items else None
         )
-        if not has_tool_activity_without_message:
-            if refusal:
-                refusal_error = ModelRefusalError(refusal)
-                run_error_data = build_run_error_data(
-                    input=original_input,
-                    new_items=pre_step_items + new_step_items,
-                    raw_responses=[new_response],
-                    last_agent=public_agent,
-                )
-                handler_result = await resolve_run_error_handler_result(
-                    error_handlers=error_handlers,
-                    error_kind="model_refusal",
-                    error=refusal_error,
-                    context_wrapper=context_wrapper,
-                    run_data=run_error_data,
-                )
-                if handler_result is None:
-                    raise refusal_error
 
-                final_output = validate_handler_final_output(
-                    public_agent, handler_result.final_output
-                )
-                if handler_result.include_in_history:
-                    output_text = format_final_output_text(public_agent, final_output)
-                    new_step_items.append(create_message_output_item(public_agent, output_text))
-                return await execute_final_output_call(
-                    public_agent=public_agent,
-                    original_input=original_input,
-                    new_response=new_response,
-                    pre_step_items=pre_step_items,
-                    new_step_items=new_step_items,
-                    final_output=final_output,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    tool_input_guardrail_results=tool_input_guardrail_results,
-                    tool_output_guardrail_results=tool_output_guardrail_results,
-                )
-            if output_schema is not None and not output_schema.is_plain_text():
-                if potential_final_output_text:
-                    validation_error: ModelBehaviorError | None = None
-                    try:
-                        final_output = output_schema.validate_json(potential_final_output_text)
-                    except ModelBehaviorError as error:
-                        if _is_error_data_redacted(error):
-                            validation_error = error
-                        else:
+        if not processed_response.has_tools_or_approvals_to_run():
+            has_tool_activity_without_message = not message_items and bool(
+                processed_response.tools_used or skipped_raw_item_ids
+            )
+            if not has_tool_activity_without_message:
+                if refusal:
+                    refusal_error = ModelRefusalError(refusal)
+                    run_error_data = build_run_error_data(
+                        input=original_input,
+                        new_items=pre_step_items + new_step_items,
+                        raw_responses=[new_response],
+                        last_agent=public_agent,
+                    )
+                    handler_result = await resolve_run_error_handler_result(
+                        error_handlers=error_handlers,
+                        error_kind="model_refusal",
+                        error=refusal_error,
+                        context_wrapper=context_wrapper,
+                        run_data=run_error_data,
+                    )
+                    if handler_result is None:
+                        raise refusal_error
+
+                    final_output = validate_handler_final_output(
+                        public_agent, handler_result.final_output
+                    )
+                    if handler_result.include_in_history:
+                        output_text = format_final_output_text(public_agent, final_output)
+                        new_step_items.append(create_message_output_item(public_agent, output_text))
+                    return await execute_final_output_call(
+                        public_agent=public_agent,
+                        original_input=original_input,
+                        new_response=new_response,
+                        pre_step_items=pre_step_items,
+                        new_step_items=new_step_items,
+                        final_output=final_output,
+                        hooks=hooks,
+                        context_wrapper=context_wrapper,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
+                    )
+                if output_schema is not None and not output_schema.is_plain_text():
+                    if potential_final_output_text:
+                        validation_error: ModelBehaviorError | None = None
+                        try:
+                            final_output = output_schema.validate_json(potential_final_output_text)
+                        except ModelBehaviorError as error:
+                            if _is_error_data_redacted(error):
+                                validation_error = error
+                            else:
+                                resolved_handler_output = await _resolve_invalid_final_output(
+                                    error_handlers=error_handlers,
+                                    error=error,
+                                    public_agent=public_agent,
+                                    original_input=original_input,
+                                    new_response=new_response,
+                                    new_items=pre_step_items + new_step_items,
+                                    context_wrapper=context_wrapper,
+                                )
+                                if resolved_handler_output is None:
+                                    raise
+                                final_output, message_item = resolved_handler_output
+                                if message_item is not None:
+                                    new_step_items.append(message_item)
+
+                        if validation_error is not None:
                             resolved_handler_output = await _resolve_invalid_final_output(
                                 error_handlers=error_handlers,
-                                error=error,
+                                error=validation_error,
                                 public_agent=public_agent,
                                 original_input=original_input,
                                 new_response=new_response,
@@ -1054,15 +1199,16 @@ async def execute_tools_and_side_effects(
                                 context_wrapper=context_wrapper,
                             )
                             if resolved_handler_output is None:
-                                raise
+                                raise validation_error
                             final_output, message_item = resolved_handler_output
                             if message_item is not None:
                                 new_step_items.append(message_item)
-
-                    if validation_error is not None:
+                    else:
                         resolved_handler_output = await _resolve_invalid_final_output(
                             error_handlers=error_handlers,
-                            error=validation_error,
+                            error=ModelBehaviorError(
+                                "Model returned no final output for the structured output type."
+                            ),
                             public_agent=public_agent,
                             original_input=original_input,
                             new_response=new_response,
@@ -1070,61 +1216,48 @@ async def execute_tools_and_side_effects(
                             context_wrapper=context_wrapper,
                         )
                         if resolved_handler_output is None:
-                            raise validation_error
+                            return SingleStepResult(
+                                original_input=original_input,
+                                model_response=new_response,
+                                pre_step_items=pre_step_items,
+                                new_step_items=new_step_items,
+                                next_step=NextStepRunAgain(),
+                                tool_input_guardrail_results=tool_input_guardrail_results,
+                                tool_output_guardrail_results=tool_output_guardrail_results,
+                            )
                         final_output, message_item = resolved_handler_output
                         if message_item is not None:
                             new_step_items.append(message_item)
-                else:
-                    resolved_handler_output = await _resolve_invalid_final_output(
-                        error_handlers=error_handlers,
-                        error=ModelBehaviorError(
-                            "Model returned no final output for the structured output type."
-                        ),
+
+                    return await execute_final_output_call(
                         public_agent=public_agent,
                         original_input=original_input,
                         new_response=new_response,
-                        new_items=pre_step_items + new_step_items,
+                        pre_step_items=pre_step_items,
+                        new_step_items=new_step_items,
+                        final_output=final_output,
+                        hooks=hooks,
                         context_wrapper=context_wrapper,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
                     )
-                    if resolved_handler_output is None:
-                        return SingleStepResult(
-                            original_input=original_input,
-                            model_response=new_response,
-                            pre_step_items=pre_step_items,
-                            new_step_items=new_step_items,
-                            next_step=NextStepRunAgain(),
-                            tool_input_guardrail_results=tool_input_guardrail_results,
-                            tool_output_guardrail_results=tool_output_guardrail_results,
-                        )
-                    final_output, message_item = resolved_handler_output
-                    if message_item is not None:
-                        new_step_items.append(message_item)
+                if output_schema is None or output_schema.is_plain_text():
+                    return await execute_final_output_call(
+                        public_agent=public_agent,
+                        original_input=original_input,
+                        new_response=new_response,
+                        pre_step_items=pre_step_items,
+                        new_step_items=new_step_items,
+                        final_output=potential_final_output_text or "",
+                        hooks=hooks,
+                        context_wrapper=context_wrapper,
+                        tool_input_guardrail_results=tool_input_guardrail_results,
+                        tool_output_guardrail_results=tool_output_guardrail_results,
+                    )
 
-                return await execute_final_output_call(
-                    public_agent=public_agent,
-                    original_input=original_input,
-                    new_response=new_response,
-                    pre_step_items=pre_step_items,
-                    new_step_items=new_step_items,
-                    final_output=final_output,
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    tool_input_guardrail_results=tool_input_guardrail_results,
-                    tool_output_guardrail_results=tool_output_guardrail_results,
-                )
-            if output_schema is None or output_schema.is_plain_text():
-                return await execute_final_output_call(
-                    public_agent=public_agent,
-                    original_input=original_input,
-                    new_response=new_response,
-                    pre_step_items=pre_step_items,
-                    new_step_items=new_step_items,
-                    final_output=potential_final_output_text or "",
-                    hooks=hooks,
-                    context_wrapper=context_wrapper,
-                    tool_input_guardrail_results=tool_input_guardrail_results,
-                    tool_output_guardrail_results=tool_output_guardrail_results,
-                )
+    except Exception:
+        _publish_completed_tools()
+        raise
 
     return SingleStepResult(
         original_input=original_input,
@@ -2599,7 +2732,11 @@ async def resolve_interrupted_turn(
     prior_input_results = list(run_state._tool_input_guardrail_results) if run_state else []
     prior_output_results = list(run_state._tool_output_guardrail_results) if run_state else []
 
+    accepting_outputs = True
+
     def _commit_tool_output(item: RunItem) -> None:
+        if not accepting_outputs:
+            return
         if any(existing is item for existing in committed_tool_outputs):
             return
         committed_tool_outputs.append(item)
@@ -2643,25 +2780,33 @@ async def resolve_interrupted_turn(
             )
         _register_tool_call_items(context_wrapper, [item])
 
-    (
-        function_results,
-        tool_input_guardrail_results,
-        tool_output_guardrail_results,
-        computer_results,
-        custom_tool_results,
-        shell_results,
-        apply_patch_results,
-        _local_shell_results,
-    ) = await _execute_tool_plan(
-        plan=plan,
-        bindings=bindings,
-        hooks=hooks,
-        context_wrapper=context_wrapper,
-        run_config=run_config,
-        tool_output_committer=_commit_tool_output,
-        tool_input_guardrail_results=tool_input_guardrail_results,
-        tool_output_guardrail_results=tool_output_guardrail_results,
-    )
+    try:
+        (
+            function_results,
+            tool_input_guardrail_results,
+            tool_output_guardrail_results,
+            computer_results,
+            custom_tool_results,
+            shell_results,
+            apply_patch_results,
+            _local_shell_results,
+        ) = await _execute_tool_plan(
+            plan=plan,
+            bindings=bindings,
+            hooks=hooks,
+            context_wrapper=context_wrapper,
+            run_config=run_config,
+            tool_output_committer=_commit_tool_output,
+            tool_input_guardrail_results=tool_input_guardrail_results,
+            tool_output_guardrail_results=tool_output_guardrail_results,
+        )
+    except BaseException:
+        accepting_outputs = False
+        if run_state is not None and not server_manages_conversation:
+            run_state._generated_items = _snapshot_tool_outputs(
+                run_state._generated_items, committed_tool_outputs
+            )
+        raise
 
     for interruption in _collect_tool_interruptions(
         function_results=function_results,
@@ -3800,6 +3945,8 @@ async def get_single_step_result_from_response(
     | None = None,
     before_side_effects: Callable[[], Awaitable[None]] | None = None,
     run_state: RunState[Any] | None = None,
+    on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     item_agent = bindings.public_agent
     try:
@@ -3862,4 +4009,6 @@ async def get_single_step_result_from_response(
         server_manages_conversation=server_manages_conversation,
         precomputed_skipped_raw_item_ids=skipped_raw_item_ids,
         run_state=run_state,
+        on_tool_execution_error=on_tool_execution_error,
+        on_tool_error_selected=on_tool_error_selected,
     )

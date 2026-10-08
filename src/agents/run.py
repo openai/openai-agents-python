@@ -23,6 +23,7 @@ from .exceptions import (
     _clear_data_redacted_error_traceback,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
@@ -120,9 +121,11 @@ from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
+    _ToolTaskCancellation,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
     get_output_schema,
+    preserve_tool_task_cancellation,
     resolve_interrupted_turn,
     run_input_guardrails,
     run_output_guardrails,
@@ -136,6 +139,7 @@ from .run_internal.run_steps import (
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
+    SingleStepResult,
 )
 from .run_internal.session_persistence import (
     _session_get_items,
@@ -1759,6 +1763,7 @@ class AgentRunner:
                     )
                     if current_turn_span is not None:
                         current_turn_span.start(mark_as_current=True)
+                    partial_tool_results: list[SingleStepResult] = []
                     try:
                         if current_turn <= 1:
                             try:
@@ -1785,29 +1790,32 @@ class AgentRunner:
                                 raise
 
                             model_task = asyncio.create_task(
-                                run_single_turn(
-                                    bindings=current_bindings,
-                                    original_input=original_input,
-                                    generated_items=items_for_model,
-                                    hooks=hooks,
-                                    context_wrapper=context_wrapper,
-                                    run_config=run_config,
-                                    should_run_agent_start_hooks=should_run_agent_start_hooks,
-                                    tool_use_tracker=tool_use_tracker,
-                                    server_conversation_tracker=server_conversation_tracker,
-                                    session=session,
-                                    session_items_to_rewind=(
-                                        last_saved_input_snapshot_for_rewind
-                                        if not is_resumed_state and session_persistence_enabled
-                                        else None
-                                    ),
-                                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
-                                    prompt_cache_key_resolver=prompt_cache_key_resolver,
-                                    error_handlers=error_handlers,
-                                    agent_span=current_span,
-                                    on_response_accepted=_commit_pending_server_response,
-                                    on_response_hooks_started=_mark_response_hooks_started,
-                                    run_state=run_state,
+                                preserve_tool_task_cancellation(
+                                    run_single_turn(
+                                        bindings=current_bindings,
+                                        original_input=original_input,
+                                        generated_items=items_for_model,
+                                        hooks=hooks,
+                                        context_wrapper=context_wrapper,
+                                        run_config=run_config,
+                                        should_run_agent_start_hooks=should_run_agent_start_hooks,
+                                        tool_use_tracker=tool_use_tracker,
+                                        server_conversation_tracker=server_conversation_tracker,
+                                        session=session,
+                                        session_items_to_rewind=(
+                                            last_saved_input_snapshot_for_rewind
+                                            if not is_resumed_state and session_persistence_enabled
+                                            else None
+                                        ),
+                                        reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                                        prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                        error_handlers=error_handlers,
+                                        agent_span=current_span,
+                                        on_response_accepted=_commit_pending_server_response,
+                                        on_response_hooks_started=_mark_response_hooks_started,
+                                        run_state=run_state,
+                                        on_tool_execution_error=partial_tool_results.append,
+                                    )
                                 )
                             )
 
@@ -1843,18 +1851,23 @@ class AgentRunner:
                                         )
                                     )
                                     raise
-                                except BaseException:
-                                    # A non-tripwire failure (the model turn raising, or a
-                                    # guardrail raising a non-tripwire error) propagates from
-                                    # gather without cancelling the sibling task. Cancel and drain
-                                    # whichever side is still pending so it is not left running
-                                    # after the run has failed and its exception is not swallowed.
-                                    for pending_task in (guardrail_task, model_task):
-                                        if not pending_task.done():
-                                            pending_task.cancel()
-                                    await asyncio.gather(
-                                        guardrail_task, model_task, return_exceptions=True
-                                    )
+                                except BaseException as error:
+                                    try:
+                                        if partial_tool_results and (
+                                            not isinstance(error, asyncio.CancelledError)
+                                            or _is_tool_local_cancellation(error)
+                                        ):
+                                            # Settle admission without replacing the selected tool
+                                            # error. Only successful verdicts admit partial history.
+                                            await asyncio.wait((guardrail_task,))
+                                    finally:
+                                        # Parent cancellation still cancels and drains both tasks.
+                                        for pending_task in (guardrail_task, model_task):
+                                            if not pending_task.done():
+                                                pending_task.cancel()
+                                        await asyncio.gather(
+                                            guardrail_task, model_task, return_exceptions=True
+                                        )
                                     raise
                             else:
                                 turn_result = await model_task
@@ -1882,7 +1895,62 @@ class AgentRunner:
                                 on_response_accepted=_commit_pending_server_response,
                                 on_response_hooks_started=_mark_response_hooks_started,
                                 run_state=run_state,
+                                on_tool_execution_error=partial_tool_results.append,
                             )
+                    except (Exception, asyncio.CancelledError) as error:
+                        if isinstance(
+                            error, asyncio.CancelledError
+                        ) and not _is_tool_local_cancellation(error):
+                            raise
+                        if not partial_tool_results:
+                            if isinstance(error, _ToolTaskCancellation):
+                                raise error.error from None
+                            raise
+                        input_accepted = len(_attempt_input_guardrail_results()) >= len(
+                            all_input_guardrails
+                        ) and not input_guardrails_triggered(_attempt_input_guardrail_results())
+                        if partial_tool_results and input_accepted:
+                            partial_result = partial_tool_results[0]
+                            generated_items.extend(partial_result.new_step_items)
+                            session_items.extend(partial_result.new_step_items)
+                            model_responses.append(partial_result.model_response)
+                            tool_input_guardrail_results.extend(
+                                partial_result.tool_input_guardrail_results
+                            )
+                            tool_output_guardrail_results.extend(
+                                partial_result.tool_output_guardrail_results
+                            )
+                            if run_state is not None:
+                                _synchronize_accepted_run_state(
+                                    run_state,
+                                    generated_items=generated_items,
+                                    session_items=session_items,
+                                    model_responses=model_responses,
+                                    tool_input_guardrail_results=tool_input_guardrail_results,
+                                    tool_output_guardrail_results=tool_output_guardrail_results,
+                                    current_turn=current_turn,
+                                )
+                                run_state._current_step = NextStepRunAgain()
+                                run_state.set_tool_use_tracker_snapshot(
+                                    _tool_use_tracker_snapshot()
+                                )
+                            try:
+                                if session_persistence_enabled:
+                                    await save_result_to_session(
+                                        session,
+                                        [],
+                                        partial_result.new_step_items,
+                                        run_state,
+                                        response_id=partial_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                        resumed_write_state=run_state,
+                                    )
+                            except Exception:
+                                logger.warning("Failed to save completed tools after a tool error")
+                        if isinstance(error, _ToolTaskCancellation):
+                            raise error.error from None
+                        raise
                     finally:
                         if current_turn_span is not None:
                             attach_usage_to_span(
