@@ -39,7 +39,10 @@ from ..memory import (
     SessionSettings,
     is_openai_responses_compaction_aware_session,
 )
-from ..memory.openai_conversations_session import OpenAIConversationsSession
+from ..memory.openai_conversations_session import (
+    _MAX_ITEMS_PER_REQUEST,
+    OpenAIConversationsSession,
+)
 from ..memory.session import _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
 from ..run_context import RunContextWrapper
@@ -1496,7 +1499,8 @@ async def resume_pending_session_write(
             pending["before"] = digests(tail)
             append = True
         else:
-            expected = (before or []) + digests(pending["items"])
+            batch = digests(pending["items"])
+            expected = (before or []) + batch
             observed_generation: int | None = None
             get_with_generation = getattr(session, "_get_items_with_generation", None)
             if wrapper is not None and callable(get_with_generation):
@@ -1509,7 +1513,29 @@ async def resume_pending_session_write(
             observed = digests(tail)
             committed = observed == expected
             unchanged = observed[-len(before) :] == before if before else not observed
-            if (acknowledged and not committed) or (not acknowledged and committed == unchanged):
+            # Only multi-request Conversations writes admit partially committed chunks.
+            # Other backends and single-request writes retain their atomic recovery contract.
+            partial = False
+            if (
+                isinstance(session, OpenAIConversationsSession)
+                and not acknowledged
+                and len(batch) > _MAX_ITEMS_PER_REQUEST
+            ):
+                before_count = len(before or [])
+                complete_before = before_count < len(batch) + 1
+                # A short snapshot captured all prior history: count must agree with
+                # zero progress as well as each candidate chunk prefix. A full-size
+                # snapshot may omit older items, so repeated content remains ambiguous.
+                if complete_before:
+                    unchanged = unchanged and len(observed) == before_count
+                partial = any(
+                    (not complete_before or len(observed) == before_count + count)
+                    and observed[-(before_count + count) :] == (before or []) + batch[:count]
+                    for count in range(_MAX_ITEMS_PER_REQUEST, len(batch), _MAX_ITEMS_PER_REQUEST)
+                )
+            if (acknowledged and not committed) or (
+                not acknowledged and (partial or committed == unchanged)
+            ):
                 raise UserError(
                     "Cannot reconcile the pending Session write: history changed or is "
                     "ambiguous. Repair the original Session before resuming; do not rerun "

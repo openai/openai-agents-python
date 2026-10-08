@@ -11,6 +11,8 @@ from ..items import TResponseInputItem
 from .session import SessionABC, _await_mutation
 from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 
+_MAX_ITEMS_PER_REQUEST = 20
+
 
 async def start_openai_conversations_session(openai_client: AsyncOpenAI | None = None) -> str:
     _maybe_openai_client = openai_client
@@ -36,6 +38,7 @@ class OpenAIConversationsSession(SessionABC):
     ):
         self._session_id: str | None = conversation_id
         self._session_id_lock = asyncio.Lock()
+        self._mutation_lock = asyncio.Lock()
         self.session_settings = (
             coerce_session_settings(session_settings)
             if session_settings is not None
@@ -83,6 +86,11 @@ class OpenAIConversationsSession(SessionABC):
         self._session_id = None
 
     async def get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        async with self._mutation_lock:
+            return await self._get_items(limit)
+
+    async def _get_items(self, limit: int | None = None) -> list[TResponseInputItem]:
+        """Read history while the caller holds the instance's mutation lock."""
         session_id = await self._get_session_id()
 
         session_limit = resolve_session_limit(limit, self.session_settings)
@@ -112,28 +120,62 @@ class OpenAIConversationsSession(SessionABC):
         return all_items  # type: ignore
 
     async def add_items(self, items: list[TResponseInputItem]) -> None:
+        """Append items in order, in requests of at most 20 items each.
+
+        Reads and mutations through this session instance are serialized. Separate instances
+        or external writers require application-level coordination.
+
+        Writes spanning multiple requests are not atomic. If a request fails or
+        is cancelled, earlier batches remain saved and later batches are not
+        sent. For multi-request writes, cancellation waits for the current request
+        to complete or fail before releasing the instance lock and propagating
+        cancellation. Single-request writes retain their existing cancellation behavior.
+        Automatic client retries are disabled for multi-request writes, even if
+        the supplied client enables retries, to avoid duplicating a saved chunk
+        after a lost response. Single-request writes retain the client's retry policy.
+        The original exception propagates. Before retrying, callers must
+        reconcile the remote history; retrying the entire list can duplicate
+        items that were already saved, including an unacknowledged request.
+        """
         if not items:
             return
 
-        session_id = await self._get_session_id()
-        await self._openai_client.conversations.items.create(
-            conversation_id=session_id,
-            items=items,
-        )
+        async with self._mutation_lock:
+            session_id = await self._get_session_id()
+            multiple_requests = len(items) > _MAX_ITEMS_PER_REQUEST
+            client = (
+                self._openai_client.with_options(max_retries=0)
+                if multiple_requests
+                else self._openai_client
+            )
+            # The Conversations items-create endpoint accepts up to 20 items per request.
+            for offset in range(0, len(items), _MAX_ITEMS_PER_REQUEST):
+                if offset:
+                    # Deliver queued cancellation before scheduling another mutation.
+                    await asyncio.sleep(0)
+                request = client.conversations.items.create(
+                    conversation_id=session_id,
+                    items=items[offset : offset + _MAX_ITEMS_PER_REQUEST],
+                )
+                if multiple_requests:
+                    await _await_mutation(request)
+                else:
+                    await request
 
     async def pop_item(self) -> TResponseInputItem | None:
-        session_id = await self._get_session_id()
-        items = await self.get_items(limit=1)
-        if not items:
-            return None
-        item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
-        await self._openai_client.conversations.items.delete(
-            conversation_id=session_id, item_id=item_id
-        )
-        return items[0]
+        async with self._mutation_lock:
+            session_id = await self._get_session_id()
+            items = await self._get_items(limit=1)
+            if not items:
+                return None
+            item_id: str = str(items[0]["id"])  # type: ignore [typeddict-item]
+            await self._openai_client.conversations.items.delete(
+                conversation_id=session_id, item_id=item_id
+            )
+            return items[0]
 
     async def clear_session(self) -> None:
-        async with self._session_id_lock:
+        async with self._mutation_lock, self._session_id_lock:
             if self._session_id is None:
                 return
 
