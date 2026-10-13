@@ -947,13 +947,16 @@ def _stream_events_for_step(
                     ),
                     cast(
                         TResponseStreamEvent,
-                        ResponseFunctionCallArgumentsDoneEvent(
-                            type="response.function_call_arguments.done",
-                            item_id=item_id,
-                            output_index=output_index,
-                            arguments=output_item.arguments,
-                            name=output_item.name,
-                            sequence_number=sequence_number + 1,
+                        # Older openai models require name; newer ones retain it as an extra.
+                        ResponseFunctionCallArgumentsDoneEvent.model_validate(
+                            {
+                                "type": "response.function_call_arguments.done",
+                                "item_id": item_id,
+                                "output_index": output_index,
+                                "arguments": output_item.arguments,
+                                "name": output_item.name,
+                                "sequence_number": sequence_number + 1,
+                            }
                         ),
                     ),
                 ]
