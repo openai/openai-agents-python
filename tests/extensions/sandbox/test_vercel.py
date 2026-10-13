@@ -161,7 +161,7 @@ def _install_hostile_exception_descriptors(
 
 def _assert_base_exception_preserved(error: BaseException, message: str) -> None:
     assert cast(Any, BaseException.args).__get__(error, type(error)) == (message,)
-    assert cast(Any, BaseException.__traceback__).__get__(error, type(error)) is not None
+    assert cast(Any, BaseException.__traceback__).__get__(error, type(error)) is None
 
 
 class _MemorySnapshot(SnapshotBase):
@@ -1009,7 +1009,9 @@ async def test_vercel_protected_session_public_operations_redact_provider_failur
     assert exc_info.value.context == {}
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    _assert_base_exception_preserved(source_error, sentinel)
+    assert source_error.args == (sentinel,)
+    # The provider failure is linked from the caught SDK error, not the caught root.
+    assert source_error.__traceback__ is not None
     traceback = exc_info.value.__traceback__
     while traceback is not None:
         frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
@@ -2753,7 +2755,7 @@ async def test_vercel_s3_mount_failure_redacts_full_activation_traceback(
     assert exc_info.value.retryable is True
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    assert provider_error.__traceback__ is not None
+    assert provider_error.__traceback__ is None
     assert provider_error.__cause__ is None
     assert provider_error.__context__ is None
     assert_activation_traceback_is_redacted(exc_info.value)
@@ -4217,7 +4219,7 @@ async def test_vercel_direct_persist_redacts_protected_mount_provider_error(
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.asyncio
@@ -4247,4 +4249,4 @@ async def test_vercel_client_delete_propagates_redacted_shutdown_failure(
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None

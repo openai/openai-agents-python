@@ -605,7 +605,7 @@ async def test_run_state_direct_base_exception_is_value_free(operation: str) -> 
             await RunState.from_string(agent, json.dumps(payload))
 
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -686,7 +686,7 @@ async def test_run_state_preserves_value_free_process_control_exceptions(
         assert type(exc_info.value.args[0]) is type(expected_args[0])
     assert exc_info.value is not source_error
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     if type(source_error) is SystemExit:
         assert source_error.code == source_code
 
@@ -718,7 +718,7 @@ async def test_run_state_rejects_a_foreign_error_with_a_copied_trusted_traceback
 
     assert source_error.args == source_args
     assert source_error.__dict__["payload"] == sentinel
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -743,7 +743,7 @@ async def test_run_state_rejects_a_foreign_error_with_a_forged_validation_marker
 
     assert source_error.args == source_args
     assert source_error.__dict__["payload"] == sentinel
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -772,7 +772,7 @@ async def test_run_state_rejects_a_mutated_trusted_diagnostic(
 
     assert source_error is not None
     assert source_error.args == (sentinel,)
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -807,7 +807,7 @@ async def test_run_state_rejects_a_diagnostic_from_the_wrong_trusted_producer(
 
     assert source_error is not None
     assert source_error.args == ("Run state pending_input must be a list",)
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -946,7 +946,7 @@ async def test_run_state_failure_preserves_retained_source_exception() -> None:
 
     assert source_error.args == source_args
     assert source_error.__dict__ == {"payload": payload}
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 async def test_run_state_failure_preserves_retained_nested_exception() -> None:
@@ -974,7 +974,7 @@ async def test_run_state_failure_preserves_retained_nested_exception() -> None:
 
     assert source_error.args == source_args
     assert source_error.__dict__ == {"payload": (child,)}
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert child.args == (sentinel,)
     assert child.__dict__ == {"payload": {"credential": sentinel}}
     assert child.__traceback__ is None
@@ -1006,7 +1006,7 @@ async def test_run_state_failure_preserves_retained_exception_group_children() -
     assert child.args == ("safe child",)
     assert child.payload is payload
     assert source_group.args[0] == sentinel
-    assert source_group.__traceback__ is not None
+    assert source_group.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -1052,7 +1052,7 @@ async def test_run_state_failure_preserves_slots_without_metaclass_callbacks() -
     assert descriptor_calls == []
     assert source_error.args == source_args
     assert source_error.payload is payload
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -1102,7 +1102,7 @@ async def test_run_state_hidden_overwritten_slot_remains_caller_owned_without_ca
 
         assert descriptor_calls == []
         assert source_error.args == source_args
-        assert source_error.__traceback__ is not None
+        assert source_error.__traceback__ is None
         assert sentinel not in _redaction_observables(exc_info.value, [])
 
         # Python exposes no callback-free way to reach the hidden slot after its
@@ -1189,7 +1189,7 @@ async def test_run_state_from_string_non_decode_parser_failure_discards_input(
         await RunState.from_string(Agent(name="compat-agent"), sentinel)
 
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -1217,7 +1217,7 @@ async def test_run_state_from_string_discards_hostile_json_decode_error_descript
 
     assert source_error.args == source_args
     assert source_error.__dict__["doc"] == sentinel
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
@@ -1248,7 +1248,7 @@ async def test_run_state_from_string_parser_preserves_value_free_process_control
     assert exc_info.value.args == expected_args
     assert exc_info.value is not source_error
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.parametrize("operation", ["from_json", "from_string"])
@@ -1369,7 +1369,7 @@ async def test_run_state_does_not_trust_foreign_code_with_sdk_globals_and_filena
         await RunState.from_json(agent, payload)
 
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 

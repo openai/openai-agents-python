@@ -2877,6 +2877,7 @@ async def test_docker_direct_persist_redacts_protected_mount_provider_error(
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert source_error.args == source_args
+    # The provider failure is a cause of the caught SDK error and remains untouched.
     assert source_error.__traceback__ is not None
 
 
@@ -2951,7 +2952,7 @@ async def test_docker_delete_redacts_first_failure_and_settles_all_volumes(
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert secondary_error.args == ("secondary container removal failed",)
     assert container.remove_calls == [{}]
     assert first_volume.remove_calls == 1

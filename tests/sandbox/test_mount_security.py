@@ -2942,9 +2942,7 @@ async def test_protected_structured_mount_error_preserves_safe_contract(
     assert safe_error.__context__ is None
     assert sentinel not in repr(safe_error)
     assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
-    assert (
-        cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is not None
-    )
+    assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
     assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
 
@@ -3046,7 +3044,7 @@ async def test_protected_mount_config_error_preserves_valid_structured_fields(
     assert safe_error.retryable is True
     assert sentinel not in repr(safe_error)
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.parametrize("boundary", ["async", "sync"])
@@ -3249,9 +3247,7 @@ async def test_protected_custom_sandbox_error_falls_back_without_source_state() 
     assert type(exc_info.value) is RuntimeError
     assert sentinel not in repr(exc_info.value)
     assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
-    assert (
-        cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is not None
-    )
+    assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
 
 
 @pytest.mark.parametrize("boundary", ["async", "sync"])
@@ -3302,9 +3298,7 @@ async def test_protected_hostile_exception_type_cannot_escape_redaction(boundary
 
     assert sentinel not in repr(exc_info.value)
     assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
-    assert (
-        cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is not None
-    )
+    assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
     assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
 
@@ -3360,7 +3354,7 @@ async def test_protected_hostile_exception_state_key_cannot_escape_redaction(
     assert sentinel not in repr(exc_info.value)
     assert source_error.args == source_args
     assert list(source_error.__dict__.values()) == [sentinel]
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.parametrize("boundary", ["async", "sync"])
@@ -3417,7 +3411,7 @@ async def test_protected_direct_manifest_precedes_opaque_owner_descriptors(
 
     assert sentinel not in repr(exc_info.value)
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 def test_protected_mount_config_error_cannot_forge_safe_message_marker() -> None:
@@ -3447,7 +3441,7 @@ def test_protected_mount_config_error_cannot_forge_safe_message_marker() -> None
 
     assert sentinel not in repr(exc.value)
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.asyncio
@@ -3566,7 +3560,7 @@ def test_protected_nested_exception_is_preserved_beside_hostile_object() -> None
 
     assert sentinel not in repr(exc_info.value)
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
 
@@ -3608,7 +3602,7 @@ def test_protected_process_control_is_replaced_without_payload(
     assert exc_info.value is not source_error
     assert exc_info.value.args == expected_args
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 def test_closing_protected_coroutine_preserves_generator_exit() -> None:
@@ -3678,7 +3672,7 @@ async def test_slot_backed_session_state_preserves_mount_authority_classificatio
 
         assert exc_info.value is not source_error
         assert source_error.args == source_args
-        assert source_error.__traceback__ is not None
+        assert source_error.__traceback__ is None
     else:
         with pytest.raises(RuntimeError) as exc_info:
             await session.start()
@@ -3724,7 +3718,7 @@ async def test_property_backed_session_state_fails_closed_without_descriptor_acc
     assert exc_info.value is not source_error
     assert PropertyBackedSession.state_accessed is False
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.parametrize("boundary", ["async", "sync"])
@@ -3779,7 +3773,7 @@ async def test_protected_system_exit_uses_active_safe_status(
     assert exc_info.value is not source_error
     assert exc_info.value.args == expected_args
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 def test_credentialless_structured_mount_error_is_unchanged() -> None:
@@ -3897,7 +3891,7 @@ async def test_required_authority_carrier_dominates_aliased_optional_link(
 
     assert exc_info.value is not source_error
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.asyncio
@@ -3936,8 +3930,7 @@ async def test_operation_error_with_mount_authority_is_replaced() -> None:
         f"provider failed with {sentinel}",
     )
     assert (
-        cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error))
-        is not None
+        cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
     traceback = exc.value.__traceback__
     while traceback is not None:
@@ -3983,7 +3976,7 @@ async def test_operation_error_with_implicit_broad_authority_is_replaced(
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
     assert provider_error.args == (sentinel,)
-    assert provider_error.__traceback__ is not None
+    assert provider_error.__traceback__ is None
     traceback = exc.value.__traceback__
     while traceback is not None:
         frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
@@ -4027,8 +4020,7 @@ def test_sync_operation_error_with_mount_authority_preserves_source_arguments() 
         f"provider failed with {sentinel}",
     )
     assert (
-        cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error))
-        is not None
+        cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
 
 
@@ -4067,7 +4059,7 @@ def test_sync_operation_error_with_implicit_broad_authority_is_replaced(
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
     assert provider_error.args == (sentinel,)
-    assert provider_error.__traceback__ is not None
+    assert provider_error.__traceback__ is None
 
 
 @pytest.mark.asyncio
@@ -4106,7 +4098,7 @@ async def test_operation_error_with_read_only_provider_attributes_is_replaced() 
     assert sentinel not in str(exc.value)
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-    assert provider_error.__traceback__ is not None
+    assert provider_error.__traceback__ is None
     traceback_cursor = exc.value.__traceback__
     while traceback_cursor is not None:
         frame_path = Path(traceback_cursor.tb_frame.f_code.co_filename).as_posix()
@@ -4151,8 +4143,7 @@ async def test_cancellation_with_mount_authority_preserves_redacted_cancellation
         sentinel,
     )
     assert (
-        cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error))
-        is not None
+        cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
     traceback = exc.value.__traceback__
     while traceback is not None:
@@ -4562,6 +4553,10 @@ async def test_start_preserves_retained_failure_and_context_on_repeated_calls() 
     saved = RetainedError("retained-start-failure")
     saved.__cause__ = ValueError("retained-root-cause")
     cause = saved.__cause__
+    try:
+        raise cause
+    except ValueError:
+        cause_traceback = cause.__traceback__
     earlier = RetainedError("previously-handled-failure")
 
     class FailingSession(BaseSandboxSession):
@@ -4594,7 +4589,9 @@ async def test_start_preserves_retained_failure_and_context_on_repeated_calls() 
             await session.start()
         assert saved.message == "retained-start-failure"
         assert saved.args == ("retained-start-failure",)
+        assert saved.__traceback__ is None
         assert saved.__cause__ is cause
+        assert cause.__traceback__ is cause_traceback
         assert saved.__context__ is earlier
         assert earlier.message == "previously-handled-failure"
         assert cause.args == ("retained-root-cause",)

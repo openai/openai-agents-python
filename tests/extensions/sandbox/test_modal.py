@@ -5119,7 +5119,7 @@ async def test_modal_direct_persist_redacts_protected_mount_provider_error(
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
 
 
 @pytest.mark.asyncio

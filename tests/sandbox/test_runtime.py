@@ -274,9 +274,7 @@ def _assert_mount_error_redacted(
     assert error.__cause__ is None
     assert error.__context__ is None
     assert error is not source_error
-    assert (
-        cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is not None
-    )
+    assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
     traceback = error.__traceback__
     while traceback is not None:
         frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
@@ -4496,7 +4494,7 @@ def test_process_manifest_preserves_value_free_process_control_with_authority(
     assert exc_info.value.args == expected_args
     assert exc_info.value is not source_error
     assert source_error.args == source_args
-    assert source_error.__traceback__ is not None
+    assert source_error.__traceback__ is None
     assert sentinel not in repr(exc_info.value)
 
 

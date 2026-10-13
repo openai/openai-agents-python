@@ -41,10 +41,10 @@ from ..exceptions import (
     _clear_data_redacted_error_traceback,
     _copy_data_redacted_process_control_error,
     _detach_data_redacted_error_traceback,
+    _detach_source_exception_traceback,
     _is_error_data_redacted,
     _mark_error_data_redacted,
     _mark_error_to_drain_stream_events,
-    _prepare_data_redacted_error,
 )
 from ..guardrail import OutputGuardrailResult
 from ..handoffs import Handoff
@@ -760,7 +760,7 @@ def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
     """Return a payload-free persistence failure without swallowing control flow."""
     if _base_exception_group_exceptions(error) is None:
         safe_error = _safe_redacted_persistence_leaf_error(error)
-        _prepare_data_redacted_error(error)
+        _detach_source_exception_traceback(error)
         return safe_error
 
     group_children: dict[int, tuple[BaseException, ...]] = {}
@@ -792,9 +792,9 @@ def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
         for current_id, current in leaf_errors.items():
             safe_errors[current_id] = _safe_redacted_persistence_leaf_error(current)
 
-        # Release completed source frames before constructing replacement groups. Source
-        # messages and state remain intact and must never cross the public boundary.
-        _prepare_data_redacted_error(error)
+        # Detach the source root's retry traceback before constructing replacement groups.
+        # Its fields and linked exceptions remain intact and never cross the public boundary.
+        _detach_source_exception_traceback(error)
 
         for group in group_postorder:
             children = group_children[id(group)]
@@ -815,11 +815,11 @@ def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
             safe_errors[id(group)] = safe_group
         return safe_errors[id(error)]
     except BaseException as conversion_error:
-        # Fail closed if traversal or reconstruction itself fails. Preparing the conversion error
-        # also releases completed frames in its context, without mutating source exceptions.
-        _prepare_data_redacted_error(error)
+        # Fail closed if traversal or reconstruction itself fails. Detach the caught roots'
+        # tracebacks without clearing caller frames or mutating linked exceptions.
+        _detach_source_exception_traceback(error)
         safe_error = _safe_redacted_persistence_leaf_error(conversion_error)
-        _prepare_data_redacted_error(conversion_error)
+        _detach_source_exception_traceback(conversion_error)
         return safe_error
 
 
