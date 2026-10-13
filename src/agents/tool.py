@@ -86,6 +86,7 @@ from .util._tool_errors import get_trace_tool_error
 from .util._types import MaybeAwaitable
 
 if TYPE_CHECKING:
+    from mcp.types import ToolAnnotations
     from typing_extensions import dataclass_transform
 
     from .agent import Agent, AgentBase
@@ -593,6 +594,22 @@ class FunctionTool:
         default=None, kw_only=True, repr=False
     )
     """Original MCP server name, raw tool name, and configured server position for resume."""
+
+    _mcp_annotations: ToolAnnotations | None = field(default=None, kw_only=True, repr=False)
+
+    @property
+    def mcp_annotations(self) -> ToolAnnotations | None:
+        """Return a copy of the MCP annotations captured when this tool was converted.
+
+        Returns None for non-MCP tools and MCP tools without annotations. The value uses
+        the installed MCP SDK's ToolAnnotations type and attribute names. Omitted hints
+        remain omitted; callers must apply MCP defaults when interpreting them.
+
+        These are server-provided hints, not proof of side effects, successful execution,
+        or safe retries. Trust decisions belong to the application. This runtime metadata
+        is not included in tool origin serialization.
+        """
+        return copy.deepcopy(self._mcp_annotations)
 
     @property
     def qualified_name(self) -> str:

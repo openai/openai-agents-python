@@ -9,7 +9,9 @@ from agents import (
     FunctionTool,
     ModelBehaviorError,
     RunContextWrapper,
+    RunHooks,
     Runner,
+    Tool,
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailData,
     ToolOutputGuardrailData,
@@ -23,6 +25,7 @@ from agents.tool_guardrails import tool_input_guardrail, tool_output_guardrail
 
 from ..test_responses import get_function_tool_call, get_text_message
 from .helpers import FakeMCPServer
+from .model_compat import Tool as MCPTool
 
 
 def _model_tool_outputs(model: ScriptedModel) -> list[Any]:
@@ -34,6 +37,68 @@ def _model_tool_outputs(model: ScriptedModel) -> list[Any]:
                 item.get("output") if isinstance(item, dict) else getattr(item, "output", None)
             )
     return values
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_runner_hooks_can_read_mcp_annotations(streaming: bool):
+    hints = {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+    server = FakeMCPServer(
+        tools=[
+            MCPTool(name="write_record", inputSchema={}, annotations=hints),
+            MCPTool(name="unclassified", inputSchema={}),
+        ]
+    )
+    observed: list[tuple[str, str, dict[str, Any] | None]] = []
+
+    class Hooks(RunHooks):
+        def record(self, event: str, tool: Tool) -> None:
+            assert isinstance(tool, FunctionTool)
+            annotations = tool.mcp_annotations
+            observed.append(
+                (
+                    event,
+                    tool.name,
+                    annotations.model_dump(by_alias=True, exclude_none=True)
+                    if annotations is not None
+                    else None,
+                )
+            )
+
+        async def on_tool_start(self, context, agent, tool):
+            self.record("start", tool)
+
+        async def on_tool_end(self, context, agent, tool, result):
+            self.record("end", tool)
+
+    model = ScriptedModel(
+        [
+            [get_function_tool_call("write_record", "{}")],
+            [get_function_tool_call("unclassified", "{}", call_id="unclassified_call")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="test", model=model, mcp_servers=[server])
+    if streaming:
+        result = Runner.run_streamed(agent, input="user_message", hooks=Hooks())
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, input="user_message", hooks=Hooks())
+
+    assert result.final_output == "done"
+    assert server.tool_calls == ["write_record", "unclassified"]
+    assert observed == [
+        ("start", "write_record", hints),
+        ("end", "write_record", hints),
+        ("start", "unclassified", None),
+        ("end", "unclassified", None),
+    ]
 
 
 @pytest.mark.asyncio
