@@ -275,7 +275,7 @@ async def test_native_finalization_preserves_output_without_delaying_parent(monk
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict", ["pass", "reject", "error"])
+@pytest.mark.parametrize("verdict", ["pass", "reject", "error", "cancelled_child"])
 @pytest.mark.parametrize("kind", ["custom", "function"])
 @pytest.mark.parametrize("streaming", [False, True])
 @pytest.mark.parametrize("tool_cancel", [False, True])
@@ -345,6 +345,10 @@ async def test_input_verdict_during_tool_drain_preserves_selected_tool_error(
         release.set()
         if verdict == "error":
             raise ValueError("late input failure")
+        if verdict == "cancelled_child":
+            check = asyncio.create_task(asyncio.sleep(0))
+            check.cancel()
+            await check
         return GuardrailFunctionOutput(output_info=None, tripwire_triggered=verdict == "reject")
 
     calls = [call, function_call("fail", {}, call_id="fail")]

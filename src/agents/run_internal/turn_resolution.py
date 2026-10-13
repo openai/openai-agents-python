@@ -104,7 +104,7 @@ from ..logger import log_tool_action_error, logger
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
-from ..run_state import RunState
+from ..run_state import RunState, _serialize_output_value
 from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -805,6 +805,32 @@ async def check_for_final_output_from_tools(
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
 
 
+def _snapshot_output_value(value: Any) -> Any:
+    """Detach supported recovery data while retaining opaque application values."""
+    try:
+        return _serialize_output_value(value)
+    except Exception:
+        # Preserve the original failure when an application value cannot be converted.
+        return value
+
+
+def _snapshot_tool_output_guardrail_results(
+    results: list[ToolOutputGuardrailResult],
+) -> list[ToolOutputGuardrailResult]:
+    """Detach SDK-owned diagnostic data without copying guardrail instances."""
+    return [
+        replace(
+            result,
+            output=replace(
+                result.output,
+                output_info=_snapshot_output_value(result.output.output_info),
+                behavior=copy(result.output.behavior),
+            ),
+        )
+        for result in results
+    ]
+
+
 def _snapshot_tool_outputs(items: list[RunItem], live_outputs: list[RunItem]) -> list[RunItem]:
     """Detach failed-run replay data from finalizers that may still be running."""
     # Provider-owned and prior-turn items retain their established response identities.
@@ -812,11 +838,12 @@ def _snapshot_tool_outputs(items: list[RunItem], live_outputs: list[RunItem]) ->
     snapshots: list[RunItem] = []
     for item in items:
         if isinstance(item, ToolCallOutputItem) and id(item) in live_output_ids:
-            # A shallow copy preserves occurrence markers and opaque application output.
-            # Only provider payloads and SDK metadata belong to this recovery snapshot.
+            # Preserve occurrence markers and detach the supported serialized output
+            # representation, which recovery reads independently of raw_item.
             snapshot = copy(item)
             snapshot.raw_item = deepcopy(item.raw_item)
             snapshot.custom_data = deepcopy(item.custom_data)
+            snapshot.output = _snapshot_output_value(item.output)
             snapshots.append(snapshot)
         else:
             snapshots.append(item)
@@ -1006,7 +1033,9 @@ async def execute_tools_and_side_effects(
                         new_step_items=retained_items,
                         next_step=NextStepRunAgain(),
                         tool_input_guardrail_results=tool_input_guardrail_results,
-                        tool_output_guardrail_results=tool_output_guardrail_results,
+                        tool_output_guardrail_results=_snapshot_tool_output_guardrail_results(
+                            tool_output_guardrail_results
+                        ),
                     )
                 )
 
@@ -2810,6 +2839,12 @@ async def resolve_interrupted_turn(
             run_state._generated_items = _snapshot_tool_outputs(
                 run_state._generated_items, committed_tool_outputs
             )
+            run_state._tool_output_guardrail_results = [
+                *prior_output_results,
+                *_snapshot_tool_output_guardrail_results(
+                    run_state._tool_output_guardrail_results[len(prior_output_results) :]
+                ),
+            ]
         raise
 
     for interruption in _collect_tool_interruptions(

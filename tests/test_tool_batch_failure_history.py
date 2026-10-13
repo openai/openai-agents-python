@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from openai.types.responses import ResponseReasoningItem
@@ -568,14 +568,24 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
                     # Exercise a callback that outlives cancellation and publication.
                     pass
             context.raw_item["output"] = "extractor-local mutation"
+            if kind == "function":
+                context.output["ticket"]["status"] = "mutated after publication"
             return {"ticket": "T-1"}
         finally:
             settled.set()
 
-    @tool(custom_data_extractor=extract, needs_approval=approved)
-    async def create_ticket() -> str:
+    @tool_output_guardrail
+    async def record_output(data):
+        return ToolGuardrailFunctionOutput.allow(output_info=data.output)
+
+    @tool(
+        custom_data_extractor=extract,
+        needs_approval=approved,
+        tool_output_guardrails=[record_output],
+    )
+    async def create_ticket() -> dict[str, Any]:
         effects.append("ticket")
-        return "created"
+        return {"ticket": {"status": "created"}}
 
     @tool(failure_error_function=None, needs_approval=approved)
     async def fail() -> str:
@@ -589,7 +599,7 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
     else:
         completed_tool = create_ticket
         completed_call = function_call("create_ticket", {}, call_id="ticket")
-        expected_output = "created"
+        expected_output = "{'ticket': {'status': 'created'}}"
     calls = [completed_call, function_call("fail", {}, call_id="fail")]
     model = ScriptedModel(
         [
@@ -639,6 +649,8 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
         assert len(accepted) == 1
         assert accepted[0].raw_item["output"] == expected_output
         assert accepted[0].custom_data is None
+        if kind == "function":
+            assert accepted[0].output == {"ticket": {"status": "created"}}
         if not approved:
             saved = await session.get_items()
             assert saved[-1]["output"] == expected_output
@@ -646,12 +658,23 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
                 assert len(outputs) == 1
                 state = result.to_state()
         serialized = state.to_json() if state is not None else None
+        if kind == "function":
+            guardrail_results = (
+                state._tool_output_guardrail_results
+                if state is not None
+                else cast(Any, caught.value.run_data).tool_output_guardrail_results
+            )
+            assert guardrail_results[0].guardrail is record_output
         release.set()
         await asyncio.wait_for(settled.wait(), 2)
         # Let the extractor's owner perform its assignment after extract() returns.
         await asyncio.sleep(0)
         assert accepted[0].custom_data is None
+        if kind == "function":
+            assert accepted[0].output == {"ticket": {"status": "created"}}
         assert accepted[0].raw_item["output"] == expected_output
+        if kind == "function":
+            assert guardrail_results[0].output.output_info == {"ticket": {"status": "created"}}
         if state is not None:
             assert state.to_json() == serialized
             restored = await RunState.from_json(agent, serialized)
@@ -659,6 +682,8 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
                 item for item in restored._generated_items if item.type == "tool_call_output_item"
             )
             assert restored_output.custom_data is None
+            if kind == "function":
+                assert restored_output.output == {"ticket": {"status": "created"}}
         if not approved:
             assert await session.get_items() == saved
             if outputs:
@@ -963,7 +988,7 @@ async def test_selected_tool_error_survives_completed_task_guardrail_race(monkey
                     observed_completed = all(t.done() for t in tasks)
                     raise
 
-            return deliver_after_completion()
+            return asyncio.create_task(deliver_after_completion())
         return original_gather(*tasks, **kwargs)
 
     monkeypatch.setattr(
@@ -1009,3 +1034,125 @@ async def test_selected_tool_error_survives_completed_task_guardrail_race(monkey
     with pytest.raises(UserError, match="primary tool failure"):
         await Runner.run(agent, "go", hooks=Hooks())
     assert observed_completed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_failure_snapshot_preserves_opaque_output_identity(streaming, wrapped):
+    class ApplicationValue:
+        def __deepcopy__(self, memo):
+            raise AssertionError("Opaque application output must not be deep-copied")
+
+    value = ApplicationValue()
+    tool_output = {"opaque": value, "status": ["created"]} if wrapped else value
+
+    @tool
+    async def completed() -> Any:
+        return tool_output
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            raise UserError("synthetic end-hook failure")
+
+    agent = Agent(
+        name="opaque",
+        tools=[completed],
+        model=ScriptedModel([[function_call("completed", {}, call_id="opaque")]]),
+    )
+    with pytest.raises(UserError, match="synthetic end-hook failure") as caught:
+        if streaming:
+            result = Runner.run_streamed(agent, "go", hooks=Hooks())
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", hooks=Hooks())
+    assert caught.value.run_data is not None
+    output = next(i for i in caught.value.run_data.new_items if i.type == "tool_call_output_item")
+    if wrapped:
+        tool_output["status"].append("late mutation")
+        assert output.output["status"] == ["created"]
+        assert output.output["opaque"] is value
+    else:
+        assert output.output is value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_approved_mutable_snapshot_recovery_uses_publication_value(streaming):
+    extracting = asyncio.Event()
+    release = asyncio.Event()
+    settled = asyncio.Event()
+    effects = []
+
+    async def extract(context):
+        extracting.set()
+        try:
+            while not release.is_set():
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    # Model a finalizer that finishes after the bounded failure drain.
+                    pass
+            context.output["ticket"]["status"] = "late mutation"
+        finally:
+            settled.set()
+
+    @tool(needs_approval=True, custom_data_extractor=extract)
+    async def create_ticket() -> dict[str, Any]:
+        effects.append("ticket")
+        return {"ticket": {"status": "created"}}
+
+    @tool(needs_approval=True)
+    async def audit() -> str:
+        await extracting.wait()
+        effects.append("audit")
+        return "recorded"
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool.name == "audit":
+                raise UserError("synthetic post-output failure")
+
+    agent = Agent(
+        name="approval",
+        tools=[create_ticket, audit],
+        tool_use_behavior="stop_on_first_tool",
+        model=ScriptedModel(
+            [
+                [
+                    function_call("create_ticket", {}, call_id="ticket"),
+                    function_call("audit", {}, call_id="audit"),
+                ]
+            ]
+        ),
+    )
+    session = SQLiteSession("mutable-recovery")
+    try:
+        parked = await Runner.run(agent, "go", session=session)
+        state = parked.to_state()
+        for item in parked.interruptions:
+            state.approve(item)
+        with pytest.raises(UserError, match="synthetic post-output failure"):
+            if streaming:
+                result = Runner.run_streamed(agent, state, session=session, hooks=Hooks())
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, state, session=session, hooks=Hooks())
+        if streaming:
+            state = result.to_state()
+        serialized = state.to_json()
+        release.set()
+        await asyncio.wait_for(settled.wait(), 2)
+        await asyncio.sleep(0)
+        assert state.to_json() == serialized
+        restored = await RunState.from_json(agent, serialized)
+        recovered = await Runner.run(agent, restored, session=session)
+        assert recovered.final_output == "{'ticket': {'status': 'created'}}"
+        assert effects == ["ticket", "audit"]
+    finally:
+        release.set()
+        if extracting.is_set():
+            await asyncio.wait_for(settled.wait(), 2)
+        session.close()

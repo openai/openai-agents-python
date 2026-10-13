@@ -184,6 +184,7 @@ from .tracing.config import include_task_and_turn_spans
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
 from .util import _error_tracing
+from .util._asyncio_tasks import _consume_future_exception
 
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
@@ -1837,11 +1838,18 @@ class AgentRunner:
                                         input_guardrail_results,
                                     )
                                 )
+                                guardrail_model_future = asyncio.gather(guardrail_task, model_task)
+                                guardrail_model_future.add_done_callback(_consume_future_exception)
+                                parent_cancelled = False
                                 try:
-                                    _, turn_result = await asyncio.gather(
-                                        guardrail_task,
-                                        model_task,
-                                    )
+                                    try:
+                                        # Waiting on the future separates cancellation of this
+                                        # runner from a cancelled child reported by result().
+                                        await asyncio.wait((guardrail_model_future,))
+                                    except asyncio.CancelledError:
+                                        parent_cancelled = True
+                                        raise
+                                    _, turn_result = guardrail_model_future.result()
                                 except InputGuardrailTripwireTriggered:
                                     if tool_error_selected:
                                         # Finish the selected tool failure's bounded cleanup.
@@ -1871,9 +1879,7 @@ class AgentRunner:
                                     raise
                                 except BaseException as error:
                                     try:
-                                        if tool_error_selected and not isinstance(
-                                            error, asyncio.CancelledError
-                                        ):
+                                        if tool_error_selected and not parent_cancelled:
                                             # Admission and failure ownership are independent.
                                             # Settle the verdict, then retrieve the selected
                                             # error even if its task has already completed.
