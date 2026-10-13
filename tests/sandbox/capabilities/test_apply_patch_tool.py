@@ -717,6 +717,68 @@ class TestSandboxApplyPatchTool:
         assert session.rm_users == []
         assert session.files[Path("/workspace/existing.txt")] == b"new\n"
 
+    @pytest.mark.parametrize(
+        "separator", ["\f", "\u2028", "\r"], ids=["form-feed", "unicode", "cr"]
+    )
+    @pytest.mark.asyncio
+    async def test_custom_tool_create_preserves_embedded_separators(self, separator: str) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(session=session)
+        path = Path("/workspace/text.txt")
+
+        # A '+' after the embedded character is file content, not another patch line.
+        context = f"section{separator}+continued"
+        created = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=(f"*** Begin Patch\n*** Add File: text.txt\n+{context}\n*** End Patch\n"),
+        )
+        assert created.output == "Created text.txt"
+        assert session.files[path] == context.encode()
+
+    @pytest.mark.parametrize(
+        "separator", ["\f", "\u2028", "\r"], ids=["form-feed", "unicode", "cr"]
+    )
+    @pytest.mark.asyncio
+    async def test_custom_tool_update_preserves_embedded_separators(self, separator: str) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(session=session)
+        path = Path("/workspace/text.txt")
+        context = f"section{separator}+continued"
+        original = f"old{separator}value"
+        replacement = f"new{separator}value"
+        session.files[path] = f"{context}\n{original}".encode()
+
+        updated = await _execute_custom_tool_call(
+            tool,
+            context_wrapper=make_context_wrapper(),
+            raw_input=(
+                "*** Begin Patch\n*** Update File: text.txt\n@@\n"
+                f" {context}\n-{original}\n+{replacement}\n*** End Patch\n"
+            ),
+        )
+        assert updated.output == "Updated text.txt"
+        assert session.files[path] == f"{context}\n{replacement}".encode()
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"], ids=["lf", "crlf"])
+    @pytest.mark.parametrize("final_newline", [False, True])
+    @pytest.mark.asyncio
+    async def test_custom_tool_patch_line_endings(self, newline: str, final_newline: bool) -> None:
+        session = ApplyPatchSession()
+        tool = SandboxApplyPatchTool(session=session)
+        patch = newline.join(
+            ["*** Begin Patch", "*** Add File: text.txt", "+first", "+second", "*** End Patch"]
+        )
+        if final_newline:
+            patch += newline
+
+        result = await _execute_custom_tool_call(
+            tool, context_wrapper=make_context_wrapper(), raw_input=patch
+        )
+
+        assert result.output == "Created text.txt"
+        assert session.files[Path("/workspace/text.txt")] == b"first\nsecond"
+
     @pytest.mark.asyncio
     async def test_custom_tool_input_create_update_move_delete(self) -> None:
         session = ApplyPatchSession()
