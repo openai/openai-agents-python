@@ -195,6 +195,44 @@ def test_example_command_runs_python_unbuffered(monkeypatch) -> None:
     assert example.command == ["uv", "run", "python", "-u", "-m", "examples.basic.hello_world"]
 
 
+@pytest.mark.parametrize("extras", ["", "litellm"])
+def test_decisions_runner_applies_native_client_override(
+    monkeypatch, tmp_path, capsys, extras
+) -> None:
+    monkeypatch.setenv("EXAMPLES_UV_EXTRAS", extras)
+    monkeypatch.setattr(run_examples, "build_command_path", lambda: "")
+    spawn = Mock(side_effect=AssertionError("Dry runs must not launch examples"))
+    monkeypatch.setattr(run_examples.subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_examples.py",
+            "--filter",
+            "decisions",
+            "--include-interactive",
+            "--dry-run",
+            "--logs-dir",
+            str(tmp_path / "logs"),
+            "--main-log",
+            str(tmp_path / "main.log"),
+            "--artifacts-dir",
+            str(tmp_path / "artifacts"),
+        ],
+    )
+
+    assert run_examples.main() == 0
+
+    output = capsys.readouterr().out
+    prefix = "uv run " + ("--extra litellm " if extras else "")
+    for module in ("classify", "model_router", "tool_risk_gate"):
+        assert f"- RUN  examples/decisions/{module}.py" in output
+        assert (
+            prefix + f"--with 'openai>=3.26.0,<4' python -u -m examples.decisions.{module}"
+        ) in output
+    spawn.assert_not_called()
+
+
 def test_example_command_includes_configured_uv_extras(monkeypatch) -> None:
     monkeypatch.setenv("EXAMPLES_UV_EXTRAS", "litellm any-llm")
     example = run_examples.ExampleScript(

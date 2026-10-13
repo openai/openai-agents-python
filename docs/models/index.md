@@ -5,6 +5,59 @@ The Agents SDK comes with out-of-the-box support for OpenAI models in two flavor
 -   **Recommended**: the [`OpenAIResponsesModel`][agents.models.openai_responses.OpenAIResponsesModel], which calls OpenAI APIs using the new [Responses API](https://platform.openai.com/docs/api-reference/responses).
 -   The [`OpenAIChatCompletionsModel`][agents.models.openai_chatcompletions.OpenAIChatCompletionsModel], which calls OpenAI APIs using the [Chat Completions API](https://platform.openai.com/docs/api-reference/chat).
 
+## Decisions API
+
+Use the [OpenAI Decisions API](https://developers.openai.com/api/docs/guides/decisions) for classification alongside an agent run. Call `AsyncOpenAI.decisions.create()` directly, then use the answer in an existing Agents SDK guardrail, approval callback, or model-selection step. Decisions does not implement the Agents SDK `Model` interface.
+
+Install `openai>=3.26.0,<4` to use the native Decisions client. The Agents SDK's minimum dependency version alone does not guarantee that the Decisions resource is available. Configure the native client explicitly, including any custom credentials or base URL; Agents SDK defaults such as `set_default_openai_client()` do not configure a separately constructed `AsyncOpenAI` instance.
+
+The [runnable Decisions examples](https://github.com/openai/openai-agents-python/tree/main/examples/decisions) demonstrate three workflows:
+
+| Workflow | Existing SDK API | Application responsibility |
+| --- | --- | --- |
+| Check the initial request | `@input_guardrail(run_in_parallel=False)` | Choose a predicate and a threshold; handle refusals before the agent starts. |
+| Review function-tool content | `@tool_input_guardrail` or callable `needs_approval` | Define the content policy and choose whether to reject the call or request human approval. |
+| Select a model before a run | `agent.clone(model=...)` | Map a choice answer to an allowed model and choose a refusal fallback. |
+
+### Read answers by name
+
+A Decisions request can contain predicate, choice, and score questions. The native response contains an `answers` list. Index the answers by their question names, then inspect each answer's `type` before reading its type-specific fields:
+
+```python
+from openai import AsyncOpenAI
+
+
+async def is_support_request(client: AsyncOpenAI, text: str) -> bool:
+    decision = await client.decisions.create(
+        model="gpt-6-luna",
+        input=text,
+        questions=[
+            {
+                "type": "predicate",
+                "name": "in_scope",
+                "instructions": "Is this a request for help with a software product?",
+            }
+        ],
+    )
+    answers = {answer.name: answer for answer in decision.answers}
+    answer = answers.get("in_scope")
+    if answer is None or answer.type != "predicate":
+        return False
+    return answer.probability >= 0.8
+```
+
+The threshold above is illustrative. Select thresholds using labeled examples from your application. A refusal applies to one question; another question in the same response can still return an answer. Decide separately how each workflow handles a refusal, a missing answer, or an API error. The examples propagate API errors rather than treating an unavailable classifier as an affirmative answer.
+
+### Define the integration boundary
+
+The input-guardrail example accepts a single text request and blocks agent execution until the check finishes. The tool example evaluates announcement arguments and only simulates publication. Its classifier implements an editorial review policy; it does not determine user authorization. Enforce permissions separately in trusted application code.
+
+With callable `needs_approval`, decorated function tools require manual approval when argument validation needs conversion, defaults, or application-defined validation. The SDK does not call the conditional approval callback in those cases. After explicit approval, the SDK resumes the call without evaluating that callback again. Tool input guardrails are separate checks and can run again immediately before invocation. See [human-in-the-loop](../human_in_the_loop.md) and [tool guardrails](../guardrails.md#tool-guardrails).
+
+Pre-run routing selects the starting agent's model. It does not automatically select models for handoffs or re-route a resumed run. Supply the intended classification evidence yourself; these text-only recipes do not retrieve server-held history or convert arbitrary conversation items and attachments to Decisions inputs.
+
+Direct Decisions calls are outside the Runner's model adapter. Their usage is available on the native response and is not automatically included in `RunResult.context_wrapper.usage` or an Agents SDK generation span. Manage the native client's lifetime with `async with AsyncOpenAI() as client`, as the examples do.
+
 ## Choosing a model setup
 
 Start with the simplest path that fits your setup:
