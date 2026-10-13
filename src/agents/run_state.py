@@ -43,6 +43,7 @@ from ._run_state_agent_identity import (
     _build_agent_identity_map,
     _build_agent_map,
     _get_ambiguous_agent_ids,
+    _has_ambiguous_hook_identities,
     _has_legacy_hook_identity_ambiguity,
     _iter_agent_graph,
 )
@@ -1905,12 +1906,22 @@ class RunState(Generic[TContext, TAgent]):
             A dictionary representation of the run state.
 
         Raises:
-            UserError: If required state (agent, context) is missing.
+            UserError: If required state (agent, context) is missing, or same-name agents
+                cannot be distinguished without hook instance attributes. Use unique agent
+                names before starting a persistable run in that case.
         """
         if self._current_agent is None:
             raise UserError("Cannot serialize RunState: No current agent")
         if self._context is None:
             raise UserError("Cannot serialize RunState: No context")
+
+        if self._starting_agent is not None and _has_ambiguous_hook_identities(
+            self._starting_agent
+        ):
+            raise UserError(
+                "RunState cannot distinguish same-name agents without hook instance state. "
+                "Use unique agent names before starting a persistable run."
+            )
 
         approvals_dict = self._serialize_approvals()
         tool_invocations = self._serialize_tool_invocations()
@@ -2324,9 +2335,11 @@ class RunState(Generic[TContext, TAgent]):
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
-        Duplicate non-root agent names with hooks require schema 1.21 or later.
-        Older snapshots omit the hook state that determined their identity ordering,
-        so they cannot be restored safely. Start a new run with unique agent names.
+        Hook instance attributes do not identify agents in schema 1.21 or later.
+        Same-name agents that cannot be distinguished without those attributes are
+        rejected. Older snapshots are rejected if hook state could have changed
+        their identity ordering. Use unique names before starting new persistable
+        runs; renaming agents does not repair an ambiguous existing checkpoint.
 
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
@@ -2416,9 +2429,11 @@ class RunState(Generic[TContext, TAgent]):
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
-        Duplicate non-root agent names with hooks require schema 1.21 or later.
-        Older snapshots omit the hook state that determined their identity ordering,
-        so they cannot be restored safely. Start a new run with unique agent names.
+        Hook instance attributes do not identify agents in schema 1.21 or later.
+        Same-name agents that cannot be distinguished without those attributes are
+        rejected. Older snapshots are rejected if hook state could have changed
+        their identity ordering. Use unique names before starting new persistable
+        runs; renaming agents does not repair an ambiguous existing checkpoint.
 
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
@@ -4180,6 +4195,13 @@ async def _build_run_state_from_json(
             UserError,
         )
 
+    if _has_ambiguous_hook_identities(initial_agent):
+        raise validation_error_factory(
+            "RunState cannot distinguish same-name agents without hook instance state. "
+            "Use unique agent names before starting a persistable run.",
+            UserError,
+        )
+
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
 
@@ -5540,6 +5562,10 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         ),
         "Run state agent not found in agent map",
+        (
+            "RunState cannot distinguish same-name agents without hook instance state. "
+            "Use unique agent names before starting a persistable run."
+        ),
         (
             "Cannot safely restore legacy duplicate-agent identities with hooks. "
             "Start a new run with unique agent names; the saved hook ordering is unavailable."

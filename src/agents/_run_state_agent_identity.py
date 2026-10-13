@@ -366,6 +366,21 @@ def _handoff_identity_signature(handoff_item: Agent[Any] | Handoff[Any, Any]) ->
     }
 
 
+def _hook_identity_signature(hooks: Any) -> Any:
+    """Keep the legacy type discriminator, without lifecycle instance state."""
+    if hooks is None:
+        return None
+    # Match the normalization categories used by the legacy capability serializer.
+    # Keeping their spelling preserves ordering between different hook types.
+    if callable(hooks):
+        return {"callable": _callable_identity_name(hooks)}
+    if dataclasses.is_dataclass(hooks):
+        return {"dataclass": _identity_type_name(hooks)}
+    if hasattr(hooks, "model_dump"):
+        return {"model": _identity_type_name(hooks)}
+    return {"object": _identity_type_name(hooks)}
+
+
 def _agent_identity_signature(agent: Agent[Any]) -> str:
     signature: dict[str, Any] = {
         "agent_type": _identity_type_name(agent),
@@ -375,9 +390,7 @@ def _agent_identity_signature(agent: Agent[Any]) -> str:
         "model": _normalize_identity_value(getattr(agent, "model", None)),
         "model_settings": _normalize_identity_value(getattr(agent, "model_settings", None)),
         "mcp_config": _normalize_capability_identity_value(getattr(agent, "mcp_config", None)),
-        # Hook instances carry lifecycle state (for example event counters). Only
-        # their type is configuration that survives reconstructing the graph.
-        "hooks": _identity_type_name(agent.hooks) if agent.hooks is not None else None,
+        "hooks": _hook_identity_signature(agent.hooks),
         "input_guardrails": sorted(
             _stable_identity_text(_normalize_capability_identity_value(guardrail))
             for guardrail in getattr(agent, "input_guardrails", [])
@@ -448,14 +461,31 @@ def _get_ambiguous_agent_ids(initial_agent: Agent[Any]) -> set[int]:
 
 def _has_legacy_hook_identity_ambiguity(initial_agent: Agent[Any]) -> bool:
     """Whether old ordinal identities could depend on unrecorded hook state."""
-    groups: dict[str, list[Agent[Any]]] = {}
+    seen_prefixes: set[tuple[str, str]] = set()
     for agent in _iter_agent_graph(initial_agent):
         # Root priority is independent of its signature and always sorts first.
-        if agent is not initial_agent:
-            groups.setdefault(agent.name, []).append(agent)
+        if agent is initial_agent or agent.hooks is None or callable(agent.hooks):
+            continue
+        signature = json.loads(_agent_identity_signature(agent))
+        # The signature is sorted by JSON field name. Earlier configuration and
+        # the hook type precede hook instance state, so they cannot be reordered
+        # by changing that state. Later fields cannot provide this guarantee.
+        prefix = _stable_identity_text(
+            {key: value for key, value in signature.items() if key <= "hooks"}
+        )
+        key = (agent.name, prefix)
+        if key in seen_prefixes:
+            return True
+        seen_prefixes.add(key)
+    return False
+
+
+def _has_ambiguous_hook_identities(initial_agent: Agent[Any]) -> bool:
+    """Whether removing hook state leaves an owner dependent on traversal order."""
+    ambiguous = _get_ambiguous_agent_ids(initial_agent)
     return any(
-        len(group) > 1 and any(agent.hooks is not None for agent in group)
-        for group in groups.values()
+        id(agent) in ambiguous and agent.hooks is not None and not callable(agent.hooks)
+        for agent in _iter_agent_graph(initial_agent)
     )
 
 
