@@ -5145,6 +5145,7 @@
 </ul>
 <p>If you need checks before and/or after each custom function-tool call in a workflow that includes managers, handoffs, or delegated specialists, use tool guardrails instead of relying only on agent-level input/output guardrails.</p>
 <h2 id="input-guardrails">Input guardrails</h2>
+<p>A guardrail can call an external classifier directly; it does not need to run another agent. For a native OpenAI Decisions client example, see <a href="../models/#decisions-api">Decisions API</a>.</p>
 <p>Input guardrails run in 3 steps:</p>
 <ol>
 <li>First, the guardrail receives the same input passed to the agent.</li>

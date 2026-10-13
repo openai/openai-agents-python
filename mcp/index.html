@@ -5856,6 +5856,7 @@ consume incremental MCP output while the model is still working:</p>
 <li><code>True</code> requires approval for all tools, and <code>False</code> requires approval for none (equivalent to <code>"always"</code> and <code>"never"</code>, respectively).</li>
 <li>A per-tool map, for example <code>{"delete_file": "always", "read_file": "never"}</code>.</li>
 <li>A grouped object: <code>{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}</code>.</li>
+<li>A synchronous or asynchronous callable with the signature <code>(run_context, agent, tool) -&gt; bool | Awaitable[bool]</code>. Return <code>True</code> to require approval or <code>False</code> to allow the call without approval.</li>
 </ul>
 <div class="language-python highlight"><pre><span></span><code><span id="__span-7-1"><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">async</span> <span class="k">with</span> <span class="n">MCPServerStreamableHttp</span><span class="p">(</span>
 </span><span id="__span-7-2"><a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>    <span class="n">name</span><span class="o">=</span><span class="s2">&quot;Filesystem MCP&quot;</span><span class="p">,</span>
@@ -5864,6 +5865,9 @@ consume incremental MCP output while the model is still working:</p>
 </span><span id="__span-7-5"><a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="p">)</span> <span class="k">as</span> <span class="n">server</span><span class="p">:</span>
 </span><span id="__span-7-6"><a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>    <span class="o">...</span>
 </span></code></pre></div>
+<p>The callable receives the current <code>RunContextWrapper</code>, the agent, and the original MCP SDK <code>Tool</code>, including <code>tool.annotations</code>. The callable can use application context or tool metadata to decide whether approval is required. Server-provided annotations are advisory hints; use them to bypass approval only when your application trusts the server's classification.</p>
+<p>Unlike a <code>FunctionTool.needs_approval</code> callable, a local MCP <code>require_approval</code> callable does not receive the specific call's arguments or call ID.</p>
+<p>If you call <code>MCPUtil.to_function_tool()</code> directly without supplying an <code>agent</code>, a callable policy is not invoked and the converted tool requires approval. This fail-closed fallback applies to legacy direct conversion calls.</p>
 <p>For a full pause/resume flow, see <a href="../human_in_the_loop/">Human-in-the-loop</a> and <code>examples/mcp/get_all_mcp_tools_example/main.py</code>.</p>
 <h3 id="per-call-metadata-with-tool_meta_resolver">Per-call metadata with <code>tool_meta_resolver</code></h3>
 <p>Use <code>tool_meta_resolver</code> when your MCP server expects request metadata in <code>_meta</code> (for example, tenant IDs or trace context). The example below assumes you pass a <code>dict</code> as <code>context</code> to <code>Runner.run(...)</code>.</p>
