@@ -128,7 +128,7 @@ from ..util._approvals import evaluate_needs_approval_setting
 from ..util._asyncio_tasks import gather_with_cancel
 from .agent_bindings import AgentBindings
 from .agent_tool_configuration import register_agent_tool_configuration
-from .blocked_output import _current_response_boundary
+from .blocked_output import _current_response_boundary, _should_defer_interrupted_session_items
 from .error_handlers import (
     build_run_error_data,
     create_message_output_item,
@@ -987,7 +987,11 @@ async def execute_tools_and_side_effects(
         nonlocal accepting_outputs
         accepting_outputs = False
         # Server-managed continuation retains its separate recovery path.
-        if on_tool_execution_error is not None and not server_manages_conversation:
+        if (
+            on_tool_execution_error is not None
+            and not server_manages_conversation
+            and not _should_defer_interrupted_session_items(public_agent, run_config)
+        ):
             model_item_ids = {id(item) for item in new_step_items}
             retained_items = _snapshot_tool_outputs(
                 _completed_tool_step_items(pre_step_items, new_step_items, completed_outputs),

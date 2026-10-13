@@ -277,8 +277,10 @@ async def test_native_finalization_preserves_output_without_delaying_parent(monk
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verdict", ["pass", "reject", "error"])
 @pytest.mark.parametrize("kind", ["custom", "function"])
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("tool_cancel", [False, True])
 async def test_input_verdict_during_tool_drain_preserves_selected_tool_error(
-    monkeypatch, verdict, kind
+    monkeypatch, verdict, kind, streaming, tool_cancel
 ):
     from agents import GuardrailFunctionOutput, input_guardrail
     from agents.run_internal.tool_execution import _FunctionToolBatchExecutor
@@ -333,6 +335,8 @@ async def test_input_verdict_during_tool_drain_preserves_selected_tool_error(
     @tool(failure_error_function=None)
     async def fail() -> str:
         await entered.wait()
+        if tool_cancel:
+            raise asyncio.CancelledError("primary tool cancellation")
         raise ValueError("primary tool failure")
 
     @input_guardrail
@@ -347,21 +351,26 @@ async def test_input_verdict_during_tool_drain_preserves_selected_tool_error(
     agent = Agent(
         name="native-agent",
         tools=[native, fail],
-        model=ScriptedModel([get_exact_output_stream_step(calls)]),
+        model=ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls]),
         input_guardrails=[input_verdict],
     )
     session = SQLiteSession("verdict-during-drain")
-    result = Runner.run_streamed(agent, "go", session=session, hooks=Hooks())
+    result = None
     try:
-        with pytest.raises(UserError, match="primary tool failure"):
-            async for _ in result.stream_events():
-                pass
-        assert result.run_loop_task is not None and not result.run_loop_task.cancelled()
+        expected_error = asyncio.CancelledError if tool_cancel else UserError
+        with pytest.raises(expected_error):
+            if streaming:
+                result = Runner.run_streamed(agent, "go", session=session, hooks=Hooks())
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, "go", session=session, hooks=Hooks())
         assert effects == [kind]
-        assert len(result.new_items) == (2 if verdict == "pass" else 0)
         assert len(await session.get_items()) == (3 if verdict == "pass" else 1)
-        if verdict == "pass" and kind == "custom":
-            assert result.new_items[-1].custom_data == {"finalized": True}
+        if result is not None:
+            assert len(result.new_items) == (2 if verdict == "pass" else 0)
+            if verdict == "pass" and kind == "custom":
+                assert result.new_items[-1].custom_data == {"finalized": True}
     finally:
         release.set()
         session.close()

@@ -208,8 +208,11 @@ async def test_completed_history_at_failure_boundaries(streaming: bool, boundary
             if boundary == "parent_cancel":
                 await asyncio.wait_for(blocked.wait(), 2)
                 result.cancel()
-            if boundary in ("tool_cancel", "native_cancel", "parent_cancel"):
+            if boundary == "parent_cancel":
                 await asyncio.wait_for(consumer, 2)
+            elif boundary in ("tool_cancel", "native_cancel"):
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(consumer, 2)
             else:
                 with pytest.raises(UserError) as exc:
                     await asyncio.wait_for(consumer, 2)

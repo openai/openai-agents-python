@@ -189,6 +189,7 @@ from .session_persistence import (
     reconcile_nested_history_owned_session_item_refs,
     record_compaction_model_response,
     resume_pending_session_write,
+    resumed_failure_items,
     resumed_response_store,
     resumed_turn_items,
     rewind_session_items,
@@ -1513,6 +1514,12 @@ async def start_streaming(
                             streamed_result._model_input_items != streamed_result.new_items
                         )
                         if not _is_error_data_redacted(exc):
+                            streamed_result.new_items = resumed_failure_items(
+                                run_state, current_agent, run_config
+                            )
+                            streamed_result._replay_from_model_input_items = (
+                                streamed_result._model_input_items != streamed_result.new_items
+                            )
                             streamed_result.tool_input_guardrail_results = list(
                                 run_state._tool_input_guardrail_results
                             )
@@ -2361,6 +2368,10 @@ async def start_streaming(
     except BaseException as error:
         if _is_error_data_redacted(error):
             _detach_data_redacted_error_traceback(error)
+        if _is_tool_local_cancellation(error) and streamed_result._tool_error_selected:
+            # Task.exception() cannot report cancellation. Keep the selected
+            # tool failure observable instead of ending the stream successfully.
+            streamed_result._stored_exception = error
         raise
     else:
         streamed_result.is_complete = True
@@ -2795,6 +2806,7 @@ async def run_single_turn(
     on_response_hooks_started: Callable[[], None] | None = None,
     run_state: RunState[Any] | None = None,
     on_tool_execution_error: Callable[[SingleStepResult], None] | None = None,
+    on_tool_error_selected: Callable[[], None] | None = None,
 ) -> SingleStepResult:
     """Run a single non-streaming turn of the agent loop."""
     public_agent = bindings.public_agent
@@ -2908,6 +2920,7 @@ async def run_single_turn(
         after_invocation_validation=after_invocation_validation,
         run_state=run_state,
         on_tool_execution_error=on_tool_execution_error,
+        on_tool_error_selected=on_tool_error_selected,
     )
 
 

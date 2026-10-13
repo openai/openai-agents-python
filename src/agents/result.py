@@ -152,6 +152,11 @@ def _populate_state_from_result(
         state._pending_input = copy.deepcopy(source_state._pending_input)
         state._pending_session_write = copy.deepcopy(source_state._pending_session_write)
         state._current_step = source_state._current_step
+        if isinstance(source_state._current_step, NextStepInterruption):
+            # Failure diagnostics may expose accepted outputs still awaiting their
+            # normal resume write. Keep the checkpoint's publication boundary so
+            # recovery does not mistake those outputs for already persisted work.
+            state._session_items = list(source_state._session_items)
         # A streamed result exists before its terminal append does, so a checkpoint taken from a
         # failed stream has to keep the fail-closed marker or it would look resumable.
         state._terminal_unrecoverable = source_state._terminal_unrecoverable

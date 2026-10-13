@@ -565,6 +565,7 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
                 try:
                     await release.wait()
                 except asyncio.CancelledError:
+                    # Exercise a callback that outlives cancellation and publication.
                     pass
             context.raw_item["output"] = "extractor-local mutation"
             return {"ticket": "T-1"}
@@ -624,6 +625,13 @@ async def test_partial_history_freezes_accepted_output_before_metadata(streaming
         assert not settled.is_set()
         if state is not None:
             items = state._generated_items
+            if isinstance(caught.value, AgentsException):
+                assert caught.value.run_data is not None
+                assert any(
+                    item.type == "tool_call_output_item" for item in caught.value.run_data.new_items
+                )
+            if result is not None:
+                assert any(item.type == "tool_call_output_item" for item in result.new_items)
         else:
             assert caught.value.run_data is not None
             items = caught.value.run_data.new_items
@@ -776,3 +784,228 @@ async def test_nonstreamed_partial_history_waits_for_input_verdict(monkeypatch, 
                 task.cancel()
         await asyncio.gather(run_task, waiting_task, return_exceptions=True)
         session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("guarded_terminal", [False, True])
+async def test_approved_failure_diagnostics_preserve_retry_boundary(streaming, guarded_terminal):
+    from agents import output_guardrail
+
+    completed = asyncio.Event()
+    effects = []
+    failures = 0
+
+    @tool(needs_approval=True)
+    async def create_ticket() -> str:
+        effects.append("ticket")
+        return "ticket T-1"
+
+    @tool(needs_approval=True)
+    async def flaky() -> str:
+        await completed.wait()
+        return "done"
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            nonlocal failures
+            if tool.name == "create_ticket":
+                completed.set()
+            else:
+                failures += 1
+                raise ValueError("post-output hook failure")
+
+    @output_guardrail
+    async def accept(context, agent, output):
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    model = ScriptedModel(
+        [
+            [
+                function_call("create_ticket", {}, call_id="ticket"),
+                function_call("flaky", {}, call_id="flaky"),
+            ],
+            [assistant_message("finished")],
+        ]
+    )
+    agent = Agent(
+        name="approved",
+        model=model,
+        tools=[create_ticket, flaky],
+        tool_use_behavior="stop_on_first_tool" if guarded_terminal else "run_llm_again",
+        output_guardrails=[accept] if guarded_terminal else [],
+    )
+    session = SQLiteSession("approved-failure-diagnostics")
+    try:
+        parked = await Runner.run(agent, "go", session=session)
+        state = parked.to_state()
+        for interruption in parked.interruptions:
+            state.approve(interruption)
+        with pytest.raises(UserError) as caught:
+            if streaming:
+                result = Runner.run_streamed(agent, state, session=session, hooks=Hooks())
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, state, session=session, hooks=Hooks())
+        assert caught.value.run_data is not None
+        public_outputs = [
+            i for i in caught.value.run_data.new_items if i.type == "tool_call_output_item"
+        ]
+        assert len(public_outputs) == (0 if guarded_terminal else 2)
+        if streaming:
+            state = result.to_state()
+        restored = await RunState.from_json(agent, state.to_json())
+        retried = await Runner.run(agent, restored, session=session, hooks=Hooks())
+        assert retried.final_output == ("ticket T-1" if guarded_terminal else "finished")
+        assert effects == ["ticket"]
+        assert failures == 1
+        saved_outputs = [
+            i for i in await session.get_items() if i.get("type") == "function_call_output"
+        ]
+        assert [i["call_id"] for i in saved_outputs] == ["ticket", "flaky"]
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("failure", ["tool_hook", "agent_hook", "sibling"])
+async def test_fresh_guarded_terminal_failure_keeps_output_private(streaming, failure):
+    from agents import output_guardrail
+
+    completed = asyncio.Event()
+    guardrail_outputs = []
+
+    @tool
+    async def guarded() -> str:
+        return "synthetic guarded output"
+
+    @tool(failure_error_function=None)
+    async def sibling() -> str:
+        await completed.wait()
+        raise ValueError("synthetic failure")
+
+    @output_guardrail
+    async def reject(context, agent, output):
+        guardrail_outputs.append(output)
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=True)
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool.name == "guarded":
+                completed.set()
+                if failure == "tool_hook":
+                    raise UserError("synthetic failure")
+
+        async def on_agent_end(self, context, agent, output):
+            if failure == "agent_hook":
+                raise UserError("synthetic failure")
+
+    calls = [function_call("guarded", {}, call_id="guarded")]
+    if failure == "sibling":
+        calls.append(function_call("sibling", {}, call_id="sibling"))
+    agent = Agent(
+        name="guarded-terminal",
+        model=ScriptedModel([calls]),
+        tools=[guarded, sibling],
+        tool_use_behavior="stop_on_first_tool",
+        output_guardrails=[reject],
+    )
+    session = SQLiteSession("fresh-guarded-failure")
+    try:
+        with pytest.raises(UserError, match="synthetic failure") as caught:
+            if streaming:
+                result = Runner.run_streamed(agent, "go", session=session, hooks=Hooks())
+                async for event in result.stream_events():
+                    if event.type == "run_item_stream_event":
+                        assert event.item.type != "tool_call_output_item"
+            else:
+                await Runner.run(agent, "go", session=session, hooks=Hooks())
+        assert guardrail_outputs == []
+        assert caught.value.run_data is not None
+        assert caught.value.run_data.new_items == []
+        assert _shape(await session.get_items()) == ["user"]
+        if streaming:
+            assert result.new_items == []
+            assert result.to_state()._generated_items == []
+    finally:
+        session.close()
+
+
+@pytest.mark.asyncio
+async def test_selected_tool_error_survives_completed_task_guardrail_race(monkeypatch):
+    import agents.run_internal.tool_execution as execution
+
+    selected = asyncio.Event()
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    original_drain = execution._FunctionToolBatchExecutor._raise_failure_after_draining_siblings
+    original_gather = asyncio.gather
+    observed_completed = False
+
+    async def observe_selection(self, failure):
+        selected.set()
+        return await original_drain(self, failure)
+
+    def delayed_delivery(*tasks, **kwargs):
+        names = {t.get_coro().__name__ for t in tasks if isinstance(t, asyncio.Task)}
+        if names == {"run_input_guardrails", "preserve_tool_task_cancellation"}:
+
+            async def deliver_after_completion():
+                nonlocal observed_completed
+                try:
+                    return await original_gather(*tasks, **kwargs)
+                except ValueError:
+                    # Hold delivery of the guardrail error until sibling teardown
+                    # finishes, reproducing a scheduler delay at the Runner boundary.
+                    await original_gather(*tasks, return_exceptions=True)
+                    observed_completed = all(t.done() for t in tasks)
+                    raise
+
+            return deliver_after_completion()
+        return original_gather(*tasks, **kwargs)
+
+    monkeypatch.setattr(
+        execution._FunctionToolBatchExecutor,
+        "_raise_failure_after_draining_siblings",
+        observe_selection,
+    )
+    monkeypatch.setattr(asyncio, "gather", delayed_delivery)
+
+    @tool
+    async def completed() -> str:
+        return "done"
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await entered.wait()
+        raise ValueError("primary tool failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            entered.set()
+            await release.wait()
+
+    @input_guardrail
+    async def late_error(context, agent, input):
+        await selected.wait()
+        release.set()
+        raise ValueError("secondary guardrail failure")
+
+    agent = Agent(
+        name="race",
+        tools=[completed, fail],
+        input_guardrails=[late_error],
+        model=ScriptedModel(
+            [
+                [
+                    function_call("completed", {}, call_id="done"),
+                    function_call("fail", {}, call_id="fail"),
+                ]
+            ]
+        ),
+    )
+    with pytest.raises(UserError, match="primary tool failure"):
+        await Runner.run(agent, "go", hooks=Hooks())
+    assert observed_completed

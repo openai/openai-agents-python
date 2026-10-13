@@ -153,6 +153,7 @@ from .run_internal.session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     resume_pending_session_write,
+    resumed_failure_items,
     resumed_response_store,
     resumed_turn_items,
     save_result_to_session,
@@ -1764,6 +1765,12 @@ class AgentRunner:
                     if current_turn_span is not None:
                         current_turn_span.start(mark_as_current=True)
                     partial_tool_results: list[SingleStepResult] = []
+                    tool_error_selected = False
+
+                    def on_tool_error_selected() -> None:
+                        nonlocal tool_error_selected
+                        tool_error_selected = True
+
                     try:
                         if current_turn <= 1:
                             try:
@@ -1815,6 +1822,7 @@ class AgentRunner:
                                         on_response_hooks_started=_mark_response_hooks_started,
                                         run_state=run_state,
                                         on_tool_execution_error=partial_tool_results.append,
+                                        on_tool_error_selected=on_tool_error_selected,
                                     )
                                 )
                             )
@@ -1835,6 +1843,16 @@ class AgentRunner:
                                         model_task,
                                     )
                                 except InputGuardrailTripwireTriggered:
+                                    if tool_error_selected:
+                                        # Finish the selected tool failure's bounded cleanup.
+                                        # A late verdict still rejects admission, but cannot
+                                        # replace the error that initiated teardown.
+                                        try:
+                                            await model_task
+                                        finally:
+                                            if not model_task.done():
+                                                model_task.cancel()
+                                            await asyncio.gather(model_task, return_exceptions=True)
                                     if should_cancel_parallel_model_task_on_input_guardrail_trip():
                                         if not model_task.done():
                                             model_task.cancel()
@@ -1853,6 +1871,14 @@ class AgentRunner:
                                     raise
                                 except BaseException as error:
                                     try:
+                                        if tool_error_selected and not isinstance(
+                                            error, asyncio.CancelledError
+                                        ):
+                                            # Admission and failure ownership are independent.
+                                            # Settle the verdict, then retrieve the selected
+                                            # error even if its task has already completed.
+                                            await asyncio.wait((guardrail_task,))
+                                            await model_task
                                         if partial_tool_results and (
                                             not isinstance(error, asyncio.CancelledError)
                                             or _is_tool_local_cancellation(error)
@@ -2408,7 +2434,12 @@ class AgentRunner:
                             ]
                         exc.run_data = RunErrorDetails(
                             input=original_input,
-                            new_items=session_items,
+                            new_items=(
+                                resumed_failure_items(run_state, current_agent, run_config)
+                                if run_state is not None
+                                and isinstance(run_state._current_step, NextStepInterruption)
+                                else session_items
+                            ),
                             raw_responses=model_responses,
                             last_agent=current_agent,
                             context_wrapper=context_wrapper,

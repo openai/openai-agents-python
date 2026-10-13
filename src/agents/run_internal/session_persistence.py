@@ -16,6 +16,8 @@ from typing import Any, cast
 
 from .. import _debug
 from .._tool_identity import get_hosted_mcp_approval_request_identity
+from .._tool_invocation import tool_output_identity
+from ..agent import Agent
 from ..exceptions import UserError
 from ..items import (
     HandoffOutputItem,
@@ -42,9 +44,14 @@ from ..memory import (
 from ..memory.openai_conversations_session import OpenAIConversationsSession
 from ..memory.session import _call_session_method, _get_session_wrapper
 from ..models.fake_id import FAKE_RESPONSES_ID
+from ..run_config import RunConfig
 from ..run_context import RunContextWrapper
 from ..run_state import RunState, _PendingSessionWrite
-from .blocked_output import _current_response_boundary, _identity_sequence_start
+from .blocked_output import (
+    _current_response_boundary,
+    _identity_sequence_start,
+    _should_defer_interrupted_session_items,
+)
 from .items import (
     _TOOL_CALL_TO_OUTPUT_TYPE,
     NestedHistoryOwnedItem,
@@ -620,6 +627,31 @@ def session_items_for_turn(turn_result: SingleStepResult) -> list[RunItem]:
         else turn_result.new_step_items
     )
     return list(items)
+
+
+def resumed_failure_items(
+    run_state: RunState, agent: Agent[Any], run_config: RunConfig
+) -> list[RunItem]:
+    """Expose accepted checkpoint outputs without marking them as already persisted."""
+    public_items = list(run_state._session_items)
+    if _should_defer_interrupted_session_items(agent, run_config):
+        return public_items
+    boundary = _current_response_boundary((), run_state._last_processed_response, run_state)
+    if not boundary.proven or boundary.generated_start is None:
+        return public_items
+    published_outputs = {
+        tool_output_identity(item.raw_item)
+        for item in public_items
+        if isinstance(item, ToolCallOutputItem)
+    }
+    return public_items + [
+        item
+        for item in run_state._generated_items[
+            boundary.generated_start + len(boundary.processed_items) :
+        ]
+        if isinstance(item, ToolCallOutputItem)
+        and tool_output_identity(item.raw_item) not in published_outputs
+    ]
 
 
 def resumed_turn_items(
