@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from openai.types.responses import ResponseReasoningItem
+from openai.types.responses.response_output_item import McpApprovalRequest
 
-from agents import Agent, ModelSettings, RunConfig, Runner, RunState, handoff
+from agents import Agent, HostedMCPTool, ModelSettings, RunConfig, Runner, RunState, handoff
 from agents.handoffs import HandoffInputData
 from agents.items import TResponseInputItem
 from agents.memory import OpenAIResponsesCompactionSession, Session, SQLiteSession
@@ -16,6 +17,7 @@ from agents.memory.session import SessionABC
 from agents.result import RunResult, RunResultStreaming
 from agents.run_config import CallModelData, ModelInputData
 from agents.testing import ScriptedModel
+from tests.model_test_helpers import get_exact_output_stream_step
 from tests.test_responses import (
     get_function_tool,
     get_function_tool_call,
@@ -324,21 +326,164 @@ async def test_resumed_tool_output_stays_local_when_filtered(streamed: bool) -> 
     tool.needs_approval = True
     model = ScriptedModel(steps=[[get_function_tool_call("lookup")], [get_text_message("ok")]])
     agent = Agent(name="worker", model=model, tools=[tool], tool_use_behavior="stop_on_first_tool")
-    # Avoid compacting the interruption's still-pending tool call.
-    session.should_trigger_compaction = lambda _: False
     interrupted = await run(agent, "first", session, streamed)
     state = interrupted.to_state()
     state.approve(interrupted.interruptions[0])
     serialized = state.to_json()
     assert "_session_compaction_model_exchange" not in str(serialized)
     restored = await RunState.from_json(agent, serialized)
-    session.should_trigger_compaction = lambda _: True
     resumed = await run(agent, restored, session, streamed)
     assert resumed.final_output == LOCAL_OUTPUT
     await run(agent, "second", session, streamed, RunConfig(call_model_input_filter=filter_tools))
     assert LOCAL_OUTPUT not in str(model.calls[-1].input)
     client.responses.compact.assert_not_awaited()
     assert LOCAL_OUTPUT in str(await session.get_items())
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("atomic_backend", [False, True])
+async def test_pending_approval_defers_automatic_compaction(
+    streamed: bool, approve: bool, atomic_backend: bool
+) -> None:
+    client = MagicMock()
+    summary = {"type": "compaction", "id": "cmp-test", "encrypted_content": "synthetic-summary"}
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[summary]))
+    backend = SQLiteSession("approval") if atomic_backend else SimpleListSession()
+    session = OpenAIResponsesCompactionSession(
+        "approval",
+        backend,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: True,
+    )
+    tool = get_function_tool(name="lookup", return_value=LOCAL_OUTPUT)
+    tool.needs_approval = True
+    call = get_function_tool_call("lookup")
+    model = ScriptedModel(
+        steps=[
+            [call],
+            [get_text_message("resolved")],
+            [get_text_message("next")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(name="worker", model=model, tools=[tool])
+    try:
+        interrupted = await run(agent, "first", session, streamed)
+        assert len(interrupted.interruptions) == 1
+        client.responses.compact.assert_not_awaited()
+        assert any(item.get("call_id") == call.call_id for item in await session.get_items())
+
+        state = await RunState.from_json(agent, interrupted.to_state().to_json())
+        if approve:
+            state.approve(interrupted.interruptions[0])
+        else:
+            state.reject(interrupted.interruptions[0])
+        await run(agent, state, session, streamed)
+
+        for items in (model.calls[1].input, await session.get_items()):
+            assert [item["type"] for item in items if item.get("call_id") == call.call_id] == [
+                "function_call",
+                "function_call_output",
+            ]
+
+        await run(agent, "second", session, streamed)
+        client.responses.compact.assert_awaited_once()
+        assert [
+            item["type"]
+            for item in client.responses.compact.call_args.kwargs["input"]
+            if item.get("call_id") == call.call_id
+        ] == ["function_call", "function_call_output"]
+        assert await session.get_items() == [summary]
+
+        await run(agent, "third", session, streamed)
+        assert model.calls[3].input == [summary, {"role": "user", "content": "third"}]
+    finally:
+        if isinstance(backend, SQLiteSession):
+            backend.close()
+
+
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("approve", [False, True])
+async def test_pending_hosted_mcp_approval_defers_automatic_compaction(
+    streamed: bool, approve: bool
+) -> None:
+    client = MagicMock()
+    summary = {"type": "compaction", "id": "cmp-mcp", "encrypted_content": "synthetic-summary"}
+    client.responses.compact = AsyncMock(return_value=SimpleNamespace(output=[summary]))
+    backend = SQLiteSession("mcp-approval")
+    session = OpenAIResponsesCompactionSession(
+        "mcp-approval",
+        backend,
+        client=client,
+        compaction_mode="input",
+        should_trigger_compaction=lambda _: True,
+    )
+    request = McpApprovalRequest(
+        id="approval-1",
+        type="mcp_approval_request",
+        arguments="{}",
+        name="lookup",
+        server_label="synthetic",
+    )
+    model = ScriptedModel(
+        steps=[
+            get_exact_output_stream_step([request]) if streamed else [request],
+            [get_text_message("resolved")],
+            [get_text_message("next")],
+            [get_text_message("done")],
+        ]
+    )
+    agent = Agent(
+        name="worker",
+        model=model,
+        tools=[
+            HostedMCPTool(
+                tool_config={
+                    "type": "mcp",
+                    "server_label": "synthetic",
+                    "server_url": "https://synthetic.example/mcp",
+                    "require_approval": "always",
+                }
+            )
+        ],
+    )
+    try:
+        interrupted = await run(agent, "first", session, streamed)
+        assert len(interrupted.interruptions) == 1
+        client.responses.compact.assert_not_awaited()
+        assert request.model_dump(exclude_unset=True) in await session.get_items()
+
+        state = await RunState.from_json(agent, interrupted.to_state().to_json())
+        if approve:
+            state.approve(interrupted.interruptions[0])
+        else:
+            state.reject(interrupted.interruptions[0])
+        await run(agent, state, session, streamed)
+        for items in (model.calls[1].input, await session.get_items()):
+            assert request.model_dump(exclude_unset=True) in items
+            responses = [item for item in items if item.get("type") == "mcp_approval_response"]
+            assert len(responses) == 1
+            assert responses[0]["approval_request_id"] == request.id
+            assert responses[0]["approve"] is approve
+
+        await run(agent, "second", session, streamed)
+        client.responses.compact.assert_awaited_once()
+        compact_input = client.responses.compact.call_args.kwargs["input"]
+        assert request.model_dump(exclude_unset=True) in compact_input
+        assert any(
+            item.get("type") == "mcp_approval_response"
+            and item.get("approval_request_id") == request.id
+            and item.get("approve") is approve
+            for item in compact_input
+        )
+        assert await session.get_items() == [summary]
+
+        await run(agent, "third", session, streamed)
+        assert model.calls[3].input == [summary, {"role": "user", "content": "third"}]
+    finally:
+        backend.close()
 
 
 @pytest.mark.parametrize("streamed", [False, True])

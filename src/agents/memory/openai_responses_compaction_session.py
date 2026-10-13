@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
 
+from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
@@ -405,15 +406,30 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     return
                 suffix_start += boundary
                 session_items = session_items[boundary:]
-                # Keep tool/program groups intact. Pruning a broken group here would
-                # make replacement remove stored items absent from the compact input.
-                if (
-                    drop_orphan_function_calls(
-                        session_items, output_pruning_indexes=set(range(len(session_items)))
-                    )
-                    != session_items
-                ):
-                    return
+            # Keep tool/program groups intact, including pending approval calls in
+            # complete history. Wait for their outputs rather than compacting the
+            # calls away or sending an incomplete group to the compaction API.
+            if (
+                drop_orphan_function_calls(
+                    session_items, output_pruning_indexes=set(range(len(session_items)))
+                )
+                != session_items
+            ):
+                return
+            # Hosted MCP approvals use request IDs rather than tool call IDs, so
+            # the tool-group check above does not cover their request/response pair.
+            mcp_request_ids = {
+                identity.request_id
+                for item in session_items
+                if (identity := get_hosted_mcp_approval_request_identity(item)) is not None
+            }
+            mcp_response_ids = {
+                item.get("approval_request_id")
+                for item in session_items
+                if item.get("type") == "mcp_approval_response"
+            }
+            if mcp_request_ids != mcp_response_ids:
+                return
             compaction_candidate_items = select_compaction_candidate_items(session_items)
             # A bounded reload may include history omitted from the hook's initial
             # cached/default-limited view. Require approval of the actual snapshot.
