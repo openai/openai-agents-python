@@ -136,7 +136,11 @@ class ExampleScript:
     @property
     def command(self) -> list[str]:
         # Run via module path so relative imports inside examples work.
-        return [*build_uv_run_command(), "python", "-u", "-m", self.module]
+        command = build_uv_run_command()
+        if self.relpath.startswith("examples/decisions/"):
+            # These recipes need the native Decisions resource without changing the lockfile.
+            command.extend(["--with", "openai>=3.26.0,<4"])
+        return [*command, "python", "-u", "-m", self.module]
 
 
 @dataclass

@@ -13,6 +13,8 @@ uv run --with 'openai>=3.26.0,<4' python -m examples.decisions.tool_risk_gate --
 
 The dependency override supplies the native Decisions resource without modifying the repository lockfile. These commands make paid API calls. The publication tool is a simulation; it only returns text.
 
+The repository example runner (`make examples-run`) applies the same dependency override when it launches these recipes.
+
 - `classify.py` asks predicate, choice, and score questions, indexes answers by name, and uses the predicate in a blocking input guardrail. A refusal or missing scope answer blocks the run. Other questions may refuse independently.
 - `model_router.py` classifies a single text request before the run and passes the selected model to `agent.clone()`. A refusal or missing route uses the application's `powerful` fallback. API errors propagate.
 - `tool_risk_gate.py` applies an illustrative editorial policy to announcement arguments. The default mode rejects content that needs review before the tool runs. `--require-approval` instead pauses for a human decision; it does not automatically approve interruptions. Refusals require review, and API errors stop the attempted operation.
