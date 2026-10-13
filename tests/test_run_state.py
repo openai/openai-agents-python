@@ -981,7 +981,7 @@ class TestRunState:
         ]
 
         snapshot = json.loads(state.to_string())
-        assert snapshot["$schemaVersion"] == "1.20"
+        assert snapshot["$schemaVersion"] == CURRENT_SCHEMA_VERSION
         restored = await RunState.from_json(agent, snapshot)
         assert restored._last_processed_response is not None
         assert restored._last_processed_response.tool_output_guardrail_result_start == 0
@@ -9005,6 +9005,7 @@ class TestRunStateSerializationEdgeCases:
                 "1.17",
                 "1.18",
                 "1.19",
+                "1.20",
                 CURRENT_SCHEMA_VERSION,
             }
         )

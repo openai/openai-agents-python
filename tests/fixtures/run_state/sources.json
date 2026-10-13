@@ -143,6 +143,13 @@
       "note": "The unreleased held-write scenario includes the current-response boundary. The recorded 1.19 writer serializes this canonical scenario payload without interpretation; this is not a historical checkpoint from a released version.",
       "provenance": "canonical_compatibility",
       "version": "1.19"
+    },
+    {
+      "commit": "125efa029b4bfd84238bd2c4fd69c3406f802663",
+      "feature": "tool_output_guardrail_boundary",
+      "fixture": "features/v1_20_tool_output_guardrail_boundary.json",
+      "provenance": "historical_writer",
+      "version": "1.20"
     }
   ],
   "resume": {
@@ -225,6 +232,10 @@
     "1.2": {
       "commit": "74e8c1e22d7441bd42c58bcd4270937ccc2dca8c",
       "fixture": "minimal/v1_2.json"
+    },
+    "1.20": {
+      "commit": "125efa029b4bfd84238bd2c4fd69c3406f802663",
+      "fixture": "minimal/v1_20.json"
     },
     "1.3": {
       "commit": "6814a54711f591712c893f0a8be1cf56c512ae63",

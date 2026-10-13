@@ -43,6 +43,8 @@ from ._run_state_agent_identity import (
     _build_agent_identity_map,
     _build_agent_map,
     _get_ambiguous_agent_ids,
+    _has_ambiguous_hook_identities,
+    _has_legacy_hook_identity_ambiguity,
     _iter_agent_graph,
 )
 from ._tool_identity import (
@@ -242,7 +244,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.20"
+CURRENT_SCHEMA_VERSION = "1.21"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -300,6 +302,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists the pending tool output guardrail result boundary so a resumed run withholds "
         "current-response diagnostics until its terminal guardrails complete."
     ),
+    "1.21": "Makes duplicate-agent identity independent of mutable hook instance state.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -1906,12 +1909,22 @@ class RunState(Generic[TContext, TAgent]):
             A dictionary representation of the run state.
 
         Raises:
-            UserError: If required state (agent, context) is missing.
+            UserError: If required state (agent, context) is missing, or same-name agents
+                cannot be distinguished without hook instance attributes. Use unique agent
+                names before starting a persistable run in that case.
         """
         if self._current_agent is None:
             raise UserError("Cannot serialize RunState: No current agent")
         if self._context is None:
             raise UserError("Cannot serialize RunState: No context")
+
+        if self._starting_agent is not None and _has_ambiguous_hook_identities(
+            self._starting_agent
+        ):
+            raise UserError(
+                "RunState cannot distinguish same-name agents without hook instance state. "
+                "Use unique agent names before starting a persistable run."
+            )
 
         approvals_dict = self._serialize_approvals()
         tool_invocations = self._serialize_tool_invocations()
@@ -2325,6 +2338,12 @@ class RunState(Generic[TContext, TAgent]):
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
+        Hook instance attributes do not identify agents in schema 1.21 or later.
+        Same-name agents that cannot be distinguished without those attributes are
+        rejected. Older snapshots are rejected if hook state could have changed
+        their identity ordering. Use unique names before starting new persistable
+        runs; renaming agents does not repair an ambiguous existing checkpoint.
+
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
         Keep the application's MCP server configuration and ordering unchanged when resuming.
@@ -2412,6 +2431,12 @@ class RunState(Generic[TContext, TAgent]):
         Do not pass client-supplied state directly to this method. Keep the snapshot on the
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
+        Hook instance attributes do not identify agents in schema 1.21 or later.
+        Same-name agents that cannot be distinguished without those attributes are
+        rejected. Older snapshots are rejected if hook state could have changed
+        their identity ordering. Use unique names before starting new persistable
+        runs; renaming agents does not repair an ambiguous existing checkpoint.
 
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
@@ -4167,6 +4192,22 @@ async def _build_run_state_from_json(
             UserError,
         )
 
+    if (schema_major, schema_minor) < (1, 21) and _has_legacy_hook_identity_ambiguity(
+        initial_agent
+    ):
+        raise validation_error_factory(
+            "Cannot safely restore legacy duplicate-agent identities with hooks. "
+            "Start a new run with unique agent names; the saved hook ordering is unavailable.",
+            UserError,
+        )
+
+    if _has_ambiguous_hook_identities(initial_agent):
+        raise validation_error_factory(
+            "RunState cannot distinguish same-name agents without hook instance state. "
+            "Use unique agent names before starting a persistable run.",
+            UserError,
+        )
+
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
 
@@ -5529,6 +5570,14 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         ),
         "Run state agent not found in agent map",
+        (
+            "RunState cannot distinguish same-name agents without hook instance state. "
+            "Use unique agent names before starting a persistable run."
+        ),
+        (
+            "Cannot safely restore legacy duplicate-agent identities with hooks. "
+            "Start a new run with unique agent names; the saved hook ordering is unavailable."
+        ),
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
         "Invalid tool output guardrail result boundary",

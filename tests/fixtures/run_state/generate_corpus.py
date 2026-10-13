@@ -43,6 +43,7 @@ state = RunState(
 # from main either.
 RELEASED_1_18_WRITER = "ce8ae9f368e7e3e2f495fc80a0c44137e88b78c4"
 HELD_WRITE_1_19_WRITER = "9303a8f8b8a528f572582ba09743b37b9fd0735c"
+GUARDRAIL_1_20_WRITER = "125efa029b4bfd84238bd2c4fd69c3406f802663"
 
 LEGACY_CANONICAL_COMPATIBILITY_NOTE = (
     "The release-boundary schema renumbering introduced this reader version without a writer "
@@ -539,6 +540,20 @@ state._pending_session_write = {
             "interpretation; this is not a historical checkpoint from a released version."
         ),
     ),
+    Scenario(
+        "1.20",
+        GUARDRAIL_1_20_WRITER,
+        "tool_output_guardrail_boundary",
+        """
+from agents.run_internal.run_steps import ProcessedResponse
+
+state._last_processed_response = ProcessedResponse(
+    new_items=[], handoffs=[], functions=[], computer_actions=[], local_shell_calls=[],
+    shell_calls=[], apply_patch_calls=[], tools_used=[], mcp_approval_requests=[],
+    interruptions=[], tool_output_guardrail_result_start=0,
+)
+""",
+    ),
 )
 
 
@@ -583,6 +598,7 @@ MINIMAL_SCENARIOS = (
             "minimal payload it emits, not a historical checkpoint from a released version."
         ),
     ),
+    Scenario("1.20", GUARDRAIL_1_20_WRITER, "minimal", ""),
 )
 
 
