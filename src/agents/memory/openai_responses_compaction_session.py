@@ -492,7 +492,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
             previous_items = await self._get_all_underlying_session_items()
             try:
                 await self._replace_underlying_session_items(
-                    output_items=stored_output_items, previous_items=previous_items
+                    output_items=stored_output_items, previous_items=previous_items, wrapper=wrapper
                 )
             except (Exception, asyncio.CancelledError):
                 self._mutation_generation += 1
@@ -545,7 +545,32 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         *,
         output_items: list[TResponseInputItem],
         previous_items: list[TResponseInputItem],
+        wrapper: RunContextWrapper[Any] | None = None,
     ) -> None:
+        # Resolve on the immediate backend's type: transparent __getattr__ forwarding
+        # must not bypass a wrapper's storage transforms (for example encryption).
+        atomic_replace = getattr(type(self.underlying_session), "_atomic_replace_items", None)
+        if atomic_replace is not None:
+
+            async def replace_and_publish() -> bool:
+                replaced = await atomic_replace(self.underlying_session, output_items)
+                if replaced:
+                    self._deferred_response_id = None
+                    if wrapper is not None:
+                        wrapper._session_compaction_completed = True  # type: ignore[attr-defined]
+                return bool(replaced)
+
+            try:
+                # Publish the committed outcome to Runner before caller cancellation,
+                # just as the atomic snapshot replacement path does.
+                if await _await_mutation(replace_and_publish()):
+                    return
+            except (Exception, asyncio.CancelledError):
+                # The transaction may commit before cancellation is delivered.
+                self._compaction_candidate_items = None
+                self._session_items = None
+                raise
+
         # Treat clear → add as one replacement transaction. Exception and CancelledError
         # both restore previous history, and restore settlement is always drained so a
         # cancel during restore cannot leave an empty session.

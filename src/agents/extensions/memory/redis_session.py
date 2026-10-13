@@ -481,8 +481,9 @@ class RedisSession(SessionABC):
         keys: tuple[str, str, str],
         serialized_items: list[str] | None,
         completion_owned: asyncio.Event,
+        replace: bool = False,
     ) -> _PipelineAttemptOutcome:
-        """Run one watched append or clear attempt and finish its pipeline."""
+        """Run one watched append, replacement, or clear and finish its pipeline."""
         committed = False
         retryable_watch_conflict = False
         operation_error: BaseException | None = None
@@ -531,7 +532,7 @@ class RedisSession(SessionABC):
                     raise ResponseError("WRONGTYPE session messages key must contain a list")
                 # Legacy key names can overlap across session IDs. Check every
                 # key we will delete or expire under WATCH, before side effects.
-                if serialized_items is None or self._ttl is not None:
+                if serialized_items is None or replace or self._ttl is not None:
                     counter_key_type = self._key_type_name(await pipe.type(self._counter_key))
                     if counter_key_type not in ("none", "string"):
                         raise ResponseError("WRONGTYPE session counter key must contain a string")
@@ -553,10 +554,12 @@ class RedisSession(SessionABC):
                         raise ValueError("ttl is outside Redis's supported expiration range")
 
                 pipe.multi()
-                if serialized_items is None:
+                if serialized_items is None or (replace and not serialized_items):
                     batch_response_index = len(pipe.command_stack)
                     pipe.delete(*keys)
                 else:
+                    if replace:
+                        pipe.delete(*keys)
                     pipe.hset(self._session_key, "session_id", self.session_id)
                     pipe.hsetnx(self._session_key, "created_at", now)
                     batch_response_index = len(pipe.command_stack)
@@ -605,14 +608,18 @@ class RedisSession(SessionABC):
     async def _mutate_items(
         self,
         serialized_items: list[str] | None,
+        *,
+        replace: bool = False,
     ) -> None:
-        """Atomically append a batch, or clear for None, after validating key types."""
+        """Atomically append, replace, or clear after validating key types."""
         keys = (self._session_key, self._messages_key, self._counter_key)
         while True:
             pipe = self._redis.pipeline()
             completion_owned = asyncio.Event()
             attempt = asyncio.create_task(
-                self._mutate_items_attempt(pipe, keys, serialized_items, completion_owned)
+                self._mutate_items_attempt(
+                    pipe, keys, serialized_items, completion_owned, replace=replace
+                )
             )
             outcome, cancellation = await _await_pipeline_attempt(attempt, completion_owned)
 
@@ -704,6 +711,22 @@ class RedisSession(SessionABC):
                 serialized_items.append(serialized)
 
             await self._mutate_items(serialized_items)
+
+    async def _atomic_replace_items(self, items: list[TResponseInputItem]) -> bool:
+        """Replace history in one transaction; return False for subclass-owned storage.
+
+        An application-process exit leaves the old or new history, rather than a
+        clear/add gap. This does not check whether the compaction input is stale.
+        """
+        # Subclasses may transform get/add items or maintain additional indexes.
+        # Like SQLite's snapshot hook, inherited replacement must not bypass them.
+        if type(self) is not RedisSession:
+            return False
+        async with self._lock:
+            self._check_not_closed()
+            serialized_items = [await self._serialize_item(item) for item in items]
+            await self._mutate_items(serialized_items, replace=True)
+        return True
 
     async def pop_item(self) -> TResponseInputItem | None:
         """Remove and return the most recent item from the session.
