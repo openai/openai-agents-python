@@ -1372,6 +1372,7 @@ def test_run_sync_preserves_redacted_hybrid_cancellation_catchability(
     assert error.__context__ is None
     _assert_secret_absent_from_agents_traceback(error, "RUN_SYNC_HYBRID_SECRET")
     _assert_secret_absent_from_agents_traceback(error, "RUN_SYNC_INPUT_SECRET")
+    assert hybrid_error.args == ("RUN_SYNC_HYBRID_SECRET",)
 
 
 @pytest.mark.asyncio

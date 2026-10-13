@@ -183,7 +183,7 @@ def _prepare_data_redacted_error(
     *,
     trusted_error_message: str | None = None,
 ) -> BaseException:
-    """Detach payload-owned state and return a safe error for a public boundary."""
+    """Build a safe replacement and detach only the source's retry traceback."""
     error_type = type(error)
     process_control_error = _replace_data_redacted_process_control_error(error)
     if process_control_error is not None:
@@ -199,7 +199,7 @@ def _prepare_data_redacted_error(
         except BaseException:
             pass
 
-    _discard_exception_graph(error)
+    _detach_source_exception_traceback(error)
 
     safe_error: BaseException = RuntimeError(_DATA_REDACTED_ERROR_MESSAGE)
     if error_type is ModelBehaviorError:
@@ -281,133 +281,32 @@ def _copy_data_redacted_process_control_error(
 def _replace_data_redacted_process_control_error(
     error: BaseException,
 ) -> BaseException | None:
-    """Discard a process-control source and return a fresh value-free replacement."""
+    """Detach the source traceback and return a fresh process-control replacement."""
     safe_error = _copy_data_redacted_process_control_error(error)
     if safe_error is None:
         return None
-    _discard_exception_graph(error)
+    _detach_source_exception_traceback(error)
     return safe_error
 
 
-def _collect_nested_exceptions(value: object, linked: list[BaseException]) -> None:
-    """Collect exceptions reachable through exact built-in containers without callbacks."""
-    pending = [value]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if issubclass(type(current), BaseException):
-            linked.append(cast(BaseException, current))
-        elif type(current) is dict:
-            for key, item in dict.items(current):
-                pending.extend((key, item))
-        elif (
-            type(current) is list
-            or type(current) is tuple
-            or type(current) is set
-            or type(current) is frozenset
-        ):
-            pending.extend(current)
+def _detach_source_exception_traceback(error: BaseException) -> None:
+    """Bound retry tracebacks without clearing caller frames or linked exceptions.
 
-
-def _discard_exception_graph(error: BaseException) -> None:
-    """Best-effort clear discoverable state from an exception and its linked graph.
-
-    Exact built-in descriptors avoid provider-controlled attribute, descriptor, and
-    metaclass callbacks. Read-only storage such as an exception group's message
-    cannot be changed in place, so public boundaries must return a fresh error that
-    does not retain the source exception.
+    Re-raising a cached failure prepends new traceback nodes. Drop only the caught
+    root's traceback; its fields and linked exception state remain caller-owned.
+    Clearing frames can close suspended caller coroutines on Python before 3.13.
     """
-    pending = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-
-        linked: list[BaseException] = []
-        group_exceptions: tuple[BaseException, ...] | None = None
-        current_type = type(current)
-        if issubclass(current_type, BaseExceptionGroup):
-            group_exceptions = _base_exception_group_exceptions(current)
-            if group_exceptions is not None:
-                linked.extend(group_exceptions)
-        for descriptor in (
-            cast(Any, BaseException.__cause__),
-            cast(Any, BaseException.__context__),
-        ):
-            try:
-                candidate = descriptor.__get__(current, current_type)
-            except BaseException:
-                continue
-            if issubclass(type(candidate), BaseException):
-                linked.append(cast(BaseException, candidate))
-
-        try:
-            args = cast(Any, BaseException.args).__get__(current, current_type)
-            _collect_nested_exceptions(args, linked)
-        except BaseException:
-            pass
-
-        try:
-            source_traceback = cast(Any, BaseException.__traceback__).__get__(current, current_type)
-        except BaseException:
-            source_traceback = None
-        if source_traceback is not None:
-            try:
-                traceback.clear_frames(source_traceback)
-            except BaseException:
-                pass
-
-        state = _base_exception_instance_dict(current)
-        if state is not None:
-            _collect_nested_exceptions(state, linked)
-            state.clear()
-
-        current_metadata = _static_type_metadata(current_type)
-        if current_metadata is not None:
-            _, current_mro = current_metadata
-            for base in current_mro:
-                base_metadata = _static_type_metadata(base)
-                if base_metadata is None:
-                    continue
-                namespace, _ = base_metadata
-                for descriptor in namespace.values():
-                    if type(descriptor) is not types.MemberDescriptorType:
-                        continue
-                    try:
-                        value = descriptor.__get__(current, current_type)
-                        _collect_nested_exceptions(value, linked)
-                    except BaseException:
-                        pass
-                    try:
-                        descriptor.__delete__(current)
-                    except BaseException:
-                        pass
-
-        if group_exceptions is None:
-            safe_args: tuple[object, ...] = ()
-        else:
-            safe_args = (_DATA_REDACTED_ERROR_MESSAGE, group_exceptions)
-        for descriptor, value in (
-            (cast(Any, BaseException.args), safe_args),
-            (cast(Any, BaseException.__traceback__), None),
-            (cast(Any, BaseException.__cause__), None),
-            (cast(Any, BaseException.__context__), None),
-        ):
-            try:
-                descriptor.__set__(current, value)
-            except BaseException:
-                pass
-        pending.extend(linked)
+    cast(Any, BaseException.__traceback__).__set__(error, None)
 
 
 def _raise_data_redacted_error(error: BaseException) -> NoReturn:
     """Raise a detached redacted error from a frame that owns no payload data."""
-    raise error from None
+    try:
+        raise error from None
+    finally:
+        # Python attaches the caller's active exception even with ``from None``.
+        # Detach that link on our replacement, never on the caller's exception.
+        cast(Any, BaseException.__context__).__set__(error, None)
 
 
 @dataclass

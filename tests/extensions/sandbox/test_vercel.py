@@ -159,14 +159,9 @@ def _install_hostile_exception_descriptors(
         type.__setattr__(error_type, "__str__", reject_string_access)
 
 
-def _assert_base_exception_slots_cleared(error: BaseException) -> None:
-    assert cast(Any, BaseException.args).__get__(error, type(error)) == ()
-    for descriptor in (
-        cast(Any, BaseException.__traceback__),
-        cast(Any, BaseException.__cause__),
-        cast(Any, BaseException.__context__),
-    ):
-        assert descriptor.__get__(error, type(error)) is None
+def _assert_base_exception_preserved(error: BaseException, message: str) -> None:
+    assert cast(Any, BaseException.args).__get__(error, type(error)) == (message,)
+    assert cast(Any, BaseException.__traceback__).__get__(error, type(error)) is None
 
 
 class _MemorySnapshot(SnapshotBase):
@@ -1014,7 +1009,9 @@ async def test_vercel_protected_session_public_operations_redact_provider_failur
     assert exc_info.value.context == {}
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    _assert_base_exception_slots_cleared(source_error)
+    assert source_error.args == (sentinel,)
+    # The provider failure is linked from the caught SDK error, not the caught root.
+    assert source_error.__traceback__ is not None
     traceback = exc_info.value.__traceback__
     while traceback is not None:
         frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
@@ -2853,7 +2850,7 @@ async def test_vercel_s3_mount_failure_ignores_hostile_exception_descriptors(
     assert exc_info.value.retryable is None
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    _assert_base_exception_slots_cleared(provider_error)
+    _assert_base_exception_preserved(provider_error, "provider returned test-secret-key")
     assert sandbox.stop_calls == 1
 
 
@@ -2894,7 +2891,7 @@ async def test_vercel_s3_shutdown_redacts_provider_failure(
     assert "test-secret-key" not in repr(exc_info.value.context)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    _assert_base_exception_slots_cleared(provider_error)
+    _assert_base_exception_preserved(provider_error, "provider cleanup failed with test-secret-key")
     traceback = exc_info.value.__traceback__
     while traceback is not None:
         frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
@@ -2998,7 +2995,7 @@ async def test_vercel_s3_mount_cancellation_ignores_hostile_exception_descriptor
     assert type(exc_info.value) is asyncio.CancelledError
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    _assert_base_exception_slots_cleared(provider_error)
+    _assert_base_exception_preserved(provider_error, "provider cancelled with test-secret-key")
     assert sandbox.stop_calls == 1
 
 
@@ -4200,6 +4197,7 @@ async def test_vercel_direct_persist_redacts_protected_mount_provider_error(
     inner = cast(Any, session._inner)
     sentinel = "direct-vercel-persist-secret"
     source_error = RuntimeError(f"provider echoed {sentinel}")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     async def run_operation(
         _session: object,
@@ -4220,7 +4218,7 @@ async def test_vercel_direct_persist_redacts_protected_mount_provider_error(
     assert sentinel not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -4237,6 +4235,7 @@ async def test_vercel_client_delete_propagates_redacted_shutdown_failure(
     )
     sentinel = "vercel-delete-secret"
     source_error = RuntimeError(f"provider echoed {sentinel}")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     async def fail_shutdown() -> None:
         raise source_error
@@ -4249,5 +4248,5 @@ async def test_vercel_client_delete_propagates_redacted_shutdown_failure(
     assert sentinel not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None

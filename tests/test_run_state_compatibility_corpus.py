@@ -589,6 +589,7 @@ async def test_run_state_direct_base_exception_is_value_free(operation: str) -> 
     sentinel = f"RUNSTATE_{operation.upper()}_BASE_EXCEPTION_SENTINEL_42"
     payload["original_input"] = sentinel
     source_error = ProviderAbort(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     async def raise_source_error(self: Agent[Any], context: object) -> list[object]:
         _ = (self, context)
@@ -603,7 +604,7 @@ async def test_run_state_direct_base_exception_is_value_free(operation: str) -> 
         else:
             await RunState.from_string(agent, json.dumps(payload))
 
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -659,6 +660,8 @@ async def test_run_state_preserves_value_free_process_control_exceptions(
     expected_type: type[BaseException],
     expected_args: tuple[object, ...],
 ) -> None:
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
+    source_code = source_error.code if type(source_error) is SystemExit else None
     payload = json.loads((FIXTURE_ROOT / "minimal" / "v1_15.json").read_text())
     payload["context"]["context_meta"] = {
         "omitted": False,
@@ -682,10 +685,10 @@ async def test_run_state_preserves_value_free_process_control_exceptions(
     if expected_args:
         assert type(exc_info.value.args[0]) is type(expected_args[0])
     assert exc_info.value is not source_error
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
     if type(source_error) is SystemExit:
-        assert source_error.code is None
+        assert source_error.code == source_code
 
 
 async def test_run_state_rejects_a_foreign_error_with_a_copied_trusted_traceback(
@@ -702,6 +705,7 @@ async def test_run_state_rejects_a_foreign_error_with_a_copied_trusted_traceback
     source_error = UserError("Run state pending_input must be a list").with_traceback(
         trusted_exc_info.value.__traceback__
     )
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.payload = sentinel  # type: ignore[attr-defined]
 
     def raise_foreign_error(_agent: Agent[Any]) -> dict[str, Agent[Any]]:
@@ -712,8 +716,8 @@ async def test_run_state_rejects_a_foreign_error_with_a_copied_trusted_traceback
     with pytest.raises(RuntimeError, match="Error details are redacted") as exc_info:
         await RunState.from_json(Agent(name="compat-agent"), payload)
 
-    assert source_error.args == ()
-    assert source_error.__dict__ == {}
+    assert source_error.args == source_args
+    assert source_error.__dict__["payload"] == sentinel
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -725,6 +729,7 @@ async def test_run_state_rejects_a_foreign_error_with_a_forged_validation_marker
     message = "Run state pending_input must be a list"
     payload = json.loads((FIXTURE_ROOT / "minimal" / "v1_15.json").read_text())
     source_error = UserError(message)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.payload = sentinel  # type: ignore[attr-defined]
     source_error._agents_run_state_validation = (object(), message)  # type: ignore[attr-defined]
 
@@ -736,8 +741,8 @@ async def test_run_state_rejects_a_foreign_error_with_a_forged_validation_marker
     with pytest.raises(RuntimeError, match="Error details are redacted") as exc_info:
         await RunState.from_json(Agent(name="compat-agent"), payload)
 
-    assert source_error.args == ()
-    assert source_error.__dict__ == {}
+    assert source_error.args == source_args
+    assert source_error.__dict__["payload"] == sentinel
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -766,7 +771,7 @@ async def test_run_state_rejects_a_mutated_trusted_diagnostic(
         await RunState.from_json(agent, payload)
 
     assert source_error is not None
-    assert source_error.args == ()
+    assert source_error.args == (sentinel,)
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -801,7 +806,7 @@ async def test_run_state_rejects_a_diagnostic_from_the_wrong_trusted_producer(
             await RunState.from_string(agent, json.dumps(payload))
 
     assert source_error is not None
-    assert source_error.args == ()
+    assert source_error.args == ("Run state pending_input must be a list",)
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -917,7 +922,7 @@ async def test_run_state_failure_discards_exception_owned_payload(carrier: str) 
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
-async def test_run_state_failure_discards_retained_source_exception() -> None:
+async def test_run_state_failure_preserves_retained_source_exception() -> None:
     class PayloadError(Exception):
         pass
 
@@ -926,6 +931,7 @@ async def test_run_state_failure_discards_retained_source_exception() -> None:
     sentinel = "RUNSTATE_RETAINED_SOURCE_SENTINEL_42"
     payload["original_input"] = sentinel
     source_error = PayloadError("safe restoration failure")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.payload = payload  # type: ignore[attr-defined]
 
     async def raise_source_error(self: Agent[Any], context: object) -> list[object]:
@@ -938,12 +944,12 @@ async def test_run_state_failure_discards_retained_source_exception() -> None:
     with pytest.raises(RuntimeError, match="Error details are redacted"):
         await RunState.from_json(agent, payload)
 
-    assert source_error.args == ()
-    assert source_error.__dict__ == {}
+    assert source_error.args == source_args
+    assert source_error.__dict__ == {"payload": payload}
     assert source_error.__traceback__ is None
 
 
-async def test_run_state_failure_discards_retained_nested_exception() -> None:
+async def test_run_state_failure_preserves_retained_nested_exception() -> None:
     class PayloadError(Exception):
         pass
 
@@ -953,6 +959,7 @@ async def test_run_state_failure_discards_retained_nested_exception() -> None:
     child = PayloadError(sentinel)
     child.payload = {"credential": sentinel}  # type: ignore[attr-defined]
     source_error = RuntimeError("safe restoration failure", {"children": [child]})
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.payload = (child,)  # type: ignore[attr-defined]
 
     async def raise_source_error(self: Agent[Any], context: object) -> list[object]:
@@ -965,15 +972,15 @@ async def test_run_state_failure_discards_retained_nested_exception() -> None:
     with pytest.raises(RuntimeError, match="Error details are redacted"):
         await RunState.from_json(agent, payload)
 
-    assert source_error.args == ()
-    assert source_error.__dict__ == {}
+    assert source_error.args == source_args
+    assert source_error.__dict__ == {"payload": (child,)}
     assert source_error.__traceback__ is None
-    assert child.args == ()
-    assert child.__dict__ == {}
+    assert child.args == (sentinel,)
+    assert child.__dict__ == {"payload": {"credential": sentinel}}
     assert child.__traceback__ is None
 
 
-async def test_run_state_failure_discards_retained_exception_group_children() -> None:
+async def test_run_state_failure_preserves_retained_exception_group_children() -> None:
     class SlottedPayloadError(Exception):
         payload: object
         __slots__ = ("payload",)
@@ -996,15 +1003,14 @@ async def test_run_state_failure_discards_retained_exception_group_children() ->
     with pytest.raises(RuntimeError, match="Error details are redacted") as exc_info:
         await RunState.from_json(agent, payload)
 
-    assert child.args == ()
-    with pytest.raises(AttributeError):
-        _ = child.payload
-    assert source_group.args[0] == "Error details are redacted."
+    assert child.args == ("safe child",)
+    assert child.payload is payload
+    assert source_group.args[0] == sentinel
     assert source_group.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
 
-async def test_run_state_failure_discards_slots_without_metaclass_callbacks() -> None:
+async def test_run_state_failure_preserves_slots_without_metaclass_callbacks() -> None:
     descriptor_calls: list[str] = []
 
     class HostileMroDescriptor:
@@ -1030,6 +1036,7 @@ async def test_run_state_failure_discards_slots_without_metaclass_callbacks() ->
     sentinel = "RUNSTATE_HOSTILE_METACLASS_SLOT_SENTINEL_42"
     payload["original_input"] = sentinel
     source_error = SlottedPayloadError("safe restoration failure")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.payload = payload
 
     async def raise_source_error(self: Agent[Any], context: object) -> list[object]:
@@ -1043,9 +1050,8 @@ async def test_run_state_failure_discards_slots_without_metaclass_callbacks() ->
         await RunState.from_json(agent, payload)
 
     assert descriptor_calls == []
-    assert source_error.args == ()
-    with pytest.raises(AttributeError):
-        _ = source_error.payload
+    assert source_error.args == source_args
+    assert source_error.payload is payload
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -1078,6 +1084,7 @@ async def test_run_state_hidden_overwritten_slot_remains_caller_owned_without_ca
     sentinel = "RUNSTATE_HIDDEN_PROVIDER_SLOT_SENTINEL_42"
     payload["original_input"] = sentinel
     source_error = SlottedPayloadError("safe restoration failure")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.payload = payload
     original_descriptor = type.__getattribute__(SlottedPayloadError, "__dict__")["payload"]
     type.__setattr__(SlottedPayloadError, "payload", HostileDescriptor())
@@ -1094,7 +1101,7 @@ async def test_run_state_hidden_overwritten_slot_remains_caller_owned_without_ca
             await RunState.from_json(agent, payload)
 
         assert descriptor_calls == []
-        assert source_error.args == ()
+        assert source_error.args == source_args
         assert source_error.__traceback__ is None
         assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -1168,6 +1175,7 @@ async def test_run_state_from_string_non_decode_parser_failure_discards_input(
 ) -> None:
     sentinel = "RUNSTATE_NON_DECODE_PARSER_SENTINEL_42"
     source_error = RecursionError("parser nesting limit")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     def fail_to_parse(state_string: str) -> object:
         retained_input = state_string
@@ -1180,7 +1188,7 @@ async def test_run_state_from_string_non_decode_parser_failure_discards_input(
     with pytest.raises(UserError, match="Failed to parse run state JSON") as exc_info:
         await RunState.from_string(Agent(name="compat-agent"), sentinel)
 
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -1197,6 +1205,7 @@ async def test_run_state_from_string_discards_hostile_json_decode_error_descript
             return super().__getattribute__(name)
 
     source_error = HostileJSONDecodeError("invalid JSON", sentinel, 0)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     def fail_to_parse(_state_string: str) -> object:
         raise source_error
@@ -1206,8 +1215,8 @@ async def test_run_state_from_string_discards_hostile_json_decode_error_descript
     with pytest.raises(UserError, match="Failed to parse run state JSON") as exc_info:
         await RunState.from_string(Agent(name="compat-agent"), sentinel)
 
-    assert source_error.args == ()
-    assert source_error.__dict__ == {}
+    assert source_error.args == source_args
+    assert source_error.__dict__["doc"] == sentinel
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 
@@ -1225,6 +1234,8 @@ async def test_run_state_from_string_parser_preserves_value_free_process_control
     expected_type: type[BaseException],
     expected_args: tuple[object, ...],
 ) -> None:
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
+
     def fail_to_parse(_state_string: str) -> object:
         raise source_error
 
@@ -1236,7 +1247,7 @@ async def test_run_state_from_string_parser_preserves_value_free_process_control
     assert type(exc_info.value) is expected_type
     assert exc_info.value.args == expected_args
     assert exc_info.value is not source_error
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -1345,6 +1356,7 @@ async def test_run_state_does_not_trust_foreign_code_with_sdk_globals_and_filena
         )
     except UserError as error:
         source_error = error
+        source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     async def raise_source_error(self: Agent[Any], context: object) -> list[object]:
         _ = (self, context)
@@ -1356,7 +1368,7 @@ async def test_run_state_does_not_trust_foreign_code_with_sdk_globals_and_filena
     with pytest.raises(RuntimeError, match="Error details are redacted") as exc_info:
         await RunState.from_json(agent, payload)
 
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
     assert sentinel not in _redaction_observables(exc_info.value, [])
 

@@ -2894,6 +2894,7 @@ async def test_protected_structured_mount_error_preserves_safe_contract(
             cause=child_error,
             retryable=True,
         )
+        source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
         expected_type = MountCommandError
         expected_code = ErrorCode.MOUNT_FAILED
         expected_retryable = True
@@ -2903,6 +2904,7 @@ async def test_protected_structured_mount_error_preserves_safe_contract(
             context={"credential": sentinel},
             cause=child_error,
         )
+        source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
         expected_type = MountToolMissingError
         expected_code = ErrorCode.MOUNT_MISSING_TOOL
         expected_retryable = False
@@ -2939,9 +2941,9 @@ async def test_protected_structured_mount_error_preserves_safe_contract(
     assert safe_error.__cause__ is None
     assert safe_error.__context__ is None
     assert sentinel not in repr(safe_error)
-    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
+    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
     assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
-    assert child_error.args == ()
+    assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
 
 
@@ -2964,6 +2966,7 @@ async def test_protected_malformed_mount_config_error_falls_back(
         }
     )
     source_error = MountConfigError(message=sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     if invalid_state == "missing_retryable":
         del source_error.retryable
     else:
@@ -2990,7 +2993,7 @@ async def test_protected_malformed_mount_config_error_falls_back(
 
     assert type(exc_info.value) is RuntimeError
     assert sentinel not in repr(exc_info.value)
-    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
+    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
 
 
 @pytest.mark.parametrize("boundary", ["async", "sync"])
@@ -3010,6 +3013,7 @@ async def test_protected_mount_config_error_preserves_valid_structured_fields(
         }
     )
     source_error = MountConfigError(message=sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.error_code = ErrorCode.EXEC_TIMEOUT
     source_error.op = "exec"
     source_error.retryable = True
@@ -3039,7 +3043,7 @@ async def test_protected_mount_config_error_preserves_valid_structured_fields(
     assert safe_error.op == "exec"
     assert safe_error.retryable is True
     assert sentinel not in repr(safe_error)
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3061,6 +3065,7 @@ async def test_untrusted_nested_authority_owner_fails_closed_without_descriptor_
     client = _SecurityTestClient()
     cast(Any, client).state = OpaqueOwner()
     source_error = RuntimeError(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     if boundary == "async":
 
@@ -3084,7 +3089,7 @@ async def test_untrusted_nested_authority_owner_fails_closed_without_descriptor_
     assert exc_info.value is not source_error
     assert OpaqueOwner.descriptor_accessed is False
     assert sentinel not in repr(exc_info.value)
-    assert source_error.args == ()
+    assert source_error.args == source_args
 
 
 @pytest.mark.parametrize(
@@ -3171,6 +3176,7 @@ async def test_protected_structured_sandbox_error_requires_retryable_field(
         context={"secret": sentinel},
         retryable=None,
     )
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     if not retryable_present:
         del source_error.retryable
     expected_type: type[BaseException] = SandboxError if retryable_present else RuntimeError
@@ -3201,7 +3207,7 @@ async def test_protected_structured_sandbox_error_requires_retryable_field(
     else:
         assert type(safe_error) is RuntimeError
     assert sentinel not in repr(safe_error)
-    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
+    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
 
 
 @pytest.mark.asyncio
@@ -3228,6 +3234,7 @@ async def test_protected_custom_sandbox_error_falls_back_without_source_state() 
         context={"credential": sentinel},
         retryable=True,
     )
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     @redact_mount_error_data
     async def fail(*, manifest: Manifest) -> None:
@@ -3239,7 +3246,7 @@ async def test_protected_custom_sandbox_error_falls_back_without_source_state() 
 
     assert type(exc_info.value) is RuntimeError
     assert sentinel not in repr(exc_info.value)
-    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
+    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
     assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
 
 
@@ -3266,6 +3273,7 @@ async def test_protected_hostile_exception_type_cannot_escape_redaction(boundary
         pass
 
     source_error = ProviderError(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     child_error = RuntimeError(sentinel)
     source_error.__cause__ = child_error
 
@@ -3289,9 +3297,9 @@ async def test_protected_hostile_exception_type_cannot_escape_redaction(boundary
             fail_sync(manifest=manifest)
 
     assert sentinel not in repr(exc_info.value)
-    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
+    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == source_args
     assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
-    assert child_error.args == ()
+    assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
 
 
@@ -3321,6 +3329,7 @@ async def test_protected_hostile_exception_state_key_cannot_escape_redaction(
             raise RuntimeError(sentinel)
 
     source_error = RuntimeError(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     cast(dict[object, object], source_error.__dict__)[HostileKey()] = sentinel
 
     if boundary == "async":
@@ -3343,8 +3352,8 @@ async def test_protected_hostile_exception_state_key_cannot_escape_redaction(
             fail_sync(manifest=manifest)
 
     assert sentinel not in repr(exc_info.value)
-    assert source_error.args == ()
-    assert source_error.__dict__ == {}
+    assert source_error.args == source_args
+    assert list(source_error.__dict__.values()) == [sentinel]
     assert source_error.__traceback__ is None
 
 
@@ -3379,6 +3388,7 @@ async def test_protected_direct_manifest_precedes_opaque_owner_descriptors(
             raise KeyboardInterrupt(sentinel)
 
     source_error = RuntimeError(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     if boundary == "async":
 
@@ -3400,7 +3410,7 @@ async def test_protected_direct_manifest_precedes_opaque_owner_descriptors(
             fail_sync(OpaqueOwner(), manifest)
 
     assert sentinel not in repr(exc_info.value)
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3417,6 +3427,7 @@ def test_protected_mount_config_error_cannot_forge_safe_message_marker() -> None
         }
     )
     source_error = MountConfigError(message=sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     cast(Any, source_error)._agents_data_redacted = True
     cast(Any, source_error)._agents_safe_mount_validation_message = True
 
@@ -3429,7 +3440,7 @@ def test_protected_mount_config_error_cannot_forge_safe_message_marker() -> None
         fail(manifest=manifest)
 
     assert sentinel not in repr(exc.value)
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3462,8 +3473,8 @@ async def test_protected_exception_group_is_not_retained_by_safe_error() -> None
     assert safe_error.__context__ is None
     assert sentinel not in repr(safe_error)
     source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
-    assert source_args[0] == "Error details are redacted."
-    assert child_error.args == ()
+    assert source_args[0] == sentinel
+    assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
     traceback_cursor = safe_error.__traceback__
     while traceback_cursor is not None:
@@ -3474,7 +3485,7 @@ async def test_protected_exception_group_is_not_retained_by_safe_error() -> None
         traceback_cursor = traceback_cursor.tb_next
 
 
-def test_protected_exception_group_children_are_collected_without_subclass_callbacks() -> None:
+def test_protected_exception_group_children_are_preserved_without_subclass_callbacks() -> None:
     sentinel = "protected-exception-group-callback-secret"
     manifest = Manifest(
         entries={
@@ -3509,13 +3520,13 @@ def test_protected_exception_group_children_are_collected_without_subclass_callb
         fail(manifest=manifest)
 
     assert HostileGroup.callbacks == 0
-    assert child_error.args == ()
+    assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
 
 
-def test_protected_nested_exception_is_scrubbed_beside_hostile_object() -> None:
+def test_protected_nested_exception_is_preserved_beside_hostile_object() -> None:
     sentinel = "protected-nested-exception-secret"
     manifest = Manifest(
         entries={
@@ -3537,6 +3548,7 @@ def test_protected_nested_exception_is_scrubbed_beside_hostile_object() -> None:
 
     child_error = RuntimeError(sentinel)
     source_error = RuntimeError([child_error, Opaque()])
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     @redact_mount_error_data_sync
     def fail(*, manifest: Manifest) -> None:
@@ -3547,9 +3559,9 @@ def test_protected_nested_exception_is_scrubbed_beside_hostile_object() -> None:
         fail(manifest=manifest)
 
     assert sentinel not in repr(exc_info.value)
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
-    assert child_error.args == ()
+    assert child_error.args == (sentinel,)
     assert child_error.__traceback__ is None
 
 
@@ -3566,6 +3578,7 @@ def test_protected_process_control_is_replaced_without_payload(
     expected_type: type[BaseException],
     expected_args: tuple[object, ...],
 ) -> None:
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     manifest = Manifest(
         entries={
             "data": S3Mount(
@@ -3588,7 +3601,7 @@ def test_protected_process_control_is_replaced_without_payload(
     assert type(exc_info.value) is expected_type
     assert exc_info.value is not source_error
     assert exc_info.value.args == expected_args
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3634,6 +3647,7 @@ async def test_slot_backed_session_state_preserves_mount_authority_classificatio
         else {}
     )
     source_error = RuntimeError(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     class SlotBackedSession(BaseSandboxSession):
         __slots__ = ("state",)
@@ -3657,7 +3671,7 @@ async def test_slot_backed_session_state_preserves_mount_authority_classificatio
             await session.start()
 
         assert exc_info.value is not source_error
-        assert source_error.args == ()
+        assert source_error.args == source_args
         assert source_error.__traceback__ is None
     else:
         with pytest.raises(RuntimeError) as exc_info:
@@ -3671,6 +3685,7 @@ async def test_slot_backed_session_state_preserves_mount_authority_classificatio
 async def test_property_backed_session_state_fails_closed_without_descriptor_access() -> None:
     sentinel = "property-backed-session-secret"
     source_error = RuntimeError(sentinel)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     class PropertyBackedSession(BaseSandboxSession):
         state_accessed = False
@@ -3702,7 +3717,7 @@ async def test_property_backed_session_state_fails_closed_without_descriptor_acc
 
     assert exc_info.value is not source_error
     assert PropertyBackedSession.state_accessed is False
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3732,6 +3747,7 @@ async def test_protected_system_exit_uses_active_safe_status(
         }
     )
     source_error = SystemExit(construction_code)
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     source_error.code = active_code
 
     if boundary == "async":
@@ -3756,7 +3772,7 @@ async def test_protected_system_exit_uses_active_safe_status(
     assert type(exc_info.value) is SystemExit
     assert exc_info.value is not source_error
     assert exc_info.value.args == expected_args
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3852,6 +3868,7 @@ async def test_required_authority_carrier_dominates_aliased_optional_link(
         owner = client
 
     source_error = RuntimeError("protected-aliased-authority-secret")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     if boundary == "async":
 
@@ -3873,7 +3890,7 @@ async def test_required_authority_carrier_dominates_aliased_optional_link(
             fail_sync(owner)
 
     assert exc_info.value is not source_error
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 
@@ -3909,7 +3926,9 @@ async def test_operation_error_with_mount_authority_is_replaced() -> None:
     assert sentinel not in str(exc.value)
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-    assert cast(Any, BaseException.args).__get__(provider_error, type(provider_error)) == ()
+    assert cast(Any, BaseException.args).__get__(provider_error, type(provider_error)) == (
+        f"provider failed with {sentinel}",
+    )
     assert (
         cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
@@ -3956,7 +3975,7 @@ async def test_operation_error_with_implicit_broad_authority_is_replaced(
     assert sentinel not in str(exc.value)
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-    assert provider_error.args == ()
+    assert provider_error.args == (sentinel,)
     assert provider_error.__traceback__ is None
     traceback = exc.value.__traceback__
     while traceback is not None:
@@ -3966,7 +3985,7 @@ async def test_operation_error_with_implicit_broad_authority_is_replaced(
         traceback = traceback.tb_next
 
 
-def test_sync_operation_error_with_mount_authority_clears_source_arguments() -> None:
+def test_sync_operation_error_with_mount_authority_preserves_source_arguments() -> None:
     sentinel = "sync-provider-operation-secret"
     manifest = Manifest(
         entries={
@@ -3997,7 +4016,9 @@ def test_sync_operation_error_with_mount_authority_clears_source_arguments() -> 
     assert sentinel not in str(exc.value)
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-    assert cast(Any, BaseException.args).__get__(provider_error, type(provider_error)) == ()
+    assert cast(Any, BaseException.args).__get__(provider_error, type(provider_error)) == (
+        f"provider failed with {sentinel}",
+    )
     assert (
         cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
@@ -4037,7 +4058,7 @@ def test_sync_operation_error_with_implicit_broad_authority_is_replaced(
     assert sentinel not in str(exc.value)
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-    assert provider_error.args == ()
+    assert provider_error.args == (sentinel,)
     assert provider_error.__traceback__ is None
 
 
@@ -4118,7 +4139,9 @@ async def test_cancellation_with_mount_authority_preserves_redacted_cancellation
     assert sentinel not in str(exc.value)
     assert exc.value.__cause__ is None
     assert exc.value.__context__ is None
-    assert cast(Any, BaseException.args).__get__(provider_error, type(provider_error)) == ()
+    assert cast(Any, BaseException.args).__get__(provider_error, type(provider_error)) == (
+        sentinel,
+    )
     assert (
         cast(Any, BaseException.__traceback__).__get__(provider_error, type(provider_error)) is None
     )
@@ -4514,3 +4537,108 @@ def test_deserialization_rejects_malformed_entry_container_without_values() -> N
         if isinstance(module_name, str) and module_name.startswith("agents."):
             assert sentinel not in repr(traceback.tb_frame.f_locals)
         traceback = traceback.tb_next
+
+
+@pytest.mark.asyncio
+async def test_start_preserves_retained_failure_and_context_on_repeated_calls() -> None:
+    class RetainedError(Exception):
+        def __init__(self, message: str) -> None:
+            super().__init__(message)
+            self._message = message
+
+        @property
+        def message(self) -> str:
+            return self._message
+
+    saved = RetainedError("retained-start-failure")
+    saved.__cause__ = ValueError("retained-root-cause")
+    cause = saved.__cause__
+    try:
+        raise cause
+    except ValueError:
+        cause_traceback = cause.__traceback__
+    earlier = RetainedError("previously-handled-failure")
+
+    class FailingSession(BaseSandboxSession):
+        async def _ensure_backend_started(self) -> None:
+            try:
+                raise earlier
+            except RetainedError:
+                raise saved from cause
+
+    class State(SandboxSessionState):
+        type: Literal["docker"] = "docker"
+
+    FailingSession.__abstractmethods__ = frozenset()
+    session = cast(Any, FailingSession)()
+    session.state = State(
+        manifest=Manifest(
+            entries={
+                "data": S3Mount(
+                    bucket="bucket",
+                    access_key_id="example-access-key",
+                    secret_access_key="example-secret-key",
+                    mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+                )
+            }
+        ),
+        snapshot=NoopSnapshot(id="retained-failure"),
+    )
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+            await session.start()
+        assert saved.message == "retained-start-failure"
+        assert saved.args == ("retained-start-failure",)
+        assert saved.__traceback__ is None
+        assert saved.__cause__ is cause
+        assert cause.__traceback__ is cause_traceback
+        assert saved.__context__ is earlier
+        assert earlier.message == "previously-handled-failure"
+        assert cause.args == ("retained-root-cause",)
+        assert exc.value is not saved
+        assert exc.value.__cause__ is None
+        assert exc.value.__context__ is None
+        tb = exc.value.__traceback__
+        while tb is not None:
+            if tb.tb_frame.f_globals.get("__name__", "").startswith("agents."):
+                assert saved not in tb.tb_frame.f_locals.values()
+                assert "example-secret-key" not in repr(tb.tb_frame.f_locals)
+            tb = tb.tb_next
+
+
+@pytest.mark.parametrize("boundary", ["async", "sync"])
+@pytest.mark.asyncio
+async def test_protected_failure_detaches_ambient_caller_context(boundary: str) -> None:
+    manifest = Manifest(
+        entries={
+            "data": S3Mount(
+                bucket="bucket",
+                access_key_id="access-key",
+                secret_access_key="mount-secret",
+                mount_strategy=DockerVolumeMountStrategy(driver="rclone"),
+            )
+        }
+    )
+    saved = RuntimeError("saved-provider-secret")
+    earlier = ValueError("earlier-caller-secret")
+
+    @redact_mount_error_data
+    async def fail(*, manifest: Manifest) -> None:
+        raise saved
+
+    @redact_mount_error_data_sync
+    def fail_sync(*, manifest: Manifest) -> None:
+        raise saved
+
+    try:
+        raise earlier
+    except ValueError:
+        with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+            if boundary == "async":
+                await fail(manifest=manifest)
+            else:
+                fail_sync(manifest=manifest)
+        assert exc.value.__context__ is None
+        assert exc.value.__cause__ is None
+        assert saved.args == ("saved-provider-secret",)
+        assert earlier.args == ("earlier-caller-secret",)

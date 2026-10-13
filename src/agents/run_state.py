@@ -68,6 +68,7 @@ from .agent import Agent
 from .exceptions import (
     ModelBehaviorError,
     UserError,
+    _detach_source_exception_traceback,
     _mark_error_data_redacted,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
@@ -1126,7 +1127,7 @@ class RunState(Generic[TContext, TAgent]):
                     )
                 )
         except Exception as error:
-            _prepare_data_redacted_error(error)
+            _detach_source_exception_traceback(error)
             copy_error = UserError(
                 "Cannot safely copy pending tool approvals. Ensure each interruption uses a "
                 "supported tool call or contains only JSON-compatible mapping data."
@@ -2377,7 +2378,7 @@ class RunState(Generic[TContext, TAgent]):
             state_json = json.loads(state_string)
         except json.JSONDecodeError as error:
             state_string = "<redacted>"
-            _prepare_data_redacted_error(error)
+            _detach_source_exception_traceback(error)
             parse_error = UserError("Failed to parse run state JSON")
         except BaseException as error:
             state_string = "<redacted>"

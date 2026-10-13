@@ -2837,6 +2837,7 @@ async def test_docker_direct_persist_redacts_protected_mount_provider_error(
 ) -> None:
     sentinel = "direct-docker-persist-secret"
     source_error = docker.errors.APIError(f"provider echoed {sentinel}")
+    source_args = source_error.args
     manifest = Manifest(
         entries={
             "data": S3Mount(
@@ -2875,8 +2876,9 @@ async def test_docker_direct_persist_redacts_protected_mount_provider_error(
     assert sentinel not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    assert source_error.args == ()
-    assert source_error.__traceback__ is None
+    assert source_error.args == source_args
+    # The provider failure is a cause of the caught SDK error and remains untouched.
+    assert source_error.__traceback__ is not None
 
 
 @pytest.mark.asyncio
@@ -2886,6 +2888,7 @@ async def test_docker_delete_redacts_first_failure_and_settles_all_volumes(
     session_id = uuid.UUID("12345678-1234-5678-1234-567812345678")
     sentinel = "delete-boundary-secret"
     source_error = RuntimeError(f"shutdown echoed {sentinel}")
+    source_args = source_error.args
     secondary_error = RuntimeError("secondary container removal failed")
     manifest = Manifest(
         entries={
@@ -2948,7 +2951,7 @@ async def test_docker_delete_redacts_first_failure_and_settles_all_volumes(
     assert sentinel not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
     assert secondary_error.args == ("secondary container removal failed",)
     assert container.remove_calls == [{}]

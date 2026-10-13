@@ -5090,6 +5090,7 @@ async def test_modal_direct_persist_redacts_protected_mount_provider_error(
     modal_module, _create_calls, _registry_tags = _load_modal_module(monkeypatch)
     sentinel = "direct-modal-persist-secret"
     source_error = RuntimeError(f"provider echoed {sentinel}")
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
     state = modal_module.ModalSandboxSessionState(
         manifest=Manifest(
             root="/workspace",
@@ -5117,7 +5118,7 @@ async def test_modal_direct_persist_redacts_protected_mount_provider_error(
     assert sentinel not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
     assert exc_info.value.__context__ is None
-    assert source_error.args == ()
+    assert source_error.args == source_args
     assert source_error.__traceback__ is None
 
 

@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from ..exceptions import (
     _base_exception_instance_dict,
-    _discard_exception_graph,
+    _detach_source_exception_traceback,
     _exact_string_state_entry,
     _exact_string_state_value,
     _is_error_data_redacted,
@@ -487,7 +487,7 @@ class _InvalidRawMountManifestError(ValueError):
 def redact_mount_error_data(
     function: Callable[_P, Coroutine[Any, Any, _T]],
 ) -> Callable[_P, Coroutine[Any, Any, _T]]:
-    """Replace failures after clearing async frames that handled mount authority."""
+    """Replace protected failures without retaining their source exception graph."""
 
     @wraps(function)
     async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -518,7 +518,7 @@ def _redact_mount_error_data_sync(
     *,
     preserve_value_error_type: bool,
 ) -> Callable[_P, _T]:
-    """Replace failures after clearing sync frames that handled mount authority."""
+    """Replace protected failures without retaining their source exception graph."""
 
     @wraps(function)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
@@ -549,7 +549,7 @@ def _redact_mount_error_data_sync(
 
 
 def redact_mount_error_data_sync(function: Callable[_P, _T]) -> Callable[_P, _T]:
-    """Replace failures after clearing sync frames that handled mount authority."""
+    """Replace protected failures without retaining their source exception graph."""
 
     return _redact_mount_error_data_sync(function, preserve_value_error_type=False)
 
@@ -660,8 +660,8 @@ def _replace_mount_operation_error(error: BaseException) -> RuntimeError:
 
 
 def discard_mount_source_exception(error: BaseException) -> None:
-    """Clear source frames without consulting provider-defined exception attributes."""
-    _discard_exception_graph(error)
+    """Detach only the source traceback, without clearing frames or linked errors."""
+    _detach_source_exception_traceback(error)
 
 
 def _url_contains_inline_authority(value: object) -> bool:

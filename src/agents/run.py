@@ -374,7 +374,7 @@ class Runner:
         session = cast(Any, None)
         runner = cast(Any, None)
         assert redacted_error is not None
-        raise redacted_error from None
+        _raise_data_redacted_error(redacted_error)
 
     @classmethod
     def run_sync(
@@ -477,7 +477,7 @@ class Runner:
         session = cast(Any, None)
         runner = cast(Any, None)
         assert redacted_error is not None
-        raise redacted_error from None
+        _raise_data_redacted_error(redacted_error)
 
     @classmethod
     def run_streamed(
@@ -618,7 +618,7 @@ class AgentRunner:
         cast(dict[str, Any], kwargs).clear()
         assert redacted_error is not None
         _detach_data_redacted_error_traceback(redacted_error)
-        raise redacted_error from None
+        _raise_data_redacted_error(redacted_error)
 
     async def _run_impl(
         self,
@@ -2424,6 +2424,7 @@ class AgentRunner:
                 _detach_data_redacted_error_traceback(redacted_source)
                 redacted_error = redacted_source
 
+        redacted_source = None
         self = cast(Any, None)
         starting_agent = cast(Any, None)
         input = cast(Any, None)
