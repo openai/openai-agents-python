@@ -808,18 +808,32 @@ async def check_for_final_output_from_tools(
     raise UserError(f"Invalid tool_use_behavior: {agent.tool_use_behavior}")
 
 
-def _snapshot_output_value(value: Any) -> Any:
+def _snapshot_output_value(value: Any, memo: dict[int, Any] | None = None) -> Any:
     """Detach live tool data without applying JSON conversion or copying opaque values."""
+    if memo is None:
+        memo = {}
+    identity = id(value)
+    if identity in memo:
+        return memo[identity]
     if type(value) is dict:
-        return {key: _snapshot_output_value(item) for key, item in value.items()}
+        mapping: dict[Any, Any] = {}
+        memo[identity] = mapping
+        mapping.update((key, _snapshot_output_value(item, memo)) for key, item in value.items())
+        return mapping
     if type(value) is list:
-        return [_snapshot_output_value(item) for item in value]
+        sequence: list[Any] = []
+        memo[identity] = sequence
+        sequence.extend(_snapshot_output_value(item, memo) for item in value)
+        return sequence
     if type(value) is tuple:
-        return tuple(_snapshot_output_value(item) for item in value)
+        items = tuple(_snapshot_output_value(item, memo) for item in value)
+        # A backlink through a mutable child may already have copied this tuple.
+        return memo.setdefault(identity, items)
     if type(value) in (ToolOutputText, ToolOutputImage, ToolOutputFileContent):
         # SDK structured output models contain immutable scalar fields. A shallow
         # model copy preserves the Python type without invoking arbitrary deepcopy hooks.
-        return value.model_copy()
+        memo[identity] = value.model_copy()
+        return memo[identity]
     return value
 
 

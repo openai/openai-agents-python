@@ -1254,3 +1254,66 @@ async def test_approved_live_snapshot_preserves_structured_output_type(streaming
         assert effects == ["ticket"]
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+async def test_cyclic_completed_output_preserves_selected_failure_and_history(streaming, wrapped):
+    completed = asyncio.Event()
+    value: dict[str, Any] = {"status": ["created"]}
+    tool_output = (value,) if wrapped else value
+    value["children"] = [{"parent": tool_output}]
+
+    @tool
+    async def create_ticket() -> Any:
+        return tool_output
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await completed.wait()
+        raise ValueError("selected sibling failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool.name == "create_ticket":
+                completed.set()
+
+    agent = Agent(
+        name="cyclic-result",
+        tools=[create_ticket, fail],
+        model=ScriptedModel(
+            [
+                [
+                    function_call("create_ticket", {}, call_id="ticket"),
+                    function_call("fail", {}, call_id="fail"),
+                ]
+            ]
+        ),
+    )
+    session = SQLiteSession("cyclic-result")
+    try:
+        with pytest.raises(UserError, match="selected sibling failure") as caught:
+            if streaming:
+                result = Runner.run_streamed(agent, "go", session=session, hooks=Hooks())
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, "go", session=session, hooks=Hooks())
+        assert caught.value.run_data is not None
+        output = next(
+            i for i in caught.value.run_data.new_items if i.type == "tool_call_output_item"
+        )
+        snapshot = output.output
+        assert snapshot is not tool_output
+        copied_value = snapshot[0] if wrapped else snapshot
+        assert copied_value["children"][0]["parent"] is snapshot
+        value["status"].append("late mutation")
+        assert copied_value["status"] == ["created"]
+        assert _shape(await session.get_items()) == [
+            "user",
+            "function_call:ticket",
+            "function_call_output:ticket",
+        ]
+    finally:
+        session.close()
