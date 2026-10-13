@@ -1880,10 +1880,12 @@ class AgentRunner:
                                 except BaseException as error:
                                     try:
                                         if tool_error_selected and not parent_cancelled:
-                                            # Admission and failure ownership are independent.
-                                            # Settle the verdict, then retrieve the selected
-                                            # error even if its task has already completed.
-                                            await asyncio.wait((guardrail_task,))
+                                            # Finish the selected failure's cleanup first so
+                                            # publication has collected any completed outputs.
+                                            # Admission matters only when there is history to keep.
+                                            await asyncio.wait((model_task,))
+                                            if partial_tool_results:
+                                                await asyncio.wait((guardrail_task,))
                                             await model_task
                                         if partial_tool_results and (
                                             not isinstance(error, asyncio.CancelledError)

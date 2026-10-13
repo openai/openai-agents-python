@@ -1156,3 +1156,47 @@ async def test_approved_mutable_snapshot_recovery_uses_publication_value(streami
         if extracting.is_set():
             await asyncio.wait_for(settled.wait(), 2)
         session.close()
+
+
+@pytest.mark.asyncio
+async def test_nonstreamed_tool_failure_without_output_cancels_pending_input_guardrail():
+    guardrail_started = asyncio.Event()
+    guardrail_cancelled = asyncio.Event()
+    release = asyncio.Event()
+
+    @input_guardrail
+    async def slow_check(context, agent, input):
+        guardrail_started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            guardrail_cancelled.set()
+            raise
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=False)
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await guardrail_started.wait()
+        raise ValueError("primary tool failure without output")
+
+    agent = Agent(
+        name="no-partial-history",
+        tools=[fail],
+        input_guardrails=[slow_check],
+        model=ScriptedModel([[function_call("fail", {}, call_id="failed")]]),
+    )
+    session = SQLiteSession("no-partial-history")
+    task = asyncio.create_task(Runner.run(agent, "go", session=session))
+    try:
+        with pytest.raises(UserError, match="primary tool failure without output") as caught:
+            await asyncio.wait_for(task, timeout=2)
+        assert guardrail_cancelled.is_set()
+        assert caught.value.run_data is not None
+        assert caught.value.run_data.new_items == []
+        assert _shape(await session.get_items()) == ["user"]
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        session.close()
