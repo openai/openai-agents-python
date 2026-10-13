@@ -364,7 +364,7 @@ class RedisSession(SessionABC):
         self,
         session_id: str,
         *,
-        redis_client: Redis,
+        redis_client: Redis | RedisCluster,
         key_prefix: str = "agents:session",
         ttl: int | None = None,
         session_settings: SessionSettings | dict[str, Any] | None = None,
@@ -373,8 +373,10 @@ class RedisSession(SessionABC):
 
         Args:
             session_id (str): Unique identifier for the conversation.
-            redis_client (Redis[bytes]): A pre-configured standalone Redis async client.
-                RedisCluster clients are not supported.
+            redis_client (Redis | RedisCluster): A pre-configured Redis async client.
+                RedisCluster clients support reading and popping history, but built-in
+                append, clear, and compaction replacement require standalone Redis.
+                Subclasses may provide their own cluster-compatible write methods.
             key_prefix (str, optional): Prefix for Redis keys to avoid collisions.
                 Defaults to "agents:session".
             ttl (int | None, optional): Time-to-live in seconds for session data.
@@ -383,12 +385,6 @@ class RedisSession(SessionABC):
             session_settings (SessionSettings | None): Session configuration settings including
                 default limit for retrieving items. If None, uses default SessionSettings().
         """
-        if isinstance(redis_client, RedisCluster):
-            raise TypeError(
-                "RedisSession does not support RedisCluster clients. "
-                "Use redis.asyncio.Redis connected to a standalone Redis server, "
-                "or implement a custom Session backend for Redis Cluster."
-            )
         self.session_id = session_id
         self.session_settings = (
             coerce_session_settings(session_settings)
@@ -612,6 +608,12 @@ class RedisSession(SessionABC):
         replace: bool = False,
     ) -> None:
         """Atomically append, replace, or clear after validating key types."""
+        if isinstance(self._redis, RedisCluster):
+            raise TypeError(
+                "RedisSession does not support transactions with RedisCluster clients. "
+                "Use redis.asyncio.Redis connected to a standalone Redis server, "
+                "or implement a custom Session backend for Redis Cluster."
+            )
         keys = (self._session_key, self._messages_key, self._counter_key)
         while True:
             pipe = self._redis.pipeline()

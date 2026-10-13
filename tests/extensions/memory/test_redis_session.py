@@ -6,7 +6,7 @@ import sys
 import time
 from collections.abc import Awaitable
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -111,27 +111,108 @@ async def _create_test_session(session_id: str | None = None) -> RedisSession:
     return session
 
 
-async def test_redis_session_rejects_cluster_client_before_io(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("operation", ["add", "clear", "compact"])
+async def test_redis_session_rejects_cluster_transactions_before_pipeline(
+    monkeypatch: pytest.MonkeyPatch, operation: str
+):
+    from types import SimpleNamespace
+
     from redis.asyncio.cluster import RedisCluster
+
+    from agents.memory import OpenAIResponsesCompactionSession
 
     client = RedisCluster(host="localhost", port=6379)
     initialize = AsyncMock(side_effect=AssertionError("must not connect"))
     close = AsyncMock(side_effect=AssertionError("caller owns the client"))
+    pipeline = Mock(side_effect=AssertionError("must not create a pipeline"))
+    items: list[TResponseInputItem] = [{"role": "user", "content": "saved history"}]
     try:
         with monkeypatch.context() as patch:
             patch.setattr(client, "initialize", initialize)
             patch.setattr(client, "aclose", close)
+            patch.setattr(client, "pipeline", pipeline)
+            patch.setattr(client, "lrange", AsyncMock(return_value=[json.dumps(items[0])]))
+            session = RedisSession("cluster-session", redis_client=client)
+            await session.add_items([])
             with pytest.raises(
-                TypeError, match="RedisSession does not support RedisCluster"
+                TypeError, match="RedisSession does not support transactions with RedisCluster"
             ) as exc:
-                RedisSession("cluster-session", redis_client=cast("Redis", client))
+                if operation == "add":
+                    await session.add_items(items)
+                elif operation == "clear":
+                    await session.clear_session()
+                else:
+                    compact = AsyncMock(return_value=SimpleNamespace(usage=None, output=items))
+                    compaction = OpenAIResponsesCompactionSession(
+                        session.session_id,
+                        session,
+                        client=cast(
+                            Any, SimpleNamespace(responses=SimpleNamespace(compact=compact))
+                        ),
+                        compaction_mode="input",
+                    )
+                    await compaction.run_compaction({"force": True})
 
             assert "redis.asyncio.Redis connected to a standalone Redis server" in str(exc.value)
             assert "custom Session backend" in str(exc.value)
+            await session.close()
+            pipeline.assert_not_called()
             initialize.assert_not_called()
             close.assert_not_called()
     finally:
         await client.aclose()
+
+
+@pytest.mark.parametrize("custom_writes", [False, True])
+async def test_redis_cluster_reads_and_subclass_writes(
+    monkeypatch: pytest.MonkeyPatch, custom_writes: bool
+):
+    if not USE_FAKE_REDIS:
+        pytest.skip("This test requires fakeredis")
+
+    from redis.asyncio.cluster import RedisCluster
+
+    class CustomRedisSession(RedisSession):
+        async def add_items(self, items: list[TResponseInputItem]) -> None:
+            if items:
+                await self._redis.rpush(self._messages_key, *(json.dumps(item) for item in items))
+
+        async def clear_session(self) -> None:
+            await self._redis.delete(self._messages_key)
+
+    client = RedisCluster(host="localhost", port=6379)
+    storage = fakeredis.aioredis.FakeRedis()
+    items: list[TResponseInputItem] = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+    ]
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(client, "initialize", AsyncMock(side_effect=AssertionError("no network")))
+            close = AsyncMock(side_effect=AssertionError("caller owns the client"))
+            patch.setattr(client, "aclose", close)
+            for command in ("lrange", "rpop", "rpush", "delete"):
+                patch.setattr(client, command, getattr(storage, command))
+            session_type = CustomRedisSession if custom_writes else RedisSession
+            session = session_type("cluster-history", redis_client=client)
+            if custom_writes:
+                await session.add_items(items)
+            else:
+                await storage.rpush(
+                    "agents:session:cluster-history:messages", *(json.dumps(item) for item in items)
+                )
+            assert await session.get_items() == items
+            assert await session.get_items(limit=1) == items[-1:]
+            assert await session.pop_item() == items[-1]
+            await session.close()
+            close.assert_not_called()
+            assert await session.get_items() == items[:1]
+            if custom_writes:
+                await session.clear_session()
+                assert await session.get_items() == []
+    finally:
+        await client.aclose()
+        await storage.aclose()
 
 
 async def test_redis_session_direct_ops():
