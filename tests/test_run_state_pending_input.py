@@ -25,7 +25,7 @@ from agents.usage import Usage
 
 from .model_test_helpers import get_exact_output_stream_step
 from .test_computer_tool_lifecycle import FakeComputer
-from .test_responses import get_function_tool_call, get_text_message
+from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
 
 
@@ -403,9 +403,12 @@ async def test_interruption_without_guaranteed_next_model_rejects_input(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streamed", [False, True])
 @pytest.mark.parametrize("serialized", [False, True])
-@pytest.mark.parametrize("stop_name", ["finish", "workflow.finish", "unrelated"])
+@pytest.mark.parametrize(
+    "stop_name,has_handoff",
+    [("finish", False), ("workflow.finish", False), ("unrelated", False), ("finish", True)],
+)
 async def test_completed_stop_sibling_controls_pending_input(
-    streamed: bool, serialized: bool, stop_name: str
+    streamed: bool, serialized: bool, stop_name: str, has_handoff: bool
 ) -> None:
     calls: list[str] = []
 
@@ -419,11 +422,14 @@ async def test_completed_stop_sibling_controls_pending_input(
         calls.append("protected")
         return "Approved"
 
-    model = ScriptedModel(
-        steps=[
+    model = ScriptedModel()
+    delegate = Agent(name="delegate", model=model)
+    model.extend(
+        [
             [
                 get_function_tool_call("finish", "{}", "finish-call", namespace="workflow"),
                 get_function_tool_call("protected_tool", "{}", "protected-call"),
+                *([get_handoff_tool_call(delegate)] if has_handoff else []),
             ],
             [get_text_message("Continued")],
         ]
@@ -436,6 +442,7 @@ async def test_completed_stop_sibling_controls_pending_input(
             protected_tool,
         ],
         tool_use_behavior={"stop_at_tool_names": [stop_name]},
+        handoffs=[delegate] if has_handoff else [],
     )
 
     async def run(input: str | RunState[Any]) -> Any:
@@ -452,7 +459,8 @@ async def test_completed_stop_sibling_controls_pending_input(
         state = await RunState.from_string(agent, state.to_string())
     assert calls == ["finish"]
     before = state.to_json()
-    if stop_name == "unrelated":
+    continues = stop_name == "unrelated" or has_handoff
+    if continues:
         state.add_input("Late input")
     else:
         with pytest.raises(UserError, match="tool result may end the run"):
@@ -463,8 +471,9 @@ async def test_completed_stop_sibling_controls_pending_input(
     resumed = await run(state)
     assert calls == ["finish", "protected"]
     assert state.pending_input == []
-    if stop_name == "unrelated":
+    if continues:
         assert resumed.final_output == "Continued"
+        assert resumed.last_agent is (delegate if has_handoff else agent)
         assert len(model.calls) == 2
         model_input = cast(list[TResponseInputItem], model.calls[-1].input)
         assert [_message_text(item) for item in model_input].count("Late input") == 1

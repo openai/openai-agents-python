@@ -1079,7 +1079,11 @@ class RunState(Generic[TContext, TAgent]):
                 if item.tool_name is not None
             }
             # Completed siblings also participate in the resumed turn's final-output decision.
-            if self._last_processed_response is not None:
+            # A pending handoff takes precedence and continues with the receiving agent instead.
+            if (
+                self._last_processed_response is not None
+                and not self._last_processed_response.handoffs
+            ):
                 for function_run in self._last_processed_response.functions:
                     response_tool_names.add(function_run.function_tool.name)
                     response_tool_names.add(function_run.function_tool.qualified_name)
