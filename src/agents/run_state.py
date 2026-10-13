@@ -43,6 +43,7 @@ from ._run_state_agent_identity import (
     _build_agent_identity_map,
     _build_agent_map,
     _get_ambiguous_agent_ids,
+    _has_legacy_hook_identity_ambiguity,
     _iter_agent_graph,
 )
 from ._tool_identity import (
@@ -242,7 +243,7 @@ def _default_run_state_validation_error(
 # 3. to_json() always emits CURRENT_SCHEMA_VERSION.
 # 4. Forward compatibility is intentionally fail-fast (older SDKs reject newer or unsupported
 #    versions).
-CURRENT_SCHEMA_VERSION = "1.20"
+CURRENT_SCHEMA_VERSION = "1.21"
 _PROGRAMMATIC_TOOL_CALLING_MIN_SCHEMA_VERSION = "1.13"
 _HOSTED_MCP_APPROVALS_MIN_SCHEMA_VERSION = "1.14"
 _CURRENT_RESPONSE_OWNERSHIP_MIN_SCHEMA_VERSION = "1.17"
@@ -300,6 +301,7 @@ SCHEMA_VERSION_SUMMARIES: dict[str, str] = {
         "Persists the pending tool output guardrail result boundary so a resumed run withholds "
         "current-response diagnostics until its terminal guardrails complete."
     ),
+    "1.21": "Makes duplicate-agent identity independent of mutable hook instance state.",
 }
 SUPPORTED_SCHEMA_VERSIONS = frozenset(SCHEMA_VERSION_SUMMARIES)
 
@@ -2322,6 +2324,10 @@ class RunState(Generic[TContext, TAgent]):
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
 
+        Duplicate non-root agent names with hooks require schema 1.21 or later.
+        Older snapshots omit the hook state that determined their identity ordering,
+        so they cannot be restored safely. Start a new run with unique agent names.
+
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
         Keep the application's MCP server configuration and ordering unchanged when resuming.
@@ -2409,6 +2415,10 @@ class RunState(Generic[TContext, TAgent]):
         Do not pass client-supplied state directly to this method. Keep the snapshot on the
         server and apply authorized approval decisions to that server-owned state instead.
         Neither `context_override` nor `strict_context` verifies snapshot integrity.
+
+        Duplicate non-root agent names with hooks require schema 1.21 or later.
+        Older snapshots omit the hook state that determined their identity ordering,
+        so they cannot be restored safely. Start a new run with unique agent names.
 
         Executing pending local MCP calls requires recipient bindings written by schema 1.18
         or later.
@@ -4161,6 +4171,15 @@ async def _build_run_state_from_json(
             UserError,
         )
 
+    if (schema_major, schema_minor) < (1, 21) and _has_legacy_hook_identity_ambiguity(
+        initial_agent
+    ):
+        raise validation_error_factory(
+            "Cannot safely restore legacy duplicate-agent identities with hooks. "
+            "Start a new run with unique agent names; the saved hook ordering is unavailable.",
+            UserError,
+        )
+
     agent_identity_map = _build_agent_identity_map(initial_agent)
     agent_map = _build_agent_map(initial_agent)
 
@@ -5521,6 +5540,10 @@ _TRUSTED_RUN_STATE_ERROR_MESSAGES = frozenset(
             f"New snapshots are written as version {CURRENT_SCHEMA_VERSION}."
         ),
         "Run state agent not found in agent map",
+        (
+            "Cannot safely restore legacy duplicate-agent identities with hooks. "
+            "Start a new run with unique agent names; the saved hook ordering is unavailable."
+        ),
         "Run state pending_input must be a list",
         "Run state pending Session write is invalid",
         "Invalid tool output guardrail result boundary",

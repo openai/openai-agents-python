@@ -375,7 +375,9 @@ def _agent_identity_signature(agent: Agent[Any]) -> str:
         "model": _normalize_identity_value(getattr(agent, "model", None)),
         "model_settings": _normalize_identity_value(getattr(agent, "model_settings", None)),
         "mcp_config": _normalize_capability_identity_value(getattr(agent, "mcp_config", None)),
-        "hooks": _normalize_capability_identity_value(getattr(agent, "hooks", None)),
+        # Hook instances carry lifecycle state (for example event counters). Only
+        # their type is configuration that survives reconstructing the graph.
+        "hooks": _identity_type_name(agent.hooks) if agent.hooks is not None else None,
         "input_guardrails": sorted(
             _stable_identity_text(_normalize_capability_identity_value(guardrail))
             for guardrail in getattr(agent, "input_guardrails", [])
@@ -442,6 +444,19 @@ def _get_ambiguous_agent_ids(initial_agent: Agent[Any]) -> set[int]:
         )
         groups.setdefault((agent.name, priority, signature), []).append(id(agent))
     return {agent_id for group in groups.values() if len(group) > 1 for agent_id in group}
+
+
+def _has_legacy_hook_identity_ambiguity(initial_agent: Agent[Any]) -> bool:
+    """Whether old ordinal identities could depend on unrecorded hook state."""
+    groups: dict[str, list[Agent[Any]]] = {}
+    for agent in _iter_agent_graph(initial_agent):
+        # Root priority is independent of its signature and always sorts first.
+        if agent is not initial_agent:
+            groups.setdefault(agent.name, []).append(agent)
+    return any(
+        len(group) > 1 and any(agent.hooks is not None for agent in group)
+        for group in groups.values()
+    )
 
 
 def _build_agent_identity_map(initial_agent: Agent[Any]) -> dict[str, Agent[Any]]:
