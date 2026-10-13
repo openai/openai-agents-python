@@ -199,7 +199,7 @@ def _prepare_data_redacted_error(
         except BaseException:
             pass
 
-    _discard_exception_graph(error)
+    _clear_exception_graph_frames(error)
 
     safe_error: BaseException = RuntimeError(_DATA_REDACTED_ERROR_MESSAGE)
     if error_type is ModelBehaviorError:
@@ -281,11 +281,11 @@ def _copy_data_redacted_process_control_error(
 def _replace_data_redacted_process_control_error(
     error: BaseException,
 ) -> BaseException | None:
-    """Discard a process-control source and return a fresh value-free replacement."""
+    """Release source frames and return a fresh value-free process-control replacement."""
     safe_error = _copy_data_redacted_process_control_error(error)
     if safe_error is None:
         return None
-    _discard_exception_graph(error)
+    _clear_exception_graph_frames(error)
     return safe_error
 
 
@@ -312,13 +312,13 @@ def _collect_nested_exceptions(value: object, linked: list[BaseException]) -> No
             pending.extend(current)
 
 
-def _discard_exception_graph(error: BaseException) -> None:
-    """Best-effort clear discoverable state from an exception and its linked graph.
+def _clear_exception_graph_frames(error: BaseException) -> None:
+    """Release completed frames without mutating caller-owned exception state.
 
-    Exact built-in descriptors avoid provider-controlled attribute, descriptor, and
-    metaclass callbacks. Read-only storage such as an exception group's message
-    cannot be changed in place, so public boundaries must return a fresh error that
-    does not retain the source exception.
+    Sources and linked exceptions may be retained by the caller for later handling.
+    Preserve their arguments, attributes, slots and links; public boundaries must
+    instead raise fresh errors outside the source handler and drop their own source
+    references. Exact built-in descriptors avoid provider-controlled callbacks.
     """
     pending = [error]
     seen: set[int] = set()
@@ -365,7 +365,6 @@ def _discard_exception_graph(error: BaseException) -> None:
         state = _base_exception_instance_dict(current)
         if state is not None:
             _collect_nested_exceptions(state, linked)
-            state.clear()
 
         current_metadata = _static_type_metadata(current_type)
         if current_metadata is not None:
@@ -383,31 +382,17 @@ def _discard_exception_graph(error: BaseException) -> None:
                         _collect_nested_exceptions(value, linked)
                     except BaseException:
                         pass
-                    try:
-                        descriptor.__delete__(current)
-                    except BaseException:
-                        pass
-
-        if group_exceptions is None:
-            safe_args: tuple[object, ...] = ()
-        else:
-            safe_args = (_DATA_REDACTED_ERROR_MESSAGE, group_exceptions)
-        for descriptor, value in (
-            (cast(Any, BaseException.args), safe_args),
-            (cast(Any, BaseException.__traceback__), None),
-            (cast(Any, BaseException.__cause__), None),
-            (cast(Any, BaseException.__context__), None),
-        ):
-            try:
-                descriptor.__set__(current, value)
-            except BaseException:
-                pass
         pending.extend(linked)
 
 
 def _raise_data_redacted_error(error: BaseException) -> NoReturn:
     """Raise a detached redacted error from a frame that owns no payload data."""
-    raise error from None
+    try:
+        raise error from None
+    finally:
+        # Python attaches the caller's active exception even with ``from None``.
+        # Detach that link on our replacement, never on the caller's exception.
+        cast(Any, BaseException.__context__).__set__(error, None)
 
 
 @dataclass

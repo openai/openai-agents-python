@@ -273,8 +273,10 @@ def _assert_mount_error_redacted(
     assert sentinel not in str(error)
     assert error.__cause__ is None
     assert error.__context__ is None
-    assert cast(Any, BaseException.args).__get__(source_error, type(source_error)) == ()
-    assert cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is None
+    assert error is not source_error
+    assert (
+        cast(Any, BaseException.__traceback__).__get__(source_error, type(source_error)) is not None
+    )
     traceback = error.__traceback__
     while traceback is not None:
         frame_path = Path(traceback.tb_frame.f_code.co_filename).as_posix()
@@ -4460,6 +4462,7 @@ def test_process_manifest_preserves_value_free_process_control_with_authority(
     source_error: BaseException = (
         SystemExit(sentinel) if error_kind == "system_exit" else KeyboardInterrupt(sentinel)
     )
+    source_args = cast(Any, BaseException.args).__get__(source_error, type(source_error))
 
     class ProcessControlCapability(Capability):
         type: str = "process-control"
@@ -4492,8 +4495,8 @@ def test_process_manifest_preserves_value_free_process_control_with_authority(
     assert type(exc_info.value) is expected_type
     assert exc_info.value.args == expected_args
     assert exc_info.value is not source_error
-    assert source_error.args == ()
-    assert source_error.__traceback__ is None
+    assert source_error.args == source_args
+    assert source_error.__traceback__ is not None
     assert sentinel not in repr(exc_info.value)
 
 
@@ -7310,3 +7313,51 @@ async def test_sandbox_mcp_names_remain_distinct_from_conditional_handoffs(strea
     assert len(call.tools) == 1
     assert call.tools[0].name.startswith("mcp_docs__lookup")
     assert call.tools[0].name not in {item.tool_name for item in call.handoffs}
+
+
+@pytest.mark.parametrize("mode", ["async", "sync", "stream"])
+def test_runner_protected_start_preserves_caller_error_without_exposing_it(mode: str) -> None:
+    source = RuntimeError("provider-start-secret")
+    earlier = ValueError("caller-context-secret")
+    source.__cause__ = earlier
+
+    class FailingSession(_FakeSession):
+        start = cast(Any, BaseSandboxSession.start)
+
+        async def _ensure_backend_started(self) -> None:
+            raise source
+
+    session = FailingSession(_external_mount_manifest("mount-secret"))
+    cast(Any, session.state).type = "docker"
+    agent = SandboxAgent(name="test", model=ScriptedModel(steps=[]))
+    config = RunConfig(tracing_disabled=True, sandbox=SandboxRunConfig(session=session))
+
+    async def invoke_async() -> BaseException:
+        try:
+            raise earlier
+        except ValueError:
+            with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+                if mode == "stream":
+                    result = Runner.run_streamed(agent, "hello", run_config=config)
+                    async for _ in result.stream_events():
+                        pass
+                else:
+                    await Runner.run(agent, "hello", run_config=config)
+            return exc.value
+
+    if mode == "sync":
+        try:
+            raise earlier
+        except ValueError:
+            with pytest.raises(RuntimeError, match="protected mount configuration") as exc:
+                Runner.run_sync(agent, "hello", run_config=config)
+            outward = exc.value
+    else:
+        outward = asyncio.run(invoke_async())
+
+    assert earlier.args == ("caller-context-secret",)
+    assert source.args == ("provider-start-secret",)
+    assert source.__cause__ is earlier
+    assert outward.__context__ is None
+    assert outward.__cause__ is None
+    _assert_mount_error_redacted(outward, source_error=source, sentinel="mount-secret")

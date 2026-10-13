@@ -787,14 +787,13 @@ def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
             pending.append((current, True))
             pending.extend((child, False) for child in reversed(children))
 
-        # Snapshot the full group topology before clearing any source exception. On Python 3.10,
-        # the exceptiongroup backport stores children in the instance dictionary, so sanitizing a
-        # linked leaf can otherwise erase a group that has not been converted yet.
+        # Snapshot leaf replacements before rebuilding the group topology. Source exceptions
+        # and the exceptiongroup backport's instance state remain caller-owned.
         for current_id, current in leaf_errors.items():
             safe_errors[current_id] = _safe_redacted_persistence_leaf_error(current)
 
-        # Clear the complete provider-owned graph before constructing replacement groups. Group
-        # messages are read-only, so the source objects must never cross the public boundary.
+        # Release completed source frames before constructing replacement groups. Source
+        # messages and state remain intact and must never cross the public boundary.
         _prepare_data_redacted_error(error)
 
         for group in group_postorder:
@@ -817,7 +816,7 @@ def _safe_redacted_persistence_error(error: BaseException) -> BaseException:
         return safe_errors[id(error)]
     except BaseException as conversion_error:
         # Fail closed if traversal or reconstruction itself fails. Preparing the conversion error
-        # also clears its implicit context, including any source group still referenced there.
+        # also releases completed frames in its context, without mutating source exceptions.
         _prepare_data_redacted_error(error)
         safe_error = _safe_redacted_persistence_leaf_error(conversion_error)
         _prepare_data_redacted_error(conversion_error)

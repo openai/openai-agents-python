@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 
 from ..exceptions import (
     _base_exception_instance_dict,
-    _discard_exception_graph,
+    _clear_exception_graph_frames,
     _exact_string_state_entry,
     _exact_string_state_value,
     _is_error_data_redacted,
@@ -661,7 +661,7 @@ def _replace_mount_operation_error(error: BaseException) -> RuntimeError:
 
 def discard_mount_source_exception(error: BaseException) -> None:
     """Clear source frames without consulting provider-defined exception attributes."""
-    _discard_exception_graph(error)
+    _clear_exception_graph_frames(error)
 
 
 def _url_contains_inline_authority(value: object) -> bool:

@@ -22,6 +22,7 @@ from .exceptions import (
     _await_data_redacted_error_boundary,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _raise_data_redacted_error,
     _should_drain_stream_events_before_raising,
 )
 from .guardrail import InputGuardrailResult, OutputGuardrailResult
@@ -1137,6 +1138,7 @@ class RunResultStreaming(RunResultBase):
                 self = cast(Any, None)
                 registered_consumer_task = None
                 item = cast(Any, None)
+                _raise_data_redacted_error(stored_exception)
             raise stored_exception
 
     def _create_error_details(self) -> RunErrorDetails | None:
