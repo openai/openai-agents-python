@@ -405,15 +405,16 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                     return
                 suffix_start += boundary
                 session_items = session_items[boundary:]
-                # Keep tool/program groups intact. Pruning a broken group here would
-                # make replacement remove stored items absent from the compact input.
-                if (
-                    drop_orphan_function_calls(
-                        session_items, output_pruning_indexes=set(range(len(session_items)))
-                    )
-                    != session_items
-                ):
-                    return
+            # Keep tool/program groups intact, including pending approval calls in
+            # complete history. Wait for their outputs rather than compacting the
+            # calls away or sending an incomplete group to the compaction API.
+            if (
+                drop_orphan_function_calls(
+                    session_items, output_pruning_indexes=set(range(len(session_items)))
+                )
+                != session_items
+            ):
+                return
             compaction_candidate_items = select_compaction_candidate_items(session_items)
             # A bounded reload may include history omitted from the hook's initial
             # cached/default-limited view. Require approval of the actual snapshot.
