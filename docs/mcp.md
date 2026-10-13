@@ -268,6 +268,7 @@ Supported forms:
 - `True` requires approval for all tools, and `False` requires approval for none (equivalent to `"always"` and `"never"`, respectively).
 - A per-tool map, for example `{"delete_file": "always", "read_file": "never"}`.
 - A grouped object: `{"always": {"tool_names": [...]}, "never": {"tool_names": [...]}}`.
+- A synchronous or asynchronous callable with the signature `(run_context, agent, tool) -> bool | Awaitable[bool]`. Return `True` to require approval or `False` to allow the call without approval.
 
 ```python
 async with MCPServerStreamableHttp(
@@ -277,6 +278,12 @@ async with MCPServerStreamableHttp(
 ) as server:
     ...
 ```
+
+The callable receives the current `RunContextWrapper`, the agent, and the original MCP SDK `Tool`, including `tool.annotations`. The callable can use application context or tool metadata to decide whether approval is required. Server-provided annotations are advisory hints; use them to bypass approval only when your application trusts the server's classification.
+
+Unlike a `FunctionTool.needs_approval` callable, a local MCP `require_approval` callable does not receive the specific call's arguments or call ID.
+
+If you call `MCPUtil.to_function_tool()` directly without supplying an `agent`, a callable policy is not invoked and the converted tool requires approval. This fail-closed fallback applies to legacy direct conversion calls.
 
 For a full pause/resume flow, see [Human-in-the-loop](human_in_the_loop.md) and `examples/mcp/get_all_mcp_tools_example/main.py`.
 
