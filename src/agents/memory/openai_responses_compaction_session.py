@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 from openai import AsyncOpenAI
 
+from .._tool_identity import get_hosted_mcp_approval_request_identity
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
 from ..models._openai_shared import get_default_openai_client
@@ -414,6 +415,20 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
                 )
                 != session_items
             ):
+                return
+            # Hosted MCP approvals use request IDs rather than tool call IDs, so
+            # the tool-group check above does not cover their request/response pair.
+            mcp_request_ids = {
+                identity.request_id
+                for item in session_items
+                if (identity := get_hosted_mcp_approval_request_identity(item)) is not None
+            }
+            mcp_response_ids = {
+                item.get("approval_request_id")
+                for item in session_items
+                if item.get("type") == "mcp_approval_response"
+            }
+            if mcp_request_ids != mcp_response_ids:
                 return
             compaction_candidate_items = select_compaction_candidate_items(session_items)
             # A bounded reload may include history omitted from the hook's initial
