@@ -209,7 +209,7 @@ def test_decisions_runner_applies_native_client_override(
         [
             "run_examples.py",
             "--filter",
-            "examples/decisions/",
+            "decisions",
             "--include-interactive",
             "--dry-run",
             "--logs-dir",
