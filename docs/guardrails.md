@@ -19,6 +19,8 @@ If you need checks before and/or after each custom function-tool call in a workf
 
 ## Input guardrails
 
+A guardrail can call an external classifier directly; it does not need to run another agent. For a native OpenAI Decisions client example, see [Decisions API](models/index.md#decisions-api).
+
 Input guardrails run in 3 steps:
 
 1. First, the guardrail receives the same input passed to the agent.
