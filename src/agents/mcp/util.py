@@ -601,6 +601,7 @@ class MCPUtil:
                 mcp_server_name=get_mcp_server_log_name(server.name),
             ),
         )
+        function_tool._mcp_annotations = copy.deepcopy(tool.annotations)
         function_tool._mcp_tool_binding = (get_mcp_server_log_name(server.name), tool.name, None)
         return function_tool
 

@@ -3059,6 +3059,38 @@ def test_to_function_tool_preserves_mcp_title_metadata():
     assert function_tool._mcp_title == "Search Docs"
 
 
+def test_mcp_annotations_are_isolated_discovery_metadata():
+    server = FakeMCPServer()
+    tool = MCPTool(name="search", inputSchema={}, annotations={"readOnlyHint": True})
+    function_tool = MCPUtil.to_function_tool(tool, server, convert_schemas_to_strict=False)
+    annotations = function_tool.mcp_annotations
+    assert annotations is not None
+    assert annotations.model_dump(by_alias=True, exclude_none=True) == {"readOnlyHint": True}
+    assert annotations is not tool.annotations
+
+    # Consumers and later discovery updates cannot rewrite the converted tool's snapshot.
+    annotations.title = "consumer edit"
+    assert tool.annotations is not None
+    tool.annotations.title = "server edit"
+    snapshot = function_tool.mcp_annotations
+    assert snapshot is not None
+    assert snapshot.model_dump(by_alias=True, exclude_none=True) == {"readOnlyHint": True}
+    assert function_tool.needs_approval is False
+    assert function_tool._tool_origin is not None
+    assert function_tool._tool_origin.to_json_dict() == {
+        "type": "mcp",
+        "mcp_server_name": server.name,
+    }
+
+
+def test_non_mcp_function_tool_has_no_mcp_annotations():
+    async def invoke(context, arguments):
+        return "done"
+
+    tool = FunctionTool("ordinary", "", {}, invoke)
+    assert tool.mcp_annotations is None
+
+
 def test_to_function_tool_description_falls_back_to_mcp_title():
     server = FakeMCPServer()
     tool = MCPTool(
