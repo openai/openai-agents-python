@@ -335,7 +335,11 @@ def _parse_apply_patch_operation_json(operation: object) -> ApplyPatchOperation:
 
 
 def _parse_apply_patch_input(raw_input: str) -> list[ApplyPatchOperation]:
-    lines = raw_input.splitlines()
+    # The grammar uses LF delimiters; other line separators are file content.
+    lines = raw_input.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    lines = [line.removesuffix("\r") for line in lines]
     if not lines or lines[0] != _BEGIN_PATCH:
         raise ValueError("apply_patch input must start with '*** Begin Patch'")
     if len(lines) < 2 or lines[-1] != _END_PATCH:
