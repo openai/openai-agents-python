@@ -21,6 +21,8 @@ from agents import (
     ToolGuardrailFunctionOutput,
     ToolInputGuardrailTripwireTriggered,
     ToolOutputGuardrailTripwireTriggered,
+    ToolOutputText,
+    ToolsToFinalOutputResult,
     UserError,
     input_guardrail,
     tool_input_guardrail,
@@ -1199,4 +1201,56 @@ async def test_nonstreamed_tool_failure_without_output_cancels_pending_input_gua
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("shape", ["single", "list", "tuple"])
+async def test_approved_live_snapshot_preserves_structured_output_type(streaming, shape):
+    output = ToolOutputText(text="ticket created")
+    effects = []
+
+    @tool(needs_approval=True)
+    async def create_ticket() -> Any:
+        effects.append("ticket")
+        return output if shape == "single" else [output] if shape == "list" else (output,)
+
+    async def finish(context, results):
+        recovered_output = results[0].output
+        if shape != "single":
+            assert type(recovered_output) is (list if shape == "list" else tuple)
+            recovered_output = recovered_output[0]
+        return ToolsToFinalOutputResult(is_final_output=True, final_output=recovered_output.text)
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            raise UserError("synthetic end-hook failure")
+
+    agent = Agent(
+        name="typed-recovery",
+        tools=[create_ticket],
+        tool_use_behavior=finish,
+        model=ScriptedModel([[function_call("create_ticket", {}, call_id="ticket")]]),
+    )
+    session = SQLiteSession("typed-recovery")
+    try:
+        parked = await Runner.run(agent, "go", session=session)
+        state = parked.to_state()
+        state.approve(parked.interruptions[0])
+        with pytest.raises(UserError, match="synthetic end-hook failure"):
+            if streaming:
+                result = Runner.run_streamed(agent, state, session=session, hooks=Hooks())
+                async for _ in result.stream_events():
+                    pass
+            else:
+                await Runner.run(agent, state, session=session, hooks=Hooks())
+        serialized = state.to_json()
+        # Retry the same Python state without passing through JSON serialization.
+        output.text = "late mutation"
+        assert state.to_json() == serialized
+        recovered = await Runner.run(agent, state, session=session)
+        assert recovered.final_output == "ticket created"
+        assert effects == ["ticket"]
+    finally:
         session.close()

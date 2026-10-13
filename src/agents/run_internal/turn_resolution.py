@@ -104,7 +104,7 @@ from ..logger import log_tool_action_error, logger
 from ..run_config import RunConfig, ToolErrorFormatterArgs
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
 from ..run_error_handlers import RunErrorHandlers
-from ..run_state import RunState, _serialize_output_value
+from ..run_state import RunState
 from ..tool import (
     ApplyPatchTool,
     CodeInterpreterTool,
@@ -119,6 +119,9 @@ from ..tool import (
     Tool,
     ToolOrigin,
     ToolOriginType,
+    ToolOutputFileContent,
+    ToolOutputImage,
+    ToolOutputText,
     get_function_tool_origin,
 )
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
@@ -806,12 +809,18 @@ async def check_for_final_output_from_tools(
 
 
 def _snapshot_output_value(value: Any) -> Any:
-    """Detach supported recovery data while retaining opaque application values."""
-    try:
-        return _serialize_output_value(value)
-    except Exception:
-        # Preserve the original failure when an application value cannot be converted.
-        return value
+    """Detach live tool data without applying JSON conversion or copying opaque values."""
+    if type(value) is dict:
+        return {key: _snapshot_output_value(item) for key, item in value.items()}
+    if type(value) is list:
+        return [_snapshot_output_value(item) for item in value]
+    if type(value) is tuple:
+        return tuple(_snapshot_output_value(item) for item in value)
+    if type(value) in (ToolOutputText, ToolOutputImage, ToolOutputFileContent):
+        # SDK structured output models contain immutable scalar fields. A shallow
+        # model copy preserves the Python type without invoking arbitrary deepcopy hooks.
+        return value.model_copy()
+    return value
 
 
 def _snapshot_tool_output_guardrail_results(
@@ -838,8 +847,8 @@ def _snapshot_tool_outputs(items: list[RunItem], live_outputs: list[RunItem]) ->
     snapshots: list[RunItem] = []
     for item in items:
         if isinstance(item, ToolCallOutputItem) and id(item) in live_output_ids:
-            # Preserve occurrence markers and detach the supported serialized output
-            # representation, which recovery reads independently of raw_item.
+            # Preserve occurrence markers and the live Python output type, which
+            # recovery reads independently of the model-facing raw_item.
             snapshot = copy(item)
             snapshot.raw_item = deepcopy(item.raw_item)
             snapshot.custom_data = deepcopy(item.custom_data)
