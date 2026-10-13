@@ -545,7 +545,9 @@ def _copy_pydantic_value(
                 if normalized_field_name in allowed_fields_set:
                     copied_fields_set.add(normalized_field_name)
 
-            copied_model = declared_model_type.model_construct(
+            # The OpenAI override expects wire aliases; these copied keys are field names.
+            copied_model = cast(Any, BaseModel.model_construct).__func__(
+                declared_model_type,
                 _fields_set=set(copied_fields_set),
                 **copied_fields,
                 **copied_extra,
@@ -662,7 +664,8 @@ def _validate_declared_payload(
     """Validate a declared payload after filling only missing required values."""
     while True:
         try:
-            return model_adapter.validate_python(explicit)
+            # Approval snapshots are dumped with Python field names, including aliased fields.
+            return model_adapter.validate_python(explicit, by_name=True)
         except ValidationError as error:
             filled_missing_value = False
             for detail in error.errors(
@@ -823,7 +826,7 @@ def _copy_tool_approval_raw_item(raw_item: Any) -> Any:
             copied_realized,
             copied_baseline,
         )
-        validated_model = model_adapter.validate_python(merged)
+        validated_model = model_adapter.validate_python(merged, by_name=True)
         _restore_pydantic_fields_set(validated_model, copied_raw_item)
         return validated_model
     if dict in raw_item_mro:
@@ -3324,7 +3327,7 @@ async def _deserialize_processed_response(
 
     def _parse_apply_patch_call(data: dict[str, Any]) -> Any:
         try:
-            return ResponseFunctionToolCall(**data)
+            return ResponseFunctionToolCall.model_validate(data, by_name=True)
         except Exception:
             return data
 
@@ -3379,7 +3382,10 @@ async def _deserialize_processed_response(
                     dict(tool_call_data_raw) if isinstance(tool_call_data_raw, Mapping) else {}
                 )
                 try:
-                    tool_call = ResponseFunctionToolCall(**tool_call_data)
+                    # RunState stores Python field names, including alias-only provider fields.
+                    tool_call = ResponseFunctionToolCall.model_validate(
+                        tool_call_data, by_name=True
+                    )
                 except Exception:
                     continue
                 _ensure_restored_tool_call_allowed(
@@ -3418,7 +3424,7 @@ async def _deserialize_processed_response(
                 "handoffs",
                 "handoff",
                 handoffs_map,
-                lambda data: ResponseFunctionToolCall(**data),
+                lambda data: ResponseFunctionToolCall.model_validate(data, by_name=True),
                 lambda tool_call, handoff: ToolRunHandoff(tool_call=tool_call, handoff=handoff),
                 _resolve_handoff_tool_name,
             ),
@@ -3591,7 +3597,7 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
 
     if tool_type == "function_call":
         try:
-            return ResponseFunctionToolCall(**normalized_raw_item)
+            return ResponseFunctionToolCall.model_validate(normalized_raw_item, by_name=True)
         except Exception:
             return normalized_raw_item
 
@@ -3605,7 +3611,7 @@ def _deserialize_tool_call_raw_item(normalized_raw_item: Mapping[str, Any]) -> A
         return normalized_raw_item
 
     try:
-        return ResponseFunctionToolCall(**normalized_raw_item)
+        return ResponseFunctionToolCall.model_validate(normalized_raw_item, by_name=True)
     except Exception:
         return normalized_raw_item
 
@@ -5058,7 +5064,7 @@ def _deserialize_model_responses(responses_data: list[dict[str, Any]]) -> list[M
                 output.append(item)
             elif item.get("type") == "message":
                 output.append(_deserialize_message_output_item(item))
-            elif item.get("type") == "program":
+            elif item.get("type") in {"program", "function_call"}:
                 output.append(_deserialize_tool_call_raw_item(item))
             elif item.get("type") == "program_output":
                 output.append(_deserialize_tool_call_output_raw_item(item))
@@ -5260,7 +5266,9 @@ def _deserialize_items(
                 result.append(ReasoningItem(agent=agent, raw_item=raw_item_reason))
 
             elif item_type == "handoff_call_item":
-                raw_item_handoff = ResponseFunctionToolCall(**normalized_raw_item)
+                raw_item_handoff = ResponseFunctionToolCall.model_validate(
+                    normalized_raw_item, by_name=True
+                )
                 result.append(HandoffCallItem(agent=agent, raw_item=raw_item_handoff))
 
             elif item_type == "handoff_output_item":
