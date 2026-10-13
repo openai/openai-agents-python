@@ -9,7 +9,7 @@ from openai.types.responses.response_computer_tool_call import (
     ResponseComputerToolCall,
 )
 
-from agents import Agent, ComputerTool, InputItem, RunConfig, Runner, function_tool
+from agents import Agent, ComputerTool, InputItem, RunConfig, Runner, function_tool, tool_namespace
 from agents.exceptions import InputGuardrailTripwireTriggered, ModelBehaviorError, UserError
 from agents.guardrail import GuardrailFunctionOutput, InputGuardrail
 from agents.items import ModelResponse, TResponseInputItem
@@ -25,7 +25,7 @@ from agents.usage import Usage
 
 from .model_test_helpers import get_exact_output_stream_step
 from .test_computer_tool_lifecycle import FakeComputer
-from .test_responses import get_function_tool_call, get_text_message
+from .test_responses import get_function_tool_call, get_handoff_tool_call, get_text_message
 from .utils.simple_session import SimpleListSession
 
 
@@ -398,6 +398,88 @@ async def test_interruption_without_guaranteed_next_model_rejects_input(
     with pytest.raises(UserError, match="tool result may end the run"):
         state.add_input("Late input")
     assert state.to_json() == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("serialized", [False, True])
+@pytest.mark.parametrize(
+    "stop_name,has_handoff",
+    [("finish", False), ("workflow.finish", False), ("unrelated", False), ("finish", True)],
+)
+async def test_completed_stop_sibling_controls_pending_input(
+    streamed: bool, serialized: bool, stop_name: str, has_handoff: bool
+) -> None:
+    calls: list[str] = []
+
+    @function_tool
+    def finish() -> str:
+        calls.append("finish")
+        return "Finished"
+
+    @function_tool(needs_approval=True)
+    def protected_tool() -> str:
+        calls.append("protected")
+        return "Approved"
+
+    model = ScriptedModel()
+    delegate = Agent(name="delegate", model=model)
+    model.extend(
+        [
+            [
+                get_function_tool_call("finish", "{}", "finish-call", namespace="workflow"),
+                get_function_tool_call("protected_tool", "{}", "protected-call"),
+                *([get_handoff_tool_call(delegate)] if has_handoff else []),
+            ],
+            [get_text_message("Continued")],
+        ]
+    )
+    agent = Agent(
+        name="assistant",
+        model=model,
+        tools=[
+            *tool_namespace(name="workflow", description="Workflow tools", tools=[finish]),
+            protected_tool,
+        ],
+        tool_use_behavior={"stop_at_tool_names": [stop_name]},
+        handoffs=[delegate] if has_handoff else [],
+    )
+
+    async def run(input: str | RunState[Any]) -> Any:
+        if streamed:
+            result = Runner.run_streamed(agent, input)
+            async for _event in result.stream_events():
+                pass
+            return result
+        return await Runner.run(agent, input)
+
+    interrupted = await run("Initial request")
+    state = interrupted.to_state()
+    if serialized:
+        state = await RunState.from_string(agent, state.to_string())
+    assert calls == ["finish"]
+    before = state.to_json()
+    continues = stop_name == "unrelated" or has_handoff
+    if continues:
+        state.add_input("Late input")
+    else:
+        with pytest.raises(UserError, match="tool result may end the run"):
+            state.add_input("Late input")
+        assert state.to_json() == before
+
+    state.approve(state.get_interruptions()[0])
+    resumed = await run(state)
+    assert calls == ["finish", "protected"]
+    assert state.pending_input == []
+    if continues:
+        assert resumed.final_output == "Continued"
+        assert resumed.last_agent is (delegate if has_handoff else agent)
+        assert len(model.calls) == 2
+        model_input = cast(list[TResponseInputItem], model.calls[-1].input)
+        assert [_message_text(item) for item in model_input].count("Late input") == 1
+    else:
+        assert resumed.final_output == "Finished"
+        assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio

@@ -1076,16 +1076,23 @@ class RunState(Generic[TContext, TAgent]):
             if self._current_agent is None:
                 raise UserError("Cannot add input to a RunState without a current agent")
             tool_use_behavior = self._current_agent.tool_use_behavior
-            interrupted_tool_names = {
+            response_tool_names = {
                 item.tool_name
                 for item in self._current_step.interruptions
                 if item.tool_name is not None
             }
+            # Completed siblings also participate in the resumed turn's final-output decision.
+            # A pending handoff takes precedence and continues with the receiving agent instead.
+            if (
+                self._last_processed_response is not None
+                and not self._last_processed_response.handoffs
+            ):
+                for function_run in self._last_processed_response.functions:
+                    response_tool_names.add(function_run.function_tool.name)
+                    response_tool_names.add(function_run.function_tool.qualified_name)
             stops_before_next_model = tool_use_behavior == "stop_on_first_tool" or (
                 isinstance(tool_use_behavior, dict)
-                and bool(
-                    interrupted_tool_names & set(tool_use_behavior.get("stop_at_tool_names", []))
-                )
+                and bool(response_tool_names & set(tool_use_behavior.get("stop_at_tool_names", [])))
             )
             if stops_before_next_model or callable(tool_use_behavior):
                 raise UserError(
