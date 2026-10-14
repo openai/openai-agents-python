@@ -153,6 +153,7 @@ SDK 在创建容器时会将这些键值对传递给 Docker，并将它们存储
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona 运行器](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
 | `E2BSandboxClient` | `openai-agents[e2b]` | [E2B 运行器](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/e2b_runner.py) |
 | `ModalSandboxClient` | `openai-agents[modal]` | [Modal 运行器](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/modal_runner.py) |
+| `RunloopSandboxClient` | `openai-agents[runloop]` | [Runloop 运行器](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/runloop/runner.py) |
 | `VercelSandboxClient` | `openai-agents[vercel]` | [Vercel 运行器](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/vercel_runner.py) |
 
 </div>
@@ -185,6 +186,7 @@ options = ModalSandboxClientOptions(
 | `BlaxelSandboxClient` | 支持将 `BlaxelCloudBucketMountStrategy` 与 `S3Mount`、`R2Mount` 或 `GCSMount` 条目配对使用来挂载云存储桶。还支持通过 `BlaxelDriveMount` 和 `BlaxelDriveMountStrategy` 使用持久化 Blaxel Drives，两者均可从 `agents.extensions.sandbox.blaxel` 获取。 |
 | `DaytonaSandboxClient` | 支持使用 `DaytonaCloudBucketMountStrategy` 通过 `rclone` 挂载云存储；可将其与 `S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount` 和 `BoxMount` 配合使用。 |
 | `E2BSandboxClient` | 支持使用 `E2BCloudBucketMountStrategy` 通过 `rclone` 挂载云存储；可将其与 `S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount` 和 `BoxMount` 配合使用。 |
+| `RunloopSandboxClient` | 支持使用 `RunloopCloudBucketMountStrategy` 通过 `rclone` 挂载云存储；可将其与 `S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount` 和 `BoxMount` 配合使用。 |
 | `VercelSandboxClient` | 支持将 `VercelCloudBucketMountStrategy` 与 `S3Mount` 条目配对，以仅在创建时挂载 S3 和 S3 兼容存储桶；已挂载的会话无法恢复，内联凭据需要 `allow_s3_credential_exposure=True`。 |
 
 </div>
@@ -219,6 +221,7 @@ manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledg
 | `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
+| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
