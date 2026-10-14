@@ -93,8 +93,6 @@ DEFAULT_AUTO_SKIP = {
     "examples/sandbox/extensions/daytona/usaspending_text2sql/setup_db.py",
     "examples/sandbox/extensions/e2b_runner.py",
     "examples/sandbox/extensions/modal_runner.py",
-    "examples/sandbox/extensions/runloop/capabilities.py",
-    "examples/sandbox/extensions/runloop/runner.py",
     # This local workflow gives model-selected shell commands access to the host.
     "examples/sandbox/extensions/temporal/local_hello_workflow.py",
     "examples/sandbox/extensions/temporal/temporal_sandbox_agent.py",

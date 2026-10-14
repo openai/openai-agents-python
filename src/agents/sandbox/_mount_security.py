@@ -242,12 +242,6 @@ _STRATEGY_CLASSIFICATION_BY_TYPE: dict[str, tuple[str, str | None, str, str]] = 
         "agents.extensions.sandbox.modal.mounts",
         "ModalCloudBucketMountStrategy",
     ),
-    "runloop_cloud_bucket": (
-        "in_container",
-        "runloop",
-        "agents.extensions.sandbox.runloop.mounts",
-        "RunloopCloudBucketMountStrategy",
-    ),
     "vercel_cloud_bucket": (
         "in_container",
         "vercel",
@@ -264,7 +258,6 @@ _SERIALIZED_FIELDS_BY_STRATEGY_TYPE: dict[str, frozenset[str]] = {
     "daytona_cloud_bucket": frozenset({"type", "pattern"}),
     "e2b_cloud_bucket": frozenset({"type", "pattern"}),
     "modal_cloud_bucket": frozenset({"type", "secret_name", "secret_environment_name"}),
-    "runloop_cloud_bucket": frozenset({"type", "pattern"}),
     "vercel_cloud_bucket": frozenset({"type"}),
 }
 _SERIALIZED_PATTERN_CLASS_BY_TYPE: dict[str, type[MountPatternBase]] = {
@@ -295,7 +288,6 @@ _RCLONE_STRATEGY_TYPES = frozenset(
         "in_container",
         "daytona_cloud_bucket",
         "e2b_cloud_bucket",
-        "runloop_cloud_bucket",
     }
 )
 _IN_CONTAINER_MOUNT_CREDENTIAL_CAPABILITIES: tuple[_InContainerMountCredentialCapability, ...] = (

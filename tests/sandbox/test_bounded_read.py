@@ -70,10 +70,9 @@ class _Content:
         self.closed = True
 
 
-PROVIDERS = ["e2b", "runloop", "vercel", "daytona", "blaxel", "cloudflare"]
+PROVIDERS = ["e2b", "vercel", "daytona", "blaxel", "cloudflare"]
 CLASSES = {
     "e2b": "E2BSandboxSession",
-    "runloop": "RunloopSandboxSession",
     "vercel": "VercelSandboxSession",
     "daytona": "DaytonaSandboxSession",
     "blaxel": "BlaxelSandboxSession",
@@ -93,19 +92,6 @@ def _session(provider: str, content: _Content, *, status: int = 200) -> Any:
     if provider == "e2b":
         session._sandbox = SimpleNamespace(
             files=SimpleNamespace(read=AsyncMock(return_value=content))
-        )
-    elif provider == "runloop":
-        session.state = SimpleNamespace(
-            devbox_id="test", timeouts=SimpleNamespace(file_download_s=30)
-        )
-        session._sdk = SimpleNamespace(
-            api=SimpleNamespace(
-                devboxes=SimpleNamespace(
-                    with_streaming_response=SimpleNamespace(
-                        download_file=MagicMock(return_value=content)
-                    )
-                )
-            )
         )
     elif provider == "vercel":
 
@@ -346,7 +332,7 @@ async def test_daytona_bounded_read_timeout_preserves_retryability(phase: str) -
     "provider,retryable",
     [
         (provider, retryable)
-        for provider in ["cloudflare", "vercel", "runloop", "modal", "daytona", "e2b"]
+        for provider in ["cloudflare", "vercel", "modal", "daytona", "e2b"]
         for retryable in [True, False]
     ]
     + [("blaxel", True), ("blaxel", None)],
@@ -404,26 +390,6 @@ async def test_bounded_provider_read_preserves_retry_policy(
         error_cls = sdk.SandboxApiError
         inner._ensure_sandbox.return_value.iter_file.side_effect = error_cls(
             httpx.Response(429 if retryable else 403), "synthetic-private-response"
-        )
-    elif provider == "runloop":
-        import runloop_api_client
-
-        from agents.extensions.sandbox.runloop.sandbox import RunloopSandboxSessionState
-
-        inner.state = RunloopSandboxSessionState(
-            devbox_id="test", manifest=Manifest(), snapshot=NoopSnapshot(id="test")
-        )
-        error_cls = (
-            runloop_api_client.RateLimitError
-            if retryable
-            else runloop_api_client.PermissionDeniedError
-        )
-        inner._sdk.api.devboxes.with_streaming_response.download_file.side_effect = error_cls(
-            "synthetic-private-response",
-            response=httpx.Response(
-                429 if retryable else 403, request=httpx.Request("GET", "https://example.invalid")
-            ),
-            body={"detail": "synthetic-private-response"},
         )
     events: list[SandboxSessionEvent] = []
     wrapper = SandboxSession(
@@ -515,40 +481,6 @@ async def test_bounded_provider_read_cancellation_closes_response(provider: str)
     assert content.closed
     if provider == "vercel":
         assert not session.mount_active
-
-
-@pytest.mark.asyncio
-async def test_runloop_bounded_read_uses_streaming_sdk_response() -> None:
-    import httpx
-
-    pytest.importorskip("runloop_api_client")
-    from runloop_api_client import AsyncRunloop
-
-    consumed = 0
-    closed = False
-
-    class Body(httpx.AsyncByteStream):
-        async def __aiter__(self) -> AsyncIterator[bytes]:
-            nonlocal consumed
-            for _ in range(10):
-                consumed += 1
-                yield b"x" * 65536
-
-        async def aclose(self) -> None:
-            nonlocal closed
-            closed = True
-
-    def respond(request: httpx.Request) -> httpx.Response:
-        assert request.url.path.endswith("/download_file")
-        return httpx.Response(200, stream=Body())
-
-    async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
-        async with AsyncRunloop(bearer_token="synthetic-test-key", http_client=http) as api:
-            session = _session("runloop", _Content(b"unused"))
-            session._sdk = SimpleNamespace(api=api)
-            assert await session.read_bounded(Path("out.jsonl"), max_bytes=5) == b"xxxxx"
-    assert consumed == 1
-    assert closed
 
 
 @pytest.mark.asyncio

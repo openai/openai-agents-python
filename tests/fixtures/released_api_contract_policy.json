@@ -139,54 +139,6 @@
       "name": "ModalSandboxClientOptions"
     },
     {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopAfterIdle",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopAfterIdle"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopGatewaySpec",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopGatewaySpec"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopLaunchParameters",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopLaunchParameters"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopMcpSpec",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopMcpSpec"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopSandboxClient",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopSandboxClient"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopSandboxClientOptions",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopSandboxClientOptions"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopTunnelConfig",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopTunnelConfig"
-    },
-    {
-      "canonical_module": "agents.extensions.sandbox.runloop",
-      "canonical_name": "RunloopUserParameters",
-      "module": "agents.extensions.sandbox",
-      "name": "RunloopUserParameters"
-    },
-    {
       "canonical_module": "agents.extensions.sandbox.vercel",
       "canonical_name": "VercelSandboxClient",
       "module": "agents.extensions.sandbox",
@@ -386,9 +338,6 @@
     "redis": {
       "extra": "redis"
     },
-    "runloop_api_client": {
-      "extra": "runloop"
-    },
     "sqlalchemy": {
       "extra": "sqlalchemy"
     },
@@ -422,27 +371,11 @@
         "CloudflareSandboxClientOptions": "aiohttp",
         "CloudflareSandboxSession": "aiohttp",
         "CloudflareSandboxSessionState": "aiohttp",
-        "DEFAULT_RUNLOOP_ROOT_WORKSPACE_ROOT": "runloop_api_client",
-        "DEFAULT_RUNLOOP_WORKSPACE_ROOT": "runloop_api_client",
         "ModalCloudBucketMountStrategy": "modal",
         "ModalSandboxClient": "modal",
         "ModalSandboxClientOptions": "modal",
         "ModalSandboxSession": "modal",
         "ModalSandboxSessionState": "modal",
-        "RunloopAfterIdle": "runloop_api_client",
-        "RunloopCloudBucketMountStrategy": "runloop_api_client",
-        "RunloopExistingSecret": "runloop_api_client",
-        "RunloopGatewaySpec": "runloop_api_client",
-        "RunloopLaunchParameters": "runloop_api_client",
-        "RunloopMcpSpec": "runloop_api_client",
-        "RunloopPlatformClient": "runloop_api_client",
-        "RunloopSandboxClient": "runloop_api_client",
-        "RunloopSandboxClientOptions": "runloop_api_client",
-        "RunloopSandboxSession": "runloop_api_client",
-        "RunloopSandboxSessionState": "runloop_api_client",
-        "RunloopTimeouts": "runloop_api_client",
-        "RunloopTunnelConfig": "runloop_api_client",
-        "RunloopUserParameters": "runloop_api_client",
         "VercelCloudBucketMountStrategy": "vercel",
         "VercelSandboxClient": "vercel",
         "VercelSandboxClientOptions": "vercel",
@@ -740,24 +673,6 @@
       "module": "agents.voice.models.openai_model_provider",
       "names": [
         "agent_registration"
-      ]
-    },
-    {
-      "class_name": "RunloopPlatformClient",
-      "module": "agents.extensions.sandbox",
-      "names": [
-        "axons",
-        "benchmarks",
-        "blueprints",
-        "network_policies",
-        "secrets"
-      ]
-    },
-    {
-      "class_name": "RunloopSandboxClient",
-      "module": "agents.extensions.sandbox",
-      "names": [
-        "platform"
       ]
     },
     {
