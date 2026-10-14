@@ -23,6 +23,7 @@ from .exceptions import (
     _clear_data_redacted_error_traceback,
     _detach_data_redacted_error_traceback,
     _is_error_data_redacted,
+    _is_tool_local_cancellation,
     _prepare_data_redacted_error,
     _raise_data_redacted_error,
 )
@@ -120,9 +121,11 @@ from .run_internal.prompt_cache_key import PromptCacheKeyResolver
 from .run_internal.run_grouping import resolve_run_grouping_id
 from .run_internal.run_loop import (
     _safe_redacted_persistence_error,
+    _ToolTaskCancellation,
     cleanup_models_after_run,
     finalize_max_turns_handler_output,
     get_output_schema,
+    preserve_tool_task_cancellation,
     resolve_interrupted_turn,
     run_input_guardrails,
     run_output_guardrails,
@@ -136,6 +139,7 @@ from .run_internal.run_steps import (
     NextStepInterruption,
     NextStepRunAgain,
     ProcessedResponse,
+    SingleStepResult,
 )
 from .run_internal.session_persistence import (
     _session_get_items,
@@ -149,6 +153,7 @@ from .run_internal.session_persistence import (
     prepare_input_with_session,
     reconcile_nested_history_owned_session_item_refs,
     resume_pending_session_write,
+    resumed_failure_items,
     resumed_response_store,
     resumed_turn_items,
     save_result_to_session,
@@ -179,6 +184,7 @@ from .tracing.config import include_task_and_turn_spans
 from .tracing.context import TraceCtxManager, create_trace_for_run
 from .tracing.span_data import AgentSpanData, TaskSpanData
 from .util import _error_tracing
+from .util._asyncio_tasks import _consume_future_exception
 
 DEFAULT_AGENT_RUNNER: AgentRunner = None  # type: ignore
 # the value is set at the end of the module
@@ -1759,6 +1765,13 @@ class AgentRunner:
                     )
                     if current_turn_span is not None:
                         current_turn_span.start(mark_as_current=True)
+                    partial_tool_results: list[SingleStepResult] = []
+                    tool_error_selected = False
+
+                    def on_tool_error_selected() -> None:
+                        nonlocal tool_error_selected
+                        tool_error_selected = True
+
                     try:
                         if current_turn <= 1:
                             try:
@@ -1785,29 +1798,33 @@ class AgentRunner:
                                 raise
 
                             model_task = asyncio.create_task(
-                                run_single_turn(
-                                    bindings=current_bindings,
-                                    original_input=original_input,
-                                    generated_items=items_for_model,
-                                    hooks=hooks,
-                                    context_wrapper=context_wrapper,
-                                    run_config=run_config,
-                                    should_run_agent_start_hooks=should_run_agent_start_hooks,
-                                    tool_use_tracker=tool_use_tracker,
-                                    server_conversation_tracker=server_conversation_tracker,
-                                    session=session,
-                                    session_items_to_rewind=(
-                                        last_saved_input_snapshot_for_rewind
-                                        if not is_resumed_state and session_persistence_enabled
-                                        else None
-                                    ),
-                                    reasoning_item_id_policy=resolved_reasoning_item_id_policy,
-                                    prompt_cache_key_resolver=prompt_cache_key_resolver,
-                                    error_handlers=error_handlers,
-                                    agent_span=current_span,
-                                    on_response_accepted=_commit_pending_server_response,
-                                    on_response_hooks_started=_mark_response_hooks_started,
-                                    run_state=run_state,
+                                preserve_tool_task_cancellation(
+                                    run_single_turn(
+                                        bindings=current_bindings,
+                                        original_input=original_input,
+                                        generated_items=items_for_model,
+                                        hooks=hooks,
+                                        context_wrapper=context_wrapper,
+                                        run_config=run_config,
+                                        should_run_agent_start_hooks=should_run_agent_start_hooks,
+                                        tool_use_tracker=tool_use_tracker,
+                                        server_conversation_tracker=server_conversation_tracker,
+                                        session=session,
+                                        session_items_to_rewind=(
+                                            last_saved_input_snapshot_for_rewind
+                                            if not is_resumed_state and session_persistence_enabled
+                                            else None
+                                        ),
+                                        reasoning_item_id_policy=resolved_reasoning_item_id_policy,
+                                        prompt_cache_key_resolver=prompt_cache_key_resolver,
+                                        error_handlers=error_handlers,
+                                        agent_span=current_span,
+                                        on_response_accepted=_commit_pending_server_response,
+                                        on_response_hooks_started=_mark_response_hooks_started,
+                                        run_state=run_state,
+                                        on_tool_execution_error=partial_tool_results.append,
+                                        on_tool_error_selected=on_tool_error_selected,
+                                    )
                                 )
                             )
 
@@ -1821,12 +1838,29 @@ class AgentRunner:
                                         input_guardrail_results,
                                     )
                                 )
+                                guardrail_model_future = asyncio.gather(guardrail_task, model_task)
+                                guardrail_model_future.add_done_callback(_consume_future_exception)
+                                parent_cancelled = False
                                 try:
-                                    _, turn_result = await asyncio.gather(
-                                        guardrail_task,
-                                        model_task,
-                                    )
+                                    try:
+                                        # Waiting on the future separates cancellation of this
+                                        # runner from a cancelled child reported by result().
+                                        await asyncio.wait((guardrail_model_future,))
+                                    except asyncio.CancelledError:
+                                        parent_cancelled = True
+                                        raise
+                                    _, turn_result = guardrail_model_future.result()
                                 except InputGuardrailTripwireTriggered:
+                                    if tool_error_selected:
+                                        # Finish the selected tool failure's bounded cleanup.
+                                        # A late verdict still rejects admission, but cannot
+                                        # replace the error that initiated teardown.
+                                        try:
+                                            await model_task
+                                        finally:
+                                            if not model_task.done():
+                                                model_task.cancel()
+                                            await asyncio.gather(model_task, return_exceptions=True)
                                     if should_cancel_parallel_model_task_on_input_guardrail_trip():
                                         if not model_task.done():
                                             model_task.cancel()
@@ -1843,18 +1877,31 @@ class AgentRunner:
                                         )
                                     )
                                     raise
-                                except BaseException:
-                                    # A non-tripwire failure (the model turn raising, or a
-                                    # guardrail raising a non-tripwire error) propagates from
-                                    # gather without cancelling the sibling task. Cancel and drain
-                                    # whichever side is still pending so it is not left running
-                                    # after the run has failed and its exception is not swallowed.
-                                    for pending_task in (guardrail_task, model_task):
-                                        if not pending_task.done():
-                                            pending_task.cancel()
-                                    await asyncio.gather(
-                                        guardrail_task, model_task, return_exceptions=True
-                                    )
+                                except BaseException as error:
+                                    try:
+                                        if tool_error_selected and not parent_cancelled:
+                                            # Finish the selected failure's cleanup first so
+                                            # publication has collected any completed outputs.
+                                            # Admission matters only when there is history to keep.
+                                            await asyncio.wait((model_task,))
+                                            if partial_tool_results:
+                                                await asyncio.wait((guardrail_task,))
+                                            await model_task
+                                        if partial_tool_results and (
+                                            not isinstance(error, asyncio.CancelledError)
+                                            or _is_tool_local_cancellation(error)
+                                        ):
+                                            # Settle admission without replacing the selected tool
+                                            # error. Only successful verdicts admit partial history.
+                                            await asyncio.wait((guardrail_task,))
+                                    finally:
+                                        # Parent cancellation still cancels and drains both tasks.
+                                        for pending_task in (guardrail_task, model_task):
+                                            if not pending_task.done():
+                                                pending_task.cancel()
+                                        await asyncio.gather(
+                                            guardrail_task, model_task, return_exceptions=True
+                                        )
                                     raise
                             else:
                                 turn_result = await model_task
@@ -1882,7 +1929,62 @@ class AgentRunner:
                                 on_response_accepted=_commit_pending_server_response,
                                 on_response_hooks_started=_mark_response_hooks_started,
                                 run_state=run_state,
+                                on_tool_execution_error=partial_tool_results.append,
                             )
+                    except (Exception, asyncio.CancelledError) as error:
+                        if isinstance(
+                            error, asyncio.CancelledError
+                        ) and not _is_tool_local_cancellation(error):
+                            raise
+                        if not partial_tool_results:
+                            if isinstance(error, _ToolTaskCancellation):
+                                raise error.error from None
+                            raise
+                        input_accepted = len(_attempt_input_guardrail_results()) >= len(
+                            all_input_guardrails
+                        ) and not input_guardrails_triggered(_attempt_input_guardrail_results())
+                        if partial_tool_results and input_accepted:
+                            partial_result = partial_tool_results[0]
+                            generated_items.extend(partial_result.new_step_items)
+                            session_items.extend(partial_result.new_step_items)
+                            model_responses.append(partial_result.model_response)
+                            tool_input_guardrail_results.extend(
+                                partial_result.tool_input_guardrail_results
+                            )
+                            tool_output_guardrail_results.extend(
+                                partial_result.tool_output_guardrail_results
+                            )
+                            if run_state is not None:
+                                _synchronize_accepted_run_state(
+                                    run_state,
+                                    generated_items=generated_items,
+                                    session_items=session_items,
+                                    model_responses=model_responses,
+                                    tool_input_guardrail_results=tool_input_guardrail_results,
+                                    tool_output_guardrail_results=tool_output_guardrail_results,
+                                    current_turn=current_turn,
+                                )
+                                run_state._current_step = NextStepRunAgain()
+                                run_state.set_tool_use_tracker_snapshot(
+                                    _tool_use_tracker_snapshot()
+                                )
+                            try:
+                                if session_persistence_enabled:
+                                    await save_result_to_session(
+                                        session,
+                                        [],
+                                        partial_result.new_step_items,
+                                        run_state,
+                                        response_id=partial_result.model_response.response_id,
+                                        store=store_setting,
+                                        wrapper=context_wrapper,
+                                        resumed_write_state=run_state,
+                                    )
+                            except Exception:
+                                logger.warning("Failed to save completed tools after a tool error")
+                        if isinstance(error, _ToolTaskCancellation):
+                            raise error.error from None
+                        raise
                     finally:
                         if current_turn_span is not None:
                             attach_usage_to_span(
@@ -2340,7 +2442,12 @@ class AgentRunner:
                             ]
                         exc.run_data = RunErrorDetails(
                             input=original_input,
-                            new_items=session_items,
+                            new_items=(
+                                resumed_failure_items(run_state, current_agent, run_config)
+                                if run_state is not None
+                                and isinstance(run_state._current_step, NextStepInterruption)
+                                else session_items
+                            ),
                             raw_responses=model_responses,
                             last_agent=current_agent,
                             context_wrapper=context_wrapper,

@@ -5,6 +5,7 @@ functions and approval plumbing live in tool_execution.py.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import dataclasses
 import inspect
@@ -57,6 +58,7 @@ from .tool_execution import (
     render_shell_outputs,
     resolve_approval_rejection_message,
     resolve_approval_status,
+    run_native_tool_post_invoke,
     serialize_shell_output,
     truncate_shell_outputs,
     with_tool_function_span,
@@ -114,6 +116,7 @@ class ComputerAction:
         config: RunConfig,
         acknowledged_safety_checks: list[ComputerCallOutputAcknowledgedSafetyCheck] | None = None,
         tool_output_committer: Callable[[RunItem], None] | None = None,
+        sibling_category_failure: asyncio.Event | None = None,
     ) -> RunItem:
         """Run a computer action, capturing a screenshot and notifying hooks."""
         trace_tool_name = get_tool_trace_name_for_tool(action.computer_tool) or cls.TRACE_TOOL_NAME
@@ -177,28 +180,36 @@ class ComputerAction:
                 output=image_url,
                 raw_item=raw_item,
             )
+
+            # Record accepted output before optional metadata and end hooks.
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
-            custom_data = await maybe_extract_custom_data(
-                action.computer_tool.custom_data_extractor,
-                ComputerToolCustomDataContext(
-                    run_context=context_wrapper,
-                    tool=action.computer_tool,
-                    tool_call=action.tool_call,
-                    output=image_url,
-                    raw_item=copy.deepcopy(raw_item),
-                ),
-            )
-            output_item.custom_data = custom_data
 
-            await gather_with_cancel(
-                hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
-                (
-                    agent_hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output)
-                    if agent_hooks is not None
-                    else _coro.noop_coroutine()
-                ),
-            )
+            async def finalize_output() -> None:
+                custom_data = await maybe_extract_custom_data(
+                    action.computer_tool.custom_data_extractor,
+                    ComputerToolCustomDataContext(
+                        run_context=context_wrapper,
+                        tool=action.computer_tool,
+                        tool_call=action.tool_call,
+                        output=image_url,
+                        raw_item=copy.deepcopy(raw_item),
+                    ),
+                )
+                output_item.custom_data = custom_data
+
+                await gather_with_cancel(
+                    hooks.on_tool_end(context_wrapper, agent, action.computer_tool, output),
+                    (
+                        agent_hooks.on_tool_end(
+                            context_wrapper, agent, action.computer_tool, output
+                        )
+                        if agent_hooks is not None
+                        else _coro.noop_coroutine()
+                    ),
+                )
+
+            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
             if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = image_url
@@ -400,6 +411,7 @@ class LocalShellAction:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         tool_output_committer: Callable[[RunItem], None] | None = None,
+        sibling_category_failure: asyncio.Event | None = None,
     ) -> RunItem:
         """Run a local shell tool call and wrap the result as a ToolCallOutputItem."""
         agent_hooks = agent.hooks
@@ -433,17 +445,22 @@ class LocalShellAction:
             output=result,
             raw_item=raw_payload,
         )
-        if tool_output_committer is not None:
-            tool_output_committer(output_item)
 
-        await gather_with_cancel(
-            hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
-            (
-                agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
-                if agent_hooks is not None
-                else _coro.noop_coroutine()
-            ),
-        )
+        async def finalize_output() -> None:
+            if tool_output_committer is not None:
+                tool_output_committer(output_item)
+
+            await gather_with_cancel(
+                hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result),
+                (
+                    agent_hooks.on_tool_end(context_wrapper, agent, call.local_shell_tool, result)
+                    if agent_hooks is not None
+                    else _coro.noop_coroutine()
+                ),
+            )
+
+        await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
+
         return output_item
 
 
@@ -460,6 +477,7 @@ class ShellAction:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         tool_output_committer: Callable[[RunItem], None] | None = None,
+        sibling_category_failure: asyncio.Event | None = None,
     ) -> RunItem:
         """Run a shell tool call and return a normalized ToolCallOutputItem."""
         shell_call = coerce_shell_call(call.tool_call)
@@ -639,17 +657,23 @@ class ShellAction:
                 output=output_text,
                 raw_item=raw_item,
             )
-            if tool_output_committer is not None:
-                tool_output_committer(output_item)
 
-            await gather_with_cancel(
-                hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
-                (
-                    agent_hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text)
-                    if agent_hooks is not None
-                    else _coro.noop_coroutine()
-                ),
-            )
+            async def finalize_output() -> None:
+                if tool_output_committer is not None:
+                    tool_output_committer(output_item)
+
+                await gather_with_cancel(
+                    hooks.on_tool_end(context_wrapper, agent, call.shell_tool, output_text),
+                    (
+                        agent_hooks.on_tool_end(
+                            context_wrapper, agent, call.shell_tool, output_text
+                        )
+                        if agent_hooks is not None
+                        else _coro.noop_coroutine()
+                    ),
+                )
+
+            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
             if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
@@ -676,6 +700,7 @@ class CustomToolAction:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         tool_output_committer: Callable[[RunItem], None] | None = None,
+        sibling_category_failure: asyncio.Event | None = None,
     ) -> RunItem:
         custom_tool: CustomTool = call.custom_tool
         agent_hooks = agent.hooks
@@ -801,28 +826,34 @@ class CustomToolAction:
                 output_text,
                 raw_item=raw_item,
             )
+
+            # Record accepted output before optional metadata and end hooks.
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
-            custom_data = await maybe_extract_custom_data(
-                custom_tool.custom_data_extractor,
-                CustomToolCustomDataContext(
-                    tool_context=tool_context,
-                    tool=custom_tool,
-                    input=tool_input,
-                    output=output_text,
-                    raw_item=copy.deepcopy(raw_item),
-                ),
-            )
-            output_item.custom_data = custom_data
 
-            await gather_with_cancel(
-                hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
-                (
-                    agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
-                    if agent_hooks is not None
-                    else _coro.noop_coroutine()
-                ),
-            )
+            async def finalize_output() -> None:
+                custom_data = await maybe_extract_custom_data(
+                    custom_tool.custom_data_extractor,
+                    CustomToolCustomDataContext(
+                        tool_context=tool_context,
+                        tool=custom_tool,
+                        input=tool_input,
+                        output=output_text,
+                        raw_item=copy.deepcopy(raw_item),
+                    ),
+                )
+                output_item.custom_data = custom_data
+
+                await gather_with_cancel(
+                    hooks.on_tool_end(tool_context, agent, custom_tool, output_text),
+                    (
+                        agent_hooks.on_tool_end(tool_context, agent, custom_tool, output_text)
+                        if agent_hooks is not None
+                        else _coro.noop_coroutine()
+                    ),
+                )
+
+            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
             if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text
@@ -885,6 +916,7 @@ class ApplyPatchAction:
         context_wrapper: RunContextWrapper[Any],
         config: RunConfig,
         tool_output_committer: Callable[[RunItem], None] | None = None,
+        sibling_category_failure: asyncio.Event | None = None,
     ) -> RunItem:
         """Run an apply_patch call and serialize the editor result for the model."""
         apply_patch_tool: ApplyPatchTool = call.apply_patch_tool
@@ -1037,30 +1069,37 @@ class ApplyPatchAction:
                 output=output_text,
                 raw_item=raw_item,
             )
+
+            # Record accepted output before optional metadata and end hooks.
             if tool_output_committer is not None:
                 tool_output_committer(output_item)
 
-            custom_data = await maybe_extract_custom_data(
-                apply_patch_tool.custom_data_extractor,
-                ApplyPatchToolCustomDataContext(
-                    run_context=context_wrapper,
-                    tool=apply_patch_tool,
-                    operations=operations,
-                    output=output_text,
-                    status=status,
-                    raw_item=copy.deepcopy(raw_item),
-                ),
-            )
-            output_item.custom_data = custom_data
+            async def finalize_output() -> None:
+                custom_data = await maybe_extract_custom_data(
+                    apply_patch_tool.custom_data_extractor,
+                    ApplyPatchToolCustomDataContext(
+                        run_context=context_wrapper,
+                        tool=apply_patch_tool,
+                        operations=operations,
+                        output=output_text,
+                        status=status,
+                        raw_item=copy.deepcopy(raw_item),
+                    ),
+                )
+                output_item.custom_data = custom_data
 
-            await gather_with_cancel(
-                hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
-                (
-                    agent_hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text)
-                    if agent_hooks is not None
-                    else _coro.noop_coroutine()
-                ),
-            )
+                await gather_with_cancel(
+                    hooks.on_tool_end(context_wrapper, agent, apply_patch_tool, output_text),
+                    (
+                        agent_hooks.on_tool_end(
+                            context_wrapper, agent, apply_patch_tool, output_text
+                        )
+                        if agent_hooks is not None
+                        else _coro.noop_coroutine()
+                    ),
+                )
+
+            await run_native_tool_post_invoke(finalize_output(), sibling_category_failure)
 
             if span is not None and config.trace_include_sensitive_data:
                 span.span_data.output = output_text

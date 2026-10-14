@@ -29,7 +29,7 @@ async def gather_with_cancel(
     awaitable_2: Awaitable[T2],
     /,
     *,
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[T1, T2]: ...
 
 
@@ -40,7 +40,7 @@ async def gather_with_cancel(
     awaitable_3: Awaitable[T3],
     /,
     *,
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[T1, T2, T3]: ...
 
 
@@ -52,7 +52,7 @@ async def gather_with_cancel(
     awaitable_4: Awaitable[T4],
     /,
     *,
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[T1, T2, T3, T4]: ...
 
 
@@ -65,7 +65,7 @@ async def gather_with_cancel(
     awaitable_5: Awaitable[T5],
     /,
     *,
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[T1, T2, T3, T4, T5]: ...
 
 
@@ -79,20 +79,20 @@ async def gather_with_cancel(
     awaitable_6: Awaitable[T6],
     /,
     *,
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[T1, T2, T3, T4, T5, T6]: ...
 
 
 @overload
 async def gather_with_cancel(
     *awaitables: Awaitable[T],
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[T, ...]: ...
 
 
 async def gather_with_cancel(
     *awaitables: Awaitable[Any],
-    on_child_failure: Callable[[], None] | None = None,
+    on_child_failure: Callable[[BaseException], None] | None = None,
 ) -> tuple[Any, ...]:
     """Gather awaitables, cancelling and draining siblings when one raises."""
     tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
@@ -102,9 +102,9 @@ async def gather_with_cancel(
         await asyncio.wait((gather_future,))
         try:
             return tuple(gather_future.result())
-        except BaseException:
+        except BaseException as error:
             if on_child_failure is not None:
-                on_child_failure()
+                on_child_failure(error)
             raise
     except GeneratorExit:
         # Coroutine closure cannot suspend; the owner must tear down child tasks.

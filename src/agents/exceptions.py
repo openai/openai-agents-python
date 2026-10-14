@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 from .util._pretty_print import pretty_print_run_error_details
 
+_TOOL_LOCAL_CANCELLATION_ATTR = "_agents_tool_local_cancellation"
 _DRAIN_STREAM_EVENTS_ATTR = "_agents_drain_queued_stream_events"
 _DATA_REDACTED_ATTR = "_agents_data_redacted"
 _DATA_REDACTED_ERROR_MESSAGE = "Error details are redacted."
@@ -39,6 +40,16 @@ _SYSTEM_EXIT_CODE_DESCRIPTOR = cast(Any, SystemExit).__dict__["code"]
 
 class _RedactedExceptionCancellationError(asyncio.CancelledError, Exception):
     """Payload-free cancellation that remains catchable as an Exception."""
+
+
+def _mark_tool_local_cancellation(error: asyncio.CancelledError) -> None:
+    setattr(error, _TOOL_LOCAL_CANCELLATION_ATTR, True)
+
+
+def _is_tool_local_cancellation(error: BaseException) -> bool:
+    return isinstance(error, asyncio.CancelledError) and bool(
+        getattr(error, _TOOL_LOCAL_CANCELLATION_ATTR, False)
+    )
 
 
 def _mark_error_to_drain_stream_events(error: BaseException) -> None:

@@ -153,6 +153,11 @@ def _populate_state_from_result(
         state._pending_input = copy.deepcopy(source_state._pending_input)
         state._pending_session_write = copy.deepcopy(source_state._pending_session_write)
         state._current_step = source_state._current_step
+        if isinstance(source_state._current_step, NextStepInterruption):
+            # Failure diagnostics may expose accepted outputs still awaiting their
+            # normal resume write. Keep the checkpoint's publication boundary so
+            # recovery does not mistake those outputs for already persisted work.
+            state._session_items = list(source_state._session_items)
         # A streamed result exists before its terminal append does, so a checkpoint taken from a
         # failed stream has to keep the fail-closed marker or it would look resumable.
         state._terminal_unrecoverable = source_state._terminal_unrecoverable
@@ -704,6 +709,8 @@ class RunResultStreaming(RunResultBase):
     _triggered_input_guardrail_result: InputGuardrailResult | None = field(default=None, repr=False)
     _output_guardrails_task: asyncio.Task[Any] | None = field(default=None, repr=False)
     _stored_exception: BaseException | None = field(default=None, repr=False)
+    _tool_error_selected: bool = field(default=False, init=False, repr=False)
+    """A selected tool error owns failure reporting while its input verdict settles."""
     _cancel_mode: Literal["none", "immediate", "after_turn"] = field(default="none", repr=False)
     _last_processed_response: ProcessedResponse | None = field(default=None, repr=False)
     """The last processed model response. This is needed for resuming from interruptions."""
@@ -1176,7 +1183,7 @@ class RunResultStreaming(RunResultBase):
         # Fetch all the completed guardrail results from the queue and raise if needed
         while not self._input_guardrail_queue.empty():
             guardrail_result = self._input_guardrail_queue.get_nowait()
-            if guardrail_result.output.tripwire_triggered:
+            if guardrail_result.output.tripwire_triggered and not self._tool_error_selected:
                 tripwire_exc = InputGuardrailTripwireTriggered(guardrail_result)
                 tripwire_exc.run_data = self._create_error_details()
                 self._stored_exception = tripwire_exc
@@ -1194,7 +1201,11 @@ class RunResultStreaming(RunResultBase):
                         run_impl_exc.run_data = self._create_error_details()
                     self._stored_exception = run_impl_exc
 
-        if self._input_guardrails_task and self._input_guardrails_task.done():
+        if (
+            not self._tool_error_selected
+            and self._input_guardrails_task
+            and self._input_guardrails_task.done()
+        ):
             if not self._input_guardrails_task.cancelled():
                 in_guard_exc = self._input_guardrails_task.exception()
                 if isinstance(in_guard_exc, Exception):
