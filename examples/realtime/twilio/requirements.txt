@@ -7,5 +7,5 @@ fastapi
 starlette>=1.7.0
 uvicorn[standard]
 websockets
-python-dotenv>=1.2.3
+python-dotenv>=1.2.4
 twilio>=9.11.2,<10
