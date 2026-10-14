@@ -1,4 +1,4 @@
-fastapi>=0.141.1
+fastapi>=0.142.2
 starlette>=1.7.0
 openai>=3.20.0,<4
 httpx2>=2.13.1
