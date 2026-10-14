@@ -153,7 +153,6 @@ SDK는 컨테이너를 생성할 때 이러한 키-값 쌍을 Docker에 전달�
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona 실행 예제](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
 | `E2BSandboxClient` | `openai-agents[e2b]` | [E2B 실행 예제](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/e2b_runner.py) |
 | `ModalSandboxClient` | `openai-agents[modal]` | [Modal 실행 예제](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/modal_runner.py) |
-| `RunloopSandboxClient` | `openai-agents[runloop]` | [Runloop 실행 예제](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/runloop/runner.py) |
 | `VercelSandboxClient` | `openai-agents[vercel]` | [Vercel 실행 예제](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/vercel_runner.py) |
 
 </div>
@@ -186,7 +185,6 @@ options = ModalSandboxClientOptions(
 | `BlaxelSandboxClient` | `BlaxelCloudBucketMountStrategy`를 `S3Mount`, `R2Mount` 또는 `GCSMount` 항목과 함께 사용하여 클라우드 버킷 마운트를 지원합니다. 또한 `agents.extensions.sandbox.blaxel`에서 모두 제공되는 `BlaxelDriveMount`와 `BlaxelDriveMountStrategy`을 사용하여 영구 Blaxel Drive를 지원합니다. |
 | `DaytonaSandboxClient` | `DaytonaCloudBucketMountStrategy`를 사용하여 `rclone`을 통한 클라우드 스토리지 마운트를 지원합니다. `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`와 함께 사용합니다. |
 | `E2BSandboxClient` | `E2BCloudBucketMountStrategy`를 사용하여 `rclone`을 통한 클라우드 스토리지 마운트를 지원합니다. `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`과 함께 사용합니다. |
-| `RunloopSandboxClient` | `RunloopCloudBucketMountStrategy`을 사용하여 `rclone`를 통한 클라우드 스토리지 마운트를 지원합니다. `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, `BoxMount`와 함께 사용합니다. |
 | `VercelSandboxClient` | `VercelCloudBucketMountStrategy`을 `S3Mount` 항목과 함께 사용하여 생성 시점에만 S3 및 S3 호환 버킷 마운트를 지원합니다. 마운트된 세션은 재개할 수 없으며 인라인 자격 증명에는 `allow_s3_credential_exposure=True`가 필요합니다. |
 
 </div>
@@ -221,7 +219,6 @@ manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledg
 | `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>

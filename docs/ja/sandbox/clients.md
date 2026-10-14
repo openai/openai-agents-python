@@ -153,7 +153,6 @@ SDK はコンテナの作成時にこれらのキーと値のペアを Docker �
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona ランナー](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
 | `E2BSandboxClient` | `openai-agents[e2b]` | [E2B ランナー](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/e2b_runner.py) |
 | `ModalSandboxClient` | `openai-agents[modal]` | [Modal ランナー](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/modal_runner.py) |
-| `RunloopSandboxClient` | `openai-agents[runloop]` | [Runloop ランナー](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/runloop/runner.py) |
 | `VercelSandboxClient` | `openai-agents[vercel]` | [Vercel ランナー](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/vercel_runner.py) |
 
 </div>
@@ -186,7 +185,6 @@ options = ModalSandboxClientOptions(
 | `BlaxelSandboxClient` | `BlaxelCloudBucketMountStrategy` と `S3Mount`、`R2Mount`、または `GCSMount` のエントリを組み合わせることで、クラウドバケットのマウントをサポートします。また、`agents.extensions.sandbox.blaxel` から利用できる `BlaxelDriveMount` と `BlaxelDriveMountStrategy` を使用した永続的な Blaxel Drives もサポートします。 |
 | `DaytonaSandboxClient` | `DaytonaCloudBucketMountStrategy` を使用して `rclone` 経由でクラウドストレージをマウントできます。`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`、`BoxMount` とともに使用します。 |
 | `E2BSandboxClient` | `E2BCloudBucketMountStrategy` を使用して `rclone` 経由でクラウドストレージをマウントできます。`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`、`BoxMount` とともに使用します。 |
-| `RunloopSandboxClient` | `RunloopCloudBucketMountStrategy` を使用して `rclone` 経由でクラウドストレージをマウントできます。`S3Mount`、`GCSMount`、`R2Mount`、`AzureBlobMount`、`BoxMount` とともに使用します。 |
 | `VercelSandboxClient` | `VercelCloudBucketMountStrategy` と `S3Mount` エントリを組み合わせることで、作成時に限り S3 および S3 互換バケットのマウントをサポートします。マウントされたセッションは再開できず、インライン認証情報には `allow_s3_credential_exposure=True` が必要です。 |
 
 </div>
@@ -221,7 +219,6 @@ manifest = manifest.with_in_container_mount_broad_credential_exposure_acknowledg
 | `BlaxelSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
-| `RunloopSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `VercelSandboxClient` | ✓ | - | - | - | - | - |
 
 </div>
