@@ -2922,7 +2922,7 @@ requires-dist = [
     { name = "runloop-api-client", marker = "extra == 'runloop'", specifier = ">=1.16.0,<2.0.0" },
     { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'sqlalchemy'", specifier = ">=2.0" },
     { name = "starlette", specifier = ">=1.3.1" },
-    { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.33.0" },
+    { name = "temporalio", marker = "extra == 'temporal'", specifier = "==1.34.0" },
     { name = "textual", marker = "extra == 'temporal'", specifier = ">=8.2.3,<8.3" },
     { name = "typing-extensions", specifier = ">=4.12.2,<5" },
     { name = "urllib3", specifier = ">=2.8.0" },
@@ -4290,7 +4290,7 @@ wheels = [
 
 [[package]]
 name = "temporalio"
-version = "1.33.0"
+version = "1.34.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "nexus-rpc" },
@@ -4299,15 +4299,15 @@ dependencies = [
     { name = "types-protobuf" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bd/64/b92769790411fa33ce2d037131f5bc856b90837ab1af3d093036f5144c15/temporalio-1.33.0.tar.gz", hash = "sha256:a1e506bcad08c995df7ec083bfd953f3c85bd1e2f6accbbb7562ef39386b3afb", size = 3065348, upload-time = "2026-09-15T00:53:07.558Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/13/85/9ece6f400552ed21951c8c5c534056e7d015cb065e3384470ec23ac24f28/temporalio-1.34.0.tar.gz", hash = "sha256:6453cb20e18df485e16578b22c82a9c4bcb1cf7eedd94147dfd373551d80f5b6", size = 3163890, upload-time = "2026-09-30T20:22:56.056Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/21/eca23a5b343e1036b2449c18405df32d6e452bebaa3ce1e896551741f738/temporalio-1.33.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:152b808c622c83052e17e64e228c1fa0410c515a908ed8981d17cba527183cf9", size = 13900095, upload-time = "2026-09-15T00:52:51.43Z" },
-    { url = "https://files.pythonhosted.org/packages/dd/89/91e8ed945b6e35f948e4cb01335bd8db0aa973f94d5ed86ead3c0f1fa6c2/temporalio-1.33.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:a46970c35acf77dfe142ee2aa3504462a3ff7aa12abdada57e7e8e2488930cbc", size = 13572589, upload-time = "2026-09-15T00:52:53.98Z" },
-    { url = "https://files.pythonhosted.org/packages/54/96/b23ed2a722f2758035dc5af03d93b426740a7f65ca573a6f9718a093594c/temporalio-1.33.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:c685f6f4629b72645c0f9a9811cb2275d8a7cd0b2893b3349bd0a53985ff6f46", size = 13974142, upload-time = "2026-09-15T00:52:56.152Z" },
-    { url = "https://files.pythonhosted.org/packages/7a/12/63e13f93b5772f5bd2128990bfeec050f7de9e80ce4d8504d99f7f794b10/temporalio-1.33.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:efba3fec8735c4592c57a1a7aa4c2e4acf5a0765f53bd7366b94540755dbab0f", size = 14322659, upload-time = "2026-09-15T00:52:58.513Z" },
-    { url = "https://files.pythonhosted.org/packages/b5/34/886675724adbdf4b8b01e37fabda07138eb4668ee50388fbd2ac308ec26f/temporalio-1.33.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:79840232ed78943951d5f0069193b997d24e1da85890784a7d4351a48eb1f166", size = 14032190, upload-time = "2026-09-15T00:53:00.726Z" },
-    { url = "https://files.pythonhosted.org/packages/7f/00/11d89ec3017fd7fe9c6cfcc8b2f52e8327ff82ff8412b361e5f2efda1e32/temporalio-1.33.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:8f52f2f175aed174de21fc5782e5cba1e9e2e37cfd5687d5a8bd084b4deba483", size = 14423865, upload-time = "2026-09-15T00:53:02.932Z" },
-    { url = "https://files.pythonhosted.org/packages/1b/b9/ee3ceb93733512cd9faea4d0d1d604965870aa2e35bf0cfa83e6dba47199/temporalio-1.33.0-cp310-abi3-win_amd64.whl", hash = "sha256:33b5ff39c6737d21c6f16d3fef0c458d64aa9e78ce187e293bda6998d29ea7b8", size = 15254531, upload-time = "2026-09-15T00:53:05.319Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/71/e55380e7820819357afada375d4e5c33d141bb94a08fda35aa0551b4369b/temporalio-1.34.0-cp310-abi3-macosx_10_12_x86_64.whl", hash = "sha256:87118447ad13e1062b79bfc8b44b1695e8328ac9c6be1776e426e87b501b135a", size = 14064102, upload-time = "2026-09-30T20:22:35.601Z" },
+    { url = "https://files.pythonhosted.org/packages/db/78/356c8e2f0ec1678b757d4c5e8a1b0b1c65b15b8afb2335ad2944c158ea10/temporalio-1.34.0-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:023fff9cd9dd21860061e003880dcf95250700f5afab96c030c9cb258504dab8", size = 13763219, upload-time = "2026-09-30T20:22:38.774Z" },
+    { url = "https://files.pythonhosted.org/packages/e9/00/4a4b4e018c4c12b4691211aca1d97db8707ed4c9e31f40dcf09784c9913d/temporalio-1.34.0-cp310-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:cdb6e2fb525ea5635afa4a3f1ae4c992c16dbe29dc92939a85153baeb69d95a2", size = 14121901, upload-time = "2026-09-30T20:22:41.428Z" },
+    { url = "https://files.pythonhosted.org/packages/c1/20/b032d4a0df51d466fd929d8205e1288e83d97a890f021479f43af9bd6f9b/temporalio-1.34.0-cp310-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:540761f738bdfe5cb5bd7240b659e116a0b5094b94282aef09b8d8c2d66e9c52", size = 14457183, upload-time = "2026-09-30T20:22:44.215Z" },
+    { url = "https://files.pythonhosted.org/packages/b6/0d/b08ffeca93bbc29200a5bd85a45cca3c6be0a123de605ecd1798b617df4f/temporalio-1.34.0-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:87647f87f42ecd45efb675642e2ec8ca34aa42359f5968f31f5391f1db5ebcbe", size = 14179836, upload-time = "2026-09-30T20:22:47.474Z" },
+    { url = "https://files.pythonhosted.org/packages/81/55/acde4d1b7c9f23434e263752ef0a3ef58adeb3b95ef8472607414798dfaa/temporalio-1.34.0-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:71caa4b9061628b22a457c87c3b16da40f7ac6ac1a26ece9aa1ee6b4934404d7", size = 14570248, upload-time = "2026-09-30T20:22:50.569Z" },
+    { url = "https://files.pythonhosted.org/packages/cc/c5/6bdc3b02ec483093a71e9f887e8a50ae20fcc79e0578ed7435a81d4271b1/temporalio-1.34.0-cp310-abi3-win_amd64.whl", hash = "sha256:03bd86561188c18d88425178bc690fe0791104b78566dcebd98f59cbdbce0952", size = 15415684, upload-time = "2026-09-30T20:22:53.342Z" },
 ]
 
 [[package]]
