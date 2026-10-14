@@ -25,7 +25,7 @@ import asyncio
 import json
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from ._optional_imports import raise_optional_dependency_error
 
@@ -675,7 +675,7 @@ class RedisSession(SessionABC):
             self._check_not_closed()
             if session_limit is None:
                 # Get all messages in chronological order
-                raw_messages = await self._redis.lrange(self._messages_key, 0, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                raw_messages = await self._redis.lrange(self._messages_key, 0, -1)
                 return await _decode_messages(raw_messages)
 
             if session_limit <= 0:
@@ -687,7 +687,7 @@ class RedisSession(SessionABC):
             # limit counts valid conversation items, matching pop_item and the other backends.
             window = session_limit
             while True:
-                raw_messages = await self._redis.lrange(self._messages_key, -window, -1)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                raw_messages = await self._redis.lrange(self._messages_key, -window, -1)
                 items = await _decode_messages(raw_messages)
                 if len(items) >= session_limit:
                     return items[-session_limit:]
@@ -743,8 +743,8 @@ class RedisSession(SessionABC):
     async def _pop_item_locked(self) -> TResponseInputItem | None:
         """Claim one item while the caller retains the session lock."""
         while True:
-            # Use RPOP to atomically remove and return the rightmost (most recent) item
-            raw_msg = await self._redis.rpop(self._messages_key)  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+            # Without a count, RPOP returns one item rather than a list of items.
+            raw_msg = cast("bytes | str | None", await self._redis.rpop(self._messages_key))
 
             if raw_msg is None:
                 return None
@@ -823,7 +823,7 @@ class RedisSession(SessionABC):
             # Checked outside the try block; the except clause below would swallow it.
             self._check_not_closed()
             try:
-                await self._redis.ping()  # type: ignore[misc]  # Redis library returns Union[Awaitable[T], T] in async context
+                await self._redis.ping()
                 return True
             except Exception:
                 return False

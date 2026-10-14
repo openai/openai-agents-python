@@ -835,7 +835,7 @@ async def test_external_client_not_closed():
         # Should still be able to use the client for other operations
         await shared_client.set("test_key", "test_value")
         value = await shared_client.get("test_key")
-        assert value.decode("utf-8") == "test_value"
+        assert value == b"test_value"
 
     finally:
         # Clean up
