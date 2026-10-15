@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.23.1",
-  "baseline_commit": "b31b9f8d13d49142a64f8873f2cc2ee40441a795",
+  "baseline": "v0.24.0",
+  "baseline_commit": "7d7f70391ce12ac86d39deaff5d5d25b9e9c24c1",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -2912,6 +2912,15 @@
           },
           "kind": "KEYWORD_ONLY",
           "name": "_mcp_tool_binding"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "KEYWORD_ONLY",
+          "name": "_mcp_annotations"
         }
       ]
     },
@@ -11755,6 +11764,15 @@
           },
           "init": true,
           "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "error"
         }
       ],
       "kind": "class",
@@ -11801,6 +11819,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "run_context"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "error"
         }
       ]
     },
