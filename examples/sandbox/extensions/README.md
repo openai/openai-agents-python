@@ -10,6 +10,14 @@ They intentionally keep the flow simple:
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal `Runner` path. Each cloud backend also needs its own provider credentials.
 
+## Migrating from Runloop
+
+Runloop support has been removed from `openai-agents`. Imports from `agents.extensions.sandbox.runloop` and Runloop exports from `agents.extensions.sandbox`, including `RunloopSandboxClient`, no longer work. Applications that still need Runloop can stay on a previously released compatible version while migrating.
+
+The [Modal example](#modal) uses `ModalSandboxClient` and `ModalSandboxClientOptions` from `agents.extensions.sandbox`. Install `openai-agents[modal]`, configure Modal authentication, and set an app name. Replace the client and options in `SandboxRunConfig`, and adapt provider-specific mounts and platform operations. `ModalCloudBucketMountStrategy` provides native cloud bucket mounts; review and test its provider-specific behavior and credentials for your workload.
+
+Before switching, preserve any data you need from existing Runloop sandboxes. Runloop sandbox IDs, snapshots, and session state are provider-specific; do not assume Modal can resume them. Create a new Modal sandbox and restore the data through a supported mechanism.
+
 ## E2B
 
 ### Setup
