@@ -56,6 +56,14 @@ For `ComputerTool`, use `on_safety_check` to accept or reject safety checks retu
 
 Sticky decisions created with `always_approve=True` or `always_reject=True` are stored in the run state, so they survive `state.to_string()` / `RunState.from_string(...)` and `state.to_json()` / `RunState.from_json(...)` when you resume the same paused run later.
 
+For function tools, sticky decisions are scoped to the agent that requested approval. A different agent's function tool does not inherit a decision merely because the tool has the same name.
+
+!!! warning "Persistent local ShellTool decisions are shared across handoffs"
+
+    For local [`ShellTool`][agents.tool.ShellTool], sticky decisions are scoped to the tool name within a run, not to the owning agent or executor. If two agents expose different local `ShellTool` instances with the same name (the default is `shell`), an `always_approve=True` decision for one tool also applies to later calls to the other tool after a handoff, even when the executors have different permissions. The SDK does not prompt again or re-evaluate the second tool's `needs_approval` policy or `on_approval` callback when that sticky approval applies. `always_reject=True` decisions are shared in the same way.
+
+    When agents have different shell permissions, use per-call decisions from the start of the run: call `state.approve(interruption)` or `state.reject(interruption)`, leaving `always_approve` and `always_reject` at their default `False` values. To require a human decision for every new shell call, also set `needs_approval=True` and omit `on_approval`. A per-call decision does not clear an existing sticky decision, and serializing and restoring `RunState` preserves sticky decisions.
+
 For approval requests from [`HostedMCPTool`][agents.tool.HostedMCPTool], the Agents SDK identifies a sticky tool decision by the combination of `server_label` and tool name. An always-approve decision for `lookup_account` on one hosted MCP server does not approve a tool with the same name on another server. The Agents SDK persists an always-approve or always-reject decision only when the hosted MCP approval request includes both non-empty identity fields.
 
 You do not need to resolve every pending approval in the same pass. `interruptions` can contain a mix of regular function tools, hosted MCP approvals, and nested `Agent.as_tool()` approvals. If you rerun after approving or rejecting only some items, those resolved calls can continue while unresolved ones remain in `interruptions` and pause the run again.
