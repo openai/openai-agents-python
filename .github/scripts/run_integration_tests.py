@@ -488,14 +488,10 @@ def main() -> None:
     if args.profile == "mcp-v1":
         for mcp_version in ("1.19.0", "1.29.0"):
             environment_kind = f"mcp-v1-{mcp_version}"
-            requirements = (f"mcp=={mcp_version}",)
-            if mcp_version == "1.19.0":
-                # MCP 1.19.0 imports eval_type_backport, removed in Pydantic 2.14.
-                requirements += ("pydantic<2.14",)
             python = create_environment(
                 environment_kind,
                 wheel,
-                additional_requirements=requirements,
+                additional_requirements=(f"mcp=={mcp_version}",),
             )
             run_suite(
                 python,

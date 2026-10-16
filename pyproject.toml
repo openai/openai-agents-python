@@ -8,7 +8,8 @@ license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
     "openai>=3.0.0,<4",
-    "pydantic>=2.12.2, <3",
+    # MCP 1.19.0 imports eval_type_backport, removed in Pydantic 2.14.
+    "pydantic>=2.12.2, <2.14",
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",

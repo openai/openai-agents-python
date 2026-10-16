@@ -2914,7 +2914,7 @@ requires-dist = [
     { name = "protobuf", marker = "extra == 'e2b'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
     { name = "protobuf", marker = "extra == 'modal'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
     { name = "protobuf", marker = "extra == 'temporal'", specifier = ">=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*" },
-    { name = "pydantic", specifier = ">=2.12.2,<3" },
+    { name = "pydantic", specifier = ">=2.12.2,<2.14" },
     { name = "pygments", marker = "python_full_version >= '3.11' and extra == 'any-llm'", specifier = ">=2.20.0" },
     { name = "pygments", marker = "extra == 'e2b'", specifier = ">=2.20.0" },
     { name = "pygments", marker = "extra == 'modal'", specifier = ">=2.20.0" },
