@@ -8,13 +8,12 @@ license = "MIT"
 authors = [{ name = "OpenAI", email = "support@openai.com" }]
 dependencies = [
     "openai>=3.0.0,<4",
-    # MCP 1.19.0 imports eval_type_backport, removed in Pydantic 2.14.
-    "pydantic>=2.12.2, <2.14",
+    "pydantic>=2.12.2, <3",
     "griffelib>=2, <3",
     "typing-extensions>=4.12.2, <5",
     "requests>=2.0, <3",
     "websockets>=15.0, <17",
-    "mcp>=1.19.0, <3; python_version >= '3.10'",
+    "mcp>=1.21.1, <3; python_version >= '3.10'",
     # Security floors for transitive runtime dependencies.
     "httpx2>=2.12.0",
     "pyjwt>=2.15.0",
