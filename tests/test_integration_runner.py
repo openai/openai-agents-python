@@ -582,6 +582,50 @@ def test_extra_collection_deselects_only_non_applicable_memory_backends(
     assert deselected == [non_applicable]
 
 
+def test_mcp_v1_profile_isolates_legacy_pydantic_constraint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    namespace = runpy.run_path(str(RUNNER))
+    main = cast(Callable[[], None], namespace["main"])
+    created: list[tuple[str, tuple[str, ...]]] = []
+    suites: list[dict[str, Any]] = []
+
+    def fake_create_environment(
+        name: str,
+        distribution: Path,
+        *,
+        additional_requirements: tuple[str, ...] = (),
+    ) -> Path:
+        _ = distribution
+        created.append((name, additional_requirements))
+        return tmp_path / name / "python"
+
+    monkeypatch.setattr(sys, "argv", [str(RUNNER), "--profile", "mcp-v1"])
+    monkeypatch.setitem(
+        main.__globals__,
+        "build_distributions",
+        lambda: (tmp_path / "candidate.whl", tmp_path / "candidate.tar.gz"),
+    )
+    monkeypatch.setitem(main.__globals__, "create_environment", fake_create_environment)
+    monkeypatch.setitem(
+        main.__globals__, "run_suite", lambda *args, **kwargs: suites.append(kwargs)
+    )
+    monkeypatch.setattr(main.__globals__["shutil"], "rmtree", lambda *args, **kwargs: None)
+
+    main()
+
+    assert created == [
+        ("mcp-v1-1.19.0", ("mcp==1.19.0", "pydantic<2.14")),
+        ("mcp-v1-1.29.0", ("mcp==1.29.0",)),
+    ]
+    assert [suite["selection"] for suite in suites] == ["mcp_compat", "mcp_compat"]
+    assert [suite["additional_env"] for suite in suites] == [
+        {"OPENAI_AGENTS_INTEGRATION_MCP_VERSION": "1.19.0"},
+        {"OPENAI_AGENTS_INTEGRATION_MCP_VERSION": "1.29.0"},
+    ]
+
+
 def test_packaging_profile_checks_dependency_present_contract_for_wheel_and_sdist(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
