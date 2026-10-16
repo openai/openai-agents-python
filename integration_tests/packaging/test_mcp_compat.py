@@ -7,12 +7,31 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+from packaging.requirements import Requirement
 
 from agents.mcp import MCPServerSse, MCPServerStdio, MCPServerStreamableHttp
 
 pytestmark = pytest.mark.mcp_compat
 
 LEGACY_SERVER_PATH = Path(__file__).with_name("mcp_legacy_server.py")
+
+
+def test_package_metadata_requires_fixed_mcp_and_allows_current_pydantic() -> None:
+    requirements = [
+        Requirement(value) for value in importlib.metadata.requires("openai-agents") or []
+    ]
+    pydantic = next(requirement for requirement in requirements if requirement.name == "pydantic")
+
+    assert "2.12.2" in pydantic.specifier
+    assert "2.13.5" in pydantic.specifier
+    assert "2.14.0" in pydantic.specifier
+    assert "2.14.1" in pydantic.specifier
+    mcp = next(requirement for requirement in requirements if requirement.name == "mcp")
+    assert "1.21.0" not in mcp.specifier
+    assert "1.21.1" in mcp.specifier
+    assert "1.29.0" in mcp.specifier
+    assert importlib.metadata.version("mcp") in mcp.specifier
+    assert importlib.metadata.version("pydantic") in pydantic.specifier
 
 
 @pytest.mark.asyncio

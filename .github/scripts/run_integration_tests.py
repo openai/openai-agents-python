@@ -486,7 +486,7 @@ def main() -> None:
     print(f"[integration] wheel={wheel.name} sdist={sdist.name} profile={args.profile}")
 
     if args.profile == "mcp-v1":
-        for mcp_version in ("1.19.0", "1.29.0"):
+        for mcp_version in ("1.21.1", "1.29.0"):
             environment_kind = f"mcp-v1-{mcp_version}"
             python = create_environment(
                 environment_kind,
