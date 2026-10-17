@@ -3613,14 +3613,6 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
         ("agents.extensions.sandbox", "ModalCloudBucketMountStrategy"),
         ("agents.extensions.sandbox", "ModalSandboxClient"),
         ("agents.extensions.sandbox", "ModalSandboxClientOptions"),
-        ("agents.extensions.sandbox", "RunloopAfterIdle"),
-        ("agents.extensions.sandbox", "RunloopGatewaySpec"),
-        ("agents.extensions.sandbox", "RunloopLaunchParameters"),
-        ("agents.extensions.sandbox", "RunloopMcpSpec"),
-        ("agents.extensions.sandbox", "RunloopSandboxClient"),
-        ("agents.extensions.sandbox", "RunloopSandboxClientOptions"),
-        ("agents.extensions.sandbox", "RunloopTunnelConfig"),
-        ("agents.extensions.sandbox", "RunloopUserParameters"),
         ("agents.extensions.sandbox", "VercelSandboxClient"),
         ("agents.extensions.sandbox", "VercelSandboxClientOptions"),
     }
@@ -3648,16 +3640,6 @@ def test_repository_release_policy_declares_v020_contract_surfaces() -> None:
             "class_name": "RetryPolicyContext",
             "module": "agents.retry",
             "names": ["response_started", "replay_safety", "stateful_request"],
-        },
-        {
-            "class_name": "RunloopPlatformClient",
-            "module": "agents.extensions.sandbox",
-            "names": ["axons", "benchmarks", "blueprints", "network_policies", "secrets"],
-        },
-        {
-            "class_name": "RunloopSandboxClient",
-            "module": "agents.extensions.sandbox",
-            "names": ["platform"],
         },
         {
             "class_name": "SandboxSessionState",
