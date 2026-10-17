@@ -257,6 +257,8 @@ For commands or file edits that require review, set `needs_approval=True` on the
 
 To decide immediately in application code, set both `needs_approval` and `on_approval`. The SDK invokes `on_approval` only when the call requires approval and has no existing approval decision; setting the callback alone does not enable approval. See `examples/tools/shell.py` for a CLI prompt and `examples/tools/shell_human_in_the_loop.py` for manual interruption handling. The `examples/tools/apply_patch.py` example instead prompts inside its editor before changing files.
 
+Persistent decisions for local `ShellTool` and `ApplyPatchTool` can carry across handoffs to another agent's tool of the same type and name, or across separate runs that reuse the same `RunContextWrapper`. Use per-call decisions when executor or editor permissions differ, and a fresh wrapper when starting a new run with different execution permissions; see the [approval scope warning](human_in_the_loop.md#how-the-approval-flow-works) for details, including why per-call decisions and context overrides during resume do not clear stored approvals.
+
 Keep `needs_approval=False` when your application intentionally authorizes automatic execution, for example through an executor that enforces your sandbox policy. Hosted shell environments do not support the SDK's local `needs_approval` or `on_approval` settings.
 
 ### ComputerTool and the Responses computer tool
