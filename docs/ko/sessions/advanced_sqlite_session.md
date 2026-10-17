@@ -4,11 +4,11 @@ search:
 ---
 # 고급 SQLite 세션
 
-`AdvancedSQLiteSession`은 기본 `SQLiteSession`의 향상된 버전으로, 대화 브랜칭, 상세한 사용량 분석, 구조화된 대화 쿼리 등 고급 대화 관리 기능을 제공합니다.
+`AdvancedSQLiteSession`은 기본 `SQLiteSession`의 향상된 버전으로, 대화 분기, 상세 사용량 분석, 구조화된 대화 쿼리 등 고급 대화 관리 기능을 제공합니다.
 
 ## 기능 {#features}
 
-- **대화 브랜칭**: 모든 사용자 메시지에서 대체 대화 경로 생성
+- **대화 분기**: 모든 사용자 메시지에서 대체 대화 경로 생성
 - **사용량 추적**: 전체 JSON 세부 내역을 포함한 턴별 상세 토큰 사용량 분석
 - **구조화된 쿼리**: 턴별 대화, 도구 사용 통계 등 조회
 - **브랜치 관리**: 독립적인 브랜치 전환 및 관리
@@ -28,28 +28,18 @@ agent = Agent(
 
 # Create an advanced session
 session = AdvancedSQLiteSession(
-    session_id="conversation_123",
-    db_path="conversations.db",
-    create_tables=True
+    session_id="conversation_123", db_path="conversations.db", create_tables=True
 )
 
 # First conversation turn
-result = await Runner.run(
-    agent,
-    "What city is the Golden Gate Bridge in?",
-    session=session
-)
+result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session)
 print(result.final_output)  # "San Francisco"
 
 # IMPORTANT: Store usage data
 await session.store_run_usage(result)
 
 # Continue conversation
-result = await Runner.run(
-    agent,
-    "What state is it in?",
-    session=session
-)
+result = await Runner.run(agent, "What state is it in?", session=session)
 print(result.final_output)  # "California"
 await session.store_run_usage(result)
 ```
@@ -62,36 +52,31 @@ from agents.extensions.memory import AdvancedSQLiteSession
 # Basic initialization
 session = AdvancedSQLiteSession(
     session_id="my_conversation",
-    create_tables=True  # Auto-create advanced tables
+    create_tables=True,  # Auto-create advanced tables
 )
 
 # With persistent storage
 session = AdvancedSQLiteSession(
-    session_id="user_123",
-    db_path="conversations.db",
-    create_tables=True
+    session_id="user_123", db_path="conversations.db", create_tables=True
 )
 
 # With custom logger
 import logging
+
 logger = logging.getLogger("my_app")
-session = AdvancedSQLiteSession(
-    session_id="session_456",
-    create_tables=True,
-    logger=logger
-)
+session = AdvancedSQLiteSession(session_id="session_456", create_tables=True, logger=logger)
 ```
 
 ### 매개변수 {#parameters}
 
 - `session_id` (str): 대화 세션의 고유 식별자
-- `db_path` (str | Path): SQLite 데이터베이스 파일 경로. 기본값은 인메모리 스토리지를 사용하는 `:memory:`입니다
+- `db_path` (str | Path): SQLite 데이터베이스 파일 경로. 기본값은 메모리 내 저장소를 사용하는 `:memory:`입니다
 - `create_tables` (bool): 고급 테이블을 자동으로 생성할지 여부. 기본값은 `False`입니다
-- `logger` (logging.Logger | None): 세션의 사용자 지정 로거. 기본적으로 모듈 로거를 사용합니다
+- `logger` (logging.Logger | None): 세션의 사용자 지정 로거. 기본값은 모듈 로거입니다
 
 ## 사용량 추적 {#usage-tracking}
 
-AdvancedSQLiteSession은 대화 턴별 토큰 사용량 데이터를 저장하여 상세한 사용량 분석을 제공합니다. **이 기능은 각 에이전트 실행 후 `store_run_usage` 메서드를 호출하는 것에 전적으로 의존합니다.**
+AdvancedSQLiteSession은 대화 턴별 토큰 사용량 데이터를 저장하여 상세한 사용량 분석을 제공합니다. **이는 각 에이전트 실행 후 `store_run_usage` 메서드가 호출되는지 여부에 전적으로 의존합니다.**
 
 ### 사용량 데이터 저장 {#storing-usage-data}
 
@@ -126,18 +111,18 @@ branch_usage = await session.get_session_usage(branch_id="main")
 turn_usage = await session.get_turn_usage()
 for turn_data in turn_usage:
     print(f"Turn {turn_data['user_turn_number']}: {turn_data['total_tokens']} tokens")
-    if turn_data['input_tokens_details']:
+    if turn_data["input_tokens_details"]:
         print(f"  Input details: {turn_data['input_tokens_details']}")
-    if turn_data['output_tokens_details']:
+    if turn_data["output_tokens_details"]:
         print(f"  Output details: {turn_data['output_tokens_details']}")
 
 # Get usage for specific turn
 turn_2_usage = await session.get_turn_usage(user_turn_number=2)
 ```
 
-## 대화 브랜칭 {#conversation-branching}
+## 대화 분기 {#conversation-branching}
 
-AdvancedSQLiteSession의 핵심 기능 중 하나는 모든 사용자 메시지에서 대화 브랜치를 생성하여 대체 대화 경로를 탐색할 수 있다는 것입니다.
+AdvancedSQLiteSession의 주요 기능 중 하나는 모든 사용자 메시지에서 대화 브랜치를 생성하여 대체 대화 경로를 탐색할 수 있다는 점입니다.
 
 ### 브랜치 생성 {#creating-branches}
 
@@ -153,16 +138,10 @@ branch_id = await session.create_branch_from_turn(2)
 print(f"Created branch: {branch_id}")
 
 # Create a branch with custom name
-branch_id = await session.create_branch_from_turn(
-    2, 
-    branch_name="alternative_path"
-)
+branch_id = await session.create_branch_from_turn(2, branch_name="alternative_path")
 
 # Create branch by searching for content
-branch_id = await session.create_branch_from_content(
-    "weather", 
-    branch_name="weather_focus"
-)
+branch_id = await session.create_branch_from_content("weather", branch_name="weather_focus")
 ```
 
 브랜치 ID는 세션 ID의 전체 수명 동안 고유합니다. 브랜치를 삭제하거나 세션을 지우면 해당 대화 데이터는 제거되지만, 이전에 사용한 브랜치 ID를 다시 사용할 수 있게 되지는 않습니다. 다른 브랜치를 생성할 때는 새 이름을 사용하세요.
@@ -174,7 +153,9 @@ branch_id = await session.create_branch_from_content(
 branches = await session.list_branches()
 for branch in branches:
     current = " (current)" if branch["is_current"] else ""
-    print(f"{branch['branch_id']}: {branch['user_turns']} turns, {branch['message_count']} messages{current}")
+    print(
+        f"{branch['branch_id']}: {branch['user_turns']} turns, {branch['message_count']} messages{current}"
+    )
 
 # Switch between branches
 await session.switch_to_branch("main")
@@ -198,22 +179,14 @@ await session.store_run_usage(result)
 branch_id = await session.create_branch_from_turn(2, "weather_focus")
 
 # Continue in new branch with different question
-result = await Runner.run(
-    agent, 
-    "What are the main tourist attractions in Paris?", 
-    session=session
-)
+result = await Runner.run(agent, "What are the main tourist attractions in Paris?", session=session)
 await session.store_run_usage(result)
 
 # Switch back to main branch
 await session.switch_to_branch("main")
 
 # Continue original conversation
-result = await Runner.run(
-    agent, 
-    "How expensive is it to visit?", 
-    session=session
-)
+result = await Runner.run(agent, "How expensive is it to visit?", session=session)
 await session.store_run_usage(result)
 ```
 
@@ -288,7 +261,7 @@ CREATE TABLE branch_reservations (
 );
 ```
 
-이 테이블은 복사된 접두사가 비어 있는 브랜치를 포함하여 브랜치 ID를 원자적으로 예약합니다. 예약 행은 브랜치를 삭제하거나 세션을 지운 경우에도 유지되므로, 오래된 세션 인스턴스가 같은 ID를 재사용한 이후의 브랜치에 기록을 병합할 수 없습니다.
+이 테이블은 복사된 접두부가 비어 있는 브랜치를 포함하여 브랜치 ID를 원자적으로 예약합니다. 브랜치가 삭제되거나 세션이 지워져도 예약 행은 유지되므로, 오래된 세션 인스턴스가 동일한 ID를 재사용한 이후 브랜치에 기록을 병합할 수 없습니다.
 
 ### turn_usage 테이블 {#turn_usage-table}
 
@@ -312,7 +285,7 @@ CREATE TABLE turn_usage (
 
 ## 전체 예제 {#complete-example}
 
-모든 기능에 대한 포괄적인 데모는 [전체 예제](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)를 참조하세요.
+모든 기능을 종합적으로 보여 주는 [전체 예제](https://github.com/openai/openai-agents-python/tree/main/examples/memory/advanced_sqlite_session_example.py)를 확인하세요.
 
 
 ## API 레퍼런스 {#api-reference}
