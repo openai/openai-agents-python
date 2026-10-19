@@ -68,8 +68,6 @@ def test_extra_credential_examples_are_skipped_in_default_auto_runs(
         "examples/sandbox/extensions/daytona/usaspending_text2sql/agent.py",
         "examples/sandbox/extensions/e2b_runner.py",
         "examples/sandbox/extensions/modal_runner.py",
-        "examples/sandbox/extensions/runloop/capabilities.py",
-        "examples/sandbox/extensions/runloop/runner.py",
     ]
     monkeypatch.delenv("EXAMPLES_AUTO_SKIP", raising=False)
     monkeypatch.setenv(
@@ -83,7 +81,6 @@ def test_extra_credential_examples_are_skipped_in_default_auto_runs(
         "E2B_API_KEY",
         "MODAL_TOKEN_ID",
         "MODAL_TOKEN_SECRET",
-        "RUNLOOP_API_KEY",
         "POSTGRES_PASSWORD",
     ):
         monkeypatch.setenv(name, "synthetic-test-value")

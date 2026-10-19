@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PID_FILE="$ROOT/.tmp/examples-auto-run.pid"
 LOG_DIR="$ROOT/.tmp/examples-start-logs"
-DEFAULT_UV_EXTRAS="litellm any-llm sqlalchemy redis blaxel modal runloop temporal"
+DEFAULT_UV_EXTRAS="litellm any-llm sqlalchemy redis blaxel modal temporal"
 
 build_uv_prefix() {
   UV_RUN=(uv run)
@@ -169,7 +169,7 @@ Commands:
 Environment overrides:
   EXAMPLES_INTERACTIVE_MODE (default auto)
   EXAMPLES_INCLUDE_SERVER/INTERACTIVE/AUDIO/EXTERNAL (defaults: 0/1/0/0)
-  EXAMPLES_UV_EXTRAS (default: litellm any-llm sqlalchemy redis blaxel modal runloop temporal; set empty to disable)
+  EXAMPLES_UV_EXTRAS (default: litellm any-llm sqlalchemy redis blaxel modal temporal; set empty to disable)
   APPLY_PATCH_AUTO_APPROVE, AUTO_APPROVE_MCP (default 1 in auto mode)
 EOF
 }

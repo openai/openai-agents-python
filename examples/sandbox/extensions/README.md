@@ -6,9 +6,17 @@ They intentionally keep the flow simple:
 
 1. Build a tiny manifest in memory.
 2. Create a `SandboxAgent` that inspects that workspace through one shell tool.
-3. Run the agent against E2B, Modal, Daytona, Cloudflare, Runloop, Blaxel, or Vercel.
+3. Run the agent against E2B, Modal, Daytona, Cloudflare, Blaxel, or Vercel.
 
 All of these examples require `OPENAI_API_KEY`, because they call the model through the normal `Runner` path. Each cloud backend also needs its own provider credentials.
+
+## Migrating from Runloop
+
+Runloop support has been removed from `openai-agents`. Imports from `agents.extensions.sandbox.runloop` and Runloop exports from `agents.extensions.sandbox`, including `RunloopSandboxClient`, no longer work. Applications that still need Runloop can stay on a previously released compatible version while migrating.
+
+The [Modal example](#modal) uses `ModalSandboxClient` and `ModalSandboxClientOptions` from `agents.extensions.sandbox`. Install `openai-agents[modal]`, configure Modal authentication, and set an app name. Replace the client and options in `SandboxRunConfig`, and adapt provider-specific mounts and platform operations. `ModalCloudBucketMountStrategy` provides native cloud bucket mounts; review and test its provider-specific behavior and credentials for your workload.
+
+Before switching, preserve any data you need from existing Runloop sandboxes. Runloop sandbox IDs, snapshots, and session state are provider-specific; do not assume Modal can resume them. Create a new Modal sandbox and restore the data through a supported mechanism.
 
 ## E2B
 
@@ -228,84 +236,6 @@ export DAYTONA_API_KEY=...
 uv run python examples/sandbox/extensions/daytona/daytona_runner.py --stream
 ```
 
-## Runloop
-
-### Setup
-
-Install the repo extra:
-
-```bash
-uv sync --extra runloop
-```
-
-Sign up for Runloop, no credit card required and $50 in credits @ [platform.runloop.ai](https://platform.runloop.ai/).
-Export the required environment variables:
-
-```bash
-export OPENAI_API_KEY=...
-export RUNLOOP_API_KEY=...
-```
-
-### Run
-
-```bash
-uv run python examples/sandbox/extensions/runloop/runner.py --stream
-```
-
-Useful flags:
-
-- `--blueprint-name <name>`
-- `--pause-on-exit`
-- `--root`
-
-Runloop-specific SDK features are also available directly on
-`RunloopSandboxClientOptions` and `RunloopSandboxClient.platform`. Example:
-
-```python
-from agents.extensions.sandbox.runloop import (
-    RunloopAfterIdle,
-    RunloopGatewaySpec,
-    RunloopLaunchParameters,
-    RunloopMcpSpec,
-    RunloopSandboxClient,
-    RunloopSandboxClientOptions,
-    RunloopTunnelConfig,
-)
-
-client = RunloopSandboxClient()
-sandbox = await client.create(
-    options=RunloopSandboxClientOptions(
-        blueprint_name="python-3-12",
-        launch_parameters=RunloopLaunchParameters(
-            network_policy_id="np_123",
-            resource_size_request="MEDIUM",
-            after_idle=RunloopAfterIdle(idle_time_seconds=300, on_idle="suspend"),
-        ),
-        tunnel=RunloopTunnelConfig(auth_mode="authenticated"),
-        gateways={
-            "OPENAI_GATEWAY": RunloopGatewaySpec(
-                gateway="openai",
-                secret="OPENAI_GATEWAY_SECRET",
-            )
-        },
-        mcp={
-            "GITHUB_MCP": RunloopMcpSpec(
-                mcp_config="github-readonly",
-                secret="GITHUB_MCP_SECRET",
-            )
-        },
-        managed_secrets={"OPENAI_API_KEY": "..."},
-        metadata={"team": "agents"},
-    )
-)
-
-public_blueprints = await client.platform.blueprints.list_public()
-public_benchmarks = await client.platform.benchmarks.list_public()
-```
-
-`managed_secrets` are stored as Runloop account secrets and only secret references are persisted in session state. An entry's value may instead be `RunloopExistingSecret()`, which attaches a secret that is already stored on the account by name, uploading nothing and leaving the stored value untouched. The platform facade also exposes Runloop-native helpers for blueprints, benchmarks, secrets, network policies, and axons.
-
-If you enable `--root`, Runloop launches the devbox with `launch_parameters.user_parameters={"username":"root","uid":0}`. In that mode, the default home and working directory become `/root`, so the example also uses `/root` as its manifest workspace root. If you configure root launch in your own code, either rely on that root-mode default or explicitly choose a `manifest.root` under `/root`.
 ## Blaxel
 
 ### Setup

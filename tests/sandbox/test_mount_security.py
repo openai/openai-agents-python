@@ -15,7 +15,6 @@ from agents.extensions.sandbox.blaxel.mounts import BlaxelCloudBucketMountStrate
 from agents.extensions.sandbox.daytona.mounts import DaytonaCloudBucketMountStrategy
 from agents.extensions.sandbox.e2b.mounts import E2BCloudBucketMountStrategy
 from agents.extensions.sandbox.modal.mounts import ModalCloudBucketMountStrategy
-from agents.extensions.sandbox.runloop.mounts import RunloopCloudBucketMountStrategy
 from agents.run_config import SandboxRunConfig
 from agents.sandbox import Manifest
 from agents.sandbox._mount_security import (
@@ -1146,7 +1145,6 @@ def test_preserves_credentialless_in_container_and_credentialed_docker_mounts() 
         ("blaxel", BlaxelCloudBucketMountStrategy()),
         ("daytona", DaytonaCloudBucketMountStrategy()),
         ("e2b", E2BCloudBucketMountStrategy()),
-        ("runloop", RunloopCloudBucketMountStrategy()),
     ],
 )
 def test_preserves_credentialless_hosted_mount_strategies(

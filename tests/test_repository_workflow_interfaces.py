@@ -94,10 +94,7 @@ def test_repository_example_script_preserves_runner_contract() -> None:
 
     assert 'PID_FILE="$ROOT/.tmp/examples-auto-run.pid"' in runner
     assert 'LOG_DIR="$ROOT/.tmp/examples-start-logs"' in runner
-    assert (
-        'DEFAULT_UV_EXTRAS="litellm any-llm sqlalchemy redis blaxel modal runloop temporal"'
-        in runner
-    )
+    assert 'DEFAULT_UV_EXTRAS="litellm any-llm sqlalchemy redis blaxel modal temporal"' in runner
     for required_argument in ("--auto-mode", "--main-log", "--logs-dir"):
         assert required_argument in runner
     for optional_mode in (
