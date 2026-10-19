@@ -27,8 +27,8 @@ def test_package_metadata_requires_fixed_mcp_and_allows_current_pydantic() -> No
     assert "2.14.0" in pydantic.specifier
     assert "2.14.1" in pydantic.specifier
     mcp = next(requirement for requirement in requirements if requirement.name == "mcp")
-    assert "1.21.0" not in mcp.specifier
-    assert "1.21.1" in mcp.specifier
+    assert "1.21.1" not in mcp.specifier
+    assert "1.21.2" in mcp.specifier
     assert "1.29.0" in mcp.specifier
     assert importlib.metadata.version("mcp") in mcp.specifier
     assert importlib.metadata.version("pydantic") in pydantic.specifier
