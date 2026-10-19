@@ -486,7 +486,8 @@ def main() -> None:
     print(f"[integration] wheel={wheel.name} sdist={sdist.name} profile={args.profile}")
 
     if args.profile == "mcp-v1":
-        for mcp_version in ("1.19.0", "1.29.0"):
+        # MCP 1.21.2 includes the Pydantic 2.14 import fix and the OAuth 401 scope hotfix.
+        for mcp_version in ("1.21.2", "1.29.0"):
             environment_kind = f"mcp-v1-{mcp_version}"
             python = create_environment(
                 environment_kind,
