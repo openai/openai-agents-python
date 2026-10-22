@@ -782,7 +782,7 @@ class TestUnixLocalUserScopedFilesystem:
         assert (workspace / "nested").is_dir()
         assert len(session.exec_commands) == 1
         assert session.exec_commands[0][:4] == ("sudo", "-u", "sandbox-user", "--")
-        assert session.exec_commands[0][4:6] == ("sh", "-lc")
+        assert session.exec_commands[0][4:6] == ("sh", "-c")
         assert session.exec_commands[0][-2:] == (str(workspace / "nested"), "0")
         assert not any(part.startswith("mkdir ") for part in session.exec_commands[0])
 
@@ -802,7 +802,7 @@ class TestUnixLocalUserScopedFilesystem:
         assert not target.exists()
         assert len(session.exec_commands) == 1
         assert session.exec_commands[0][:4] == ("sudo", "-u", "sandbox-user", "--")
-        assert session.exec_commands[0][4:6] == ("sh", "-lc")
+        assert session.exec_commands[0][4:6] == ("sh", "-c")
         assert session.exec_commands[0][-2:] == (str(target), "0")
         assert not any(part.startswith("rm ") for part in session.exec_commands[0])
 

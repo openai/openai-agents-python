@@ -270,7 +270,7 @@ done
 tar_cmd="$tar_cmd -C $(quote_sh "$workspace_root") -cf - ."
 
 workspace_fingerprint=$(
-    sh -lc "$tar_cmd" | hash_stdin
+    sh -c "$tar_cmd" | hash_stdin
 )
 fingerprint=$(
     printf '%s\\n%s\\n' "$workspace_fingerprint" "$manifest_digest" | hash_stdin
