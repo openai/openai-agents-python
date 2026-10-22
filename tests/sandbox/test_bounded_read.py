@@ -244,9 +244,9 @@ async def test_modal_bounded_read_limits_source_bytes(
     session = object.__new__(ModalSandboxSession)
     session._validate_path_access = AsyncMock(return_value=path)
 
-    async def execute(*command: str, shell: bool, timeout: float) -> ExecResult:
+    async def execute(*command: str, shell: bool, timeout: float | None = None) -> ExecResult:
         assert shell is False
-        assert timeout == 30.0
+        assert timeout is None
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -266,6 +266,47 @@ async def test_modal_bounded_read_limits_source_bytes(
         with pytest.raises(expected) as caught:
             await session.read_bounded(path, max_bytes=limit)
         assert caught.value.__context__ is None
+
+
+@pytest.mark.asyncio
+async def test_modal_bounded_read_does_not_set_sandbox_exec_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modal = pytest.importorskip("modal")
+    from modal.container_process import ContainerProcess
+
+    from agents.extensions.sandbox.modal.sandbox import (
+        ModalSandboxSession,
+        ModalSandboxSessionState,
+    )
+    from agents.sandbox import Manifest
+    from agents.sandbox.snapshot import NoopSnapshot
+
+    process = MagicMock(spec=ContainerProcess)
+    process.stdout.read.aio = AsyncMock(return_value=b"data")
+    process.stderr.read.aio = AsyncMock(return_value=b"")
+    process.wait.aio = AsyncMock(return_value=0)
+    sandbox = MagicMock(spec=modal.Sandbox)
+    sandbox.object_id = "sb-bounded-read"
+    sandbox.exec.aio = AsyncMock(return_value=process)
+    sandbox.terminate.aio = AsyncMock()
+    state = ModalSandboxSessionState(
+        manifest=Manifest(root="/workspace"),
+        snapshot=NoopSnapshot(id="bounded-read"),
+        app_name="bounded-read-tests",
+    )
+    session = ModalSandboxSession(state=state, sandbox=sandbox)
+    session._ensure_sandbox = AsyncMock()
+    session._validate_path_access = AsyncMock(return_value=Path("/workspace/out.jsonl"))
+    wait_for = AsyncMock(wraps=asyncio.wait_for)
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+
+    assert await session.read_bounded(Path("out.jsonl"), max_bytes=4) == b"data"
+    assert sandbox.exec.aio.call_args.kwargs["timeout"] is None
+    wait_for.assert_not_awaited()
+    sandbox.terminate.aio.assert_not_awaited()
+    assert session._sandbox is sandbox
+    assert state.sandbox_id == "sb-bounded-read"
 
 
 @pytest.mark.asyncio

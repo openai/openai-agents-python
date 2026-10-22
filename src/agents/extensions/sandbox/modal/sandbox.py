@@ -1253,6 +1253,7 @@ class ModalSandboxSession(BaseSandboxSession):
         try:
             workspace_path = await self._validate_path_access(path)
             # Bound acquisition inside the sandbox, using the same exec transport as read().
+            # Like read(), do not impose an exec deadline: it terminates the whole sandbox.
             result = await self.exec(
                 "/bin/sh",
                 "-c",
@@ -1262,7 +1263,6 @@ class ModalSandboxSession(BaseSandboxSession):
                 sandbox_path_str(workspace_path),
                 str(max_bytes),
                 shell=False,
-                timeout=30.0,
             )
             if result.exit_code == 44:
                 raise WorkspaceReadNotFoundError(path=path)
