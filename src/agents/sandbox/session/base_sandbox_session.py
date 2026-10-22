@@ -1019,13 +1019,13 @@ class BaseSandboxSession(abc.ABC):
     ) -> Path:
         workspace_path = await self._validate_path_access(path)
         path_arg = sandbox_path_str(workspace_path)
-        cmd = ("sh", "-lc", '[ -r "$1" ]', "sh", path_arg)
+        cmd = ("sh", "-c", '[ -r "$1" ]', "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             await self._raise_read_error_from_exec(
                 path=posix_path_as_path(coerce_posix_path(path)),
                 workspace_path=workspace_path,
-                command=("sh", "-lc", "<read_access_check>", path_arg),
+                command=("sh", "-c", "<read_access_check>", path_arg),
                 result=result,
                 user=user,
             )
@@ -1075,13 +1075,13 @@ class BaseSandboxSession(abc.ABC):
     ) -> Path:
         workspace_path = await self._validate_path_access(path, for_write=True)
         path_arg = sandbox_path_str(workspace_path)
-        cmd = ("sh", "-lc", _WRITE_ACCESS_CHECK_SCRIPT, "sh", path_arg)
+        cmd = ("sh", "-c", _WRITE_ACCESS_CHECK_SCRIPT, "sh", path_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
                 path=workspace_path,
                 context={
-                    "command": ["sh", "-lc", "<write_access_check>", path_arg],
+                    "command": ["sh", "-c", "<write_access_check>", path_arg],
                     "stdout": result.stdout.decode("utf-8", errors="replace"),
                     "stderr": result.stderr.decode("utf-8", errors="replace"),
                 },
@@ -1098,7 +1098,7 @@ class BaseSandboxSession(abc.ABC):
         workspace_path = await self._validate_path_access(path, for_write=True)
         parents_flag = "1" if parents else "0"
         path_arg = sandbox_path_str(workspace_path)
-        cmd = ("sh", "-lc", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", path_arg, parents_flag)
+        cmd = ("sh", "-c", _MKDIR_ACCESS_CHECK_SCRIPT, "sh", path_arg, parents_flag)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
@@ -1106,7 +1106,7 @@ class BaseSandboxSession(abc.ABC):
                 context={
                     "command": [
                         "sh",
-                        "-lc",
+                        "-c",
                         "<mkdir_access_check>",
                         path_arg,
                         parents_flag,
@@ -1127,7 +1127,7 @@ class BaseSandboxSession(abc.ABC):
         workspace_path = await self._validate_path_access(path, for_write=True)
         recursive_flag = "1" if recursive else "0"
         path_arg = sandbox_path_str(workspace_path)
-        cmd = ("sh", "-lc", _RM_ACCESS_CHECK_SCRIPT, "sh", path_arg, recursive_flag)
+        cmd = ("sh", "-c", _RM_ACCESS_CHECK_SCRIPT, "sh", path_arg, recursive_flag)
         result = await self.exec(*cmd, shell=False, user=user)
         if not result.ok():
             raise WorkspaceArchiveWriteError(
@@ -1135,7 +1135,7 @@ class BaseSandboxSession(abc.ABC):
                 context={
                     "command": [
                         "sh",
-                        "-lc",
+                        "-c",
                         "<rm_access_check>",
                         path_arg,
                         recursive_flag,
@@ -1297,7 +1297,7 @@ class BaseSandboxSession(abc.ABC):
         test = '[ "$1" -ef "$2" ]'
         if not follow_symlinks:
             test = '[ ! -L "$1" ] && [ ! -L "$2" ] && ' + test
-        cmd = ("sh", "-lc", test, "sh", left_arg, right_arg)
+        cmd = ("sh", "-c", test, "sh", left_arg, right_arg)
         result = await self.exec(*cmd, shell=False, user=user)
         if result.exit_code == 0:
             return True
@@ -1308,7 +1308,7 @@ class BaseSandboxSession(abc.ABC):
         if result.exit_code == 1:
             return False
         raise ExecNonZeroError(
-            result, command=("sh", "-lc", "<same_file_check>", left_arg, right_arg)
+            result, command=("sh", "-c", "<same_file_check>", left_arg, right_arg)
         )
 
     async def mkdir(

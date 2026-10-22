@@ -233,7 +233,7 @@ async def test_check_mkdir_with_exec_runs_non_destructive_probe_as_user() -> Non
     assert checked_path == Path("/workspace/nested/dir")
     assert session.last_command is not None
     assert session.last_command[:4] == ("sudo", "-u", "sandbox-user", "--")
-    assert session.last_command[4:6] == ("sh", "-lc")
+    assert session.last_command[4:6] == ("sh", "-c")
     assert session.last_command[-2:] == ("/workspace/nested/dir", "1")
 
 
@@ -250,7 +250,7 @@ async def test_check_rm_with_exec_runs_parent_write_probe_as_user() -> None:
     assert checked_path == Path("/workspace/stale.txt")
     assert session.last_command is not None
     assert session.last_command[:4] == ("sudo", "-u", "sandbox-user", "--")
-    assert session.last_command[4:6] == ("sh", "-lc")
+    assert session.last_command[4:6] == ("sh", "-c")
     assert session.last_command[-2:] == ("/workspace/stale.txt", "0")
 
 

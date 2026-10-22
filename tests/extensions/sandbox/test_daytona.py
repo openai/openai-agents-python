@@ -1088,7 +1088,7 @@ class TestDaytonaSandbox:
                 "sandbox-user",
                 "--",
                 "sh",
-                "-lc",
+                "-c",
                 _MKDIR_ACCESS_CHECK_SCRIPT,
                 "sh",
                 f"{daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT}/nested",
