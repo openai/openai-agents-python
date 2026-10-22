@@ -4,15 +4,15 @@ search:
 ---
 # 快速入门
 
-现代智能体只有能够操作文件系统中的真实文件时，才能发挥最佳效果。Agents SDK 中的**沙箱智能体**为模型提供持久工作区，使其能够检索大型文档集、编辑文件、运行命令、生成工件，并从保存的沙箱状态中恢复工作。
+现代智能体在能够操作文件系统中的真实文件时表现最佳。Agents SDK中的**沙箱智能体**为模型提供持久化工作区，使其能够检索大型文档集、编辑文件、运行命令、生成产物，并从已保存的沙箱状态继续工作。
 
-SDK 提供了这套执行框架，你无需自行串联文件暂存、文件系统工具、shell 访问、沙箱生命周期、快照以及特定于提供商的适配代码。你可以保留常规的 `Agent` 和 `Runner` 流程，然后添加用于工作区的 `Manifest`、沙箱原生工具的能力，以及用于指定工作运行位置的 `SandboxRunConfig`。
+SDK 提供了这一执行框架，无需你自行整合文件暂存、文件系统工具、shell 访问、沙箱生命周期、快照以及特定于提供商的衔接代码。你可以保留常规的 `Agent` 和 `Runner` 流程，然后添加用于工作区的 `Manifest`、用于沙箱原生工具的能力，以及指定工作运行位置的 `SandboxRunConfig`。
 
 ## 前提条件 {#prerequisites}
 
 - Python 3.10 或更高版本
-- 对OpenAI Agents SDK有基本了解
-- 一个沙箱客户端。对于可信的本地开发，请从 `UnixLocalSandboxClient` 开始。
+- 基本熟悉OpenAI Agents SDK
+- 沙箱客户端。对于可信的本地开发，请从 `UnixLocalSandboxClient` 开始。
 
 ## 安装 {#installation}
 
@@ -30,11 +30,11 @@ pip install "openai-agents[docker]"
 
 ## 本地沙箱智能体的创建 {#create-a-local-sandbox-agent}
 
-此示例会将本地代码仓库暂存到 `repo/` 下，延迟加载本地技能，并让运行器为本次运行创建 Unix 本地沙箱会话。
+此示例将本地仓库暂存至 `repo/` 下，延迟加载本地技能，并让运行器为本次运行创建 Unix 本地沙箱会话。
 
 !!! warning "本地命令使用主机权限"
 
-    在 Linux 上，`UnixLocalSandboxClient` 不会对命令施加任何操作系统级别的限制。在 macOS 上，它会通过 `sandbox-exec` 应用文件系统限制，但不提供网络隔离。请仅将此示例用于可信的本地开发，或在外部隔离的环境中使用。对于不可信的命令，包括受不可信输入影响的命令，请选择经过适当配置的 Docker 沙箱或托管沙箱，或者提供外部隔离。请参阅 [Unix 本地执行限制](sandbox/clients.md#decision-guide)。
+    在 Linux 上，`UnixLocalSandboxClient` 不会对命令增加操作系统级别的限制。在 macOS 上，它会通过 `sandbox-exec` 应用文件系统限制，但不提供网络隔离。请将此示例用于可信的本地开发或外部隔离的环境。对于不受信任的命令（包括受不受信任输入影响的命令），请选择经过适当配置的 Docker 沙箱或托管沙箱，或提供外部隔离。请参阅 [Unix 本地执行限制](sandbox/clients.md#decision-guide)。
 
 ```python
 import asyncio
@@ -66,7 +66,8 @@ def build_agent(model: str) -> SandboxAgent[None]:
                 "repo": LocalDir(src=HOST_REPO_DIR),
             }
         ),
-        capabilities=Capabilities.default() + [
+        capabilities=Capabilities.default()
+        + [
             Skills(
                 lazy_from=LocalDirLazySkillSource(
                     # This is a host path read by the SDK process.
@@ -94,16 +95,16 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-请参阅 [examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py)。它使用一个基于 shell 的微型代码仓库，因此可以在不同的 Unix 本地运行中以确定性的方式验证此示例。
+请参阅 [examples/sandbox/docs/coding_task.py](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/docs/coding_task.py)。它使用一个基于 shell 的微型仓库，因此可以在多次 Unix 本地运行中以确定性方式验证该示例。
 
-## 关键选择 {#key-choices}
+## 关键选项 {#key-choices}
 
-基本运行正常后，大多数人接下来通常会使用以下选项：
+基本运行正常后，大多数人接下来会使用以下选项：
 
-- `default_manifest`：新沙箱会话使用的文件、代码仓库、目录和挂载
-- `instructions`：应在不同提示词中统一应用的简短工作流规则
-- `base_instructions`：用于替换 SDK 沙箱提示词的高级备用机制
-- `capabilities`：沙箱原生工具，例如文件系统编辑/图像检查、shell、技能、记忆，以及 SDK 的压缩机制
+- `default_manifest`：用于新沙箱会话的文件、仓库、目录和挂载
+- `instructions`：应跨提示词应用的简短工作流规则
+- `base_instructions`：用于替换 SDK 沙箱提示词的高级应急机制
+- `capabilities`：沙箱原生工具，例如文件系统编辑/图像检查、shell、技能、记忆以及 SDK 的压缩机制
 - `run_as`：面向模型的工具执行时所使用的沙箱用户账户
 - `SandboxRunConfig.client`：沙箱后端
 - `SandboxRunConfig.session`、`session_state` 或 `snapshot`：后续运行重新连接到先前工作的方式
@@ -112,6 +113,6 @@ if __name__ == "__main__":
 
 - [概念](sandbox/guide.md)：了解清单、能力、权限、快照、运行配置和组合模式。
 - [沙箱客户端](sandbox/clients.md)：选择 Unix 本地、Docker、托管提供商和挂载策略。
-- [智能体记忆](sandbox/memory.md)：保留并复用以往沙箱运行中积累的经验。
+- [智能体记忆](sandbox/memory.md)：保留并复用先前沙箱运行中的经验。
 
-如果 shell 访问只是你偶尔使用的工具之一，请从[工具指南](tools.md)中的托管 shell 开始。当工作区隔离、沙箱客户端选择或沙箱会话恢复行为属于整体设计的一部分时，请使用沙箱智能体。
+如果 shell 访问只是偶尔使用的一种工具，请从[工具指南](tools.md)中的托管 shell 开始。如果工作区隔离、沙箱客户端选择或沙箱会话恢复行为是设计的一部分，请使用沙箱智能体。
