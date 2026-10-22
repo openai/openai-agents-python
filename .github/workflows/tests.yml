@@ -119,7 +119,7 @@ jobs:
   tests:
     runs-on: ubuntu-latest
     # Python 3.14 also runs coverage and installs Chromium with system dependencies.
-    timeout-minutes: ${{ matrix.python-version == '3.14' && 20 || 10 }}
+    timeout-minutes: ${{ matrix.python-version == '3.14' && 30 || 10 }}
     strategy:
       fail-fast: false
       matrix:
