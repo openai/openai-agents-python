@@ -50,6 +50,7 @@ from ....sandbox.errors import (
     SandboxError,
     WorkspaceArchiveReadError,
     WorkspaceArchiveWriteError,
+    WorkspaceReadNotFoundError,
     WorkspaceStartError,
     WorkspaceStopError,
     WorkspaceWriteTypeError,
@@ -1251,30 +1252,23 @@ class ModalSandboxSession(BaseSandboxSession):
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         try:
             workspace_path = await self._validate_path_access(path)
-            await self._ensure_sandbox()
-            assert self._sandbox is not None
-            # Each read starts a remote operation. Use Modal's 100 MiB per-read
-            # ceiling while respecting the caller's remaining byte budget.
-            stream = await self._sandbox.open.aio(sandbox_path_str(workspace_path), "rb")
-            completed = False
-            try:
-                result = bytearray()
-                while len(result) < max_bytes:
-                    chunk = await stream.read.aio(min(100 * 1024 * 1024, max_bytes - len(result)))
-                    if not chunk:
-                        break
-                    result.extend(chunk)
-                payload = bytes(result)
-                completed = True
-                return payload
-            finally:
-                try:
-                    await asyncio.wait_for(stream.close.aio(), timeout=5.0)
-                except Exception:
-                    # Preserve an active read failure or cancellation. A close failure
-                    # still fails a read that would otherwise have completed.
-                    if completed:
-                        raise
+            # Bound acquisition inside the sandbox, using the same exec transport as read().
+            result = await self.exec(
+                "/bin/sh",
+                "-c",
+                "PATH=/usr/bin:/bin; export PATH; "
+                '[ -e "$1" ] || exit 44; [ -f "$1" ] || exit 45; head -c "$2" < "$1"',
+                "sh",
+                sandbox_path_str(workspace_path),
+                str(max_bytes),
+                shell=False,
+                timeout=30.0,
+            )
+            if result.exit_code == 44:
+                raise WorkspaceReadNotFoundError(path=path)
+            if not result.ok():
+                raise WorkspaceArchiveReadError(path=path)
+            return result.stdout
         except (FileNotFoundError, SandboxError):
             raise
         except Exception as error:
