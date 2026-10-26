@@ -80,7 +80,10 @@ def _minimal_chat_completion(content: str = "ok") -> ChatCompletion:
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
-async def test_runner_replays_openai_conversation_assistant_history(stream: bool) -> None:
+@pytest.mark.parametrize("include_status", [True, False], ids=["with-status", "statusless"])
+async def test_runner_replays_openai_conversation_assistant_history(
+    stream: bool, include_status: bool
+) -> None:
     # Mock the transport so the real session sanitizer and provider converter both run.
     history = [
         {
@@ -98,6 +101,8 @@ async def test_runner_replays_openai_conversation_assistant_history(stream: bool
             "content": [{"type": "output_text", "text": "Hello, Ada!", "annotations": []}],
         },
     ]
+    if not include_status:
+        history[1].pop("status")
     requests: list[dict[str, Any]] = []
 
     def handler(request: httpx2.Request) -> httpx2.Response:

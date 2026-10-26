@@ -518,7 +518,8 @@ def test_items_to_messages_merges_refusal_into_pending_tool_call_message():
     assert assistant.get("tool_calls")
 
 
-def test_items_to_messages_accepts_statusless_output_message():
+@pytest.mark.parametrize("include_id", [True, False], ids=["with-id", "session-replay"])
+def test_items_to_messages_accepts_statusless_output_message(include_id: bool):
     """Output messages remain recognizable after replay normalization removes null status."""
     statusless_message = cast(
         TResponseInputItem,
@@ -535,6 +536,8 @@ def test_items_to_messages_accepts_statusless_output_message():
             ],
         },
     )
+    if not include_id:
+        statusless_message.pop("id")
 
     assert Converter.items_to_messages([statusless_message]) == [
         {"role": "assistant", "content": "hello"}

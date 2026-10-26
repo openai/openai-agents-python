@@ -302,6 +302,9 @@ class Converter:
         if role not in ("user", "assistant", "system", "developer"):
             return None
 
+        if cls.maybe_response_output_message(item):
+            return None
+
         return cast(EasyInputMessageParam, item)
 
     @classmethod
@@ -359,6 +362,7 @@ class Converter:
                 "id" in item
                 or (
                     isinstance(item["content"], list)
+                    and len(item["content"]) > 0
                     and all(
                         isinstance(part, dict) and part.get("type") in ("output_text", "refusal")
                         for part in item["content"]
