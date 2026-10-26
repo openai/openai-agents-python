@@ -11,6 +11,7 @@ from ..agent import Agent
 from ..exceptions import UserError
 from ..items import TResponseInputItem
 from ..logger import log_model_and_tool_action_warning
+from ..model_settings import ModelSettings
 from ..result import RunResult, RunResultStreaming
 from ..run_config import RunConfig
 from ..run_context import RunContextWrapper, TContext
@@ -275,6 +276,9 @@ class SandboxRuntime(Generic[TContext]):
                     bindings=bind_execution_agent(
                         public_agent=current_agent,
                         execution_agent=prepared_agent,
+                        model_settings_overrides=ModelSettings(
+                            extra_args=prepared_agent.model_settings.extra_args
+                        ),
                     ),
                     input=prepared_input,
                 )
@@ -302,6 +306,9 @@ class SandboxRuntime(Generic[TContext]):
                 bindings=bind_execution_agent(
                     public_agent=current_agent,
                     execution_agent=prepared_agent,
+                    model_settings_overrides=ModelSettings(
+                        extra_args=prepared_agent.model_settings.extra_args
+                    ),
                 ),
                 input=prepared_input,
             )

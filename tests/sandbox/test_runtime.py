@@ -7359,3 +7359,45 @@ def test_runner_protected_start_preserves_caller_error_without_exposing_it(mode:
     assert outward.__context__ is None
     assert outward.__cause__ is None
     _assert_mount_error_redacted(outward, source_error=source, sentinel="mount-secret")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_provider_defaults_are_resolved_before_sandbox_capability_settings(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool
+) -> None:
+    from unittest.mock import Mock
+
+    from agents.models.interface import ModelProvider
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model = ScriptedModel(steps=[[get_final_output_message("done")]])
+    model.model = "other-model"
+    provider = Mock(spec=ModelProvider)
+    provider.get_model.return_value = model
+    session = _FakeSession(Manifest())
+    config = _sandbox_run_config(_FakeClient(session))
+    config.model_provider = provider
+    config.model_settings = ModelSettings(extra_args={"request_option": "override"})
+    agent = SandboxAgent(
+        name="sandbox",
+        default_manifest=Manifest(),
+        capabilities=[Compaction(policy=StaticCompactionPolicy(threshold=123))],
+    )
+    original_settings = agent.model_settings
+    if streamed:
+        result = Runner.run_streamed(agent, "hello", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hello", run_config=config)
+    assert result.final_output == "done"
+    provider.get_model.assert_called_once_with(None)
+    assert model.calls[0].model_settings == ModelSettings(
+        extra_args={
+            "context_management": [{"type": "compaction", "compact_threshold": 123}],
+            "request_option": "override",
+        }
+    )
+    assert agent.model_settings is original_settings
+    assert agent.model_settings.extra_args is None

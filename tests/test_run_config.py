@@ -580,3 +580,64 @@ async def test_runner_dictionary_rejects_invalid_tool_name_collision_policy() ->
         )
 
     assert not model.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("default_name", ["gpt-4o", "gpt-5.6-luna"])
+async def test_provider_preserves_explicit_settings_equal_to_environment_defaults(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool, default_name: str
+) -> None:
+    from agents.models.default_models import get_default_model_settings
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", default_name)
+    explicit = get_default_model_settings()
+    agent = Agent(name="test", model_settings=explicit)
+    model = NamedScriptedModel("gpt-5" if default_name == "gpt-4o" else "other-model")
+    config = RunConfig(model_provider=DummyProvider(model))
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert model.calls[0].model_settings == explicit
+    assert agent.model_settings is explicit
+
+
+def test_any_llm_provider_default_uses_canonical_model_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("any_llm")
+    from agents.extensions.models.any_llm_provider import AnyLLMProvider
+    from agents.run_internal.turn_preparation import get_model_settings
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    config = RunConfig(model_provider=AnyLLMProvider())
+    model = config.model_provider.get_model(None)
+    assert get_model_settings(Agent(name="test"), config, model) == ModelSettings(
+        reasoning=Reasoning(effort="none"), verbosity="low"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_model_can_supply_defaults_without_a_string_identifier() -> None:
+    class ProviderModel(ScriptedModel):
+        def get_default_model_settings(self) -> ModelSettings:
+            return ModelSettings(temperature=0.2)
+
+    model = ProviderModel(steps=[[get_text_message("chosen")]])
+    await Runner.run(
+        Agent(name="test"),
+        "hi",
+        run_config=RunConfig(model_provider=DummyProvider(model), model_settings={"top_p": 0.5}),
+    )
+    assert model.calls[0].model_settings == ModelSettings(temperature=0.2, top_p=0.5)
+
+
+def test_invalid_settings_are_validated_before_implicit_default_detection() -> None:
+    from unittest.mock import Mock
+
+    with pytest.raises(TypeError, match="Agent model_settings must be a ModelSettings instance"):
+        Agent(name="test", model_settings=Mock())

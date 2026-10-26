@@ -40,6 +40,7 @@ from ...models._trace import model_config_for_trace, populate_generation_span
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
+from ...models.default_models import get_default_model_settings
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import (
@@ -266,6 +267,10 @@ class AnyLLMModel(Model):
         self.api: Literal["responses", "chat_completions"] | None = self._validate_api(api)
         self._provider_name, self._provider_model = self._split_model_name(model)
         self._provider_cache: dict[bool, Any] = {}
+
+    def get_default_model_settings(self) -> ModelSettings:
+        """Use the parsed provider model rather than the namespaced routing identifier."""
+        return get_default_model_settings(self._provider_model)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)

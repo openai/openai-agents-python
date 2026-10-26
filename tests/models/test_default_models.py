@@ -199,3 +199,50 @@ def test_agent_resets_model_settings_for_non_gpt_5_models():
     agent = Agent(name="test", model="gpt-4.1")
     assert agent.model == "gpt-4.1"
     assert agent.model_settings == ModelSettings()
+
+
+@pytest.mark.parametrize("model_name", [None, "gpt-4o", "gpt-5"])
+def test_explicit_default_settings_survive_construction_and_clone(
+    monkeypatch: pytest.MonkeyPatch, model_name: str | None
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    settings = get_default_model_settings()
+    agent = Agent(name="test", model=model_name, model_settings=settings)
+    cloned = agent.clone(model="gpt-4.1")
+    assert agent.model_settings is settings
+    assert cloned.model_settings is settings
+
+
+def test_clone_retains_implicit_defaults_without_copying_public_settings() -> None:
+    agent = Agent(name="test", model="gpt-5")
+    cloned = agent.clone(name="clone")
+    assert cloned.model_settings is agent.model_settings
+    assert cloned.clone(model="gpt-4.1").model_settings == ModelSettings()
+
+
+def test_clone_explicit_settings_equal_to_defaults_are_not_recomputed() -> None:
+    agent = Agent(name="test", model="gpt-5")
+    explicit = get_default_model_settings("gpt-5")
+    cloned = agent.clone(model_settings=explicit).clone(model="gpt-4.1")
+    assert cloned.model_settings is explicit
+
+
+@pytest.mark.parametrize("replacement", [False, True])
+def test_clone_preserves_settings_customized_after_construction(replacement: bool) -> None:
+    agent = Agent(name="test", model="gpt-5")
+    if replacement:
+        # Assigning an equal object is still an explicit settings choice.
+        agent.model_settings = get_default_model_settings("gpt-5")
+    else:
+        agent.model_settings.temperature = 0.3
+    settings = agent.model_settings
+    assert agent.clone(model="gpt-4.1").model_settings is settings
+
+
+def test_explicit_empty_dictionary_settings_are_preserved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-4o")
+    agent = Agent(name="test", model="gpt-5", model_settings={})
+    assert agent.model_settings == ModelSettings()
+    assert agent.clone(model="gpt-5.6-luna").model_settings == ModelSettings()
