@@ -72,8 +72,10 @@ async def test_resume_and_delete_preserve_delegate_ownership(provider: ModuleTyp
         snapshot=NoopSnapshot(id="example-snapshot"),
     )
 
-    assert await client.resume(state) is session
-    assert await client.delete(session) is session
+    resumed_session = await client.resume(state)
+    assert resumed_session is session
+    deleted_session = await client.delete(session)
+    assert deleted_session is session
     delegate.resume.assert_awaited_once_with(state)
     delegate.delete.assert_awaited_once_with(session)
     assert client.backend_id == DockerSandboxClient.backend_id == "docker"
