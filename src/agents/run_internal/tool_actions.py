@@ -624,7 +624,7 @@ class ShellAction:
                 log_tool_action_error("Shell executor failed", exc)
 
             raw_entries: list[dict[str, Any]] | None = None
-            if shell_output_payload:
+            if shell_output_payload is not None:
                 raw_entries = shell_output_payload
             elif output_text:
                 raw_entries = [

@@ -4,12 +4,19 @@ import json
 from typing import Any, cast
 
 import pytest
+from openai.types.responses import (
+    Response,
+    ResponseCompletedEvent,
+    ResponseFunctionShellToolCall,
+    ResponseOutputItemDoneEvent,
+)
 
 from agents import (
     Agent,
     RunConfig,
     RunContextWrapper,
     RunHooks,
+    Runner,
     ShellCallOutcome,
     ShellCommandOutput,
     ShellResult,
@@ -20,6 +27,7 @@ from agents import (
 )
 from agents.items import ToolApprovalItem, ToolCallOutputItem
 from agents.run_internal.run_loop import ShellAction, ToolRunShellCall, execute_shell_calls
+from agents.testing import ModelStep, ScriptedModel, assistant_message
 from agents.tool import ShellOnApprovalFunctionResult
 
 from .testing_processor import SPAN_PROCESSOR_TESTING
@@ -811,3 +819,79 @@ async def test_shell_tool_on_approval_empty_reason_uses_default_rejection() -> N
 
     assert isinstance(result, ToolCallOutputItem)
     assert result.output == HITL_REJECTION_MSG
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+async def test_shell_tool_empty_structured_output_reaches_next_model_unchanged(
+    streamed: bool,
+) -> None:
+    call = ResponseFunctionShellToolCall(
+        id="sc_empty",
+        call_id="call_empty",
+        type="shell_call",
+        status="completed",
+        action={"type": "shell_command", "commands": ["true"]},
+    )
+    step = ModelStep(output=[call])
+    if streamed:
+        response = Response(
+            id="synthetic",
+            created_at=0,
+            model="synthetic",
+            object="response",
+            output=[call],
+            tool_choice="auto",
+            tools=[],
+            parallel_tool_calls=True,
+        )
+        step = ModelStep.stream(
+            [
+                ResponseOutputItemDoneEvent(
+                    type="response.output_item.done",
+                    sequence_number=0,
+                    output_index=0,
+                    item=call,
+                ),
+                ResponseCompletedEvent(
+                    type="response.completed", sequence_number=1, response=response
+                ),
+            ],
+            output=[call],
+        )
+    model = ScriptedModel([step, [assistant_message("done")]])
+    tool = ShellTool(
+        executor=lambda request: ShellResult(
+            output=[],
+            provider_data={"runner": "test"},
+            max_output_length=4096,
+        )
+    )
+    agent = Agent(name="test", model=model, tools=[tool])
+    if streamed:
+        result = Runner.run_streamed(agent, "run", run_config=RunConfig(tracing_disabled=True))
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "run", run_config=RunConfig(tracing_disabled=True))
+
+    item = next(item for item in result.new_items if isinstance(item, ToolCallOutputItem))
+    raw = cast(dict[str, Any], item.raw_item)
+    assert item.output == "(no output)"
+    assert raw["output"] == []
+    assert "shell_output" not in raw
+    assert raw["provider_data"] == {"runner": "test"}
+    assert raw["max_output_length"] == 4096
+    assert raw["status"] == "completed"
+    assert [
+        entry for entry in model.calls[1].input if entry.get("type") == "shell_call_output"
+    ] == [
+        {
+            "type": "shell_call_output",
+            "call_id": "call_empty",
+            "output": [],
+            "max_output_length": 4096,
+        }
+    ]
+    assert result.final_output == "done"
+    model.assert_complete()
