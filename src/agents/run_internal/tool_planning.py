@@ -283,7 +283,11 @@ def _register_tool_call_items(
             continue
         if isinstance(item, ToolApprovalItem):
             continue
-        if not validate_invocations and isinstance(item, ToolCallItem | MCPApprovalRequestItem):
+        if (
+            not validate_invocations
+            and context_wrapper._allow_legacy_approval_binding_reconstruction
+            and isinstance(item, ToolCallItem | MCPApprovalRequestItem)
+        ):
             raw_type = get_mapping_or_attr(item.raw_item, "type")
             tool_name = get_mapping_or_attr(item.raw_item, "name")
             if not isinstance(tool_name, str):
@@ -352,44 +356,77 @@ def _dedupe_processed_response_invocations(
         for item in existing_items
         if (output_identity := tool_output_identity(getattr(item, "raw_item", None))) is not None
     }
-    completed_historical_invocations: dict[str, tuple[str, str, str]] = {}
+    # Fingerprinting every completed call in the history on every turn is quadratic in run
+    # length, so only call IDs that are reused in history or by this response are fingerprinted.
+    historical_entries: dict[str, list[tuple[str, str, str] | RunItem]] = {}
     for item in existing_items:
-        raw_item = getattr(item, "raw_item", None)
-        identity = tool_invocation_identity(
-            raw_item,
-            tool_lookup_key=(item.tool_lookup_key if isinstance(item, ToolApprovalItem) else None),
-            tool_name=(
-                item.tool_name if isinstance(item, ToolCallItem | ToolApprovalItem) else None
-            ),
-            invocation_role=("handoff" if isinstance(item, HandoffCallItem) else None),
-        )
+        call_identity = tool_invocation_call_id(getattr(item, "raw_item", None))
+        if (
+            call_identity is None
+            or call_identity[1] is None
+            or call_identity not in completed_output_keys
+        ):
+            continue
+        entry: tuple[str, str, str] | RunItem = item
         if (
             context_wrapper._allow_legacy_approval_binding_reconstruction
             and isinstance(item, ToolCallItem)
             and item.tool_name is None
         ):
-            call_identity = tool_invocation_call_id(raw_item)
-            if call_identity is not None and call_identity[1] is not None:
-                legacy_record = context_wrapper._tool_invocations.get(call_identity[1])
-                if (
-                    legacy_record is not None
-                    and legacy_record.completed
-                    and legacy_record.invocation_type == call_identity[0]
-                ):
-                    identity = (
-                        legacy_record.invocation_type,
-                        call_identity[1],
-                        legacy_record.fingerprint,
-                    )
-        if identity is None or identity[:2] not in completed_output_keys:
+            legacy_record = context_wrapper._tool_invocations.get(call_identity[1])
+            if (
+                legacy_record is not None
+                and legacy_record.completed
+                and legacy_record.invocation_type == call_identity[0]
+            ):
+                entry = (
+                    legacy_record.invocation_type,
+                    call_identity[1],
+                    legacy_record.fingerprint,
+                )
+        historical_entries.setdefault(call_identity[1], []).append(entry)
+
+    def historical_entry_identity(
+        entry: tuple[str, str, str] | RunItem,
+    ) -> tuple[str, str, str] | None:
+        if isinstance(entry, tuple):
+            return entry
+        return tool_invocation_identity(
+            entry.raw_item,
+            tool_lookup_key=(
+                entry.tool_lookup_key if isinstance(entry, ToolApprovalItem) else None
+            ),
+            tool_name=(
+                entry.tool_name if isinstance(entry, ToolCallItem | ToolApprovalItem) else None
+            ),
+            invocation_role=("handoff" if isinstance(entry, HandoffCallItem) else None),
+        )
+
+    completed_historical_invocations: dict[str, tuple[str, str, str] | None] = {}
+    for call_id, entries in historical_entries.items():
+        if len(entries) < 2:
             continue
-        previous_identity = completed_historical_invocations.get(identity[1])
-        if previous_identity is not None and previous_identity != identity:
-            raise ModelBehaviorError(
-                "Run history reused a tool call ID for different completed invocations. "
-                "Use a unique call ID for each tool invocation."
+        resolved_identity: tuple[str, str, str] | None = None
+        for entry in entries:
+            identity = historical_entry_identity(entry)
+            if identity is None:
+                continue
+            if resolved_identity is not None and resolved_identity != identity:
+                raise ModelBehaviorError(
+                    "Run history reused a tool call ID for different completed invocations. "
+                    "Use a unique call ID for each tool invocation."
+                )
+            resolved_identity = identity
+        completed_historical_invocations[call_id] = resolved_identity
+
+    def get_historical_identity(call_id: str) -> tuple[str, str, str] | None:
+        if call_id not in completed_historical_invocations:
+            entries = historical_entries.get(call_id)
+            completed_historical_invocations[call_id] = (
+                historical_entry_identity(entries[0]) if entries else None
             )
-        completed_historical_invocations[identity[1]] = identity
+        return completed_historical_invocations[call_id]
+
     current_response_invocations: dict[str, tuple[str, str, str]] = {}
     (
         processed_response.mcp_approval_requests,
@@ -440,7 +477,7 @@ def _dedupe_processed_response_invocations(
                 "Use a unique call ID for each tool invocation."
             )
 
-        historical_identity = completed_historical_invocations.get(identity[1])
+        historical_identity = get_historical_identity(identity[1])
         if historical_identity is not None:
             if historical_identity != identity:
                 raise ModelBehaviorError(

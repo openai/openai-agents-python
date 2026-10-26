@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from typing import Any, TypeGuard
 
 from pydantic import BaseModel
@@ -75,6 +75,16 @@ def _as_mapping(value: Any) -> Mapping[str, Any] | None:
         dumped = model_dump(**kwargs)
         return dumped if isinstance(dumped, Mapping) else None
     return None
+
+
+def _has_other_model_type(value: Any, types: Collection[str]) -> bool:
+    """Return whether a model's ``type`` rules it out without dumping the whole model."""
+    if not isinstance(value, BaseModel):
+        return False
+    value_type = getattr(value, "type", None)
+    return (
+        isinstance(value_type, str) and value_type not in types and value_type != "hosted_tool_call"
+    )
 
 
 def _normalize_value(value: Any, *, exclude_none: bool = False) -> Any:
@@ -160,9 +170,16 @@ def tool_invocation_identity_and_scope(
     invocation_role: str | None = None,
 ) -> tuple[str, str, str, str] | None:
     """Return invocation identity together with its stable approval scope."""
-    call_identity = tool_invocation_call_id(raw_item)
+    if _has_other_model_type(raw_item, _TOOL_INVOCATION_TYPES):
+        return None
+    mapping = _unwrap_hosted_mcp_approval(raw_item)
+    if mapping is None:
+        return None
+    # Unwrapping is idempotent, so the helpers below can reuse the mapping instead of
+    # dumping the raw item again.
+    call_identity = tool_invocation_call_id(mapping)
     approval_scope_identity = tool_invocation_approval_scope(
-        raw_item,
+        mapping,
         tool_lookup_key=tool_lookup_key,
         tool_name=tool_name,
         invocation_role=invocation_role,
@@ -172,10 +189,6 @@ def tool_invocation_identity_and_scope(
     invocation_type, call_id = call_identity
     scope_invocation_type, approval_scope = approval_scope_identity
     if call_id is None or scope_invocation_type != invocation_type:
-        return None
-
-    mapping = _unwrap_hosted_mcp_approval(raw_item)
-    if mapping is None:
         return None
 
     if invocation_type == "function_call":
@@ -221,6 +234,8 @@ def tool_invocation_identity_and_scope(
 
 def tool_invocation_call_id(raw_item: Any) -> tuple[str, str | None] | None:
     """Return a recognized invocation type and its valid non-empty call ID, if present."""
+    if _has_other_model_type(raw_item, _TOOL_INVOCATION_TYPES):
+        return None
     mapping = _unwrap_hosted_mcp_approval(raw_item)
     if mapping is None:
         return None
@@ -297,6 +312,8 @@ def is_mcp_approval_invocation(raw_item: Any) -> bool:
 
 def tool_output_identity(raw_item: Any) -> tuple[str, str] | None:
     """Return the invocation type and call ID completed by a tool output item."""
+    if _has_other_model_type(raw_item, _TOOL_OUTPUT_TYPES):
+        return None
     mapping = _as_mapping(raw_item)
     if mapping is None:
         return None
