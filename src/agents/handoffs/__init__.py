@@ -34,6 +34,7 @@ from .history import (
 
 if TYPE_CHECKING:
     from ..agent import Agent, AgentBase
+    from ..tool import ToolErrorFunction
 
 
 # The handoff input type is the type of data passed when the agent is called via a handoff.
@@ -207,6 +208,19 @@ class Handoff(Generic[TContext, TAgent]):
     _default_tool_identity: tuple[str, str] | None = field(default=None, kw_only=True, repr=False)
     """The target agent name and derived tool name when the default was used."""
 
+    failure_error_function: ToolErrorFunction | None = None
+    """Optional invocation-error formatter used by ``Runner`` (not Realtime sessions).
+
+    ``None`` preserves exception propagation. A sync or async formatter returns the tool
+    output sent to the calling agent, which can then retry or answer without transferring.
+    For a generic message, pass ``agents.default_tool_error_function``. Custom formatters
+    must return only application-approved error details and may re-raise unrecoverable errors.
+    This also handles application ``on_invoke_handoff``/``on_handoff`` exceptions; recovery
+    does not roll back callback side effects. Cancellation and formatter errors propagate.
+    Transfer hooks and input filters run only after a successful invocation and are not
+    covered by this handler.
+    """
+
     def get_transfer_message(self, agent: AgentBase[Any]) -> str:
         return json.dumps({"assistant": agent.name})
 
@@ -234,6 +248,7 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    failure_error_function: ToolErrorFunction | None = None,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
 
@@ -248,6 +263,7 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    failure_error_function: ToolErrorFunction | None = None,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
 
@@ -261,6 +277,7 @@ def handoff(
     input_filter: Callable[[HandoffInputData], HandoffInputData] | None = None,
     nest_handoff_history: bool | None = None,
     is_enabled: bool | Callable[[RunContextWrapper[Any], Agent[Any]], MaybeAwaitable[bool]] = True,
+    failure_error_function: ToolErrorFunction | None = None,
 ) -> Handoff[TContext, Agent[TContext]]: ...
 
 
@@ -274,6 +291,7 @@ def handoff(
     nest_handoff_history: bool | None = None,
     is_enabled: bool
     | Callable[[RunContextWrapper[Any], Agent[TContext]], MaybeAwaitable[bool]] = True,
+    failure_error_function: ToolErrorFunction | None = None,
 ) -> Handoff[TContext, Agent[TContext]]:
     """Create a handoff from an agent.
 
@@ -295,6 +313,13 @@ def handoff(
         is_enabled: Whether the handoff is enabled. Can be a bool or a callable that takes the run
             context and agent and returns whether the handoff is enabled. Disabled handoffs are
             hidden from the LLM at runtime.
+        failure_error_function: Optional sync or async invocation-error formatter for Runner.
+            None preserves exception propagation. Pass ``default_tool_error_function`` for
+            generic model-visible feedback, or a custom formatter returning application-approved
+            details. The calling agent stays active after a handled failure. Application callback
+            errors are also handled, without rolling back side effects; the formatter may re-raise
+            errors that are unsafe to recover. Cancellation, formatter errors, and errors in
+            transfer hooks or input filters propagate.
     """
 
     if input_type is not None and on_handoff is None:
@@ -374,6 +399,7 @@ def handoff(
         input_filter=input_filter,
         nest_handoff_history=nest_handoff_history,
         agent_name=agent.name,
+        failure_error_function=failure_error_function,
         is_enabled=_is_enabled if callable(is_enabled) else is_enabled,
         _default_tool_identity=(agent.name, tool_name) if not tool_name_override else None,
     )

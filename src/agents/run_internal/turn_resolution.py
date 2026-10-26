@@ -602,9 +602,34 @@ async def execute_handoffs(
             actual_handoff.tool_call,
             invocation_role="handoff",
         )
-        new_agent: Agent[Any] = await handoff.on_invoke_handoff(
-            context_wrapper, actual_handoff.tool_call.arguments
-        )
+        try:
+            new_agent: Agent[Any] = await handoff.on_invoke_handoff(
+                context_wrapper, actual_handoff.tool_call.arguments
+            )
+        except Exception as error:
+            if handoff.failure_error_function is None:
+                raise
+            # A failed invocation is not a transfer. Do not run transfer hooks or filters.
+            span_handoff.set_error(SpanError(message="Handoff invocation failed", data={}))
+            error_output = handoff.failure_error_function(context_wrapper, error)
+            if inspect.isawaitable(error_output):
+                error_output = await error_output
+            output_item = ToolCallOutputItem(
+                agent=public_agent,
+                output=error_output,
+                raw_item=ItemHelpers.tool_call_output_item(actual_handoff.tool_call, error_output),
+            )
+            new_step_items.append(output_item)
+            _register_tool_call_items(context_wrapper, [output_item])
+            return SingleStepResult(
+                original_input=original_input,
+                model_response=new_response,
+                pre_step_items=pre_step_items,
+                new_step_items=new_step_items,
+                next_step=NextStepRunAgain(),
+                tool_input_guardrail_results=list(tool_input_guardrail_results or []),
+                tool_output_guardrail_results=list(tool_output_guardrail_results or []),
+            )
         register_agent_tool_configuration(new_agent)
         span_handoff.span_data.to_agent = new_agent.name
         if multiple_handoffs:
