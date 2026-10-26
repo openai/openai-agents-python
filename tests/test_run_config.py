@@ -641,3 +641,57 @@ def test_invalid_settings_are_validated_before_implicit_default_detection() -> N
 
     with pytest.raises(TypeError, match="Agent model_settings must be a ModelSettings instance"):
         Agent(name="test", model_settings=Mock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter", ["any-llm", "litellm"])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [
+        (
+            "openrouter/openai/gpt-5.4-mini",
+            ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
+        ),
+        (
+            "openai/gpt-5",
+            ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
+        ),
+        ("openrouter/anthropic/claude-sonnet-4.5", ModelSettings()),
+        ("openrouter/other-vendor/gpt-5.4-mini", ModelSettings()),
+        ("ollama/gpt-5.4-mini", ModelSettings()),
+    ],
+)
+async def test_provider_selected_routed_model_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+    streamed: bool,
+    model_name: str,
+    expected: ModelSettings,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model: Model
+    if adapter == "any-llm":
+        pytest.importorskip("any_llm")
+        from agents.extensions.models.any_llm_model import AnyLLMModel
+
+        model = AnyLLMModel(model=model_name)
+    else:
+        pytest.importorskip("litellm")
+        from agents.extensions.models.litellm_model import LitellmModel
+
+        model = LitellmModel(model=model_name)
+    scripted = ScriptedModel(steps=[[get_text_message("chosen")]])
+    monkeypatch.setattr(model, "get_response", scripted.get_response)
+    monkeypatch.setattr(model, "stream_response", scripted.stream_response)
+    config = RunConfig(model_provider=DummyProvider(model))
+    agent = Agent(name="test")
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert scripted.calls[0].model_settings == expected
+    assert model.model == model_name

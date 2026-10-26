@@ -270,7 +270,11 @@ class AnyLLMModel(Model):
 
     def get_default_model_settings(self) -> ModelSettings:
         """Use the parsed provider model rather than the namespaced routing identifier."""
-        return get_default_model_settings(self._provider_model)
+        if self._provider_name == "openai":
+            return get_default_model_settings(self._provider_model)
+        if self._provider_name == "openrouter" and self._provider_model.startswith("openai/"):
+            return get_default_model_settings(self._provider_model.removeprefix("openai/"))
+        return ModelSettings()
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         return get_openai_retry_advice(request)
