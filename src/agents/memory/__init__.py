@@ -9,9 +9,10 @@ from .session import (
     OpenAIResponsesCompactionAwareSession,
     Session,
     SessionABC,
+    await_session_mutation,
     is_openai_responses_compaction_aware_session,
 )
-from .session_settings import SessionSettings
+from .session_settings import SessionSettings, coerce_session_settings, resolve_session_limit
 from .util import SessionInputCallback
 
 if TYPE_CHECKING:
@@ -22,6 +23,9 @@ __all__ = [
     "SessionABC",
     "SessionInputCallback",
     "SessionSettings",
+    "await_session_mutation",
+    "coerce_session_settings",
+    "resolve_session_limit",
     "SQLiteSession",
     "OpenAIConversationsSession",
     "OpenAIResponsesCompactionSession",

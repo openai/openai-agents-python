@@ -18,8 +18,21 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
-async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
-    """Wait for a mutation outcome despite repeated caller cancellation."""
+async def await_session_mutation(awaitable: Awaitable[_T]) -> _T:
+    """Wait for a session mutation to settle before propagating caller cancellation.
+
+    Once this coroutine starts, cancellation of its caller does not cancel the
+    supplied awaitable. Repeated cancellation requests are deferred until the
+    operation finishes. Without caller cancellation, return the result or raise
+    the operation's exception. With caller cancellation, retrieve the operation's
+    outcome and raise the first caller cancellation instead, even if the operation
+    failed. The caller must not interpret that cancellation as a rolled-back write.
+
+    This helper does not provide a timeout, transaction, retry, or mutual exclusion.
+    A stuck operation can delay cancellation indefinitely; configure timeouts on
+    the underlying client. Independently cancelling the supplied operation can
+    still interrupt it. Cancellation before this coroutine starts is not covered.
+    """
     task = asyncio.ensure_future(awaitable)
     cancellation: asyncio.CancelledError | None = None
     while not task.done():
@@ -38,6 +51,10 @@ async def _await_mutation(awaitable: Awaitable[_T]) -> _T:
     if cancellation is not None:
         raise cancellation from None
     return result
+
+
+# Preserve internal imports while sharing one implementation with adapter authors.
+_await_mutation = await_session_mutation
 
 
 @dataclass(frozen=True)
