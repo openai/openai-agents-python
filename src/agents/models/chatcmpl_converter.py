@@ -302,6 +302,9 @@ class Converter:
         if role not in ("user", "assistant", "system", "developer"):
             return None
 
+        if cls.maybe_response_output_message(item):
+            return None
+
         return cast(EasyInputMessageParam, item)
 
     @classmethod
@@ -349,12 +352,23 @@ class Converter:
 
     @classmethod
     def maybe_response_output_message(cls, item: Any) -> ResponseOutputMessageParam | None:
-        # ResponseOutputMessage is only used for messages with role assistant
+        # Session replay strips storage IDs from assistant output messages.
         if (
             isinstance(item, dict)
             and item.get("type") == "message"
             and item.get("role") == "assistant"
-            and {"id", "content"} <= set(item)
+            and "content" in item
+            and (
+                "id" in item
+                or (
+                    isinstance(item["content"], list)
+                    and len(item["content"]) > 0
+                    and all(
+                        isinstance(part, dict) and part.get("type") in ("output_text", "refusal")
+                        for part in item["content"]
+                    )
+                )
+            )
         ):
             return cast(ResponseOutputMessageParam, item)
         return None
