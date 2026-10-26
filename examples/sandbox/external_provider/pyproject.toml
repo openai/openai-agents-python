@@ -1,0 +1,14 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agents-example-docker-provider"
+version = "0.1.0"
+description = "An educational external sandbox client for the OpenAI Agents SDK"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["openai-agents[docker]>=0.24.0,<0.25.0"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/example_docker_provider"]

@@ -281,3 +281,7 @@ The runner also includes standalone demos for individual features. Pass
 - `drive` -- [Blaxel Drive mount](https://docs.blaxel.ai/Agent-drive/Overview) (persistent storage, requires `--drive-name`)
 
 Blaxel sandboxes support cloud bucket mounts (S3, R2, GCS) through `BlaxelCloudBucketMountStrategy` and persistent drive mounts through `BlaxelDriveMountStrategy`. See the [Blaxel Drive docs](https://docs.blaxel.ai/Agent-drive/Overview) for details.
+
+## Author an external provider
+
+The [external provider package](../external_provider/README.md) demonstrates a separately installable Docker-backed client and a deterministic Runner demo. It shows client injection and options registration without adding the package to the SDK.
