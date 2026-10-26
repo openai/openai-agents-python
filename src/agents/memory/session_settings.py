@@ -19,7 +19,13 @@ def resolve_session_limit(
     explicit_limit: int | None,
     settings: SessionSettings | dict[str, Any] | None,
 ) -> int | None:
-    """Safely resolve the effective limit for session operations."""
+    """Return an explicit limit, or fall back to the session settings' limit.
+
+    ``None`` selects the default; if both are absent, return ``None`` (unlimited).
+    Zero and negative explicit limits are preserved. A session implementation
+    should return no items for those values. This helper selects a limit; it does
+    not slice or fetch history. Dictionary settings use :func:`coerce_session_settings`.
+    """
     if explicit_limit is not None:
         return explicit_limit
     if settings is not None:
@@ -67,7 +73,14 @@ class SessionSettings:
 def coerce_session_settings(
     value: SessionSettings | dict[str, Any],
 ) -> SessionSettings:
-    """Normalize session settings while preserving existing typed instances."""
+    """Normalize a settings object or dictionary to :class:`SessionSettings`.
+
+    Existing settings instances (including subclasses) are returned unchanged.
+    Dictionary inputs reject unknown fields with ``TypeError``. Known fields use
+    the ``SessionSettings`` constructor's Pydantic validation; invalid field values
+    raise its validation errors.
+    Callers that accept ``None`` should create ``SessionSettings()`` for that case.
+    """
     return _coerce_session_settings(value, settings_type=SessionSettings)
 
 
