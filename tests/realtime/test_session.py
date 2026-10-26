@@ -185,7 +185,10 @@ async def test_property_and_send_helpers_and_enter_alias():
         # verify sent events
         assert any(isinstance(e, RealtimeModelSendUserInput) for e in model.events)
         assert any(isinstance(e, RealtimeModelSendAudio) and e.commit for e in model.events)
-        assert any(isinstance(e, RealtimeModelSendInterrupt) for e in model.events)
+        assert any(
+            isinstance(e, RealtimeModelSendInterrupt) and e.force_response_cancel
+            for e in model.events
+        )
     finally:
         await session.close()
 

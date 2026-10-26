@@ -382,8 +382,8 @@ class RealtimeSession(RealtimeModelListener):
         await self._model.send_event(RealtimeModelSendAudio(audio=audio, commit=commit))
 
     async def interrupt(self) -> None:
-        """Interrupt the model."""
-        await self._model.send_event(RealtimeModelSendInterrupt())
+        """Interrupt model generation and audio playback without cancelling running tools."""
+        await self._model.send_event(RealtimeModelSendInterrupt(force_response_cancel=True))
 
     async def update_agent(self, agent: RealtimeAgent) -> None:
         """Update the active agent for this session and apply its settings to the model."""

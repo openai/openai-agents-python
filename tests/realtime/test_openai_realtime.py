@@ -1479,6 +1479,47 @@ class TestSendEventAndConfig(TestOpenAIRealtimeWebSocketModel):
         assert send_raw.await_count == 8
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("automatic_interrupt", [True, False])
+    @pytest.mark.parametrize("response_active", [True, False])
+    async def test_session_interrupt_cancels_active_text_response(
+        self, model, monkeypatch, automatic_interrupt, response_active
+    ):
+        model._created_session = RealtimeSessionCreateRequest.model_validate(
+            {
+                "type": "realtime",
+                "model": "gpt-realtime-2.1",
+                "output_modalities": ["text"],
+                "audio": {
+                    "input": {
+                        "turn_detection": {
+                            "type": "semantic_vad",
+                            "interrupt_response": automatic_interrupt,
+                        }
+                    }
+                },
+            }
+        )
+        await model._mark_response_created("response_1")
+        if not response_active:
+            await model._mark_response_done("response_1")
+        send_raw = AsyncMock()
+        monkeypatch.setattr(model, "_send_raw_message", send_raw)
+        session = RealtimeSession(model, RealtimeAgent(name="agent"), None)
+
+        # A text/button interruption supplies no speech event to trigger VAD cancellation.
+        await session.interrupt()
+        await session.interrupt()
+
+        if response_active:
+            send_raw.assert_awaited_once()
+            assert send_raw.await_args is not None
+            assert send_raw.await_args.args[0].model_dump(exclude_unset=True) == {
+                "type": "response.cancel"
+            }
+        else:
+            send_raw.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_interrupt_force_cancel_overrides_auto_cancellation(self, model, monkeypatch):
         """Interrupt should send response.cancel even when auto cancel is enabled."""
         model._audio_state_tracker.set_audio_format("pcm16")
