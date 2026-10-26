@@ -44,19 +44,30 @@ from agents._tool_invocation import (
     tool_invocation_identity,
     tool_invocation_identity_and_scope,
 )
+from agents.decorators import tool
 from agents.editor import ApplyPatchOperation, ApplyPatchResult
 from agents.exceptions import ModelBehaviorError, UserError
-from agents.items import ModelResponse, ToolApprovalItem, TResponseOutputItem
+from agents.items import (
+    ModelResponse,
+    ToolApprovalItem,
+    ToolCallItem,
+    ToolCallOutputItem,
+    TResponseOutputItem,
+)
 from agents.lifecycle import RunHooks
 from agents.models.interface import Model, ModelProvider
 from agents.run_context import RunContextWrapper
 from agents.run_internal.run_loop import ToolRunFunction
+from agents.run_internal.run_steps import ProcessedResponse
 from agents.run_internal.tool_execution import (
     collect_manual_mcp_approvals,
     process_hosted_mcp_approvals,
     resolve_approval_rejection_message,
 )
-from agents.run_internal.tool_planning import _collect_runs_by_approval
+from agents.run_internal.tool_planning import (
+    _collect_runs_by_approval,
+    _dedupe_processed_response_invocations,
+)
 from agents.run_state import RunState
 from agents.stream_events import RunItemStreamEvent
 from agents.testing import ScriptedModel
@@ -75,6 +86,60 @@ class _ScriptedProvider(ModelProvider):
     def get_model(self, model_name: str | None) -> Model:
         assert model_name == "scripted-provider-model"
         return self.model
+
+
+@pytest.mark.parametrize("mode", ["non_streamed", "streamed"])
+async def test_unique_tool_turns_do_not_refingerprint_completed_history(
+    monkeypatch: pytest.MonkeyPatch, mode: Literal["non_streamed", "streamed"]
+) -> None:
+    turns = 24
+    executed: list[str] = []
+    identity_calls = 0
+
+    @tool
+    async def lookup(value: str) -> str:
+        executed.append(value)
+        return value
+
+    def counting_identity(raw_item: Any, **kwargs: Any) -> tuple[str, str, str] | None:
+        nonlocal identity_calls
+        identity_calls += 1
+        return tool_invocation_identity(raw_item, **kwargs)
+
+    monkeypatch.setattr(
+        "agents.run_internal.tool_planning.tool_invocation_identity", counting_identity
+    )
+    steps: list[list[TResponseOutputItem]] = [
+        [
+            get_text_message("thinking"),
+            get_function_tool_call("lookup", json.dumps({"value": str(i)}), call_id=f"call_{i}"),
+        ]
+        for i in range(turns)
+    ]
+    steps.append([get_text_message("done")])
+    model = ScriptedModel(steps)
+    agent = Agent(name="agent", model=model, tools=[lookup])
+    if mode == "non_streamed":
+        result = await Runner.run(agent, "hi", max_turns=turns + 1)
+    else:
+        result = Runner.run_streamed(agent, "hi", max_turns=turns + 1)
+        async for _ in result.stream_events():
+            pass
+
+    assert result.final_output == "done"
+    assert executed == [str(i) for i in range(turns)]
+    assert len(result.new_items) == 3 * turns + 1
+    outputs = [
+        item
+        for item in cast(list[dict[str, Any]], result.to_input_list())
+        if item.get("type") == "function_call_output"
+    ]
+    assert [(item["call_id"], item["output"]) for item in outputs] == [
+        (f"call_{i}", str(i)) for i in range(turns)
+    ]
+    model.assert_complete()
+    # Unique IDs require only the current response's identity, not historical identities.
+    assert identity_calls <= 2 * turns
 
 
 def test_canonical_shell_identity_ignores_stripped_provider_metadata() -> None:
@@ -3235,3 +3300,57 @@ def test_sticky_hosted_mcp_approval_rejects_same_id_for_changed_tool_name() -> N
 
     assert same_appended == []
     assert changed_appended == []
+
+
+@pytest.mark.parametrize(
+    ("second_arguments", "should_raise"),
+    [('{ "value" : "safe" }', False), ('{"value":"changed"}', True)],
+    ids=["same_invocation", "changed_invocation"],
+)
+def test_history_call_id_reuse_is_checked_without_current_response_call(
+    second_arguments: str,
+    should_raise: bool,
+) -> None:
+    agent = Agent(name="agent")
+    output = {"type": "function_call_output", "call_id": "call_0", "output": "ok"}
+    existing_items: list[Any] = [
+        ToolCallItem(
+            agent=agent,
+            raw_item=cast(
+                Any, get_function_tool_call("record_value", '{"value":"safe"}', call_id="call_0")
+            ),
+        ),
+        ToolCallOutputItem(agent=agent, raw_item=cast(Any, output), output="ok"),
+        ToolCallItem(
+            agent=agent,
+            raw_item=cast(
+                Any, get_function_tool_call("record_value", second_arguments, call_id="call_0")
+            ),
+        ),
+        ToolCallOutputItem(agent=agent, raw_item=cast(Any, dict(output)), output="ok"),
+    ]
+    processed_response = ProcessedResponse(
+        new_items=[],
+        handoffs=[],
+        functions=[],
+        computer_actions=[],
+        local_shell_calls=[],
+        shell_calls=[],
+        apply_patch_calls=[],
+        tools_used=[],
+        mcp_approval_requests=[],
+        interruptions=[],
+    )
+
+    def dedupe() -> None:
+        _dedupe_processed_response_invocations(
+            processed_response,
+            context_wrapper=RunContextWrapper(context=None),
+            existing_items=existing_items,
+        )
+
+    if should_raise:
+        with pytest.raises(ModelBehaviorError, match="Run history reused a tool call ID"):
+            dedupe()
+    else:
+        dedupe()
