@@ -58,6 +58,7 @@ plugins:
                     - Quickstart: sandbox_agents.md
                     - Concepts: sandbox/guide.md
                     - Sandbox clients: sandbox/clients.md
+                    - Build a sandbox provider: sandbox/custom-providers.md
                     - Agent memory: sandbox/memory.md
                 - Realtime agents:
                     - Quickstart: realtime/quickstart.md

@@ -220,3 +220,7 @@ The table below summarizes which remote storage entries each backend can mount d
 </div>
 
 For more runnable examples, browse [examples/sandbox/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox) for local, coding, memory, handoff, and agent-composition patterns, and [examples/sandbox/extensions/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox/extensions) for hosted sandbox clients.
+
+## External providers
+
+Applications can supply a sandbox client from a separately installed package through `SandboxRunConfig(client=...)`. See [Build a sandbox provider](custom-providers.md) for the authoring contract and a runnable external-package example.
