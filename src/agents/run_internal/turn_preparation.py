@@ -160,8 +160,7 @@ def _model_settings_for_resolved_name(
         return ModelSettings()
     if agent.model is None:
         defaults = model.get_default_model_settings()
-        if defaults is not None:
-            return defaults
+        return defaults if defaults is not None else agent.model_settings
     return _implicit_model_settings_for_agent(agent)
 
 

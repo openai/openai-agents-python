@@ -695,3 +695,41 @@ async def test_provider_selected_routed_model_defaults(
     assert result.final_output == "chosen"
     assert scripted.calls[0].model_settings == expected
     assert model.model == model_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    ("initial_model", "later_model", "expected"),
+    [
+        (
+            "gpt-5.4-mini",
+            "gpt-4.1",
+            ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
+        ),
+        ("gpt-4.1", "gpt-5.4-mini", ModelSettings()),
+    ],
+)
+async def test_unnamed_provider_model_retains_captured_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    initial_model: str,
+    later_model: str,
+    expected: ModelSettings,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", initial_model)
+    agent = Agent(name="test")
+    captured_settings = agent.model_settings
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", later_model)
+    model = ScriptedModel(steps=[[get_text_message("chosen")]])
+    config = RunConfig(model_provider=DummyProvider(model))
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert model.calls[0].model_settings == expected
+    assert agent.model_settings is captured_settings
+    assert agent.model_settings == expected
