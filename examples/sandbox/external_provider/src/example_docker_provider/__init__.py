@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from agents.sandbox import Manifest
 from agents.sandbox.sandboxes.docker import DockerSandboxClient, DockerSandboxClientOptions
@@ -19,6 +19,8 @@ __all__ = ["ExampleDockerClient", "ExampleDockerOptions"]
 
 class ExampleDockerOptions(BaseSandboxClientOptions):
     """Options registered when the application imports this package."""
+
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["example_docker"] = "example_docker"
     image: str = Field(min_length=1)
@@ -44,6 +46,11 @@ class ExampleDockerClient(BaseSandboxClient[ExampleDockerOptions]):
         manifest: Manifest | None = None,
         options: ExampleDockerOptions,
     ) -> SandboxSession:
+        if not isinstance(options, ExampleDockerOptions):
+            raise TypeError(
+                "ExampleDockerClient requires an ExampleDockerOptions instance; "
+                "use DockerSandboxClient directly for Docker options"
+            )
         return await self.delegate.create(
             snapshot=snapshot,
             manifest=manifest,

@@ -4,6 +4,8 @@ This directory is a separately installable Python distribution. It demonstrates 
 
 `ExampleDockerClient` is a concrete adapter over the SDK's Docker backend, not an independently implemented container runtime. It translates its `ExampleDockerOptions` into Docker options and delegates session creation, cleanup, resume, and serialization to `DockerSandboxClient`. It intentionally keeps the `docker` backend ID and Docker state format. Use the built-in Docker client directly when you do not need an adapter; this package exists to demonstrate the external-package boundary.
 
+Pass a typed `ExampleDockerOptions` instance to this adapter. `SandboxRunConfig` interprets dictionary options using the `docker` backend ID, so the adapter rejects those and other Docker options before creating a session. The example options also reject unknown fields. Use `DockerSandboxClient` directly when configuring networking or other Docker-specific settings.
+
 ## Install and run
 
 From the SDK repository root, with Python 3.10+, `uv`, and a running Docker daemon:

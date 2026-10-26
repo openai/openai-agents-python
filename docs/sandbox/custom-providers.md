@@ -32,6 +32,8 @@ run_config = RunConfig(
 
 The [demo](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/external_provider/src/example_docker_provider/demo.py) shows the complete `try`/`finally` connection lifecycle. It uses a real container with `ScriptedModel`, so the demo needs no model API key or model request. The runner creates and cleans up the sandbox session. The application closes the Docker connection that the application created.
 
+The example requires a typed `ExampleDockerOptions` instance. Dictionary options passed to `SandboxRunConfig` are parsed according to the client’s backend ID, which remains `docker` here; the adapter rejects the resulting Docker options before creating a session. It also rejects unknown fields on its own options model. An adapter must preserve accepted settings or reject unsupported inputs before delegation, especially settings that control isolation. Use `DockerSandboxClient` directly for Docker networking and other advanced options.
+
 Use composition when an existing backend already implements your runtime. Return the delegate's `SandboxSession` unchanged, and delegate serialization and resume to the same backend. The example retains `backend_id = "docker"` and Docker's state type because the underlying session remains a Docker session. It does not introduce an independent persisted state format or claim additional isolation.
 
 ## Implement a new execution runtime

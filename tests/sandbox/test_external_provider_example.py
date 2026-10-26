@@ -8,7 +8,8 @@ from unittest.mock import create_autospec
 import pytest
 from pydantic import ValidationError
 
-from agents.sandbox import Manifest
+from agents import RunConfig, Runner
+from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
 from agents.sandbox.sandboxes.docker import (
     DockerSandboxClient,
     DockerSandboxClientOptions,
@@ -16,6 +17,7 @@ from agents.sandbox.sandboxes.docker import (
 )
 from agents.sandbox.session import BaseSandboxClientOptions, SandboxSession
 from agents.sandbox.snapshot import NoopSnapshot
+from agents.testing import ScriptedModel, assistant_message
 
 
 @pytest.fixture
@@ -44,10 +46,13 @@ async def test_create_preserves_inputs_and_instrumented_session(provider: Module
     manifest = Manifest()
     snapshot = NoopSnapshot(id="example-snapshot")
 
+    config = SandboxRunConfig(
+        client=client, options=provider.ExampleDockerOptions(image="python:3.14-slim")
+    )
     result = await client.create(
         manifest=manifest,
         snapshot=snapshot,
-        options=provider.ExampleDockerOptions(image="python:3.14-slim"),
+        options=config.options,
     )
 
     assert result is session
@@ -103,3 +108,34 @@ def test_docker_state_round_trip_uses_real_delegate(provider: ModuleType) -> Non
     assert restored.container_id == state.container_id
     assert restored.session_id == state.session_id
     assert restored.image == state.image
+
+
+def test_example_options_reject_unsupported_network_setting(provider: ModuleType) -> None:
+    with pytest.raises(ValidationError, match="network_mode"):
+        provider.ExampleDockerOptions(image="python:3.14-slim", network_mode="none")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options_kind", ["dictionary", "tagged-dictionary", "docker-options"])
+async def test_runner_rejects_docker_options_before_delegation(
+    provider: ModuleType, options_kind: str
+) -> None:
+    delegate = create_autospec(DockerSandboxClient, instance=True)
+    client = provider.ExampleDockerClient(delegate)
+    payload = {"image": "python:3.14-slim", "network_mode": "none"}
+    if options_kind == "tagged-dictionary":
+        payload["type"] = "docker"
+    options = DockerSandboxClientOptions(**payload) if options_kind == "docker-options" else payload
+    config = SandboxRunConfig(client=client, options=options)
+    assert isinstance(config.options, DockerSandboxClientOptions)
+    assert config.options.network_mode == "none"
+    model = ScriptedModel([[assistant_message("done")]])
+    agent = SandboxAgent(name="External provider", model=model)
+
+    with pytest.raises(TypeError, match="requires an ExampleDockerOptions instance"):
+        await Runner.run(
+            agent, "hello", run_config=RunConfig(tracing_disabled=True, sandbox=config)
+        )
+
+    delegate.create.assert_not_awaited()
+    assert not model.calls
