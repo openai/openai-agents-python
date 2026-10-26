@@ -382,7 +382,9 @@ async with MCPServerStdio(
 
 !!! tip "Package runner cold starts"
 
-    Package runners such as `npx -y` and `uvx` may download packages before the MCP server starts. These downloads can exceed the default session timeout. Increase `client_session_timeout_seconds`, as in the example above, or install the package before connecting. The setting also applies to subsequent session requests; it is not a startup-only timeout. With MCP Python SDK v2, the initial `server/discover` request has a separate timeout, so this setting does not control every stage of connection setup.
+    Package runners such as `npx -y` and `uvx` may download packages before the MCP server starts. Install the package before connecting to avoid spending connection setup time on these downloads.
+
+    The example increases `client_session_timeout_seconds` to allow more time for initialization and subsequent session requests. With MCP Python SDK v1, this can also accommodate package downloads during initialization. With MCP Python SDK v2, the initial `server/discover` request has a separate timeout that this setting does not change. Preinstall the package for slow v2 cold starts; increasing the session timeout alone does not control every stage of connection setup.
 
 ## 5. MCP server manager
 
