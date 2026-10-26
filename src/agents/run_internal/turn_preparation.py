@@ -151,17 +151,24 @@ def _implicit_model_settings_for_agent(agent: Agent[Any]) -> ModelSettings:
     return ModelSettings()
 
 
-def _model_settings_for_resolved_name(agent: Agent[Any], run_config: RunConfig) -> ModelSettings:
+def _model_settings_for_resolved_name(
+    agent: Agent[Any], run_config: RunConfig, model: Model
+) -> ModelSettings:
     if isinstance(run_config.model, str):
         return get_default_model_settings(run_config.model)
     if isinstance(run_config.model, Model):
         return ModelSettings()
+    if agent.model is None:
+        # Providers can select a model without a name on the agent or run config.
+        resolved_name = getattr(model, "model", None)
+        if isinstance(resolved_name, str):
+            return get_default_model_settings(resolved_name)
     return _implicit_model_settings_for_agent(agent)
 
 
-def get_model_settings(agent: Agent[Any], run_config: RunConfig) -> ModelSettings:
+def get_model_settings(agent: Agent[Any], run_config: RunConfig, model: Model) -> ModelSettings:
     """Resolve model settings, keeping implicit defaults aligned with the resolved model name."""
     model_settings = agent.model_settings
     if model_settings == _implicit_model_settings_for_agent(agent):
-        model_settings = _model_settings_for_resolved_name(agent, run_config)
+        model_settings = _model_settings_for_resolved_name(agent, run_config, model)
     return model_settings.resolve(run_config.model_settings)

@@ -2513,7 +2513,7 @@ async def run_single_turn_streamed(
 
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
-    model_settings = get_model_settings(execution_agent, run_config)
+    model_settings = get_model_settings(execution_agent, run_config, model)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     final_response: ModelResponse | None = None
@@ -2957,7 +2957,7 @@ async def get_new_response(
 
     model = get_model(execution_agent, run_config)
     tool_use_tracker.record_model(model)
-    model_settings = get_model_settings(execution_agent, run_config)
+    model_settings = get_model_settings(execution_agent, run_config, model)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     if server_conversation_tracker is not None:

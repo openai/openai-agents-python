@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import PureWindowsPath
 from typing import Any, cast
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI
+from openai.types.shared import Reasoning
 
 from agents import (
     Agent,
+    OpenAIChatCompletionsModel,
     OutputGuardrailBlockedMessageArgs,
     RunConfig,
     Runner,
@@ -278,6 +283,151 @@ async def test_run_config_model_settings_override_implicit_model_specific_defaul
     assert model_settings.reasoning.effort == "low"
     assert model_settings.verbosity == "low"
     assert model_settings.temperature == 0.3
+
+
+class NamedScriptedModel(ScriptedModel):
+    def __init__(self, model: str) -> None:
+        super().__init__(steps=[[get_text_message("chosen")]])
+        self.model = model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "run_streamed"])
+@pytest.mark.parametrize(
+    ("model_name", "agent_settings", "run_settings", "expected"),
+    [
+        pytest.param("other-model", None, None, ModelSettings(), id="non-gpt5"),
+        pytest.param(
+            "gpt-5",
+            None,
+            None,
+            ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
+            id="gpt5",
+        ),
+        pytest.param(
+            "other-model",
+            ModelSettings(temperature=0.3),
+            None,
+            ModelSettings(temperature=0.3),
+            id="customized-agent",
+        ),
+        pytest.param("gpt-5", ModelSettings(), None, ModelSettings(), id="explicit-empty-agent"),
+        pytest.param(
+            "other-model",
+            None,
+            ModelSettings(reasoning=Reasoning(effort="none")),
+            ModelSettings(reasoning=Reasoning(effort="none")),
+            id="run-override-matches-old-default",
+        ),
+        pytest.param(
+            None,
+            None,
+            None,
+            ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
+            id="unnamed-model",
+        ),
+    ],
+)
+async def test_provider_chosen_model_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    model_name: str | None,
+    agent_settings: ModelSettings | None,
+    run_settings: ModelSettings | None,
+    expected: ModelSettings,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model = (
+        NamedScriptedModel(model_name)
+        if model_name is not None
+        else ScriptedModel(steps=[[get_text_message("chosen")]])
+    )
+    provider = DummyProvider(model)
+    agent = (
+        Agent(name="test", model_settings=agent_settings)
+        if agent_settings is not None
+        else Agent(name="test")
+    )
+    original_settings = agent.model_settings
+    run_config = RunConfig(model_provider=provider, model_settings=run_settings)
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=run_config)
+    assert result.final_output == "chosen"
+    assert provider.last_requested is None
+    assert model.calls[0].model_settings == expected
+    assert agent.model_settings is original_settings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["agent-name", "run-name", "agent-object", "run-object"])
+async def test_explicit_model_settings_precede_provider_reported_name(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model = NamedScriptedModel("other-model" if source.endswith("name") else "gpt-5")
+    provider = DummyProvider(model)
+    selection = "gpt-5" if source.endswith("name") else model
+    agent = Agent(name="test", model=selection if source.startswith("agent") else None)
+    config = RunConfig(
+        model=selection if source.startswith("run") else None, model_provider=provider
+    )
+    result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    expected = (
+        ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low")
+        if source.endswith("name")
+        else ModelSettings()
+    )
+    assert model.calls[0].model_settings == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_provider_chosen_chat_model_omits_gpt5_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "other-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "chosen"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.example.test/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        provider = DummyProvider(
+            OpenAIChatCompletionsModel(model="other-model", openai_client=client)
+        )
+        result = await Runner.run(
+            Agent(name="test"), "hi", run_config=RunConfig(model_provider=provider)
+        )
+    assert result.final_output == "chosen"
+    assert len(bodies) == 1
+    assert bodies[0]["model"] == "other-model"
+    assert "reasoning_effort" not in bodies[0]
+    assert "verbosity" not in bodies[0]
 
 
 @pytest.mark.asyncio
