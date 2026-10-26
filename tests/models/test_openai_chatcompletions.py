@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import AsyncIterator
 from typing import Any, cast
@@ -43,7 +44,9 @@ from agents import (
     ModelSettings,
     ModelTracing,
     OpenAIChatCompletionsModel,
+    OpenAIConversationsSession,
     OpenAIProvider,
+    RunConfig,
     Runner,
     __version__,
     function_tool,
@@ -72,6 +75,94 @@ def _minimal_chat_completion(content: str = "ok") -> ChatCompletion:
             )
         ],
     )
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True], ids=["non-streaming", "streaming"])
+async def test_runner_replays_openai_conversation_assistant_history(stream: bool) -> None:
+    # Mock the transport so the real session sanitizer and provider converter both run.
+    history = [
+        {
+            "id": "msg_user",
+            "type": "message",
+            "role": "user",
+            "status": "completed",
+            "content": [{"type": "input_text", "text": "My name is Ada."}],
+        },
+        {
+            "id": "msg_assistant",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "Hello, Ada!", "annotations": []}],
+        },
+    ]
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        if request.url.path == "/v1/conversations/conv_test/items":
+            assert request.method in {"GET", "POST"}
+            return httpx2.Response(
+                200,
+                json={
+                    "object": "list",
+                    "data": history if request.method == "GET" else [],
+                    "has_more": False,
+                },
+            )
+        assert request.method == "POST"
+        assert request.url.path == "/v1/chat/completions"
+        requests.append(json.loads(request.content))
+        if stream:
+            chunk = {
+                "id": "chatcmpl-test",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": "fake",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "delta": {"role": "assistant", "content": "Your name is Ada."},
+                    }
+                ],
+            }
+            return httpx2.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=f"data: {json.dumps(chunk)}\n\ndata: [DONE]\n\n",
+            )
+        return httpx2.Response(200, json=_minimal_chat_completion("Your name is Ada.").model_dump())
+
+    async with AsyncOpenAI(
+        api_key="test-placeholder",
+        base_url="https://provider.example/v1",
+        max_retries=0,
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        session = OpenAIConversationsSession(conversation_id="conv_test", openai_client=client)
+        agent = Agent(
+            name="test", model=OpenAIChatCompletionsModel(model="fake", openai_client=client)
+        )
+        config = RunConfig(tracing_disabled=True)
+        if stream:
+            result = Runner.run_streamed(
+                agent, "What is my name?", session=session, run_config=config
+            )
+            async for _ in result.stream_events():
+                pass
+        else:
+            result = await Runner.run(agent, "What is my name?", session=session, run_config=config)
+
+    assert result.final_output == "Your name is Ada."
+    assert len(requests) == 1
+    assert requests[0]["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "My name is Ada."}]},
+        {"role": "assistant", "content": "Hello, Ada!"},
+        {"role": "user", "content": "What is my name?"},
+    ]
+    assert history[1]["id"] == "msg_assistant"
 
 
 async def _run_chat_completions_model_with_custom_base_url(

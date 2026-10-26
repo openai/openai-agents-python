@@ -321,7 +321,8 @@ def test_items_to_messages_accepts_raw_chat_completions_user_content_parts():
     ]
 
 
-def test_items_to_messages_with_output_message_and_function_call():
+@pytest.mark.parametrize("include_id", [True, False], ids=["with-id", "session-replay"])
+def test_items_to_messages_with_output_message_and_function_call(include_id: bool):
     """
     Given a sequence of one ResponseOutputMessageParam followed by a
     ResponseFunctionToolCallParam, the converter should produce a single
@@ -354,8 +355,11 @@ def test_items_to_messages_with_output_message_and_function_call():
         "arguments": "{}",
         "type": "function_call",
     }
+    message = resp_msg.model_dump()
+    if not include_id:
+        message.pop("id")
     items: list[TResponseInputItem] = [
-        resp_msg.model_dump(),  # type:ignore
+        cast(TResponseInputItem, message),
         func_item,
     ]
     messages = Converter.items_to_messages(items)
@@ -377,6 +381,28 @@ def test_items_to_messages_with_output_message_and_function_call():
     assert tool_call["type"] == "function"
     assert tool_call["function"]["name"] == "math"
     assert tool_call["function"]["arguments"] == "{}"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "hello",
+        [{"type": "input_text", "text": "hello"}],
+        [{"type": "output_audio", "data": "AAAA"}],
+    ],
+)
+def test_idless_assistant_output_rejects_unsupported_content(content: Any):
+    item = cast(
+        TResponseInputItem,
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": content,
+        },
+    )
+    with pytest.raises(UserError, match="Unhandled item type or structure"):
+        Converter.items_to_messages([item])
 
 
 def _turn_items_function_call_first() -> list[TResponseInputItem]:
