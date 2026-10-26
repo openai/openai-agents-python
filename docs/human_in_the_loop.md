@@ -219,6 +219,14 @@ The [server-side approval example](https://github.com/openai/openai-agents-pytho
 
 Replacing `context` with `context_override`, setting `strict_context=True`, or removing only the serialized approval records does not make an untrusted snapshot safe. Other fields still control resumed execution. If an application transports the complete snapshot through a client, the application must verify its integrity, bind it to the authorized user and run, and prevent replay before deserialization. Such verification does not encrypt the snapshot or hide its contents from the client.
 
+### Recovering after a crash
+
+Approval permits a tool call to execute; it does not guarantee exactly-once execution. If a tool performs an external action and the process stops before the application stores the updated run state, resuming from the older approved snapshot can execute the tool again. For example, a payment can complete even though the saved snapshot has no record of the payment result.
+
+For tools with consequential side effects, the application should assign a stable idempotency key to each logical action and pass that key to a destination that atomically prevents duplicate effects. Reuse the same key and action parameters across retries, and respect the destination's key retention period and retry rules. An approval decision or a local completion flag alone cannot make the external action and the saved run state one atomic operation.
+
+If destination-enforced idempotency is unavailable or no longer valid, reconcile the outcome with the destination before retrying. A missing result in an ordinary lookup is not proof that retrying is safe: reads can lag, and an earlier request can still complete. Retry only after authoritative reconciliation establishes that no earlier attempt performed the action or can still perform it. If the outcome remains uncertain, the application should record it as unknown and avoid automatic replay.
+
 ### Serialization options
 
 Useful serialization options:
