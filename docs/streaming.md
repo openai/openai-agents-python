@@ -68,6 +68,36 @@ If you are manually continuing from [`result.to_input_list(mode="normalized")`][
 -   If a streamed run stopped for tool approval, do not treat that as a new turn. Finish draining the stream, inspect `result.interruptions`, and resume from `result.to_state()` instead.
 -   Use [`RunConfig.session_input_callback`][agents.run.RunConfig.session_input_callback] to customize how retrieved session history and the new user input are merged before the next model call. If you rewrite new-turn items there, the rewritten version is what gets persisted for that turn.
 
+### Stop when your event consumer exits early
+
+The background run and the event consumer have separate lifetimes. If your application breaks out of the `async for` loop over events, raises an exception while handling an event, or cancels the consumer while it is handling an event, the run can continue making model and tool calls. Closing the event iterator with `aclose()` alone waits for the run to finish; it does not request cancellation. Cancellation while the consumer is awaiting the next event does request cancellation of the run, so do not rely on where cancellation happens to stop unwanted work.
+
+When one consumer owns the run, explicitly cancel on early exit and wait for cleanup. In this example, `agent` is your agent and `forward(event)` is your application's asynchronous event handler:
+
+```python
+from agents import Runner
+
+result = Runner.run_streamed(agent, input="Please tell me 5 jokes.")
+events = result.stream_events()
+exhausted = False
+try:
+    async for event in events:
+        await forward(event)
+    else:
+        exhausted = True
+finally:
+    if not exhausted:
+        result.cancel()
+        await events.aclose()
+        # Use a fresh iterator in case cancellation already closed the original.
+        async for _event in result.stream_events():
+            pass
+```
+
+Normal exhaustion leaves the result unchanged. An early `break`, a handler exception, or consumer cancellation enters the cleanup block. `cancel()` requests cancellation; consuming the cleanup stream runs the SDK's stream cleanup path. Neither `result.is_complete` nor finishing the cleanup stream guarantees that every asynchronous finalizer inside a tool has finished. Applications that depend on those finalizers must track and await tool cleanup separately.
+
+This example assumes one consumer and cooperative asynchronous tools. A further cancellation during cleanup can interrupt the cleanup block, and a cleanup failure can replace the original exception. Applications that must handle those cases need a supervised cleanup task and an explicit error-handling policy. Cancellation cannot undo tool effects that have already happened.
+
 ## Run item events and agent events
 
 [`RunItemStreamEvent`][agents.stream_events.RunItemStreamEvent]s are higher level events. They inform you when an item has been fully generated. This allows you to push progress updates at the level of "message generated", "tool ran", etc, instead of each token. Similarly, [`AgentUpdatedStreamEvent`][agents.stream_events.AgentUpdatedStreamEvent] gives you updates when the current agent changes (e.g. as the result of a handoff).
