@@ -680,6 +680,15 @@ class OpenAIChatCompletionsModel(Model):
         reasoning_effort = (
             model_settings.reasoning.effort if model_settings.reasoning is not None else None
         )
+        # These models require non-reasoning mode for Chat Completions function tools.
+        # Keep Responses defaults and caller-provided effort overrides unchanged.
+        if (
+            reasoning_effort is None
+            and self.model in {"gpt-6-sol", "gpt-6-luna"}
+            and converted_tools
+            and "reasoning_effort" not in (model_settings.extra_args or {})
+        ):
+            reasoning_effort = "none"
         store = ChatCmplHelpers.get_store_param(self._get_client(), model_settings)
 
         stream_options = ChatCmplHelpers.get_stream_options_param(
