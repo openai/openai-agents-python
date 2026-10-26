@@ -46,6 +46,7 @@ async def test_repeated_cancellation_waits_for_mutation(fail: bool) -> None:
     finish = asyncio.Event()
     settled = asyncio.Event()
     writes: list[str] = []
+    cancellations: list[str] = []
 
     async def write() -> None:
         started.set()
@@ -57,7 +58,15 @@ async def test_repeated_cancellation_waits_for_mutation(fail: bool) -> None:
         finally:
             settled.set()
 
-    task = asyncio.create_task(await_session_mutation(write()))
+    async def mutate() -> None:
+        try:
+            await await_session_mutation(write())
+        except asyncio.CancelledError as exc:
+            # Python 3.10 can discard this message when another task awaits us.
+            cancellations.append(str(exc))
+            raise
+
+    task = asyncio.create_task(mutate())
     try:
         await started.wait()
         task.cancel("first")
@@ -67,8 +76,9 @@ async def test_repeated_cancellation_waits_for_mutation(fail: bool) -> None:
         assert not task.done()
         assert not settled.is_set()
         finish.set()
-        with pytest.raises(asyncio.CancelledError, match="first"):
+        with pytest.raises(asyncio.CancelledError):
             await task
+        assert cancellations == ["first"]
         assert settled.is_set()
         assert writes == ([] if fail else ["committed"])
     finally:
