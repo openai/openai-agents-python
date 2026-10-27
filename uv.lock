@@ -272,12 +272,12 @@ name = "any-llm-sdk"
 version = "1.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "httpx" },
-    { name = "openai" },
-    { name = "openresponses-types" },
-    { name = "pydantic" },
-    { name = "rich" },
-    { name = "typing-extensions" },
+    { name = "httpx", marker = "python_full_version >= '3.11'" },
+    { name = "openai", marker = "python_full_version >= '3.11'" },
+    { name = "openresponses-types", marker = "python_full_version >= '3.11'" },
+    { name = "pydantic", marker = "python_full_version >= '3.11'" },
+    { name = "rich", marker = "python_full_version >= '3.11'" },
+    { name = "typing-extensions", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f3/18/161747c16bbe4b15122ac690e7941f3c58f24b3df382189fdbadf0624595/any_llm_sdk-1.11.0.tar.gz", hash = "sha256:cabda4135041127e728d6d6fe6a3c0d77f45c0dd50b38a8f0bc132a2ad948a6a", size = 148392, upload-time = "2026-03-12T13:18:29.74Z" }
 wheels = [
@@ -1176,7 +1176,7 @@ name = "exceptiongroup"
 version = "1.3.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "typing-extensions" },
+    { name = "typing-extensions", marker = "python_full_version < '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/50/79/66800aadf48771f6b62f7eb014e352e5d06856655206165d775e675a02c9/exceptiongroup-1.3.1.tar.gz", hash = "sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219", size = 30371, upload-time = "2025-11-21T23:01:54.787Z" }
 wheels = [
@@ -2930,7 +2930,7 @@ requires-dist = [
     { name = "h2", marker = "extra == 'modal'", specifier = ">=4.4.1" },
     { name = "httpx2", specifier = ">=2.12.0" },
     { name = "litellm", marker = "extra == 'litellm'", specifier = ">=1.83.0" },
-    { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.21.2,<3" },
+    { name = "mcp", marker = "python_full_version >= '3.10'", specifier = ">=1.30.0,!=2.0.*,!=2.1.*,<3" },
     { name = "modal", marker = "extra == 'modal'", specifier = "==1.4.3" },
     { name = "numpy", marker = "python_full_version >= '3.10' and extra == 'voice'", specifier = ">=2.2.0,<3" },
     { name = "openai", specifier = ">=3.0.0,<4" },
@@ -3006,7 +3006,7 @@ name = "openresponses-types"
 version = "2.3.0.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "pydantic" },
+    { name = "pydantic", marker = "python_full_version >= '3.11'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/d9/26/b612c3215f5599714fa94d63eb5ee59b4eb66dbdeeaf86bb4d848359484d/openresponses_types-2.3.0.post1.tar.gz", hash = "sha256:11b8896d3621d2ac2439f6ff106f34ddcb1bbd517c317a6c852a9df2e98a0753", size = 19254, upload-time = "2026-01-22T20:02:03.933Z" }
 wheels = [
