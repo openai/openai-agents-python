@@ -143,25 +143,20 @@ def get_model(agent: Agent[Any], run_config: RunConfig) -> Model:
     return run_config.model_provider.get_model(agent.model)
 
 
-def _implicit_model_settings_for_agent(agent: Agent[Any]) -> ModelSettings:
-    if agent.model is None:
-        return get_default_model_settings()
-    if isinstance(agent.model, str):
-        return get_default_model_settings(agent.model)
-    return ModelSettings()
-
-
 def _model_settings_for_resolved_name(
     agent: Agent[Any], run_config: RunConfig, model: Model
 ) -> ModelSettings:
-    if isinstance(run_config.model, str):
-        return get_default_model_settings(run_config.model)
-    if isinstance(run_config.model, Model):
+    selection = run_config.model if run_config.model is not None else agent.model
+    if isinstance(selection, Model):
         return ModelSettings()
-    if agent.model is None:
-        defaults = model.get_default_model_settings()
-        return defaults if defaults is not None else agent.model_settings
-    return _implicit_model_settings_for_agent(agent)
+    if isinstance(selection, str) and "/" not in selection:
+        return get_default_model_settings(selection)
+    defaults = model.get_default_model_settings()
+    if defaults is not None:
+        return defaults
+    if isinstance(selection, str):
+        return get_default_model_settings(selection)
+    return agent.model_settings
 
 
 def get_model_settings(

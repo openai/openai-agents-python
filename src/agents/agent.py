@@ -520,6 +520,7 @@ class Agent(AgentBase, Generic[TContext]):
         settings_omitted = self.model_settings.__dict__.get("_agent_default_settings") is True
         if settings_omitted:
             self.model_settings = _initial_model_settings_for_model(self.model)
+            self.model_settings.__dict__["_agent_defaults_untouched"] = True
         # Keep caller assignment and in-place edits from being treated as implicit defaults.
         self._implicit_model_settings: tuple[ModelSettings, ModelSettings] | None = (
             (self.model_settings, copy.deepcopy(self.model_settings)) if settings_omitted else None
@@ -610,6 +611,7 @@ class Agent(AgentBase, Generic[TContext]):
             )
         cloned = dataclasses.replace(self, **kwargs)
         if inherit_implicit_settings:
+            cloned.model_settings.__dict__["_agent_defaults_untouched"] = True
             cloned._implicit_model_settings = (
                 cloned.model_settings,
                 copy.deepcopy(cloned.model_settings),
@@ -621,6 +623,7 @@ class Agent(AgentBase, Generic[TContext]):
         return (
             defaults is not None
             and self.model_settings is defaults[0]
+            and self.model_settings.__dict__.get("_agent_defaults_untouched") is True
             and self.model_settings == defaults[1]
         )
 
