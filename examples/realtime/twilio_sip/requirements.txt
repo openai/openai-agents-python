@@ -1,5 +1,5 @@
 fastapi>=0.150.0
-starlette>=1.7.0
+starlette>=1.9.0
 openai>=3.35.1,<4
 httpx2>=2.13.1
 uvicorn[standard]>=0.54.0
