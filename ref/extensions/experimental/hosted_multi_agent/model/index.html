@@ -566,6 +566,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../../../../sandbox/custom-providers/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Build a sandbox provider
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../../../../sandbox/memory/" class="md-nav__link">
         
   
@@ -4905,6 +4933,17 @@
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
+  <a href="#agents.extensions.experimental.hosted_multi_agent.model.OpenAIHostedMultiAgentModel.get_default_model_settings" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        get_default_model_settings
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#agents.extensions.experimental.hosted_multi_agent.model.OpenAIHostedMultiAgentModel.stream_response" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -6405,6 +6444,54 @@
 
 
 
+
+<div class="doc doc-object doc-function">
+
+
+<h4 id="agents.extensions.experimental.hosted_multi_agent.model.OpenAIHostedMultiAgentModel.get_default_model_settings" class="doc doc-heading">
+            <span class="doc doc-object-name doc-function-name">get_default_model_settings</span>
+
+
+</h4>
+<div class="language-python doc-signature highlight"><pre><span></span><code><span id="__span-0-1"><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="nf">get_default_model_settings</span><span class="p">()</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="ModelSettings (agents.model_settings.ModelSettings)" href="../../../../model_settings/#agents.model_settings.ModelSettings">ModelSettings</a></span> <span class="o">|</span> <span class="kc">None</span>
+</span></code></pre></div>
+
+    <div class="doc doc-contents ">
+
+        <p>Return defaults for this model, or None to retain the agent's implicit defaults.</p>
+<p>The default implementation recognizes adapters exposing a string <code>model</code> name.
+Adapters with namespaced identifiers can override this using their canonical model name.
+Explicit agent settings and explicit model selections take precedence over this hook.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/agents/models/interface.py</code></summary>
+              <div class="language-python highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-47">47</a></span>
+<span class="normal"><a href="#__codelineno-0-48">48</a></span>
+<span class="normal"><a href="#__codelineno-0-49">49</a></span>
+<span class="normal"><a href="#__codelineno-0-50">50</a></span>
+<span class="normal"><a href="#__codelineno-0-51">51</a></span>
+<span class="normal"><a href="#__codelineno-0-52">52</a></span>
+<span class="normal"><a href="#__codelineno-0-53">53</a></span>
+<span class="normal"><a href="#__codelineno-0-54">54</a></span>
+<span class="normal"><a href="#__codelineno-0-55">55</a></span>
+<span class="normal"><a href="#__codelineno-0-56">56</a></span>
+<span class="normal"><a href="#__codelineno-0-57">57</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-47"><a id="__codelineno-0-47" name="__codelineno-0-47"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_default_model_settings</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ModelSettings</span> <span class="o">|</span> <span class="kc">None</span><span class="p">:</span>
+</span><span id="__span-0-48"><a id="__codelineno-0-48" name="__codelineno-0-48"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return defaults for this model, or None to retain the agent&#39;s implicit defaults.</span>
+</span><span id="__span-0-49"><a id="__codelineno-0-49" name="__codelineno-0-49"></a>
+</span><span id="__span-0-50"><a id="__codelineno-0-50" name="__codelineno-0-50"></a><span class="sd">    The default implementation recognizes adapters exposing a string ``model`` name.</span>
+</span><span id="__span-0-51"><a id="__codelineno-0-51" name="__codelineno-0-51"></a><span class="sd">    Adapters with namespaced identifiers can override this using their canonical model name.</span>
+</span><span id="__span-0-52"><a id="__codelineno-0-52" name="__codelineno-0-52"></a><span class="sd">    Explicit agent settings and explicit model selections take precedence over this hook.</span>
+</span><span id="__span-0-53"><a id="__codelineno-0-53" name="__codelineno-0-53"></a><span class="sd">    &quot;&quot;&quot;</span>
+</span><span id="__span-0-54"><a id="__codelineno-0-54" name="__codelineno-0-54"></a>    <span class="kn">from</span><span class="w"> </span><span class="nn">.default_models</span><span class="w"> </span><span class="kn">import</span> <span class="n">get_default_model_settings</span>
+</span><span id="__span-0-55"><a id="__codelineno-0-55" name="__codelineno-0-55"></a>
+</span><span id="__span-0-56"><a id="__codelineno-0-56" name="__codelineno-0-56"></a>    <span class="n">name</span> <span class="o">=</span> <span class="nb">getattr</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;model&quot;</span><span class="p">,</span> <span class="kc">None</span><span class="p">)</span>
+</span><span id="__span-0-57"><a id="__codelineno-0-57" name="__codelineno-0-57"></a>    <span class="k">return</span> <span class="n">get_default_model_settings</span><span class="p">(</span><span class="n">name</span><span class="p">)</span> <span class="k">if</span> <span class="nb">isinstance</span><span class="p">(</span><span class="n">name</span><span class="p">,</span> <span class="nb">str</span><span class="p">)</span> <span class="k">else</span> <span class="kc">None</span>
+</span></code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
 
 <div class="doc doc-object doc-function">
 

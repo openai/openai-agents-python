@@ -2150,13 +2150,17 @@
 
   
       dataclass
-   (agents.agent.Agent)" href="../../../../ref/agent/#agents.agent.Agent">Agent</a></span><span class="p">[</span><span class="n"><span title="typing.Any">Any</span></span><span class="p">],</span> <span class="n">run_config</span><span class="p">:</span> <span class="n"><a class="autorefs autorefs-internal" title="RunConfig
+   (agents.agent.Agent)" href="../../../../ref/agent/#agents.agent.Agent">Agent</a></span><span class="p">[</span><span class="n"><span title="typing.Any">Any</span></span><span class="p">],</span>
+</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>    <span class="n">run_config</span><span class="p">:</span> <span class="n"><a class="autorefs autorefs-internal" title="RunConfig
 
 
   
       dataclass
-   (agents.run_config.RunConfig)" href="../../../../ref/run_config/#agents.run_config.RunConfig">RunConfig</a></span>
-</span><span id="__span-0-3"><a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="ModelSettings (agents.model_settings.ModelSettings)" href="../../../../ref/model_settings/#agents.model_settings.ModelSettings">ModelSettings</a></span>
+   (agents.run_config.RunConfig)" href="../../../../ref/run_config/#agents.run_config.RunConfig">RunConfig</a></span><span class="p">,</span>
+</span><span id="__span-0-4"><a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">model</span><span class="p">:</span> <span class="n"><a class="autorefs autorefs-internal" title="Model (agents.models.interface.Model)" href="../../../../ref/models/interface/#agents.models.interface.Model">Model</a></span><span class="p">,</span>
+</span><span id="__span-0-5"><a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-6"><a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">prepared_overrides</span><span class="p">:</span> <span class="n"><a class="autorefs autorefs-internal" title="ModelSettings (agents.model_settings.ModelSettings)" href="../../../../ref/model_settings/#agents.model_settings.ModelSettings">ModelSettings</a></span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-7"><a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n"><a class="autorefs autorefs-internal" title="ModelSettings (agents.model_settings.ModelSettings)" href="../../../../ref/model_settings/#agents.model_settings.ModelSettings">ModelSettings</a></span>
 </span></code></pre></div>
 
     <div class="doc doc-contents ">
@@ -2171,12 +2175,24 @@
 <span class="normal"><a href="#__codelineno-0-164">164</a></span>
 <span class="normal"><a href="#__codelineno-0-165">165</a></span>
 <span class="normal"><a href="#__codelineno-0-166">166</a></span>
-<span class="normal"><a href="#__codelineno-0-167">167</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-162"><a id="__codelineno-0-162" name="__codelineno-0-162"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_model_settings</span><span class="p">(</span><span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span> <span class="n">run_config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ModelSettings</span><span class="p">:</span>
-</span><span id="__span-0-163"><a id="__codelineno-0-163" name="__codelineno-0-163"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolve model settings, keeping implicit defaults aligned with the resolved model name.&quot;&quot;&quot;</span>
-</span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a>    <span class="n">model_settings</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">model_settings</span>
-</span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a>    <span class="k">if</span> <span class="n">model_settings</span> <span class="o">==</span> <span class="n">_implicit_model_settings_for_agent</span><span class="p">(</span><span class="n">agent</span><span class="p">):</span>
-</span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a>        <span class="n">model_settings</span> <span class="o">=</span> <span class="n">_model_settings_for_resolved_name</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">run_config</span><span class="p">)</span>
-</span><span id="__span-0-167"><a id="__codelineno-0-167" name="__codelineno-0-167"></a>    <span class="k">return</span> <span class="n">model_settings</span><span class="o">.</span><span class="n">resolve</span><span class="p">(</span><span class="n">run_config</span><span class="o">.</span><span class="n">model_settings</span><span class="p">)</span>
+<span class="normal"><a href="#__codelineno-0-167">167</a></span>
+<span class="normal"><a href="#__codelineno-0-168">168</a></span>
+<span class="normal"><a href="#__codelineno-0-169">169</a></span>
+<span class="normal"><a href="#__codelineno-0-170">170</a></span>
+<span class="normal"><a href="#__codelineno-0-171">171</a></span>
+<span class="normal"><a href="#__codelineno-0-172">172</a></span>
+<span class="normal"><a href="#__codelineno-0-173">173</a></span></pre></div></td><td class="code"><div><pre><span></span><code><span id="__span-0-162"><a id="__codelineno-0-162" name="__codelineno-0-162"></a><span class="k">def</span><span class="w"> </span><span class="nf">get_model_settings</span><span class="p">(</span>
+</span><span id="__span-0-163"><a id="__codelineno-0-163" name="__codelineno-0-163"></a>    <span class="n">agent</span><span class="p">:</span> <span class="n">Agent</span><span class="p">[</span><span class="n">Any</span><span class="p">],</span>
+</span><span id="__span-0-164"><a id="__codelineno-0-164" name="__codelineno-0-164"></a>    <span class="n">run_config</span><span class="p">:</span> <span class="n">RunConfig</span><span class="p">,</span>
+</span><span id="__span-0-165"><a id="__codelineno-0-165" name="__codelineno-0-165"></a>    <span class="n">model</span><span class="p">:</span> <span class="n">Model</span><span class="p">,</span>
+</span><span id="__span-0-166"><a id="__codelineno-0-166" name="__codelineno-0-166"></a>    <span class="o">*</span><span class="p">,</span>
+</span><span id="__span-0-167"><a id="__codelineno-0-167" name="__codelineno-0-167"></a>    <span class="n">prepared_overrides</span><span class="p">:</span> <span class="n">ModelSettings</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+</span><span id="__span-0-168"><a id="__codelineno-0-168" name="__codelineno-0-168"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">ModelSettings</span><span class="p">:</span>
+</span><span id="__span-0-169"><a id="__codelineno-0-169" name="__codelineno-0-169"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolve model settings, keeping implicit defaults aligned with the resolved model name.&quot;&quot;&quot;</span>
+</span><span id="__span-0-170"><a id="__codelineno-0-170" name="__codelineno-0-170"></a>    <span class="n">model_settings</span> <span class="o">=</span> <span class="n">agent</span><span class="o">.</span><span class="n">model_settings</span>
+</span><span id="__span-0-171"><a id="__codelineno-0-171" name="__codelineno-0-171"></a>    <span class="k">if</span> <span class="n">agent</span><span class="o">.</span><span class="n">_uses_implicit_model_settings</span><span class="p">():</span>
+</span><span id="__span-0-172"><a id="__codelineno-0-172" name="__codelineno-0-172"></a>        <span class="n">model_settings</span> <span class="o">=</span> <span class="n">_model_settings_for_resolved_name</span><span class="p">(</span><span class="n">agent</span><span class="p">,</span> <span class="n">run_config</span><span class="p">,</span> <span class="n">model</span><span class="p">)</span>
+</span><span id="__span-0-173"><a id="__codelineno-0-173" name="__codelineno-0-173"></a>    <span class="k">return</span> <span class="n">model_settings</span><span class="o">.</span><span class="n">resolve</span><span class="p">(</span><span class="n">prepared_overrides</span><span class="p">)</span><span class="o">.</span><span class="n">resolve</span><span class="p">(</span><span class="n">run_config</span><span class="o">.</span><span class="n">model_settings</span><span class="p">)</span>
 </span></code></pre></div></td></tr></table></div>
             </details>
     </div>
