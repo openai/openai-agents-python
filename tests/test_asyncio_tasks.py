@@ -236,3 +236,65 @@ async def test_run_producer_consumer_drains_children_on_parent_cancellation() ->
     finally:
         parent.cancel()
         await asyncio.gather(parent, *children, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_parent", [False, True])
+async def test_gather_drains_owned_child_cancellation_but_preserves_parent_cancellation(
+    cancel_parent: bool,
+) -> None:
+    started = asyncio.Event()
+    draining = asyncio.Event()
+    release = asyncio.Event()
+    child_failure = asyncio.Event()
+    interrupted = asyncio.Event()
+    finished = asyncio.Event()
+
+    async def child() -> None:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            draining.set()
+            try:
+                await release.wait()
+                finished.set()
+            except asyncio.CancelledError:
+                interrupted.set()
+                raise
+
+    async def fail() -> None:
+        await draining.wait()
+        raise RuntimeError("selected failure")
+
+    child_task = asyncio.create_task(child())
+    task = asyncio.create_task(
+        gather_with_cancel(
+            child_task,
+            fail(),
+            on_child_failure=lambda _error: child_failure.set(),
+            cancelled_children={child_task},
+        )
+    )
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        child_task.cancel()
+        await asyncio.wait_for(child_failure.wait(), 2)
+        assert not interrupted.is_set()
+        if cancel_parent:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+            assert interrupted.is_set()
+        else:
+            release.set()
+            with pytest.raises(RuntimeError, match="selected failure"):
+                await asyncio.wait_for(task, 2)
+            assert finished.is_set()
+            assert not interrupted.is_set()
+    finally:
+        release.set()
+        for pending in (task, child_task):
+            if not pending.done():
+                pending.cancel()
+        await asyncio.gather(task, child_task, return_exceptions=True)

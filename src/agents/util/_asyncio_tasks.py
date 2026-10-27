@@ -30,6 +30,7 @@ async def gather_with_cancel(
     /,
     *,
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[T1, T2]: ...
 
 
@@ -41,6 +42,7 @@ async def gather_with_cancel(
     /,
     *,
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[T1, T2, T3]: ...
 
 
@@ -53,6 +55,7 @@ async def gather_with_cancel(
     /,
     *,
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[T1, T2, T3, T4]: ...
 
 
@@ -66,6 +69,7 @@ async def gather_with_cancel(
     /,
     *,
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[T1, T2, T3, T4, T5]: ...
 
 
@@ -80,6 +84,7 @@ async def gather_with_cancel(
     /,
     *,
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[T1, T2, T3, T4, T5, T6]: ...
 
 
@@ -87,22 +92,31 @@ async def gather_with_cancel(
 async def gather_with_cancel(
     *awaitables: Awaitable[T],
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[T, ...]: ...
 
 
 async def gather_with_cancel(
     *awaitables: Awaitable[Any],
     on_child_failure: Callable[[BaseException], None] | None = None,
+    cancelled_children: set[asyncio.Task[Any]] | None = None,
 ) -> tuple[Any, ...]:
-    """Gather awaitables, cancelling and draining siblings when one raises."""
+    """Gather awaitables, cancelling and draining siblings when one raises.
+
+    ``cancelled_children`` records children whose cancellation cleanup is already
+    owned by the caller. A sibling failure drains them without cancelling twice;
+    cancellation of the parent always cancels all unfinished children.
+    """
     tasks = [asyncio.ensure_future(awaitable) for awaitable in awaitables]
     gather_future = asyncio.gather(*tasks)
     gather_future.add_done_callback(_consume_future_exception)
+    child_failed = False
     try:
         await asyncio.wait((gather_future,))
         try:
             return tuple(gather_future.result())
         except BaseException as error:
+            child_failed = True
             if on_child_failure is not None:
                 on_child_failure(error)
             raise
@@ -111,7 +125,9 @@ async def gather_with_cancel(
         raise
     except BaseException:
         for task in tasks:
-            if not task.done():
+            if not task.done() and not (
+                child_failed and cancelled_children is not None and task in cancelled_children
+            ):
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         raise

@@ -5,6 +5,7 @@ import dataclasses as _dc
 import inspect
 import json
 from collections.abc import Awaitable, Callable, Hashable, Mapping, Sequence
+from functools import partial
 from typing import Any, TypeVar, cast
 
 from openai.types.responses import ResponseFunctionToolCall
@@ -61,6 +62,7 @@ from .tool_execution import (
     execute_local_shell_calls,
     execute_shell_calls,
     get_mapping_or_attr,
+    log_tool_action_error,
 )
 
 T = TypeVar("T")
@@ -984,9 +986,54 @@ async def _execute_tool_plan(
     )
     if parallel:
         sibling_category_failure = asyncio.Event()
+        native_category_failure = asyncio.Event()
+        native_tasks: set[asyncio.Task[Any]] = set()
+        cancelled_native_tasks: set[asyncio.Task[Any]] = set()
+        function_error_selected = False
+
+        def on_function_error_selected() -> None:
+            nonlocal function_error_selected
+            function_error_selected = True
+            native_category_failure.set()
+            for task in native_tasks:
+                if not task.done():
+                    cancelled_native_tasks.add(task)
+                    task.cancel()
+            if on_tool_error_selected is not None:
+                on_tool_error_selected()
+
+        async def run_native_category(
+            execute: Callable[[], Awaitable[list[RunItem]]],
+        ) -> list[RunItem]:
+            # A function failure may be selected before this category is scheduled.
+            if function_error_selected:
+                return []
+            task = asyncio.current_task()
+            assert task is not None
+            native_tasks.add(task)
+            try:
+                return await execute()
+            except asyncio.CancelledError:
+                if not function_error_selected:
+                    raise
+                # The function category owns this failure. Let its original error
+                # reach gather after bounded cleanup, rather than replacing it with
+                # the cancellation used to stop native invocations. Cancellation of
+                # the parent still propagates through gather_with_cancel itself.
+                return []
+            except Exception as error:
+                if task not in cancelled_native_tasks:
+                    raise
+                log_tool_action_error(
+                    "Native tool failed during sibling cancellation cleanup", error
+                )
+                return []
+            finally:
+                native_tasks.discard(task)
 
         def on_category_failure(error: BaseException) -> None:
             sibling_category_failure.set()
+            native_category_failure.set()
             if on_tool_error_selected is not None:
                 on_tool_error_selected()
             if isinstance(error, asyncio.CancelledError):
@@ -1007,58 +1054,74 @@ async def _execute_tool_plan(
                 context_wrapper=context_wrapper,
                 config=run_config,
                 isolate_parallel_failures=isolate_function_tool_failures,
-                on_tool_error_selected=on_tool_error_selected,
+                on_tool_error_selected=on_function_error_selected,
                 sibling_category_failure=sibling_category_failure,
                 tool_output_committer=tool_output_committer,
                 tool_input_guardrail_results=tool_input_guardrail_results,
                 tool_output_guardrail_results=tool_output_guardrail_results,
             ),
-            execute_computer_actions(
-                public_agent=public_agent,
-                actions=plan.computer_actions,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-                tool_output_committer=tool_output_committer,
-                sibling_category_failure=sibling_category_failure,
+            run_native_category(
+                partial(
+                    execute_computer_actions,
+                    public_agent=public_agent,
+                    actions=plan.computer_actions,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                    tool_output_committer=tool_output_committer,
+                    sibling_category_failure=native_category_failure,
+                )
             ),
-            execute_custom_tool_calls(
-                public_agent=public_agent,
-                calls=plan.custom_tool_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-                tool_output_committer=tool_output_committer,
-                sibling_category_failure=sibling_category_failure,
+            run_native_category(
+                partial(
+                    execute_custom_tool_calls,
+                    public_agent=public_agent,
+                    calls=plan.custom_tool_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                    tool_output_committer=tool_output_committer,
+                    sibling_category_failure=native_category_failure,
+                )
             ),
-            execute_shell_calls(
-                public_agent=public_agent,
-                calls=plan.shell_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-                tool_output_committer=tool_output_committer,
-                sibling_category_failure=sibling_category_failure,
+            run_native_category(
+                partial(
+                    execute_shell_calls,
+                    public_agent=public_agent,
+                    calls=plan.shell_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                    tool_output_committer=tool_output_committer,
+                    sibling_category_failure=native_category_failure,
+                )
             ),
-            execute_apply_patch_calls(
-                public_agent=public_agent,
-                calls=plan.apply_patch_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-                tool_output_committer=tool_output_committer,
-                sibling_category_failure=sibling_category_failure,
+            run_native_category(
+                partial(
+                    execute_apply_patch_calls,
+                    public_agent=public_agent,
+                    calls=plan.apply_patch_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                    tool_output_committer=tool_output_committer,
+                    sibling_category_failure=native_category_failure,
+                )
             ),
-            execute_local_shell_calls(
-                public_agent=public_agent,
-                calls=plan.local_shell_calls,
-                hooks=hooks,
-                context_wrapper=context_wrapper,
-                config=run_config,
-                tool_output_committer=tool_output_committer,
-                sibling_category_failure=sibling_category_failure,
+            run_native_category(
+                partial(
+                    execute_local_shell_calls,
+                    public_agent=public_agent,
+                    calls=plan.local_shell_calls,
+                    hooks=hooks,
+                    context_wrapper=context_wrapper,
+                    config=run_config,
+                    tool_output_committer=tool_output_committer,
+                    sibling_category_failure=native_category_failure,
+                )
             ),
             on_child_failure=on_category_failure,
+            cancelled_children=cancelled_native_tasks,
         )
     else:
         (
