@@ -1716,10 +1716,20 @@ class RunState(Generic[TContext, TAgent]):
             )
 
         if hasattr(raw_context_payload, "model_dump"):
-            try:
-                serialized = raw_context_payload.model_dump(exclude_unset=True)
-            except TypeError:
-                serialized = raw_context_payload.model_dump()
+            if isinstance(raw_context_payload, BaseModel):
+                try:
+                    # Checkpoints need current defaults and in-place changes as well as assignments.
+                    serialized = raw_context_payload.model_dump(mode="json")
+                except ValueError as exc:
+                    raise UserError(
+                        "RunState could not serialize the Pydantic context to JSON. "
+                        "Provide context_serializer to serialize or exclude unsupported fields."
+                    ) from exc
+            else:
+                try:
+                    serialized = raw_context_payload.model_dump(exclude_unset=True)
+                except TypeError:
+                    serialized = raw_context_payload.model_dump()
             if not isinstance(serialized, Mapping):
                 raise UserError("RunState context model_dump must return a mapping.")
             # We can persist the data, but the original type is lost unless the caller rebuilds it.
