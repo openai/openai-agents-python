@@ -1,5 +1,6 @@
 openai-agents
-httpx2>=2.13.1
+httpx2>=2.13.1; python_version < "3.11"
+httpx2>=2.15.1; python_version >= "3.11"
 pyjwt>=2.15.1
 python-multipart>=0.0.32
 urllib3>=2.8.0
