@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import copy
 import dataclasses
 import inspect
 from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
 
 from openai.types.responses.response_prompt_param import ResponsePromptParam
@@ -177,10 +179,12 @@ def _initial_model_settings_for_model(model: str | Model | None) -> ModelSetting
     return ModelSettings()
 
 
-def _model_settings_match_implicit_model_defaults(
-    model: str | Model | None, model_settings: ModelSettings
-) -> bool:
-    return model_settings == _initial_model_settings_for_model(model)
+@wraps(get_default_model_settings)
+def _default_agent_model_settings(model: str | None = None) -> ModelSettings:
+    """Preserve the default factory's value and signature while recording SDK-owned defaults."""
+    settings = get_default_model_settings(model)
+    settings.__dict__["_agent_default_settings"] = True
+    return settings
 
 
 @dataclass
@@ -364,7 +368,7 @@ class Agent(AgentBase, Generic[TContext]):
     `agents.models.get_default_model()` (currently "gpt-5.6-luna").
     """
 
-    model_settings: ModelSettings = field(default_factory=get_default_model_settings)
+    model_settings: ModelSettings = field(default_factory=_default_agent_model_settings)
     """Configures model-specific tuning parameters (e.g. temperature, top_p).
 
     Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
@@ -513,9 +517,14 @@ class Agent(AgentBase, Generic[TContext]):
             parameter_name="Agent model_settings",
             model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
         )
-
-        if self.model is not None and self.model_settings == get_default_model_settings():
+        settings_omitted = self.model_settings.__dict__.get("_agent_default_settings") is True
+        if settings_omitted:
             self.model_settings = _initial_model_settings_for_model(self.model)
+            self.model_settings.__dict__["_agent_defaults_untouched"] = True
+        # Keep caller assignment and in-place edits from being treated as implicit defaults.
+        self._implicit_model_settings: tuple[ModelSettings, ModelSettings] | None = (
+            (self.model_settings, copy.deepcopy(self.model_settings)) if settings_omitted else None
+        )
 
         if not isinstance(self.input_guardrails, list):
             raise TypeError(
@@ -588,11 +597,10 @@ class Agent(AgentBase, Generic[TContext]):
             new_agent = agent.clone(instructions="New instructions")
             ```
         """
-        if (
-            "model" in kwargs
-            and "model_settings" not in kwargs
-            and _model_settings_match_implicit_model_defaults(self.model, self.model_settings)
-        ):
+        inherit_implicit_settings = (
+            "model_settings" not in kwargs and self._uses_implicit_model_settings()
+        )
+        if inherit_implicit_settings and "model" in kwargs:
             kwargs["model_settings"] = _initial_model_settings_for_model(kwargs["model"])
         if "model_settings" in kwargs:
             kwargs["model_settings"] = _coerce_model_settings(
@@ -601,7 +609,23 @@ class Agent(AgentBase, Generic[TContext]):
                 model_settings_type=type(self.model_settings),
                 inherited_model_settings=self.model_settings,
             )
-        return dataclasses.replace(self, **kwargs)
+        cloned = dataclasses.replace(self, **kwargs)
+        if inherit_implicit_settings:
+            cloned.model_settings.__dict__["_agent_defaults_untouched"] = True
+            cloned._implicit_model_settings = (
+                cloned.model_settings,
+                copy.deepcopy(cloned.model_settings),
+            )
+        return cloned
+
+    def _uses_implicit_model_settings(self) -> bool:
+        defaults = self._implicit_model_settings
+        return (
+            defaults is not None
+            and self.model_settings is defaults[0]
+            and self.model_settings.__dict__.get("_agent_defaults_untouched") is True
+            and self.model_settings == defaults[1]
+        )
 
     def as_tool(
         self,

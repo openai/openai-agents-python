@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 from pathlib import PureWindowsPath
 from typing import Any, cast
 
+import httpx2
 import pytest
+from openai import AsyncOpenAI
+from openai.types.shared import Reasoning
 
 from agents import (
     Agent,
+    OpenAIChatCompletionsModel,
     OutputGuardrailBlockedMessageArgs,
     RunConfig,
     Runner,
@@ -280,6 +285,151 @@ async def test_run_config_model_settings_override_implicit_model_specific_defaul
     assert model_settings.temperature == 0.3
 
 
+class NamedScriptedModel(ScriptedModel):
+    def __init__(self, model: str) -> None:
+        super().__init__(steps=[[get_text_message("chosen")]])
+        self.model = model
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True], ids=["run", "run_streamed"])
+@pytest.mark.parametrize(
+    ("model_name", "agent_settings", "run_settings", "expected"),
+    [
+        pytest.param("other-model", None, None, ModelSettings(), id="non-gpt5"),
+        pytest.param(
+            "gpt-5",
+            None,
+            None,
+            ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
+            id="gpt5",
+        ),
+        pytest.param(
+            "other-model",
+            ModelSettings(temperature=0.3),
+            None,
+            ModelSettings(temperature=0.3),
+            id="customized-agent",
+        ),
+        pytest.param("gpt-5", ModelSettings(), None, ModelSettings(), id="explicit-empty-agent"),
+        pytest.param(
+            "other-model",
+            None,
+            ModelSettings(reasoning=Reasoning(effort="none")),
+            ModelSettings(reasoning=Reasoning(effort="none")),
+            id="run-override-matches-old-default",
+        ),
+        pytest.param(
+            None,
+            None,
+            None,
+            ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
+            id="unnamed-model",
+        ),
+    ],
+)
+async def test_provider_chosen_model_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    model_name: str | None,
+    agent_settings: ModelSettings | None,
+    run_settings: ModelSettings | None,
+    expected: ModelSettings,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model = (
+        NamedScriptedModel(model_name)
+        if model_name is not None
+        else ScriptedModel(steps=[[get_text_message("chosen")]])
+    )
+    provider = DummyProvider(model)
+    agent = (
+        Agent(name="test", model_settings=agent_settings)
+        if agent_settings is not None
+        else Agent(name="test")
+    )
+    original_settings = agent.model_settings
+    run_config = RunConfig(model_provider=provider, model_settings=run_settings)
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=run_config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=run_config)
+    assert result.final_output == "chosen"
+    assert provider.last_requested is None
+    assert model.calls[0].model_settings == expected
+    assert agent.model_settings is original_settings
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["agent-name", "run-name", "agent-object", "run-object"])
+async def test_explicit_model_settings_precede_provider_reported_name(
+    monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model = NamedScriptedModel("other-model" if source.endswith("name") else "gpt-5")
+    provider = DummyProvider(model)
+    selection = "gpt-5" if source.endswith("name") else model
+    agent = Agent(name="test", model=selection if source.startswith("agent") else None)
+    config = RunConfig(
+        model=selection if source.startswith("run") else None, model_provider=provider
+    )
+    result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    expected = (
+        ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low")
+        if source.endswith("name")
+        else ModelSettings()
+    )
+    assert model.calls[0].model_settings == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.allow_call_model_methods
+async def test_provider_chosen_chat_model_omits_gpt5_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    bodies: list[dict[str, Any]] = []
+
+    async def handler(request: httpx2.Request) -> httpx2.Response:
+        bodies.append(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "other-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "chosen"},
+                        "finish_reason": "stop",
+                    }
+                ],
+            },
+        )
+
+    async with AsyncOpenAI(
+        api_key="test-key",
+        base_url="https://provider.example.test/v1",
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler)),
+    ) as client:
+        provider = DummyProvider(
+            OpenAIChatCompletionsModel(model="other-model", openai_client=client)
+        )
+        result = await Runner.run(
+            Agent(name="test"), "hi", run_config=RunConfig(model_provider=provider)
+        )
+    assert result.final_output == "chosen"
+    assert len(bodies) == 1
+    assert bodies[0]["model"] == "other-model"
+    assert "reasoning_effort" not in bodies[0]
+    assert "verbosity" not in bodies[0]
+
+
 @pytest.mark.asyncio
 async def test_run_config_model_override_object_takes_precedence() -> None:
     """
@@ -430,3 +580,233 @@ async def test_runner_dictionary_rejects_invalid_tool_name_collision_policy() ->
         )
 
     assert not model.calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("default_name", ["gpt-4o", "gpt-5.6-luna"])
+async def test_provider_preserves_explicit_settings_equal_to_environment_defaults(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool, default_name: str
+) -> None:
+    from agents.models.default_models import get_default_model_settings
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", default_name)
+    explicit = get_default_model_settings()
+    agent = Agent(name="test", model_settings=explicit)
+    model = NamedScriptedModel("gpt-5" if default_name == "gpt-4o" else "other-model")
+    config = RunConfig(model_provider=DummyProvider(model))
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert model.calls[0].model_settings == explicit
+    assert agent.model_settings is explicit
+
+
+def test_any_llm_provider_default_uses_canonical_model_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pytest.importorskip("any_llm")
+    from agents.extensions.models.any_llm_provider import AnyLLMProvider
+    from agents.run_internal.turn_preparation import get_model_settings
+
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    config = RunConfig(model_provider=AnyLLMProvider())
+    model = config.model_provider.get_model(None)
+    assert get_model_settings(Agent(name="test"), config, model) == ModelSettings(
+        reasoning=Reasoning(effort="none"), verbosity="low"
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_model_can_supply_defaults_without_a_string_identifier() -> None:
+    class ProviderModel(ScriptedModel):
+        def get_default_model_settings(self) -> ModelSettings:
+            return ModelSettings(temperature=0.2)
+
+    model = ProviderModel(steps=[[get_text_message("chosen")]])
+    await Runner.run(
+        Agent(name="test"),
+        "hi",
+        run_config=RunConfig(model_provider=DummyProvider(model), model_settings={"top_p": 0.5}),
+    )
+    assert model.calls[0].model_settings == ModelSettings(temperature=0.2, top_p=0.5)
+
+
+def test_invalid_settings_are_validated_before_implicit_default_detection() -> None:
+    from unittest.mock import Mock
+
+    with pytest.raises(TypeError, match="Agent model_settings must be a ModelSettings instance"):
+        Agent(name="test", model_settings=Mock())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter", ["any-llm", "litellm"])
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    ("model_name", "expected"),
+    [
+        (
+            "openrouter/openai/gpt-5.4-mini",
+            ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
+        ),
+        (
+            "openai/gpt-5",
+            ModelSettings(reasoning=Reasoning(effort="low"), verbosity="low"),
+        ),
+        ("openrouter/anthropic/claude-sonnet-4.5", ModelSettings()),
+        ("openrouter/other-vendor/gpt-5.4-mini", ModelSettings()),
+        ("ollama/gpt-5.4-mini", ModelSettings()),
+    ],
+)
+async def test_provider_selected_routed_model_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: str,
+    streamed: bool,
+    model_name: str,
+    expected: ModelSettings,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    model: Model
+    if adapter == "any-llm":
+        pytest.importorskip("any_llm")
+        from agents.extensions.models.any_llm_model import AnyLLMModel
+
+        model = AnyLLMModel(model=model_name)
+    else:
+        pytest.importorskip("litellm")
+        from agents.extensions.models.litellm_model import LitellmModel
+
+        model = LitellmModel(model=model_name)
+    scripted = ScriptedModel(steps=[[get_text_message("chosen")]])
+    monkeypatch.setattr(model, "get_response", scripted.get_response)
+    monkeypatch.setattr(model, "stream_response", scripted.stream_response)
+    config = RunConfig(model_provider=DummyProvider(model))
+    agent = Agent(name="test")
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert scripted.calls[0].model_settings == expected
+    assert model.model == model_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize(
+    ("initial_model", "later_model", "expected"),
+    [
+        (
+            "gpt-5.4-mini",
+            "gpt-4.1",
+            ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
+        ),
+        ("gpt-4.1", "gpt-5.4-mini", ModelSettings()),
+    ],
+)
+async def test_unnamed_provider_model_retains_captured_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    initial_model: str,
+    later_model: str,
+    expected: ModelSettings,
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", initial_model)
+    agent = Agent(name="test")
+    captured_settings = agent.model_settings
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", later_model)
+    model = ScriptedModel(steps=[[get_text_message("chosen")]])
+    config = RunConfig(model_provider=DummyProvider(model))
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert model.calls[0].model_settings == expected
+    assert agent.model_settings is captured_settings
+    assert agent.model_settings == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("selection", ["agent", "run"])
+@pytest.mark.parametrize("explicit", [False, True])
+@pytest.mark.parametrize(
+    ("route", "effort"),
+    [("any-llm/openrouter/openai/gpt-5.4-mini", "none"), ("litellm/openai/gpt-5", "low")],
+)
+async def test_routed_string_defaults_use_resolved_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+    streamed: bool,
+    selection: str,
+    explicit: bool,
+    route: str,
+    effort: str,
+) -> None:
+    from agents.models.multi_provider import MultiProvider
+
+    pytest.importorskip("any_llm" if route.startswith("any-llm/") else "litellm")
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-4.1")
+    provider = MultiProvider()
+    adapter = provider.get_model(route)
+    scripted = ScriptedModel(steps=[[get_text_message("chosen")]])
+    monkeypatch.setattr(type(adapter), "get_response", scripted.get_response)
+    monkeypatch.setattr(type(adapter), "stream_response", scripted.stream_response)
+    agent = Agent(name="test", model=route if selection == "agent" else None)
+    if explicit:
+        agent.model_settings = ModelSettings(reasoning=Reasoning(effort="high"), verbosity="medium")
+    config = RunConfig(
+        model=route if selection == "run" else None,
+        model_provider=provider,
+        model_settings=ModelSettings(temperature=0.25),
+    )
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    settings = scripted.calls[0].model_settings
+    assert settings.reasoning is not None
+    assert settings.reasoning.effort == ("high" if explicit else effort)
+    assert settings.verbosity == ("medium" if explicit else "low")
+    assert settings.temperature == 0.25
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [False, True])
+@pytest.mark.parametrize("clone_timing", ["none", "before", "after"])
+@pytest.mark.parametrize("field", ["reasoning", "verbosity"])
+async def test_equal_in_place_assignment_preserves_explicit_settings(
+    monkeypatch: pytest.MonkeyPatch, streamed: bool, clone_timing: str, field: str
+) -> None:
+    monkeypatch.setenv("OPENAI_DEFAULT_MODEL", "gpt-5.6-luna")
+    original = Agent(name="test")
+    agent = original.clone() if clone_timing == "before" else original
+    if field == "reasoning":
+        original.model_settings.reasoning = Reasoning(effort="none")
+    else:
+        original.model_settings.verbosity = "low"
+    if clone_timing == "after":
+        agent = original.clone()
+    model = NamedScriptedModel("gpt-5")
+    config = RunConfig(model_provider=DummyProvider(model))
+    if streamed:
+        result = Runner.run_streamed(agent, "hi", run_config=config)
+        async for _ in result.stream_events():
+            pass
+    else:
+        result = await Runner.run(agent, "hi", run_config=config)
+    assert result.final_output == "chosen"
+    assert model.calls[0].model_settings.reasoning == Reasoning(effort="none")
+    assert agent.model_settings is original.model_settings
+    assert "_agent_defaults_untouched" not in agent.model_settings.to_json_dict()

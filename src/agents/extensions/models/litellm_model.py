@@ -49,6 +49,7 @@ from ...models._trace import model_config_for_trace, populate_generation_span
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
 from ...models.chatcmpl_stream_handler import ChatCmplStreamHandler
+from ...models.default_models import get_default_model_settings
 from ...models.fake_id import FAKE_RESPONSES_ID
 from ...models.interface import Model, ModelTracing
 from ...models.openai_responses import Converter as OpenAIResponsesConverter
@@ -161,6 +162,11 @@ class LitellmModel(Model):
         self.base_url = base_url
         self.api_key = api_key
         self.should_replay_reasoning_content = should_replay_reasoning_content
+
+    def get_default_model_settings(self) -> ModelSettings:
+        """Recognize OpenAI model IDs carried by the supported routing namespaces."""
+        model_name = self.model.removeprefix("openai/").removeprefix("openrouter/openai/")
+        return get_default_model_settings(model_name)
 
     def get_retry_advice(self, request: ModelRetryAdviceRequest) -> ModelRetryAdvice | None:
         # LiteLLM exceptions mirror OpenAI-style status/header fields.
