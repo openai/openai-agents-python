@@ -735,3 +735,66 @@ async def test_converted_native_cancellation_bounds_late_finalization(streaming)
         if not task.done():
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_pending_native_invocation_cleanup_is_bounded(streaming):
+    started = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    release = asyncio.Event()
+    effects: list[str] = []
+
+    async def invoke(context, value):
+        effects.append(value)
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cleanup_entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+        return "native output"
+
+    native = CustomTool(name="native", description="Synthetic tool", on_invoke_tool=invoke)
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await started.wait()
+        raise ValueError("selected function failure")
+
+    calls = [
+        ResponseCustomToolCall(type="custom_tool_call", name="native", call_id=value, input=value)
+        for value in ("first", "queued")
+    ]
+    calls.append(function_call("fail", {}, call_id="failed"))
+    agent = Agent(
+        name="bounded-native-cleanup",
+        tools=[native, fail],
+        model=ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls]),
+    )
+
+    async def run():
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(cleanup_entered.wait(), 2)
+        with pytest.raises(UserError, match="selected function failure"):
+            await asyncio.wait_for(task, 2)
+        assert cleanup_cancelled.is_set()
+        assert effects == ["first"]
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

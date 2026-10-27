@@ -42,6 +42,7 @@ from ..run_context import RunContextWrapper
 from ..tool import FunctionTool, MCPToolApprovalRequest, get_function_tool_origin
 from ..tool_guardrails import ToolInputGuardrailResult, ToolOutputGuardrailResult
 from ..util._asyncio_tasks import gather_with_cancel
+from . import tool_execution
 from .agent_bindings import AgentBindings
 from .run_steps import (
     ProcessedResponse,
@@ -1122,6 +1123,8 @@ async def _execute_tool_plan(
             ),
             on_child_failure=on_category_failure,
             cancelled_children=cancelled_native_tasks,
+            # Preserve both the finalization wait and its cancellation-cleanup window.
+            cancelled_children_timeout=2 * tool_execution._FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS,
         )
     else:
         (

@@ -274,6 +274,7 @@ async def test_gather_drains_owned_child_cancellation_but_preserves_parent_cance
             fail(),
             on_child_failure=lambda _error: child_failure.set(),
             cancelled_children={child_task},
+            cancelled_children_timeout=5,
         )
     )
     try:
