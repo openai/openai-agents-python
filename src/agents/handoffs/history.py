@@ -506,7 +506,8 @@ def _split_summary_records(body: str) -> list[str]:
     current: list[str] = []
     current_is_numbered = False
 
-    for raw_line in body.splitlines():
+    # The writer separates records with LF. Other line separators can be message content.
+    for raw_line in body.split("\n"):
         if not raw_line.strip():
             continue
 
