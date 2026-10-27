@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from packaging.requirements import Requirement
 
 pytestmark = pytest.mark.packaging
 
@@ -61,6 +62,29 @@ def test_installed_distribution_advertises_expected_optional_extras() -> None:
         "voice",
     }.issubset(extras)
     assert distribution.version
+
+
+@pytest.mark.parametrize(
+    ("mcp_version", "allowed"),
+    [
+        ("1.21.2", False),
+        ("1.29.1", False),
+        ("2.0.0", False),
+        ("2.1.1", False),
+        ("1.30.0", True),
+        ("2.2.0", True),
+        ("2.3.0", True),
+    ],
+)
+def test_installed_distribution_requires_patched_mcp(mcp_version: str, allowed: bool) -> None:
+    # GHSA-rwrf-2pqf-9j8j is fixed in MCP 1.30.0 and 2.2.0.
+    requirements = [
+        Requirement(value) for value in importlib.metadata.requires("openai-agents") or []
+    ]
+    mcp_requirement = next(requirement for requirement in requirements if requirement.name == "mcp")
+
+    assert mcp_requirement.marker is None or mcp_requirement.marker.evaluate()
+    assert (mcp_version in mcp_requirement.specifier) is allowed
 
 
 @pytest.mark.parametrize(
