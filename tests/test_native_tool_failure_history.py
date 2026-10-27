@@ -121,13 +121,13 @@ async def test_native_finalization_survives_sibling_failure(
     effects: list[str] = []
     gather = tool_planning.gather_with_cancel
 
-    async def observe_failure(*args, on_child_failure=None):
+    async def observe_failure(*args, on_child_failure=None, **kwargs):
         def notify(error):
             if on_child_failure is not None:
                 on_child_failure(error)
             category_failed.set()
 
-        return await gather(*args, on_child_failure=notify)
+        return await gather(*args, on_child_failure=notify, **kwargs)
 
     # Observe the existing category-failure boundary without replacing its cancellation.
     monkeypatch.setattr(tool_planning, "gather_with_cancel", observe_failure)
@@ -291,13 +291,13 @@ async def test_input_verdict_during_tool_drain_preserves_selected_tool_error(
     effects: list[str] = []
     gather = tool_planning.gather_with_cancel
 
-    async def observe_failure(*args, on_child_failure=None):
+    async def observe_failure(*args, on_child_failure=None, **kwargs):
         def notify(error):
             if on_child_failure is not None:
                 on_child_failure(error)
             category_failed.set()
 
-        return await gather(*args, on_child_failure=notify)
+        return await gather(*args, on_child_failure=notify, **kwargs)
 
     monkeypatch.setattr(tool_planning, "gather_with_cancel", observe_failure)
 
@@ -428,3 +428,373 @@ async def test_approved_native_output_survives_custom_data_failure(streaming):
         assert len(saved_outputs) == 1
     finally:
         session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("reject_input", [False, True])
+@pytest.mark.parametrize("cleanup_error", [False, True])
+@pytest.mark.parametrize("kind", ["custom", "local_shell"])
+async def test_selected_function_failure_stops_queued_native_invocations(
+    monkeypatch, streaming, reject_input, cleanup_error, kind
+):
+    from agents import GuardrailFunctionOutput, input_guardrail
+    from agents.run_internal import tool_execution
+
+    function_finalizing = asyncio.Event()
+    release_function = asyncio.Event()
+    function_finalized = asyncio.Event()
+    native_started = asyncio.Event()
+    release_native = asyncio.Event()
+    native_settled = asyncio.Event()
+    native_cancelled = asyncio.Event()
+    selected = asyncio.Event()
+    verdict_returned = asyncio.Event()
+    effects: list[str] = []
+    original_drain = (
+        tool_execution._FunctionToolBatchExecutor._raise_failure_after_draining_siblings
+    )
+
+    async def observe_selection(self, failure):
+        selected.set()
+        return await original_drain(self, failure)
+
+    monkeypatch.setattr(
+        tool_execution._FunctionToolBatchExecutor,
+        "_raise_failure_after_draining_siblings",
+        observe_selection,
+    )
+    # Event-driven assertions must finish before the production cleanup deadline.
+    monkeypatch.setattr(tool_execution, "_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS", 5)
+
+    @tool
+    async def completed() -> str:
+        return "completed output"
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await function_finalizing.wait()
+        await native_started.wait()
+        raise ValueError("selected function failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool is completed:
+                function_finalizing.set()
+                await release_function.wait()
+                function_finalized.set()
+
+    async def invoke(context, value):
+        effects.append(value)
+        if value == "first":
+            native_started.set()
+            try:
+                await release_native.wait()
+            except asyncio.CancelledError:
+                native_cancelled.set()
+                if cleanup_error:
+                    raise RuntimeError("native cleanup failed") from None
+                raise
+        return "native output"
+
+    executor_name = "execute_custom_tool_calls" if kind == "custom" else "execute_local_shell_calls"
+    original_execute = getattr(tool_planning, executor_name)
+
+    async def observe_native_completion(**kwargs):
+        try:
+            return await original_execute(**kwargs)
+        finally:
+            native_settled.set()
+
+    monkeypatch.setattr(tool_planning, executor_name, observe_native_completion)
+    if kind == "custom":
+        native = CustomTool(name="native", description="Synthetic tool", on_invoke_tool=invoke)
+        native_calls = [
+            ResponseCustomToolCall(
+                type="custom_tool_call", name="native", call_id=value, input=value
+            )
+            for value in ("first", "queued")
+        ]
+    else:
+
+        async def execute_shell(request):
+            return await invoke(request.ctx_wrapper, request.data.call_id)
+
+        native = LocalShellTool(executor=execute_shell)
+        native_calls = [
+            LocalShellCall(
+                id=value,
+                type="local_shell_call",
+                call_id=value,
+                status="completed",
+                action=LocalShellCallAction(type="exec", command=["synthetic"], env={}),
+            )
+            for value in ("first", "queued")
+        ]
+
+    @input_guardrail
+    async def verdict(context, agent, input):
+        await selected.wait()
+        verdict_returned.set()
+        return GuardrailFunctionOutput(output_info=None, tripwire_triggered=reject_input)
+
+    calls = [
+        function_call("completed", {}, call_id="completed"),
+        function_call("fail", {}, call_id="failed"),
+        *native_calls,
+    ]
+    agent = Agent(
+        name="cancel-queued-native",
+        model=ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls]),
+        tools=[completed, fail, native],
+        input_guardrails=[verdict],
+    )
+    session = SQLiteSession("cancel-queued-native")
+    streamed = None
+
+    async def run():
+        nonlocal streamed
+        if streaming:
+            streamed = Runner.run_streamed(agent, "go", hooks=Hooks(), session=session)
+            async for _ in streamed.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", hooks=Hooks(), session=session)
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(verdict_returned.wait(), 2)
+        release_native.set()
+        await asyncio.wait_for(native_settled.wait(), 2)
+        assert native_cancelled.is_set()
+        assert effects == ["first"]
+        assert not function_finalized.is_set()
+        release_function.set()
+        with pytest.raises(UserError, match="selected function failure") as caught:
+            await asyncio.wait_for(task, 2)
+        assert function_finalized.is_set()
+        assert caught.value.run_data is not None
+        outputs = [
+            item for item in caught.value.run_data.new_items if item.type == "tool_call_output_item"
+        ]
+        if reject_input:
+            assert outputs == []
+        else:
+            assert outputs[0].output == "completed output"
+            assert len(outputs) == (2 if cleanup_error and kind == "custom" else 1)
+        assert len(await session.get_items()) == (1 if reject_input else 1 + 2 * len(outputs))
+        if streamed is not None and reject_input:
+            assert streamed.new_items == []
+    finally:
+        release_native.set()
+        release_function.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_parent_cancellation_after_function_failure_cancels_pending_finalization(
+    monkeypatch, streaming
+):
+    from agents.run_internal import tool_execution
+
+    entered = asyncio.Event()
+    selected = asyncio.Event()
+    release = asyncio.Event()
+    cancelled = asyncio.Event()
+    original_drain = (
+        tool_execution._FunctionToolBatchExecutor._raise_failure_after_draining_siblings
+    )
+
+    async def observe_selection(self, failure):
+        selected.set()
+        return await original_drain(self, failure)
+
+    monkeypatch.setattr(
+        tool_execution._FunctionToolBatchExecutor,
+        "_raise_failure_after_draining_siblings",
+        observe_selection,
+    )
+    # A parent cancellation must not wait for this sibling-finalization budget.
+    monkeypatch.setattr(tool_execution, "_FUNCTION_TOOL_POST_INVOKE_WAIT_SECONDS", 5)
+
+    @tool
+    async def completed() -> str:
+        return "completed"
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await entered.wait()
+        raise ValueError("selected function failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool is completed:
+                entered.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    cancelled.set()
+                    raise
+
+    calls = [
+        function_call("completed", {}, call_id="completed"),
+        function_call("fail", {}, call_id="failed"),
+    ]
+    agent = Agent(name="parent-cancel", tools=[completed, fail], model=ScriptedModel([calls]))
+
+    async def run():
+        if streaming:
+            result = Runner.run_streamed(agent, "go", hooks=Hooks())
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", hooks=Hooks())
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(selected.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        await asyncio.wait_for(cancelled.wait(), 2)
+        assert not release.is_set()
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_converted_native_cancellation_bounds_late_finalization(streaming):
+    started = asyncio.Event()
+    finalizing = asyncio.Event()
+    finalized_cancelled = asyncio.Event()
+    release = asyncio.Event()
+    effects: list[str] = []
+
+    async def invoke(context, value):
+        effects.append(value)
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            raise RuntimeError("native cleanup failed") from None
+        return "native output"
+
+    native = CustomTool(name="native", description="Synthetic tool", on_invoke_tool=invoke)
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await started.wait()
+        raise ValueError("selected function failure")
+
+    class Hooks(RunHooks):
+        async def on_tool_end(self, context, agent, tool, result):
+            if tool is native:
+                finalizing.set()
+                try:
+                    await release.wait()
+                except asyncio.CancelledError:
+                    finalized_cancelled.set()
+                    raise
+
+    calls = [
+        ResponseCustomToolCall(type="custom_tool_call", name="native", call_id=value, input=value)
+        for value in ("first", "queued")
+    ]
+    calls.append(function_call("fail", {}, call_id="failed"))
+    agent = Agent(
+        name="bounded-native-finalization",
+        tools=[native, fail],
+        model=ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls]),
+    )
+
+    async def run():
+        if streaming:
+            result = Runner.run_streamed(agent, "go", hooks=Hooks())
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go", hooks=Hooks())
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(finalizing.wait(), 2)
+        with pytest.raises(UserError, match="selected function failure"):
+            await asyncio.wait_for(task, 2)
+        assert finalized_cancelled.is_set()
+        assert effects == ["first"]
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_pending_native_invocation_cleanup_is_bounded(streaming):
+    started = asyncio.Event()
+    cleanup_entered = asyncio.Event()
+    cleanup_cancelled = asyncio.Event()
+    release = asyncio.Event()
+    effects: list[str] = []
+
+    async def invoke(context, value):
+        effects.append(value)
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cleanup_entered.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cleanup_cancelled.set()
+                raise
+        return "native output"
+
+    native = CustomTool(name="native", description="Synthetic tool", on_invoke_tool=invoke)
+
+    @tool(failure_error_function=None)
+    async def fail() -> str:
+        await started.wait()
+        raise ValueError("selected function failure")
+
+    calls = [
+        ResponseCustomToolCall(type="custom_tool_call", name="native", call_id=value, input=value)
+        for value in ("first", "queued")
+    ]
+    calls.append(function_call("fail", {}, call_id="failed"))
+    agent = Agent(
+        name="bounded-native-cleanup",
+        tools=[native, fail],
+        model=ScriptedModel([get_exact_output_stream_step(calls) if streaming else calls]),
+    )
+
+    async def run():
+        if streaming:
+            result = Runner.run_streamed(agent, "go")
+            async for _ in result.stream_events():
+                pass
+        else:
+            await Runner.run(agent, "go")
+
+    task = asyncio.create_task(run())
+    try:
+        await asyncio.wait_for(cleanup_entered.wait(), 2)
+        with pytest.raises(UserError, match="selected function failure"):
+            await asyncio.wait_for(task, 2)
+        assert cleanup_cancelled.is_set()
+        assert effects == ["first"]
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

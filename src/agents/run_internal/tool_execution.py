@@ -2382,6 +2382,9 @@ async def run_native_tool_post_invoke(
     task = asyncio.ensure_future(post_invoke)
     task.add_done_callback(_consume_future_exception)
     try:
+        # Invocation error conversion may consume cancellation before finalization starts.
+        if sibling_category_failure.is_set():
+            raise asyncio.CancelledError
         await asyncio.shield(task)
     except asyncio.CancelledError:
         if sibling_category_failure.is_set():
@@ -2417,6 +2420,8 @@ async def execute_custom_tool_calls(
 
     results: list[RunItem] = []
     for call in calls:
+        if sibling_category_failure is not None and sibling_category_failure.is_set():
+            break
         results.append(
             await CustomToolAction.execute(
                 agent=public_agent,
@@ -2446,6 +2451,8 @@ async def execute_local_shell_calls(
 
     results: list[RunItem] = []
     for call in calls:
+        if sibling_category_failure is not None and sibling_category_failure.is_set():
+            break
         results.append(
             await LocalShellAction.execute(
                 agent=public_agent,
@@ -2475,6 +2482,8 @@ async def execute_shell_calls(
 
     results: list[RunItem] = []
     for call in calls:
+        if sibling_category_failure is not None and sibling_category_failure.is_set():
+            break
         results.append(
             await ShellAction.execute(
                 agent=public_agent,
@@ -2504,6 +2513,8 @@ async def execute_apply_patch_calls(
 
     results: list[RunItem] = []
     for call in calls:
+        if sibling_category_failure is not None and sibling_category_failure.is_set():
+            break
         results.append(
             await ApplyPatchAction.execute(
                 agent=public_agent,
@@ -2533,6 +2544,8 @@ async def execute_computer_actions(
 
     results: list[RunItem] = []
     for action in actions:
+        if sibling_category_failure is not None and sibling_category_failure.is_set():
+            break
         context_wrapper._mark_tool_invocation_executed(
             action.tool_call,
             tool_name=action.computer_tool.name,
