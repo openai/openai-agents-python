@@ -1,5 +1,6 @@
 fastapi>=0.150.0
-starlette>=1.7.0
+starlette>=1.7.0; python_version < "3.11"
+starlette>=1.9.0; python_version >= "3.11"
 openai>=3.35.1,<4
 httpx2>=2.13.1; python_version < "3.11"
 httpx2>=2.15.1; python_version >= "3.11"
