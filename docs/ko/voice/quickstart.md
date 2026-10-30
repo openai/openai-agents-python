@@ -6,13 +6,13 @@ search:
 
 ## 사전 요구 사항 {#prerequisites}
 
-Agents SDK의 기본 [빠른 시작 지침](../quickstart.md)을 따르고 가상 환경을 설정했는지 확인합니다. 그런 다음 SDK에서 선택적 음성 의존성을 설치합니다.
+Agents SDK의 기본 [빠른 시작 지침](../quickstart.md)을 따르고 가상 환경을 설정했는지 확인합니다. 그런 다음 SDK의 선택적 음성 종속성을 설치합니다:
 
 ```bash
 pip install 'openai-agents[voice]'
 ```
 
-아래 데모 코드는 마이크 및 스피커 I/O에 [`sounddevice`](https://pypi.org/project/sounddevice/)도 사용하며, 이는 `voice` extra에 포함되지 않습니다.
+아래 데모 코드는 마이크와 스피커 I/O를 위해 [`sounddevice`](https://pypi.org/project/sounddevice/)도 사용하며, 이 패키지는 `voice` extra에 포함되지 않습니다:
 
 ```bash
 pip install sounddevice
@@ -20,10 +20,10 @@ pip install sounddevice
 
 ## 개념 {#concepts}
 
-알아야 할 주요 개념은 3단계 프로세스인 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]입니다.
+알아야 할 핵심 개념은 3단계 프로세스인 [`VoicePipeline`][agents.voice.pipeline.VoicePipeline]입니다:
 
 1. 음성-텍스트 변환 모델을 실행하여 오디오를 텍스트로 변환합니다.
-2. 일반적으로 에이전틱 워크플로인 코드를 실행하여 결과를 생성합니다.
+2. 일반적으로 에이전트 워크플로인 코드를 실행하여 결과를 생성합니다.
 3. 텍스트-음성 변환 모델을 실행하여 결과 텍스트를 다시 오디오로 변환합니다.
 
 ```mermaid
@@ -54,7 +54,7 @@ graph LR
 
 ## 에이전트 {#agents}
 
-먼저 에이전트를 설정해 보겠습니다. 이 SDK로 에이전트를 만들어 본 적이 있다면 익숙하게 느껴질 것입니다. 두 개의 에이전트, 구성된 핸드오프, 도구 하나를 사용합니다.
+먼저 몇 가지 에이전트를 설정하겠습니다. 이 SDK로 에이전트를 구축해 본 적이 있다면 익숙한 과정일 것입니다. 에이전트 2개, 구성된 핸드오프, 도구 1개를 사용합니다.
 
 ```python
 import random
@@ -94,10 +94,11 @@ agent = Agent(
 
 ## 음성 파이프라인 {#voice-pipeline}
 
-[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]을 워크플로로 사용하여 간단한 음성 파이프라인을 설정합니다.
+[`SingleAgentVoiceWorkflow`][agents.voice.workflow.SingleAgentVoiceWorkflow]을 워크플로로 사용하여 간단한 음성 파이프라인을 설정하겠습니다.
 
 ```python
 from agents.voice import SingleAgentVoiceWorkflow, VoicePipeline
+
 pipeline = VoicePipeline(workflow=SingleAgentVoiceWorkflow(agent))
 ```
 
@@ -123,10 +124,9 @@ player.start()
 async for event in result.stream():
     if event.type == "voice_stream_event_audio":
         player.write(event.data)
-
 ```
 
-## 전체 코드 통합 {#put-it-all-together}
+## 전체 구성 {#put-it-all-together}
 
 ```python
 import asyncio
@@ -194,4 +194,4 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-이 코드 예제를 실행하면 에이전트가 사용자가 들을 수 있는 음성 오디오를 생성합니다! 직접 에이전트와 대화할 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)의 코드 예제를 확인하세요.
+이 예제를 실행하면 에이전트가 직접 들어볼 수 있는 음성을 생성합니다! 에이전트에게 직접 말할 수 있는 데모는 [examples/voice/static](https://github.com/openai/openai-agents-python/tree/main/examples/voice/static)의 예제를 확인하세요.
