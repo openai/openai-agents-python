@@ -2647,10 +2647,21 @@ async def run_single_turn_streamed(
         ),
     )
 
+    stream_event_count = 0
+    last_stream_event_type: str | None = None
+    stream_response_id: str | None = None
+    stream_request_id: str | None = None
+
     # Raising out of this loop leaves the model stream suspended at its yield, so close it
     # explicitly instead of waiting for garbage collection to finalize the generator chain.
     async with aclosing(model_run_context_stream(retry_stream, tool_use_tracker)) as model_events:
         async for event in model_events:
+            stream_event_count += 1
+            last_stream_event_type = getattr(event, "type", None)
+            event_response = getattr(event, "response", None)
+            if isinstance(event_response, Response):
+                stream_response_id = event_response.id
+                stream_request_id = getattr(event_response, "_request_id", None)
             streamed_result._event_queue.put_nowait(RawResponsesStreamEvent(data=event))
 
             terminal_response: Response | None = None
@@ -2704,7 +2715,13 @@ async def run_single_turn_streamed(
                 streamed_response_output.append(event.item)
 
     if final_response is None:
-        raise ModelBehaviorError("Model did not produce a final response!")
+        raise ModelBehaviorError(
+            "Model did not produce a final response! The stream ended before a "
+            "response.completed event was received. "
+            f"event_count={stream_event_count}, last_event_type={last_stream_event_type!r}, "
+            f"response_id={stream_response_id!r}, request_id={stream_request_id!r}. "
+            "Share these IDs when reporting this issue; None means no value was observed."
+        )
 
     record_compaction_model_response(
         session, context_wrapper, compaction_input_digests, final_response, reasoning_item_id_policy
