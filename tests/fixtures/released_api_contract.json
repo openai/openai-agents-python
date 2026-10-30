@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.24.0",
-  "baseline_commit": "7d7f70391ce12ac86d39deaff5d5d25b9e9c24c1",
+  "baseline": "v0.25.0",
+  "baseline_commit": "770a5191fa7f801eae83f834acb63612270c243e",
   "callables": {
     "Agent": {
       "dataclass_fields": [
@@ -3302,6 +3302,15 @@
           },
           "init": true,
           "name": "is_enabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "init": true,
+          "name": "failure_error_function"
         }
       ],
       "kind": "class",
@@ -3417,6 +3426,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "is_enabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "failure_error_function"
         },
         {
           "default": {
@@ -4573,6 +4591,11 @@
         "close": {
           "binding": "instance",
           "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "get_default_model_settings": {
+          "binding": "instance",
+          "execution_kind": "sync",
           "parameters": []
         },
         "get_response": {
@@ -6127,6 +6150,11 @@
           "execution_kind": "coroutine",
           "parameters": []
         },
+        "get_default_model_settings": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
         "get_response": {
           "binding": "instance",
           "execution_kind": "coroutine",
@@ -6769,6 +6797,11 @@
           "execution_kind": "coroutine",
           "parameters": []
         },
+        "get_default_model_settings": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
         "get_response": {
           "binding": "instance",
           "execution_kind": "coroutine",
@@ -6980,6 +7013,11 @@
         "close": {
           "binding": "instance",
           "execution_kind": "coroutine",
+          "parameters": []
+        },
+        "get_default_model_settings": {
+          "binding": "instance",
+          "execution_kind": "sync",
           "parameters": []
         },
         "get_response": {
@@ -21817,6 +21855,55 @@
         }
       ]
     },
+    "agents.memory.await_session_mutation": {
+      "dataclass_fields": [],
+      "execution_kind": "coroutine",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "awaitable"
+        }
+      ]
+    },
+    "agents.memory.coerce_session_settings": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "value"
+        }
+      ]
+    },
+    "agents.memory.resolve_session_limit": {
+      "dataclass_fields": [],
+      "execution_kind": "sync",
+      "kind": "function",
+      "parameters": [
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "explicit_limit"
+        },
+        {
+          "default": {
+            "kind": "required"
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "settings"
+        }
+      ]
+    },
     "agents.model_settings.MCPToolChoice": {
       "dataclass_fields": [
         {
@@ -36596,6 +36683,11 @@
             }
           ]
         },
+        "get_default_model_settings": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
+        },
         "get_response": {
           "binding": "instance",
           "execution_kind": "coroutine",
@@ -38068,6 +38160,11 @@
               "name": "steps"
             }
           ]
+        },
+        "get_default_model_settings": {
+          "binding": "instance",
+          "execution_kind": "sync",
+          "parameters": []
         },
         "get_response": {
           "binding": "instance",
@@ -42132,6 +42229,15 @@
           },
           "kind": "POSITIONAL_OR_KEYWORD",
           "name": "is_enabled"
+        },
+        {
+          "default": {
+            "kind": "literal",
+            "type": "builtins.NoneType",
+            "value": null
+          },
+          "kind": "POSITIONAL_OR_KEYWORD",
+          "name": "failure_error_function"
         }
       ]
     },
@@ -45304,6 +45410,9 @@
         "SessionABC",
         "SessionInputCallback",
         "SessionSettings",
+        "await_session_mutation",
+        "coerce_session_settings",
+        "resolve_session_limit",
         "SQLiteSession",
         "OpenAIConversationsSession",
         "OpenAIResponsesCompactionSession",
