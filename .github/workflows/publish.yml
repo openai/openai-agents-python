@@ -52,7 +52,7 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: python -I control/.github/scripts/release_automation.py verify-publication
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: false
@@ -106,7 +106,7 @@ jobs:
           python -I control/.github/scripts/verify_release.py
           --repo release-source --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # setup-uv v9.0.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: false
