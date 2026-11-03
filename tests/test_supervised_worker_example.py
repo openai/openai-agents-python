@@ -126,7 +126,7 @@ async def test_two_workers_revise_reconnect_recover_and_publish_once(
     responses: ResponsesFixture, tmp_path: Path
 ) -> None:
     alpha = tmp_path / "alpha"
-    bravo = tmp_path / "bravo"
+    bravo = tmp_path / "work space +" / "bravo"
     method = tmp_path / "method.txt"
     method.write_text("Use the exact text supplied by the application.\n")
     method_options = ("--instruction-file", str(method))
@@ -185,7 +185,13 @@ async def test_two_workers_revise_reconnect_recover_and_publish_once(
                 "exec_command", {"cmd": "printf 'bravo: verified\\n' > summary.txt"}, "write"
             )
         )
-        other.respond(function_call("exec_command", {"cmd": "cat -- summary.txt"}, "real-check"))
+        other.respond(
+            function_call(
+                "exec_command",
+                {"cmd": "cat -- summary.txt", "workdir": str(bravo.resolve() / "workspace")},
+                "real-check",
+            )
+        )
         other.respond(assistant_output(ARTIFACT_RESULT))
 
         alpha_child = await scope.enter_async_context(

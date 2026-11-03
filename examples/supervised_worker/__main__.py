@@ -16,6 +16,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from time import monotonic
 from typing import Any, Literal, TypeVar
+from urllib.parse import unquote_to_bytes, urlsplit
 
 from pydantic import BaseModel, ConfigDict
 
@@ -279,7 +280,10 @@ async def work(
                 and item["turn_id"] == turn.turn_id
                 and item["status"] == "completed"
                 and item["exit_code"] == 0
-                and item["cwd"] == str(worker.workspace)
+                and item["cwd"] is not None
+                and (cwd := urlsplit(item["cwd"])).scheme == "file"
+                and not (cwd.netloc or cwd.query or cwd.fragment)
+                and unquote_to_bytes(cwd.path).rstrip(b"/") == bytes(worker.workspace)
                 and item.get("argv", [])[-1:] == [VERIFY_COMMAND]
                 and (item["output"] or "").rstrip("\n") == worker.expected_text.rstrip("\n")
             ]
