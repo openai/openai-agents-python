@@ -5429,6 +5429,11 @@
 <td><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/cloudflare_runner.py">Cloudflare runner</a></td>
 </tr>
 <tr>
+<td><code>DatabricksSandboxClient</code></td>
+<td><code>databricks-openai[sandbox]</code></td>
+<td><a href="https://github.com/databricks/databricks-ai-bridge/blob/main/integrations/openai/examples/sandbox_runner.py">Databricks runner</a></td>
+</tr>
+<tr>
 <td><code>DaytonaSandboxClient</code></td>
 <td><code>openai-agents[daytona]</code></td>
 <td><a href="https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py">Daytona runner</a></td>
@@ -5499,6 +5504,10 @@
 <tr>
 <td><code>VercelSandboxClient</code></td>
 <td>Supports create-time-only S3 and S3-compatible bucket mounts by pairing <code>VercelCloudBucketMountStrategy</code> with an <code>S3Mount</code> entry; mounted sessions cannot be resumed, and inline credentials require <code>allow_s3_credential_exposure=True</code>.</td>
+</tr>
+<tr>
+<td><code>DatabricksSandboxClient</code></td>
+<td>Cloud storage mounting is supported through Unity Catalog Volumes: <a href="https://docs.databricks.com/aws/en/connect/unity-catalog/cloud-storage/">AWS</a>, <a href="https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/">Azure</a>, <a href="https://docs.databricks.com/gcp/en/connect/unity-catalog/cloud-storage/">GCP</a>, or <a href="https://docs.databricks.com/aws/en/connect/unity-catalog/cloud-storage/external-locations-r2">Cloudflare R2</a>, and does not require an explicit SDK mount strategy.</td>
 </tr>
 </tbody>
 </table>
@@ -5592,9 +5601,19 @@
 <td>-</td>
 <td>-</td>
 </tr>
+<tr>
+<td><code>DatabricksSandboxClient</code></td>
+<td>✓</td>
+<td>✓</td>
+<td>✓</td>
+<td>-</td>
+<td>-</td>
+<td>-</td>
+</tr>
 </tbody>
 </table>
 </div>
+<p>Databricks sandboxes reach Azure storage through Unity Catalog on <a href="https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls">ADLS Gen2</a>.</p>
 <p>For more runnable examples, browse <a href="https://github.com/openai/openai-agents-python/tree/main/examples/sandbox">examples/sandbox/</a> for local, coding, memory, handoff, and agent-composition patterns, and <a href="https://github.com/openai/openai-agents-python/tree/main/examples/sandbox/extensions">examples/sandbox/extensions/</a> for hosted sandbox clients.</p>
 <h2 id="external-providers">External providers</h2>
 <p>Applications can supply a sandbox client from a separately installed package through <code>SandboxRunConfig(client=...)</code>. See <a href="../custom-providers/">Build a sandbox provider</a> for the authoring contract and a runnable external-package example.</p>
