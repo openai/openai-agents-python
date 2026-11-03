@@ -1,6 +1,6 @@
 # Agent, Session and Turn
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 An `Agent` describes what to run. A `Session` holds a live conversation. Submitting input returns a `Turn`, which you await to get a `Completed` result.
 

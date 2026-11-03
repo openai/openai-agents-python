@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - v1
+      - feat/codex-harness
   pull_request:
     # All PRs, including stacked PRs
   merge_group:
@@ -41,7 +41,7 @@ jobs:
       - name: Select Windows test coverage
         id: release-windows
         env:
-          V1_QUALIFICATION: ${{ github.ref_name == 'v1' || github.base_ref == 'v1' || github.event.merge_group.base_ref == 'refs/heads/v1' }}
+          V1_QUALIFICATION: ${{ github.ref_name == 'feat/codex-harness' || github.base_ref == 'feat/codex-harness' || github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}
           DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}

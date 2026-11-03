@@ -1,6 +1,6 @@
 # API reference
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 These signatures show the supported calls and defaults. `*` marks keyword-only arguments. Type parameters describe application context and final output. Follow each guide link for behavior and limits.
 

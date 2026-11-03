@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - v1
+      - feat/codex-harness
     paths:
       - .agents/**
       - .github/scripts/*repo_skill_tests.py

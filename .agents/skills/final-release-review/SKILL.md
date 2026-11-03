@@ -6,10 +6,10 @@ description: Review a private preview alpha candidate or release plan against th
 # Final Release Review
 ## Public v1 status
 
-This legacy procedure applies only to the private preview repository named below. Do not run it for public `v1`. Public v1 package publishing is not configured; see [Release status](../../../.github/RELEASING.md). The retained helpers support existing contract and repository tests.
+This legacy procedure applies only to the historical private preview repository. Do not run it for public `feat/codex-harness`. Public v1 package publishing is not configured; see [Release status](../../../.github/RELEASING.md). The retained helpers support existing contract and repository tests.
 
 
-Review manual alpha candidates for `OpenAI-Early-Access/openai-agents-python-preview` on `feat/v1.0-release`. Follow [Private alpha releases](../../../.github/RELEASING.md) for publication. This skill performs a read-only source review; it does not publish, qualify CI wheels, or authorize GitHub writes.
+This historical procedure reviews manual alpha candidates in the former private repository on `feat/v1.0-release`. Follow [Private alpha releases](../../../.github/RELEASING.md) for publication. This skill performs a read-only source review; it does not publish, qualify CI wheels, or authorize GitHub writes.
 
 ## Purpose
 
@@ -175,7 +175,7 @@ These checks make the final-candidate review a release gate. The report remains 
 
 Produce the report in English using this structure and the repository's `AGENTS.md` section "GitHub-ready Output". Deliver the entire report, including any Key Changes draft, inside one copyable `markdown` code block by default; the template below is the literal content of that block. Honor an explicit request for raw text without fences.
 
-Inside the report, use the fixed compare URL `https://github.com/OpenAI-Early-Access/openai-agents-python-preview/compare/<tag>...<target-commit>` as a bare URL. Use native GitHub references such as `#123` for documentation and version PRs. Do not create Markdown links or wrap an already rendered link again. Use repository-relative paths in inline code for file evidence, never absolute local paths or local-file links. If the user requests no file paths, use affected component or documentation section names, including in the risk fields. Keep host-specific citations and annotations outside the report's code block.
+Inside the report, derive the compare URL from the verified repository identity: `https://github.com/<owner>/<repository>/compare/<tag>...<target-commit>` as a bare URL. Use native GitHub references such as `#123` for documentation and version PRs. Do not create Markdown links or wrap an already rendered link again. Use repository-relative paths in inline code for file evidence, never absolute local paths or local-file links. If the user requests no file paths, use affected component or documentation section names, including in the risk fields. Keep host-specific citations and annotations outside the report's code block.
 
 Before sending, check the copyable source for one intact compare URL, native PR references, portable file evidence, and absence of nested link wrappers or host-specific markup. Preserve the review's original evidence and scope when only correcting its formatting.
 
@@ -186,7 +186,7 @@ This is a release readiness report done by `$final-release-review` skill.
 
 ### Diff
 
-https://github.com/OpenAI-Early-Access/openai-agents-python-preview/compare/<tag>...<target-commit>
+https://github.com/<owner>/<repository>/compare/<tag>...<target-commit>
 
 ### Release intent
 

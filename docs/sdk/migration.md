@@ -1,6 +1,6 @@
 # Move an application from Agents SDK v0
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 This guide covers migration from Agents SDK v0. If you use the private preview v0.24.0-alpha.5 instead, follow the [alpha.5 migration table](index.md#migrate-from-alpha5).
 

@@ -1,6 +1,6 @@
 # Public v1 release status
 
-The public `v1` branch supports source builds only. Public v1 wheels, tags, and publication are not configured. Its PyPI publisher, release tagger, and private alpha installation workflow are disabled. The inherited release automation still targets `main`; it does not prepare or qualify public v1 releases. Do not use the private alpha procedure below for public v1. Enabling public v1 publication needs a separate reviewed change and explicit authorization.
+The public `feat/codex-harness` branch supports source builds only. Public v1 wheels, tags, and publication are not configured. Its PyPI publisher, release tagger, and private alpha installation workflow are disabled. The inherited release automation still targets `main`; it does not prepare or qualify public v1 releases. Do not use the private alpha procedure below for public v1. Enabling public v1 publication needs a separate reviewed change and explicit authorization.
 
 The `Tests` workflow qualifies public v1 pushes, pull requests, and merge-queue commits on Linux, macOS, and Windows. It preserves native source and build-input receipt checks and uses the existing cold build when no retained artifact qualifies. These checks establish source-build evidence, not a published release.
 
@@ -9,9 +9,8 @@ The `Tests` workflow qualifies public v1 pushes, pull requests, and merge-queue 
 The remaining procedure records the former private repository workflow only.
 It does not authorize release actions from the public repository.
 
-Distribute this preview through GitHub Releases in
-`OpenAI-Early-Access/openai-agents-python-preview`. Customers need access to that
-private repository. Do not publish these packages to PyPI. The public v1 PyPI publisher is disabled.
+The former preview distributed wheels through private GitHub Releases.
+Customers needed access to that historical repository. Do not publish these packages to PyPI. The public v1 PyPI publisher is disabled.
 
 The distribution keeps the name `openai-agents` and the `agents` imports. Give each
 release a distinct version. Use the SemVer suffix `-alpha.N` in source versions
@@ -84,7 +83,7 @@ fresh temporary directory. Set `TAG` to the new release tag. Set `RUN_ID` and
 native build for publication.
 
 ```text
-REPO=OpenAI-Early-Access/openai-agents-python-preview
+REPO=<historical-private-repository>
 TAG=<exact-candidate-tag>
 RUN_ID=<successful-tests-run-id>
 SHA=<full-qualified-commit-id>
@@ -117,7 +116,7 @@ and test receipts. Those are not customer release assets.
 
 Write release notes in `$STAGING/notes.md` with the alpha version, qualified commit,
 Tests run URL, supported platforms, Codex revision from `packages/codex/CODEX_REVISION`,
-and a link to the [current installation steps](https://github.com/OpenAI-Early-Access/openai-agents-python-preview/blob/feat/v1.0-release/README.md#install). State the exact tag and wheel filenames in the release notes so older releases remain installable when the guide advances. Then create the tag
+and the installation instructions for that historical release. State the exact tag and wheel filenames in the release notes so older releases remain installable when the guide advances. Then create the tag
 and prerelease:
 
 ```bash

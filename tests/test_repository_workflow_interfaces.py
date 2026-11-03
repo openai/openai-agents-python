@@ -11,6 +11,11 @@ from pathlib import Path
 import pytest
 import yaml
 
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
 ROOT = Path(__file__).resolve().parents[1]
 MAKEFILE = ROOT / "Makefile"
 TESTS_WORKFLOW = ROOT / ".github" / "workflows" / "tests.yml"
@@ -73,6 +78,64 @@ def test_repository_skills_workflow_uses_the_isolated_runner() -> None:
         "uv run --no-project --python 3.11 python .github/scripts/run_repo_skill_tests.py"
     )
     assert (ROOT / ".github/scripts/run_repo_skill_tests.py").is_file()
+
+
+@pytest.mark.parametrize("existing_config", [None, "config", "config.toml"])
+@pytest.mark.skipif(sys.platform == "win32", reason="Linux registry setup uses POSIX paths")
+def test_public_native_build_preserves_linux_registry_policy(tmp_path, existing_config) -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/codex-python.yml").read_text())
+    steps = workflow["jobs"]["build"]["steps"]
+    step = next(s for s in steps if s.get("name") == "Configure Linux dependency registries")
+    index = steps.index(step)
+    assert step["if"] == "runner.os == 'Linux'"
+    assert steps[index - 1]["name"] == "Select shared Cargo directories"
+    assert all("uses" not in s for s in steps[1:index])
+    assert not any("openai/socket-firewall" in s.get("uses", "") for s in steps)
+    assert "continue-on-error" not in step
+
+    cargo_home = tmp_path / "cargo"
+    cargo_home.mkdir()
+    environment_file = tmp_path / "environment"
+    environment_file.write_text("EXISTING=value\n")
+    if existing_config is not None:
+        (cargo_home / existing_config).write_text("preserve this configuration\n")
+    result = subprocess.run(
+        ["bash", "-c", step["run"]],
+        env={**os.environ, "CARGO_HOME": str(cargo_home), "GITHUB_ENV": str(environment_file)},
+        capture_output=True,
+        text=True,
+    )
+    if existing_config is not None:
+        assert result.returncode != 0
+        assert (cargo_home / existing_config).read_text() == "preserve this configuration\n"
+        assert environment_file.read_text() == "EXISTING=value\n"
+        return
+
+    assert result.returncode == 0, result.stderr
+    config = tomllib.loads((cargo_home / "config.toml").read_text())
+    source = config["source"]
+    replacement = source["crates-io"]["replace-with"]
+    assert source[replacement]["registry"] == "sparse+https://openai.firewall.socket.dev/cargo/"
+    environment = dict(line.split("=", 1) for line in environment_file.read_text().splitlines())
+    assert environment.pop("EXISTING") == "value"
+    assert environment == {
+        **dict.fromkeys(
+            (
+                "NPM_CONFIG_REGISTRY",
+                "npm_config_registry",
+                "PNPM_CONFIG_REGISTRY",
+                "pnpm_config_registry",
+                "COREPACK_NPM_REGISTRY",
+                "YARN_NPM_REGISTRY_SERVER",
+                "BUN_CONFIG_REGISTRY",
+            ),
+            "https://openai.firewall.socket.dev/npm/",
+        ),
+        **dict.fromkeys(
+            ("UV_DEFAULT_INDEX", "UV_INDEX_URL", "PIP_INDEX_URL"),
+            "https://openai.firewall.socket.dev/pypi/simple/",
+        ),
+    }
 
 
 def test_native_contract_preparation_has_no_credentials_or_sdk_install() -> None:
@@ -146,7 +209,7 @@ def test_release_checks_gate_collection_without_rebuilding() -> None:
             else:
                 assert "if" not in step
     tests = yaml.load(TESTS_WORKFLOW.read_text(), Loader=yaml.BaseLoader)
-    assert set(tests["on"]["push"]["branches"]) == {"main", "v1"}
+    assert set(tests["on"]["push"]["branches"]) == {"main", "feat/codex-harness"}
 
 
 def test_release_checks_reject_stale_lockfile(tmp_path: Path) -> None:
@@ -267,5 +330,5 @@ def test_v1_source_only_workflows_cannot_publish_or_tag() -> None:
     tags = yaml.load((workflows / "release-tag.yml").read_text(), Loader=yaml.BaseLoader)
     assert tags["jobs"]["tag-release"]["if"].startswith("false &&")
     codeql = yaml.load((workflows / "codeql.yml").read_text(), Loader=yaml.BaseLoader)
-    assert codeql["on"]["push"]["branches"] == ["main", "v1"]
-    assert codeql["on"]["pull_request"]["branches"] == ["main", "v1"]
+    assert codeql["on"]["push"]["branches"] == ["main", "feat/codex-harness"]
+    assert codeql["on"]["pull_request"]["branches"] == ["main", "feat/codex-harness"]

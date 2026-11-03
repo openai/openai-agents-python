@@ -1,6 +1,6 @@
 # Tools
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 Put the tools an agent can use in its `tools` list. Codex admits calls and drives the model loop. A Python tool runs application code with the application's permissions. Codex owns native MCP connections and sends tool calls to the selected MCP server. That server executes the operation in its own process or service.
 
@@ -146,7 +146,7 @@ Run `.venv/bin/python context_agent.py` on Linux/macOS or `.\.venv\Scripts\pytho
 
 In `Agent[Account, str]`, `Account` is the application context type and `str` is the final output type. The SDK passes the `Account` instance to the Python function through `ctx.context`; the model does not supply that parameter. The context object itself is not model input. The function's returned display name is a tool result, so the model does receive `"Ada"`.
 
-For context together with structured output, see the [complete typed-context example](https://github.com/openai/openai-agents-python/blob/v1/examples/typed_context.py).
+For context together with structured output, see the [complete typed-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/typed_context.py).
 
 ## Native MCP
 

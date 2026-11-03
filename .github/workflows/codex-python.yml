@@ -40,18 +40,40 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
-      - uses: openai/socket-firewall@f6ef7e37dcf28e35280427862e2abd17aa2023fe
+      - name: Select shared Cargo directories
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+      - name: Configure Linux dependency registries
         if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME"
+          if [[ -e "$CARGO_HOME/config" || -e "$CARGO_HOME/config.toml" ]]; then
+            echo "Unexpected Cargo configuration in fresh CI directory." >&2
+            exit 1
+          fi
+          cat > "$CARGO_HOME/config.toml" <<'TOML'
+          [source.crates-io]
+          replace-with = "socket-firewall"
+
+          [source.socket-firewall]
+          registry = "sparse+https://openai.firewall.socket.dev/cargo/"
+          TOML
+          {
+            for variable in NPM_CONFIG_REGISTRY npm_config_registry PNPM_CONFIG_REGISTRY pnpm_config_registry COREPACK_NPM_REGISTRY YARN_NPM_REGISTRY_SERVER BUN_CONFIG_REGISTRY; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/npm/'
+            done
+            for variable in UV_DEFAULT_INDEX UV_INDEX_URL PIP_INDEX_URL; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
+            done
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           enable-cache: true
-      - name: Select shared Cargo directories
-        run: |
-          echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
       - name: Install native build tools
         # Free Linux disk space before restoring the large dependency cache.
         if: >-

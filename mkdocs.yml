@@ -3,7 +3,7 @@ site_description: Build Python agents with the native Codex harness.
 docs_dir: docs/sdk
 repo_name: openai/openai-agents-python
 repo_url: https://github.com/openai/openai-agents-python
-edit_uri: edit/v1/docs/sdk/
+edit_uri: edit/feat/codex-harness/docs/sdk/
 theme:
   name: material
   palette:

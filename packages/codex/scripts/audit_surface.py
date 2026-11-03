@@ -111,6 +111,15 @@ def snake_case(name):
     return re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()
 
 
+def dispatched_operations(source):
+    names = set()
+    levels = depths(source)
+    for match in re.finditer(r'(?m)^\s*((?:"[a-z_]+"\s*(?:\|\s*)?)+)=>', source):
+        if levels[match.start(1)] == 0:
+            names.update(re.findall(r'"([a-z_]+)"', match[1]))
+    return names
+
+
 def audit_sources(root):
     upstream = root / ".upstream/codex/codex-rs"
     protocol = (upstream / "protocol/src/protocol.rs").read_text()
@@ -209,10 +218,7 @@ def audit_sources(root):
     dispatch = set()
     for selector in ("operation", "no_args"):
         dispatch_body = block(operations, rf"\bmatch\s+{selector}\b")
-        levels = depths(dispatch_body)
-        for match in re.finditer(r'(?m)^\s*((?:"[a-z_]+"\s*\|?\s*)+)=>', dispatch_body):
-            if levels[match.start(1)] == 0:
-                dispatch.update(re.findall(r'"([a-z_]+)"', match[1]))
+        dispatch.update(dispatched_operations(dispatch_body))
     dispatch.update(re.findall(r'\boperation\s*==\s*"([a-z_]+)"', library))
     if native_operations - catalog or catalog != dispatch:
         errors.append(

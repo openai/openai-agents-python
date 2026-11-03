@@ -1,6 +1,6 @@
 # Test an agent without a model service
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 Use deterministic tests to check Python tools, application state and the requests your agent sends. Test model quality separately with a live model and representative inputs.
 
@@ -101,4 +101,4 @@ Use synthetic names and add cases that represent your application's actual failu
 Three trials are a smoke check, not a reliability estimate. Choose a larger evaluation set and trial count for consequential applications. Keep these live checks separate from the deterministic pytest suite. This separates service failures and model variation from application regressions. A passing scripted test cannot substitute for a passing live evaluation.
 
 
-For repeatable cases, recorded configurations, baseline comparisons and failure artifacts, use the [evaluation runner](https://github.com/openai/openai-agents-python/blob/v1/examples/evaluation/run.py). Its synthetic mode checks the harness; live runs measure model behavior and need a separate outcome review. Neither scripted responses nor a model-provided confidence value establishes probability calibration.
+For repeatable cases, recorded configurations, baseline comparisons and failure artifacts, use the [evaluation runner](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/evaluation/run.py). Its synthetic mode checks the harness; live runs measure model behavior and need a separate outcome review. Neither scripted responses nor a model-provided confidence value establishes probability calibration.

@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/openai/openai-agents-python/tree/v1"
+Homepage = "https://github.com/openai/openai-agents-python/tree/feat/codex-harness"
 Repository = "https://github.com/openai/openai-agents-python"
 
 [dependency-groups]

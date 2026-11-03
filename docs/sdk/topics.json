@@ -4,7 +4,7 @@
   "status": "unreleased",
   "package_version": "0.24.0-alpha.5",
   "release": null,
-  "source_ref": "v1",
+  "source_ref": "feat/codex-harness",
   "published_release": null,
   "published_guide": null,
   "topics": [

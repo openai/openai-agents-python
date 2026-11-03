@@ -1,6 +1,6 @@
 # Configure an agent
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 Construct an Agent with instructions, tools and an optional output type. Construction records data; opening a Session captures it and starts native resources. Agent.name is a diagnostic label and does not change instructions or permissions.
 

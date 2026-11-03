@@ -1,6 +1,6 @@
 # Build agents with Codex
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 The Agents SDK runs agents from Python using Codex. Give an Agent instructions and tools, then call it to get a result.
 
@@ -12,7 +12,7 @@ Use the [version selector and machine-readable topic index](versions.md) to keep
 
 ## Before you begin
 
-Use the Python environment containing a wheel built from this source revision. The [source-build guide](https://github.com/openai/openai-agents-python/blob/v1/packages/codex/MAINTAINING.md#build-from-this-source) supplies the build and installation steps. Keep v0 and v1 in separate environments, and use examples from the commit you built.
+Use the Python environment containing a wheel built from this source revision. The [source-build guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) supplies the build and installation steps. Keep v0 and v1 in separate environments, and use examples from the commit you built.
 
 The live example needs an OpenAI API key and makes model requests. For a deterministic check without a model service or real API key, use the [testing guide](testing.md).
 
@@ -52,7 +52,7 @@ export OPENAI_API_KEY="your-key"
 .venv/bin/python agent.py
 ```
 
-On Windows PowerShell, use `$env:OPENAI_API_KEY = "your-key"`, then `.\.venv\Scripts\python.exe agent.py`. In a synchronous application, use `agent.run_sync` outside an existing event loop. The [basic example](https://github.com/openai/openai-agents-python/blob/v1/examples/basic.py) shows the same complete pattern.
+On Windows PowerShell, use `$env:OPENAI_API_KEY = "your-key"`, then `.\.venv\Scripts\python.exe agent.py`. In a synchronous application, use `agent.run_sync` outside an existing event loop. The [basic example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/basic.py) shows the same complete pattern.
 
 The script prints a greeting for Ada, such as `Hello, Ada!`. The model chooses the final wording, so it can vary. The model can request a call to the `greeting` tool. The SDK calls your Python function and returns its result to the model.
 

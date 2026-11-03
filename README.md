@@ -16,7 +16,7 @@ Existing v0 applications can keep using [v0.24.0](https://github.com/openai/open
 
 ## Install
 
-Follow the [source installation guide](docs/installation.md). You need CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and your platform's native build tools. The guide links the exact system prerequisites and commands. Build from the public `v1` branch, record the commit, and use documentation and examples from that same commit.
+Follow the [source installation guide](docs/installation.md). You need CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and your platform's native build tools. The guide links the exact system prerequisites and commands. Build from the public `feat/codex-harness` branch, record the commit, and use documentation and examples from that same commit.
 
 ## Example
 

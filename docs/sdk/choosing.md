@@ -2,7 +2,7 @@
 
 For a new Python agent application, start with Agents SDK v1. It runs the Codex harness in your application and connects it to Python functions, application data and typed results.
 
-To use the interfaces described below, follow the [v1 source installation guide](https://github.com/openai/openai-agents-python/blob/v1/docs/installation.md). The published v0 package uses a different API.
+To use the interfaces described below, follow the [v1 source installation guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/installation.md). The published v0 package uses a different API.
 
 ## Use your existing Python code
 

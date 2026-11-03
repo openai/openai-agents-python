@@ -9,7 +9,7 @@ assignees: ''
 
 ### Please read this first
 
-- **Have you read the provider guide?** Use the [v1 provider configuration guide](https://github.com/openai/openai-agents-python/blob/v1/docs/sdk/configuration.md) from the same source commit as your build. Include that commit below.
+- **Have you read the provider guide?** Use the [v1 provider configuration guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/configuration.md) from the same source commit as your build. Include that commit below.
 - **Have you searched for related issues?** Others may have faced similar issues.
 
 ### Describe the question

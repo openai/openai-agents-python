@@ -678,8 +678,9 @@ def test_committed_version_controls_windows_scheduling(
     gate = next(step for step in changes["steps"] if step.get("id") == "release-windows")
     assert gate["env"] == {
         "V1_QUALIFICATION": (
-            "${{ github.ref_name == 'v1' || github.base_ref == 'v1' || "
-            "github.event.merge_group.base_ref == 'refs/heads/v1' }}"
+            "${{ github.ref_name == 'feat/codex-harness' || "
+            "github.base_ref == 'feat/codex-harness' || "
+            "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
         ),
         "DEFAULT_BRANCH_PUSH": (
             "${{ github.event_name == 'push' && "

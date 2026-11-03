@@ -1,6 +1,6 @@
 # Conversations, events and state
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 A Session owns one native conversation. Open it with an async context manager so its callbacks and native work close together.
 

@@ -1,12 +1,12 @@
 # Troubleshoot and operate an agent
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 Start with the symptom below. Preserve the original exception and inspect the failed operation before retrying. A failed request or timeout does not prove that earlier tools had no effects.
 
 | Symptom | What to check |
 | --- | --- |
-| Installation fails, a wheel is unsupported, or GitHub returns 404 | Follow the [installation checks](https://github.com/openai/openai-agents-python/blob/v1/docs/installation.md#if-setup-fails). Confirm the guide and installed wheel describe the same version. |
+| Installation fails, a wheel is unsupported, or GitHub returns 404 | Follow the [installation checks](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/installation.md#if-setup-fails). Confirm the guide and installed wheel describe the same version. |
 | `get_result` or another documented method is missing | Check the [version guide](versions.md) and use the v1 source-built wheel. The [private alpha.5 migration table](index.md#migrate-from-alpha5) applies only to users of that historical preview. Check the installed distribution with `python -m pip show openai-agents` using your application's interpreter. |
 | A notebook reports that an event loop is already running | Use `await agent.run(...)`. Reserve `run_sync()` and the scripts' `asyncio.run(main())` entry point for code outside an existing event loop. |
 | A new prompt raises `SessionBusyError` | Await the current Turn, or deliberately [queue or steer](sessions.md#conversations-events-and-state). Retrying `submit()` blindly can duplicate input. |
@@ -86,16 +86,16 @@ The SDK runs inside your application. Your application operates its workers, sto
 
 Record the installed SDK version, Python version, operating system, operation, and a small reproduction with synthetic inputs. Include whether it fails with [scripted responses](testing.md) or only with the live provider. For `NativeError`, record the available `status_code`, `code`, `request_id`, `category` and `effects` only when your data policy permits them.
 
-Exception messages, request snapshots, prompts, tool results and checkpoints can contain private data. Inspect and redact a report before sending it to [GitHub issues](https://github.com/openai/openai-agents-python/issues). Never include credentials. Use [private security reporting](https://github.com/openai/openai-agents-python/blob/v1/SECURITY.md) for vulnerabilities.
+Exception messages, request snapshots, prompts, tool results and checkpoints can contain private data. Inspect and redact a report before sending it to [GitHub issues](https://github.com/openai/openai-agents-python/issues). Never include credentials. Use [private security reporting](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/SECURITY.md) for vulnerabilities.
 
 For ongoing diagnostics, configure [telemetry](configuration.md#telemetry) before the first Session opens. Close Sessions before shutting telemetry down. Select the signals and content your application permits the collector to receive.
 
 
 ## Diagnose a trace with history and application receipts
 
-Run the synthetic local [trace walkthrough](https://github.com/openai/openai-agents-python/blob/v1/examples/observability/trace_walkthrough.py) with `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`. The example starts a local OTLP JSON receiver. It prints a receipt summary and local viewer URL. It needs no collector account or real model key. Keep receiver output synthetic.
+Run the synthetic local [trace walkthrough](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/trace_walkthrough.py) with `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`. The example starts a local OTLP JSON receiver. It prints a receipt summary and local viewer URL. It needs no collector account or real model key. Keep receiver output synthetic.
 
-Correlate the application's `example.run_id`, available span `traceId`, Session identity and available `conversation.id` fields. Read the application outcome beside telemetry and the worked [history reader](https://github.com/openai/openai-agents-python/blob/v1/examples/observability/history_reader.py). The reader joins tool calls/results by turn and call identity and keeps missing timestamps and usage as missing values.
+Correlate the application's `example.run_id`, available span `traceId`, Session identity and available `conversation.id` fields. Read the application outcome beside telemetry and the worked [history reader](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/history_reader.py). The reader joins tool calls/results by turn and call identity and keeps missing timestamps and usage as missing values.
 
 | Evidence | What it can show | What it does not prove |
 | --- | --- | --- |

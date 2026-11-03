@@ -1,10 +1,10 @@
 # Install the v1 source preview
 
-The public `v1` branch contains the native Codex-based Agents SDK. This snapshot has no public v1 wheels or release tags. Build a wheel from source and install it in a separate environment. `pip install openai-agents` installs the published v0 SDK; it does not install this branch.
+The public `feat/codex-harness` branch contains the native Codex-based Agents SDK. This snapshot has no public v1 wheels or release tags. Build a wheel from source and install it in a separate environment. `pip install openai-agents` installs the published v0 SDK; it does not install this branch.
 
 ## Requirements
 
-Use a current patch release of standard CPython 3.10–3.14, Git, `uv`, and Rust 1.95.0. Install the [platform-specific system tools](https://github.com/openai/openai-agents-python/blob/v1/packages/codex/MAINTAINING.md#build-from-this-source), including the compiler and Protocol Buffers, before building. Python package installers do not install these system tools. The build needs access to the pinned public Codex and RMCP sources and package registries. Make is optional when you use the commands below.
+Use a current patch release of standard CPython 3.10–3.14, Git, `uv`, and Rust 1.95.0. Install the [platform-specific system tools](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source), including the compiler and Protocol Buffers, before building. Python package installers do not install these system tools. The build needs access to the pinned public Codex and RMCP sources and package registries. Make is optional when you use the commands below.
 
 The native CI targets are Linux x86-64 on Ubuntu 24.04, macOS on Apple Silicon (arm64), and Windows x64, using standard CPython 3.10–3.14. These are the source-build targets for this preview; the instructions do not establish support for other operating systems, architectures, PyPy, or free-threaded Python. The old private wheel's `manylinux_2_39` tag describes that wheel and is not a general source-build prerequisite.
 
@@ -13,7 +13,7 @@ The native CI targets are Linux x86-64 on Ubuntu 24.04, macOS on Apple Silicon (
 Clone the public branch into a new directory:
 
 ```sh
-git clone --branch v1 https://github.com/openai/openai-agents-python.git
+git clone --branch feat/codex-harness https://github.com/openai/openai-agents-python.git
 cd openai-agents-python
 git rev-parse HEAD
 python3 packages/codex/scripts/prepare_codex.py
@@ -22,7 +22,7 @@ uv build --wheel
 
 On Windows, use `py -3` instead of `python3` for source preparation. On Python 3.10, install `tomli==2.2.1` in the environment that runs source preparation first. The isolated wheel build installs its own declared Python build dependencies.
 
-Record the printed commit and keep the documentation and examples from that checkout. Preparation verifies the pinned native sources; the wheel build compiles the extension and matching execution helpers. See the [maintenance guide](https://github.com/openai/openai-agents-python/blob/v1/packages/codex/MAINTAINING.md#build-from-this-source) for details.
+Record the printed commit and keep the documentation and examples from that checkout. Preparation verifies the pinned native sources; the wheel build compiles the extension and matching execution helpers. See the [maintenance guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) for details.
 
 Create a fresh environment outside the checkout, then install the exact wheel generated in `dist/`. Replace the wheel path below with that file's absolute path. Do not install a private preview wheel or an unrelated wheel already in `dist/`.
 

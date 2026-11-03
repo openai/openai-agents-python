@@ -1,6 +1,6 @@
 # Check a custom Responses endpoint
 
-> **Version:** These guides describe the v1 source branch. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
+> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
 
 A custom endpoint must implement the required Responses behavior; a Chat Completions-compatible route alone is insufficient.
 
