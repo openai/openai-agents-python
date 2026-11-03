@@ -101,7 +101,7 @@ Observations are passive, and the SDK retains a limited number. A slow reader ca
 
 To stop a captured root, use `await turn.cancel(mode="force")`. The call stops that root's callbacks and cells and waits for their cleanup. If the root has already finished or a later root has replaced it, the call does nothing. It cannot stop a later root. Native children can continue independently.
 
-A child Turn cannot use this root method. Use `await child.try_cancel(turn)` with the captured child Turn. A return value of `True` confirms that the native turn has ended. It does not guarantee that Python callbacks or background cells have finished cleanup. A return value of `False` means the SDK could not confirm native interruption. To wait for cleanup, cancel or close the whole Session when you own that scope.
+A child Turn cannot use this root method. Use `await child.try_cancel(turn)` with the captured child Turn. A return value of `True` confirms native interruption and completion of SDK-owned callback and cell cleanup. A return value of `False` means the SDK could not confirm native interruption. Cancelling this waiter still waits for cleanup. Noncooperative callbacks can delay the return.
 
 ### Stop the whole Session
 

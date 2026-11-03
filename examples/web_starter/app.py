@@ -367,6 +367,9 @@ class Service:
                 raise web.HTTPUnprocessableEntity(text="Invalid report XML") from None
             if document.tag != "presentation" or not document.findall("slide"):
                 raise web.HTTPUnprocessableEntity(text="Expected presentation with a slide")
+            # Serialize the validated tree without retaining an incompatible declaration.
+            # Escape CR so an XML reader does not normalize referenced CR text to LF.
+            content = ElementTree.tostring(document, encoding="utf-8").replace(b"\r", b"&#13;")
         # Consume before any await. Native grant acceptance precedes the effect:
         # a retained registry token alone does not prove the invocation is live.
         del self.pending[token]
@@ -377,7 +380,7 @@ class Service:
                 raise web.HTTPConflict(text="Approval expired before publication")
             if allow:
                 # No await between revalidation and the application effect.
-                handle = self.store.put(identity.user, receipt, "artifact", xml.encode())
+                handle = self.store.put(identity.user, receipt, "artifact", content)
                 self.store.update(
                     identity.user,
                     receipt,

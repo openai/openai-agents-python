@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import asynccontextmanager
+from xml.etree import ElementTree
 
 import aiohttp
 import pytest
@@ -444,6 +445,42 @@ async def test_invalid_generated_xml_publishes_nothing(tmp_path):
                 )
                 await service.reply(Identity("alice"), receipt, "invalid-xml", False)
                 assert (await turn.get_result()).final_output == "Denied"
+
+
+@pytest.mark.parametrize("encoding", [None, "utf-8", "utf-16", "iso-8859-1"])
+async def test_downloaded_xml_preserves_text_across_encoding_declarations(tmp_path, encoding):
+    from examples.web_starter.app import Pending, Work, publish_report
+
+    declaration = f'<?xml version="1.0" encoding="{encoding}"?>' if encoding else ""
+    value = "café&#13;line2&#10;line3&#9;tail"
+    expected = "café\rline2\nline3\ttail"
+    xml = declaration + f'<presentation><slide label="{value}">{value}</slide></presentation>'
+    async with running(tmp_path) as (service, server, client, post, get):
+        await login(post)
+        receipt = service.store.create("alice", "encoding", "payload", prompt="Publish")["id"]
+        async with ScriptedResponses(
+            [tool_call("publish_report", {"xml": xml}, call_id="publish")], [text("Published")]
+        ) as peer:
+            async with Agent(
+                instructions="Publish.", tools=[publish_report], provider=peer.provider
+            ).session() as session:
+                turn = await session.submit("Publish")
+                requests = await turn.wait_for_request_or_result()
+                request = publish_report.match(requests.requests[0])
+                assert request is not None
+                work = Work(Identity("alice"), receipt, float("inf"), asyncio.Event(), None)
+                service.pending["encoding"] = Pending(work, request, asyncio.Event())
+                response = await post(
+                    f"/api/receipts/{receipt}/reply", {"id": "encoding", "allow": True}
+                )
+                assert response.status == 200
+                assert (await turn.get_result()).final_output == "Published"
+                artifact = service.store.snapshot("alice", receipt)["artifact"]
+                download = await get(f"/api/objects/artifact/{artifact['id']}")
+                assert download.status == 200
+                slide = ElementTree.fromstring(await download.read()).find("slide")
+                assert slide is not None and slide.text == expected
+                assert slide.attrib["label"] == expected
 
 
 def test_live_mode_requires_server_key_before_opening_state(tmp_path, monkeypatch):

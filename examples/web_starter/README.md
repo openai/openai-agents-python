@@ -94,7 +94,9 @@ This extends the validation flow in [validated_artifact.py](../validated_artifac
 
 `read_report` stores the full report in the application database and returns fewer than 200 bytes of summary and opaque handle to the model. The browser renders only the reviewed title, row count and three-row preview. The authorized report endpoint can return the full data. Model output cannot select a filesystem path.
 
-The publish handler validates XML syntax and requires a `presentation` root with a `slide`. It stores the validated bytes under an opaque artifact ID. The download handler checks the owner and expiry, sets `application/xml`, and uses the fixed filename `report.xml`. Failed validation publishes nothing.
+The publish handler validates XML syntax and requires a `presentation` root with a `slide`. It serializes the parsed document as UTF-8 and stores those bytes under an opaque artifact ID. This can change formatting and removes the original encoding declaration.
+
+The download handler checks the owner and expiry, sets `application/xml`, and uses the fixed filename `report.xml`. Failed validation publishes nothing.
 
 The UI shows the typed final result only after the Turn settles, and shows pending, error, cancelled, expired or unknown status when appropriate. Scripted final answers do not establish model judgment about publication.
 

@@ -352,7 +352,7 @@ Set `@function_tool(callback_timeout=2.0)` to limit the callback body, including
 | --- | --- | --- |
 | Python function | Python validates parameters. `before` can allow, deny or replace arguments. | `after` receives and returns `ToolOutput`. |
 | MCP server | `before` sees original input; `approval` sees effective input. `approval_mode` also selects native approval behavior. | `transform_result` accepts or transforms the native MCP result. |
-| Environment executor tool | `approval` sees original arguments; only allowance permits `transform_arguments`. | `transform_result` changes the result before a code cell receives it. Direct result rewriting is unsupported. |
+| Environment executor tool | `approval` sees original arguments; only an approved call reaches `transform_arguments`. | `transform_result` changes the result before the model or generated code receives it. Direct and programmatic calls are supported. |
 | Native collaboration tool | `NativeAgents.approval` can allow or deny a call. It cannot replace arguments. | No general after-result callback is promised. |
 
 An after-result transform cannot undo an earlier effect. Use [tool notifications](#tool-notifications) to observe activity without changing tool values.

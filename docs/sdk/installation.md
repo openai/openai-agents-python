@@ -76,7 +76,15 @@ Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`.
 
 ## Examples and upgrades
 
-Use documentation and example files from the same release as the installed wheel. Copy a self-contained example into your application, or download that release's source archive to run its example projects. You do not need to build the SDK to use the examples.
+Use documentation and example files from the same release as the installed wheel. You can copy a self-contained example into your application.
+
+The wheel does not include example files. To run an example project:
+
+1. Download and extract the [0.24.0-alpha.6 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v0.24.0-alpha.6.zip).
+2. Keep your wheel's Python environment activated. In your shell, change to the extracted directory that contains `examples/`.
+3. Follow the example's setup notes and run its command from that directory.
+
+You do not need to build the SDK.
 
 To upgrade, download a newer compatible preview wheel and install it in the same environment with `python -m pip install --upgrade` followed by the wheel's path. Read that release's notes for changes before upgrading.
 

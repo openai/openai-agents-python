@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 import pytest
 
 from agents import Agent
+from agents.testing import ScriptedResponses, text, tool_call
 from examples.validated_artifact import ArtifactContext, publish_xml, read_memory
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -19,6 +20,26 @@ from tests.native_fixtures import (
     responses as responses,
 )
 from tests.test_native_agent import function_declarations, provider
+
+
+@pytest.mark.parametrize("encoding", [None, "utf-8", "utf-16", "iso-8859-1"])
+async def test_published_xml_preserves_text_across_encoding_declarations(
+    tmp_path: Path, encoding: str | None
+) -> None:
+    declaration = f'<?xml version="1.0" encoding="{encoding}"?>' if encoding else ""
+    value = "café&#13;line2&#10;line3&#9;tail"
+    expected = "café\rline2\nline3\ttail"
+    xml = declaration + f'<presentation><slide label="{value}">{value}</slide></presentation>'
+    output_path = tmp_path / "presentation.xml"
+    async with ScriptedResponses(
+        [tool_call("publish_xml", {"xml": xml}, call_id="publish")], [text("Published")]
+    ) as peer:
+        await Agent(instructions="Publish.", tools=[publish_xml], provider=peer.provider).run(
+            "Publish the presentation.",
+            context=ArtifactContext(memory={}, output_path=output_path),
+        )
+    slide = ElementTree.parse(output_path).getroot().find("slide")
+    assert slide is not None and slide.text == expected and slide.attrib["label"] == expected
 
 
 @pytest.mark.parametrize(

@@ -83,7 +83,7 @@ Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These
 
 ## More examples
 
-[Activate your Python environment](docs/sdk/installation.md#create-a-python-environment), then run examples from the same release as your installed wheel, for example `python examples/basic.py`. These examples call a model and need an [OpenAI API key](docs/published.md#set-an-openai-api-key).
+Follow the [example setup](docs/sdk/installation.md#examples-and-upgrades) to download the matching source archive and run commands from its root, for example `python examples/basic.py`. These examples call a model and need an [OpenAI API key](docs/published.md#set-an-openai-api-key).
 
 - [Function tools](examples/basic.py): Call a Python greeting tool.
 - [Typed application context](examples/typed_context.py): Return structured output using application context.

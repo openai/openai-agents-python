@@ -50,8 +50,10 @@ async def publish_xml(ctx: ToolContext[ArtifactContext], xml: str) -> ToolOutput
     if problem:
         return ToolOutput.error(f"{problem} Fix the XML and call publish_xml again.")
 
-    # Only validated content reaches the application-selected final path.
-    ctx.context.output_path.write_text(xml, encoding="utf-8")
+    # Serialize the validated tree so its declaration matches the stored bytes.
+    # Escape CR so an XML reader does not normalize referenced CR text to LF.
+    content = ElementTree.tostring(document, encoding="utf-8").replace(b"\r", b"&#13;")
+    ctx.context.output_path.write_bytes(content)
     return ToolOutput.text(f"Published validated XML: {ctx.context.output_path.name}")
 
 

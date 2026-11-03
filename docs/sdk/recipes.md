@@ -30,7 +30,7 @@ Limit accepted and queued application work separately from provider rate limits.
 
 ## Runnable task examples
 
-Run a module with `python -m examples.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
+Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. Run a module with `python -m examples.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
 
 ### Test application logic without a model
 
