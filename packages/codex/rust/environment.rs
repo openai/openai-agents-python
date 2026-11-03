@@ -6,13 +6,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use codex_config::{NetworkConstraints, NetworkDomainPermissionToml, NetworkDomainPermissionsToml};
 use codex_core::{
     config::validate_environment_network_policy, windows_sandbox::WindowsSandboxLevelExt,
 };
 use codex_core_api::{
     CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
     EnvironmentNetworkPolicy, NetworkDomainPermission, NetworkDomainPermissionEntry,
-    NetworkDomainPermissions,
+    NetworkDomainPermissions, NetworkProxySpec,
 };
 use codex_exec_server::{
     Environment, EnvironmentInfo, ExecParams, ExecProcessEvent, ExecServerError,
@@ -292,7 +293,7 @@ impl EnvironmentOptions {
 
     fn check_config(&self, config: &Config) -> Result<()> {
         if self.strict_writes() {
-            check_writable_config(config)?;
+            check_writable_config(config, /*local_session_proxy*/ false)?;
         }
         if self.network.is_some() {
             let approval = config.permissions.approval_policy.value();
@@ -383,7 +384,7 @@ impl EnvironmentOptions {
     }
 
     pub async fn selection(
-        self,
+        &self,
         config: &Config,
         manager: &EnvironmentManager,
     ) -> Result<TurnEnvironmentSelection> {
@@ -438,7 +439,7 @@ impl EnvironmentOptions {
         Ok(TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
-            cwd: self.cwd,
+            cwd: self.cwd.clone(),
             // Owner configuration prevents executor-advertised roots from being added.
             config: EnvironmentConfigState::Ready(EnvironmentConfig {
                 allow_login_shell: !self.local && permissions.allow_login_shell,
@@ -450,11 +451,88 @@ impl EnvironmentOptions {
                 use_legacy_landlock: config.features.use_legacy_landlock(),
                 exec_policy: None,
                 mcp_policy: None,
-                network_policy: self.network,
+                network_policy: if self.local {
+                    None
+                } else {
+                    self.network.clone()
+                },
                 selected_capability_roots,
             }),
         })
     }
+
+    pub(crate) fn configure_local_proxy(
+        &self,
+        config: &mut Config,
+        selection: &TurnEnvironmentSelection,
+    ) -> Result<()> {
+        let Some(network) = self.network.as_ref().filter(|_| self.local) else {
+            return Ok(());
+        };
+        let EnvironmentConfigState::Ready(settings) = &selection.config else {
+            anyhow::bail!("local network policy requires a ready Session Environment");
+        };
+        ensure!(
+            selection.environment_id == LOCAL_ENVIRONMENT_ID
+                && config.permissions.network.is_none(),
+            "local network policy cannot replace an existing controller proxy"
+        );
+        config.permissions.network = Some(local_proxy_spec(
+            network,
+            settings.permission_profile.permission_profile(),
+        )?);
+        Ok(())
+    }
+}
+
+fn local_proxy_spec(
+    network: &EnvironmentNetworkPolicy,
+    profile: &PermissionProfile,
+) -> Result<NetworkProxySpec> {
+    let domains = network
+        .domains
+        .as_ref()
+        .map(|domains| NetworkDomainPermissionsToml {
+            entries: domains
+                .entries
+                .iter()
+                .filter_map(|entry| {
+                    let permission = match entry.permission {
+                        NetworkDomainPermission::Allow => NetworkDomainPermissionToml::Allow,
+                        NetworkDomainPermission::Deny => NetworkDomainPermissionToml::Deny,
+                        NetworkDomainPermission::None => return None,
+                    };
+                    Some((entry.pattern.clone(), permission))
+                })
+                .collect(),
+        });
+    // Core keeps these constraints when it recomputes the session proxy for a new profile.
+    NetworkProxySpec::from_config_and_constraints(
+        Default::default(),
+        Some(NetworkConstraints {
+            enabled: Some(true),
+            http_port: Some(0),
+            socks_port: Some(0),
+            allow_upstream_proxy: Some(false),
+            dangerously_allow_non_loopback_proxy: Some(false),
+            dangerously_allow_all_unix_sockets: Some(network.dangerously_allow_all_unix_sockets),
+            domains,
+            managed_allowed_domains_only: Some(true),
+            allow_local_binding: network.allow_local_binding,
+            ..Default::default()
+        }),
+        profile,
+    )
+    .context("could not configure the local executor network proxy")
+}
+
+pub(crate) fn local_session_network_policy(config: &Config) -> Option<EnvironmentNetworkPolicy> {
+    config
+        .permissions
+        .network
+        .as_ref()
+        .map(NetworkProxySpec::environment_policy)
+        .filter(|policy| policy.requires_proxy)
 }
 
 fn workspace_profile(roots: &[PathUri]) -> PermissionProfile {
@@ -497,14 +575,14 @@ fn check_rule_directories(config: &Config) -> Result<()> {
     Ok(())
 }
 
-fn check_writable_config(config: &Config) -> Result<()> {
+fn check_writable_config(config: &Config, local_session_proxy: bool) -> Result<()> {
     check_rule_directories(config)?;
     let approval = config.permissions.approval_policy.value();
     let no_escalation = approval == AskForApproval::Never
         || matches!(approval, AskForApproval::Granular(policy) if !policy.sandbox_approval && !policy.request_permissions);
     ensure!(
         no_escalation
-            && config.permissions.network.is_none()
+            && (local_session_proxy || config.permissions.network.is_none())
             && !config.features.use_legacy_landlock()
             && config
                 .features
@@ -592,7 +670,9 @@ pub async fn replace_writable_roots(
     manager: &EnvironmentManager,
     writable_roots: Vec<PathUri>,
 ) -> Result<TurnEnvironmentSelection> {
-    check_writable_config(config)?;
+    // The SDK installs its local proxy after rejecting an ambient controller at selection.
+    let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
+    check_writable_config(config, local)?;
     let mut selection = selection.clone();
     let EnvironmentConfigState::Ready(settings) = &mut selection.config else {
         anyhow::bail!("writable_roots requires a ready Session Environment")
@@ -603,7 +683,12 @@ pub async fn replace_writable_roots(
     let info = executor_info(&environment).await?;
     let profile =
         strict_write_profile(&environment, &info, &selection.cwd, &writable_roots).await?;
-    if let Some(network) = &settings.network_policy {
+    let local_network = if local {
+        local_session_network_policy(config)
+    } else {
+        None
+    };
+    if let Some(network) = settings.network_policy.as_ref().or(local_network.as_ref()) {
         ensure!(
             info.capabilities.network_proxy_launch,
             "network policy requires an executor with managed proxy launch"
@@ -853,11 +938,7 @@ pub async fn connect_environment(
             .await
             .map_err(remote_startup_error)?;
         let config = state.thread.config().await;
-        let selection = request
-            .environment
-            .clone()
-            .selection(&config, &manager)
-            .await?;
+        let selection = request.environment.selection(&config, &manager).await?;
 
         // Connection is slow; serialize only the final update with turn admission and interrupts.
         let mutation = state.mutations.clone().lock_owned().await;
@@ -963,6 +1044,74 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[tokio::test]
+    async fn local_proxy_listens_on_loopback_and_enforces_a_fixed_allowlist() -> anyhow::Result<()>
+    {
+        use codex_protocol::models::PermissionProfile;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let environment = crate::config::environment(
+            &json!({
+                "environment": {
+                    "local": true,
+                    "cwd": "file:///work",
+                    "network": {
+                        "allowed_domains": ["allowed.example.invalid"],
+                        "denied_domains": ["blocked.example.invalid"],
+                        "allow_all_unix_sockets": true,
+                    },
+                },
+            })
+            .to_string(),
+        )?
+        .unwrap();
+        let policy = environment.network.unwrap();
+        let profile = PermissionProfile::workspace_write();
+        let spec = super::local_proxy_spec(&policy, &profile)?;
+        assert_eq!(
+            serde_json::to_value(spec.environment_policy())?,
+            serde_json::to_value(policy)?
+        );
+        let running = spec
+            .start_proxy(
+                &profile,
+                Default::default(),
+                Default::default(),
+                /*policy_decider*/ None,
+                /*blocked_request_observer*/ None,
+                /*enable_network_approval_flow*/ false,
+                Default::default(),
+            )
+            .await?;
+        let address = running.proxy().http_addr();
+        assert!(address.ip().is_loopback());
+        assert_ne!(address.port(), 0);
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for (host, reason) in [
+                ("blocked.example.invalid", "blocked-by-denylist"),
+                ("unlisted.example.invalid", "blocked-by-allowlist"),
+            ] {
+                let mut stream = tokio::net::TcpStream::connect(address).await?;
+                stream.write_all(format!(
+                    "GET http://{host}/ HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+                ).as_bytes()).await?;
+                let mut response = String::new();
+                stream.read_to_string(&mut response).await?;
+                assert!(response.starts_with("HTTP/1.1 403 "), "{response}");
+                assert!(
+                    response
+                        .lines()
+                        .any(|line| line == format!("x-proxy-error: {reason}"))
+                );
+            }
+            anyhow::Ok(())
+        })
+        .await??;
+        Ok(())
+    }
 
     #[test]
     fn startup_error_preserves_only_safe_handshake_details() {

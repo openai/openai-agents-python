@@ -253,6 +253,11 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
 
     def command(*, allow: tuple[Path, ...], deny: tuple[Path, ...]) -> str:
         parts = ["set -e", 'test -n "$HTTP_PROXY"']
+        for host in ("blocked.example.invalid", "unlisted.example.invalid"):
+            parts.append(
+                'test "$(curl --silent --show-error --max-time 3 --proxy "$HTTP_PROXY" '
+                f"--noproxy '' --output /dev/null --write-out '%{{http_code}}' http://{host}/)\" = 403"
+            )
         for directory in allow:
             parts.append(f"printf allowed >> {shlex.quote(str(directory / 'marker'))}")
         for directory in deny:
@@ -312,6 +317,14 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
         replacement = Environment.local(
             cwd=work, writable_roots=[third], tools=["exec_command"], network=network
         )
+        changed_network = replace(replacement, network=NetworkPolicy(allow_all_unix_sockets=True))
+        request_count = len(responses.requests)
+        with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+            async with agent.session(
+                storage=storage, resume=session_id, environment=changed_network
+            ):
+                pytest.fail("Reopen accepted a different network policy with the same grants")
+        assert len(responses.requests) == request_count
         async with agent.session(
             storage=storage, resume=session_id, environment=replacement
         ) as session:

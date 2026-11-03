@@ -87,6 +87,17 @@ fn matches_receipt(item: &ResponseItem, receipt: &ReconciledCall) -> bool {
 
 pub(crate) async fn executor_policies(state: &ThreadState) -> Result<Vec<Value>> {
     let manager = state.engine.manager.environment_manager();
+    let local_network = if state
+        .thread
+        .thread_extension_data()
+        .get::<crate::environment::StrictExecutorWrites>()
+        .is_some()
+    {
+        let config = state.thread.config().await;
+        crate::environment::local_session_network_policy(&config)
+    } else {
+        None
+    };
     state
         .thread
         .environment_selections()
@@ -96,7 +107,7 @@ pub(crate) async fn executor_policies(state: &ThreadState) -> Result<Vec<Value>>
             let environment = manager
                 .get_environment(&selection.environment_id)
                 .context("Selected executor is unavailable")?;
-            sdk_executor_policy_receipt(selection, environment.is_remote())
+            sdk_executor_policy_receipt(selection, environment.is_remote(), local_network.as_ref())
                 .context("Selected executor policy is unavailable")
         })
         .collect()

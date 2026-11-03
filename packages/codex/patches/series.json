@@ -83,7 +83,11 @@
     {
       "path": "0021-redact-executor-startup-tracing.patch",
       "sha256": "2febc726d78dd113512306c3bd59d9eaf4b233ff18cba8559af20e94c918b7a0"
+    },
+    {
+      "path": "0022-sdk-local-network-receipts.patch",
+      "sha256": "44d43b139d8d1f8a010dbab32a3bb7ae8e54f10a695e97026e63c93d73bb0fcf"
     }
   ],
-  "result_tree": "270f52e0c8bebbb05dfd15afba363779ea964c07"
+  "result_tree": "940cdeb7147a2f2bbdd9b6065c5cbdd73754167c"
 }
