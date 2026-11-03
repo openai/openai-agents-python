@@ -146,6 +146,7 @@ For provider-specific setup notes and links for the checked-in extension example
 | --- | --- | --- |
 | `BlaxelSandboxClient` | `openai-agents[blaxel]` | [Blaxel runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/blaxel_runner.py) |
 | `CloudflareSandboxClient` | `openai-agents[cloudflare]` | [Cloudflare runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/cloudflare_runner.py) |
+| `DatabricksSandboxClient` | `databricks-openai[sandbox]` | [Databricks runner](https://github.com/databricks/databricks-ai-bridge/blob/main/integrations/openai/examples/sandbox_runner.py) |
 | `DaytonaSandboxClient` | `openai-agents[daytona]` | [Daytona runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/daytona/daytona_runner.py) |
 | `E2BSandboxClient` | `openai-agents[e2b]` | [E2B runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/e2b_runner.py) |
 | `ModalSandboxClient` | `openai-agents[modal]` | [Modal runner](https://github.com/openai/openai-agents-python/blob/main/examples/sandbox/extensions/modal_runner.py) |
@@ -182,6 +183,7 @@ Hosted sandbox clients expose provider-specific mount strategies. Choose the bac
 | `DaytonaSandboxClient` | Supports mounting cloud storage through `rclone` by using `DaytonaCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `E2BSandboxClient` | Supports mounting cloud storage through `rclone` by using `E2BCloudBucketMountStrategy`; use it with `S3Mount`, `GCSMount`, `R2Mount`, `AzureBlobMount`, and `BoxMount`. |
 | `VercelSandboxClient` | Supports create-time-only S3 and S3-compatible bucket mounts by pairing `VercelCloudBucketMountStrategy` with an `S3Mount` entry; mounted sessions cannot be resumed, and inline credentials require `allow_s3_credential_exposure=True`. |
+| `DatabricksSandboxClient` | Cloud storage mounting is supported through Unity Catalog Volumes: [AWS](https://docs.databricks.com/aws/en/connect/unity-catalog/cloud-storage/), [Azure](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/), [GCP](https://docs.databricks.com/gcp/en/connect/unity-catalog/cloud-storage/), or [Cloudflare R2](https://docs.databricks.com/aws/en/connect/unity-catalog/cloud-storage/external-locations-r2), and does not require an explicit SDK mount strategy. |
 
 </div>
 
@@ -216,8 +218,11 @@ The table below summarizes which remote storage entries each backend can mount d
 | `DaytonaSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `E2BSandboxClient` | ✓ | ✓ | ✓ | ✓ | ✓ | - |
 | `VercelSandboxClient` | ✓ | - | - | - | - | - |
+| `DatabricksSandboxClient` | ✓ | ✓ | ✓ | - | - | - |
 
 </div>
+
+Databricks sandboxes reach Azure storage through Unity Catalog on [ADLS Gen2](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-storage/external-locations-adls).
 
 For more runnable examples, browse [examples/sandbox/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox) for local, coding, memory, handoff, and agent-composition patterns, and [examples/sandbox/extensions/](https://github.com/openai/openai-agents-python/tree/main/examples/sandbox/extensions) for hosted sandbox clients.
 
