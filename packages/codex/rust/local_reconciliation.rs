@@ -119,17 +119,29 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     tools.check_idle(&state.thread).await?;
     let history = store.load_owned_history(state.id).await?;
     let thread_id = state.id.to_string();
-    if let Some(previous) = history.iter().rev().find_map(|record| {
+    // A model-only turn has no executor policy to carry into the next Session.
+    if let Some((previous, strict_writes)) = history.iter().rev().find_map(|record| {
         let RolloutItem::TurnContext(context) = record else {
             return None;
         };
         let receipt = context.sdk_receipt.as_ref()?;
-        (receipt["thread_id"].as_str() == Some(thread_id.as_str()))
-            .then(|| receipt["executors"].as_array())
-            .flatten()
-    }) {
+        if receipt["thread_id"].as_str() != Some(thread_id.as_str()) {
+            return None;
+        }
+        Some((
+            receipt["executors"].as_array()?,
+            receipt["strict_executor_writes"].as_bool() == Some(true),
+        ))
+    }) && !previous.is_empty()
+    {
         ensure!(
-            previous == &executor_policies(state).await?,
+            (!strict_writes
+                || state
+                    .thread
+                    .thread_extension_data()
+                    .get::<crate::environment::StrictExecutorWrites>()
+                    .is_some())
+                && previous == &executor_policies(state).await?,
             "Local resume requires the recorded executor write and network policy"
         );
     }

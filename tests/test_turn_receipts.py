@@ -9,7 +9,11 @@ from pathlib import Path
 import pytest
 
 from agents import Agent
-from agents.turn_receipt import _load_instruction_files, _project_turn_receipt
+from agents.turn_receipt import (
+    _load_instruction_files,
+    _project_turn_receipt,
+    _redact_checkpoint_executor_receipts,
+)
 from tests._asyncio import timeout
 from tests.test_native_agent_checkpoints import message, peer
 from tests.test_native_instruction_updates import application_texts
@@ -41,6 +45,28 @@ def test_file_loader_hashes_the_exact_bytes_in_order(tmp_path):
 def test_old_context_or_unknown_receipt_version_is_unavailable():
     assert _project_turn_receipt({"turn_id": "old-turn"}) is None
     assert _project_turn_receipt({"turn_id": "new-turn", "sdk_receipt": {"version": 2}}) is None
+
+
+def test_portable_checkpoint_omits_descendant_and_repair_executor_details():
+    private = {"executors": [{"cwd": "/synthetic/private"}], "model": "test-model"}
+    descendant = {
+        "type": "turn_context",
+        "payload": {"sdk_receipt": {**private, "strict_executor_writes": True}},
+    }
+    unknown = {"type": "turn_context", "payload": {"sdk_receipt": "unknown shape"}}
+    repair = {"receipt": private}
+    payload = {
+        "history": [unknown],
+        "descendants": [{"history": [descendant]}],
+        "repair_turns": [repair],
+    }
+
+    _redact_checkpoint_executor_receipts(payload)
+
+    assert descendant["payload"]["sdk_receipt"] == {**private, "executors": None}
+    assert unknown["payload"]["sdk_receipt"] == "unknown shape"
+    assert repair["receipt"] == {**private, "executors": None}
+    assert private["executors"] == [{"cwd": "/synthetic/private"}]
 
 
 async def test_native_receipt_matches_provider_input_and_survives_restore(tmp_path):

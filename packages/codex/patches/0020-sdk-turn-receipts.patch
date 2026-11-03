@@ -263,7 +263,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          root_turn_id: None,
          disabled_plugin_ids: None,
 diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
-index 53e295061c291d02677873d8eb581a891b950f02..5423a689ce53643ac8a6470b2bbd285b10a248cd 100644
+index 53e295061c291d02677873d8eb581a891b950f02..ef2ed3ad924bfb95d245ed155215c919859b8480 100644
 --- a/codex-rs/core/src/session/step_context.rs
 +++ b/codex-rs/core/src/session/step_context.rs
 @@ -13,11 +13,17 @@ use crate::tools::router::ToolRouter;
@@ -284,7 +284,7 @@ index 53e295061c291d02677873d8eb581a891b950f02..5423a689ce53643ac8a6470b2bbd285b
  use tokio_util::sync::CancellationToken;
  
  /// Request-scoped state that may change between model sampling requests.
-@@ -82,6 +88,66 @@ impl StepContext {
+@@ -82,6 +88,67 @@ impl StepContext {
          item
      }
  
@@ -344,6 +344,7 @@ index 53e295061c291d02677873d8eb581a891b950f02..5423a689ce53643ac8a6470b2bbd285b
 +            "codex_revision": seed.codex_revision,
 +            "codex_source_tree": seed.codex_source_tree,
 +            "approval_policy": settings.approval_policy(),
++            "strict_executor_writes": seed.strict_executor_writes && !executors.is_empty(),
 +            "executors": executors,
 +        }))
 +    }
@@ -428,10 +429,10 @@ index fd53c8cfe22a7611d91db05c2b53f3408b718974..19f7b60887adda327e1c7f41c00e827c
          root_turn_id: None,
          disabled_plugin_ids: None,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 4e48e52d715d0f455977a35f1296b79161018ebf..1d7f238d7ceee3c837542b5841f2776dae22fa0f 100644
+index 4e48e52d715d0f455977a35f1296b79161018ebf..135ab0ff561a870b810882b7d3ee70992a66fcb2 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -124,3 +124,19 @@ pub use model_request::ModelResponseInterceptor;
+@@ -124,3 +124,20 @@ pub use model_request::ModelResponseInterceptor;
  pub use model_request::ModelResponseStream;
  pub use model_request::ModelToolAdmission;
  pub use model_request::ResponseEvent;
@@ -441,6 +442,7 @@ index 4e48e52d715d0f455977a35f1296b79161018ebf..1d7f238d7ceee3c837542b5841f2776d
 +    pub codex_revision: &'static str,
 +    pub codex_source_tree: &'static str,
 +    pub sha256: fn(&str) -> String,
++    pub strict_executor_writes: bool,
 +    pub application: Option<SdkApplicationInstructions>,
 +}
 +

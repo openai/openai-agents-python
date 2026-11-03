@@ -156,7 +156,7 @@ def test_native_tool_records_override_matching_raw_calls_without_duplication():
     assert items[1]["output"] == []
 
 
-def test_specialized_native_call_replaces_generic_response_record():
+def test_specialized_native_call_keeps_generic_response_record():
     history = [
         event("task_started"),
         response(
@@ -179,10 +179,20 @@ def test_specialized_native_call_replaces_generic_response_record():
         event("task_complete"),
     ]
     _, items = project_history(history, "root")
-    assert len(items) == 1
-    assert items[0]["type"] == "command_execution"
-    assert items[0]["output"] == "README.md"
-    assert items[0]["exit_code"] == 0
+    call, execution = items
+    assert call == {
+        "type": "function_call",
+        "id": "shell:0",
+        "turn_id": "t1",
+        "call_id": "shell",
+        "name": "exec_command",
+        "arguments": '{"cmd":"ls"}',
+        "status": "incomplete",
+    }
+    assert execution["type"] == "command_execution"
+    assert execution["id"] == execution["call_id"] == call["call_id"]
+    assert execution["output"] == "README.md"
+    assert execution["exit_code"] == 0
 
 
 def test_late_command_completion_keeps_its_recorded_thread_and_turn():
@@ -232,7 +242,7 @@ def test_late_command_completion_keeps_its_recorded_thread_and_turn():
     assert items[1]["turn_id"] == "next"
 
 
-def test_canonical_execution_replaces_legacy_receipt_without_exposing_raw_payloads():
+def test_canonical_execution_replaces_legacy_receipt_and_keeps_model_records():
     legacy = event(
         "mcp_tool_call_end",
         call_id="fetch",
@@ -262,6 +272,15 @@ def test_canonical_execution_replaces_legacy_receipt_without_exposing_raw_payloa
     )
     assert items == [
         project_execution_completion(canonical["payload"], thread_id="root", turn_id="t1"),
+        {
+            "type": "function_call",
+            "id": "provider-id",
+            "turn_id": "t1",
+            "call_id": "fetch",
+            "name": "lookup",
+            "arguments": '{"key":"raw"}',
+            "status": "completed",
+        },
         {
             "type": "function_call_output",
             "id": "fetch:output",

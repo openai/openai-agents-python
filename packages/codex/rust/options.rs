@@ -276,9 +276,16 @@ impl ThreadOptions {
             .insert(roots.unwrap_or_default());
         options.environments = match (self.environments, environment) {
             (Some(environments), _) => Some(ops::environments(environments)?),
-            (None, Some(env)) => Some(vec![
-                env.selection(&options.config, environment_manager).await?,
-            ]),
+            (None, Some(env)) => {
+                let strict_writes = env.strict_writes();
+                let selection = env.selection(&options.config, environment_manager).await?;
+                if strict_writes {
+                    options
+                        .thread_extension_init
+                        .insert(crate::environment::StrictExecutorWrites);
+                }
+                Some(vec![selection])
+            }
             (None, None) => None,
         };
         options.reserved_thread_id = self.reserved_thread_id;

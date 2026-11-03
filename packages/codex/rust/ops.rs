@@ -516,6 +516,13 @@ async fn prepare_write_selection(
     roots: Vec<PathUri>,
 ) -> Result<TurnEnvironmentSelections> {
     let thread = &state.thread;
+    ensure!(
+        thread
+            .thread_extension_data()
+            .get::<crate::environment::StrictExecutorWrites>()
+            .is_some(),
+        "Writable roots require a strict Session Environment"
+    );
     let current = thread.environment_selections().await;
     let [selection] = current.as_slice() else {
         bail!("Writable roots require one selected native Environment");

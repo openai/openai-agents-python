@@ -725,7 +725,7 @@
           "class InstructionFileReceipt(TypedDict):\n    path: str\n    source: Literal['application_file', 'native_user', 'native_thread', 'native_project']\n    sha256: str",
           "class ExecutorNetworkReceipt(TypedDict):\n    requires_proxy: bool\n    domains: dict[str, Literal['allow', 'deny']] | None\n    allow_all_unix_sockets: bool\n    allow_local_binding: bool | None",
           "class ExecutorPolicyReceipt(TypedDict):\n    environment_id: str\n    transport: Literal['local', 'remote']\n    cwd: str\n    writable_roots: list[str]\n    permission_profile: dict[str, Any]\n    network_sandbox: Literal['restricted', 'enabled']\n    network_policy: ExecutorNetworkReceipt | None",
-          "class TurnReceipt(TypedDict):\n    thread_id: str\n    turn_id: str\n    model: str\n    reasoning_effort: str | None\n    instruction_revision: str | None\n    developer_instructions_sha256: str | None\n    instruction_files: list[InstructionFileReceipt]\n    user_config_applied: bool\n    codex_revision: str\n    codex_source_tree: str\n    approval_policy: str | dict[str, Any]\n    executors: list[ExecutorPolicyReceipt]"
+          "class TurnReceipt(TypedDict):\n    thread_id: str\n    turn_id: str\n    model: str\n    reasoning_effort: str | None\n    instruction_revision: str | None\n    developer_instructions_sha256: str | None\n    instruction_files: list[InstructionFileReceipt]\n    user_config_applied: bool\n    codex_revision: str\n    codex_source_tree: str\n    approval_policy: str | dict[str, Any]\n    executors: list[ExecutorPolicyReceipt] | None"
         ],
         "exports": {
           "ExecutorNetworkReceipt": "agents.turn_receipt.ExecutorNetworkReceipt",

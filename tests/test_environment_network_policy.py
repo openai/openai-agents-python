@@ -15,7 +15,7 @@ from aiohttp import ClientTimeout, web
 from aiohttp.test_utils import RawTestServer, TestClient
 
 import agents
-from agents import Agent, Environment, NetworkPolicy
+from agents import Agent, Environment, LocalStorage, NetworkPolicy
 from agents._options import RuntimeNetworkPolicy
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -195,6 +195,11 @@ async def test_checkpoint_requires_the_current_effective_policy(
             model.respond(assistant_output("ready"))
             assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
             encoded = (await session.save_state()).to_json()
+            [receipt] = [turn["receipt"] async for turn in session.turns() if "receipt" in turn]
+            assert receipt["executors"]
+            network = receipt["executors"][0]["network_policy"]
+            assert network is not None and network["domains"] is not None
+            assert network["domains"]["a.example.invalid"] == "allow"
         for private_value in ("example.invalid", "192.0.2.1", executor.token, provider_key):
             assert private_value not in encoded
         saved = SessionState.from_json(encoded)
@@ -207,6 +212,9 @@ async def test_checkpoint_requires_the_current_effective_policy(
             state=saved, environment=replace(selected, network=equivalent)
         ) as restored:
             assert restored.id == saved.source_session_id
+            assert [turn["receipt"] async for turn in restored.turns() if "receipt" in turn] == [
+                {**receipt, "executors": None}
+            ]
         attempts = executor.attempts
         changes = [
             replace(policy, denied_domains=[]),
@@ -220,6 +228,84 @@ async def test_checkpoint_requires_the_current_effective_policy(
                 ):
                     pytest.fail("Opened a session with a different network policy")
             assert executor.attempts == attempts
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+async def test_checkpoint_requires_explicit_strict_writes_even_without_extra_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        selected = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[],
+        )
+        async with agent.session(environment=selected) as session:
+            saved = await session.save_state()
+        with pytest.raises(ValueError, match="agree on the applied executor policy"):
+            async with agent.session(
+                state=saved, environment=replace(selected, writable_roots=None)
+            ):
+                pytest.fail("Opened a checkpoint with legacy write permissions")
+        async with agent.session(state=saved, environment=selected) as restored:
+            assert restored.id == saved.source_session_id
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+async def test_local_resume_requires_explicit_strict_writes_even_without_extra_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile")
+        selected = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[],
+        )
+        extra = executor.root / "extra"
+        extra.mkdir()
+        opening = replace(selected, writable_roots=[extra])
+        model.respond(assistant_output("ready"))
+        model.respond(assistant_output("cleared"))
+        async with agent.session(storage=storage, environment=opening) as session:
+            session_id = session.id
+            assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+            changed = await session.submit("Clear extra roots.", writable_roots=[])
+            assert (await changed.get_result()).final_output == "cleared"
+            first, last = [turn["receipt"] async for turn in session.turns() if "receipt" in turn]
+            assert first["executors"] and last["executors"]
+            assert extra.resolve().as_uri() in first["executors"][0]["writable_roots"]
+            assert last["executors"][0]["writable_roots"] == [executor.root.resolve().as_uri()]
+        async with agent.session(
+            storage=storage, resume=session_id, environment=selected
+        ) as resumed:
+            assert resumed.id == session_id
+        with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+            async with agent.session(
+                storage=storage,
+                resume=session_id,
+                environment=replace(selected, writable_roots=None),
+            ):
+                pytest.fail("Reopened a Session with legacy write permissions")
+        assert len(model.requests) == 2
 
 
 async def test_checkpoint_without_network_policy_restores_only_with_the_default() -> None:

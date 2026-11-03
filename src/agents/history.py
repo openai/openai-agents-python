@@ -7,10 +7,12 @@ with derived identities receive distinct cursor IDs. Each Session iterator reads
 history snapshot; later iterators can observe newer history.
 
 Command, patch, and MCP completions use their native item ID as their call ID.
-Match them to ExecutionItemCompleted by thread ID, turn ID, and item ID. Older
-records can lack the native thread ID or the completed item. Core can truncate
-command output and replace a large MCP result with a text preview before
-retention. A call interrupted before Core records a completion may have no item.
+Match them to ExecutionItemCompleted by thread ID, turn ID, and call ID. A
+completion's history cursor can differ from its event item ID if another record
+uses that ID. Older records can lack the native thread ID or the completed item.
+Core can truncate command output and replace a large MCP result with a text
+preview before retention. A call interrupted before Core records a completion
+may have no item.
 """
 
 from dataclasses import dataclass

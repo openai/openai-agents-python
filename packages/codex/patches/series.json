@@ -78,12 +78,12 @@
     },
     {
       "path": "0020-sdk-turn-receipts.patch",
-      "sha256": "adde1ffbb9badd9e1470febaf27cbdb832d25f501eaa87ceaa880e45ad5590e0"
+      "sha256": "de462b9b82de958fa52b350cf17da9c8a6a1200005ba6a12c64d0cb4d0d70d94"
     },
     {
       "path": "0021-redact-executor-startup-tracing.patch",
       "sha256": "2febc726d78dd113512306c3bd59d9eaf4b233ff18cba8559af20e94c918b7a0"
     }
   ],
-  "result_tree": "48146b9581d2557f1f6083bc65668a6ff9a1b748"
+  "result_tree": "270f52e0c8bebbb05dfd15afba363779ea964c07"
 }

@@ -168,6 +168,9 @@ fn capability_roots(
     })
 }
 
+/// Installed on a thread after selecting an executor with strict write controls.
+pub(crate) struct StrictExecutorWrites;
+
 impl EnvironmentOptions {
     fn id(&self) -> &'static str {
         if self.local {
@@ -177,7 +180,7 @@ impl EnvironmentOptions {
         }
     }
 
-    fn strict_writes(&self) -> bool {
+    pub(crate) fn strict_writes(&self) -> bool {
         self.local || self.writable_roots.is_some()
     }
 

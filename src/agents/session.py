@@ -111,7 +111,7 @@ from .tools import (
     _ToolCatalog,
 )
 from .turn import PendingRequests, SteeringReceipt, Turn, _child_turn, _root_turn
-from .turn_receipt import _load_instruction_files
+from .turn_receipt import _load_instruction_files, _redact_checkpoint_executor_receipts
 from .usage import TokenUsageInfo, _token_usage_info
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -2664,10 +2664,20 @@ class Session(Generic[ContextT, OutputT]):
         self._check_loop()
         return self._api_rate_limit_snapshot
 
+    @property
+    def _strict_executor_writes(self) -> bool:
+        return self._executor is not None and (
+            self._executor._is_local or self._writable_roots is not None
+        )
+
     async def _executor_policy_digest(self) -> str | None:
         if self._executor is None:
             return None
         policy = await self._native._executor_policies()
+        # Strict writes also disable escalation and permission requests. The
+        # native write paths can match a default WSS profile even in that mode.
+        if self._strict_executor_writes:
+            policy = "strict-writes:" + policy
         return hashlib.sha256(policy.encode("utf-8")).hexdigest()
 
     @property
@@ -7175,7 +7185,13 @@ class Session(Generic[ContextT, OutputT]):
         *,
         probe: bool = False,
     ) -> str:
-        executor_policy_digest = await self._executor_policy_digest()
+        executor_policy_digest = None
+        if (
+            active is not None
+            or self._strict_executor_writes
+            or (self._executor is not None and self._executor.network is not None)
+        ):
+            executor_policy_digest = await self._executor_policy_digest()
         if active is not None:
             if not await self._manual_ready(active):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
@@ -7334,6 +7350,7 @@ class Session(Generic[ContextT, OutputT]):
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
             payload["executor_policy_digest"] = executor_policy_digest
+            _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions)
             raw = state.to_json()

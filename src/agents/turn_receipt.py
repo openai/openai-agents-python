@@ -66,6 +66,8 @@ class TurnReceipt(TypedDict):
     files. It excludes later tool reads. The developer hash covers the current
     accepted application instruction body, including its supplied file text,
     or the native developer instructions when there is no application revision.
+    Portable checkpoints omit executor policy details. In a restored receipt,
+    `executors` is `None` when those details were withheld.
     """
 
     thread_id: str
@@ -79,7 +81,7 @@ class TurnReceipt(TypedDict):
     codex_revision: str
     codex_source_tree: str
     approval_policy: str | dict[str, Any]
-    executors: list[ExecutorPolicyReceipt]
+    executors: list[ExecutorPolicyReceipt] | None
 
 
 def _load_instruction_files(
@@ -131,3 +133,20 @@ def _project_turn_receipt(payload: dict[str, Any]) -> TurnReceipt | None:
     if not fields.issubset(raw):
         return None
     return cast(TurnReceipt, {key: raw[key] for key in fields} | {"turn_id": turn_id})
+
+
+def _redact_checkpoint_executor_receipts(payload: dict[str, Any]) -> None:
+    """Remove policy details from the checkpoint's owned history and turn records."""
+    for thread in (payload, *payload["descendants"]):
+        for record in thread["history"]:
+            if record["type"] == "turn_context":
+                receipt = record["payload"].get("sdk_receipt")
+                if isinstance(receipt, dict):
+                    receipt.pop("strict_executor_writes", None)
+                    if receipt.get("executors"):
+                        receipt["executors"] = None
+    for turn in payload["repair_turns"]:
+        receipt = turn.get("receipt")
+        if receipt is not None and receipt["executors"]:
+            # The turn is a copy, but its receipt still belongs to the live Session.
+            turn["receipt"] = {**receipt, "executors": None}

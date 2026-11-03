@@ -123,16 +123,18 @@ def project_history(
     turn_order: list[str] = []
 
     def remember(item: dict[str, Any], *, native: bool, recorded_id: bool = True) -> None:
-        is_output = item["type"] == "function_call_output"
-        is_execution = item["type"] in _EXECUTION_TYPES
+        kind = item["type"]
+        is_output = kind == "function_call_output"
+        is_execution = kind in _EXECUTION_TYPES
+        # Execution records describe what ran. Keep them separate from the model's call and output.
         identity = (
             item["turn_id"],
-            "output" if is_output else "item",
+            kind if is_output or is_execution else "item",
             item["id"],
         )
         occurrence = identities.get(identity)
         call_key = (item["turn_id"], item.get("call_id", item["id"]))
-        call = latest_calls.get(call_key)
+        call = None if is_execution else latest_calls.get(call_key)
         if is_output and call is not None:
             if call.output is None:
                 occurrence = None
@@ -140,16 +142,6 @@ def project_history(
                 occurrence = call.output
             else:
                 occurrence = None
-        elif is_execution and call is not None:
-            occurrence = call
-        elif (
-            item["type"] == "function_call"
-            and call is not None
-            and (call.value["type"] in _EXECUTION_TYPES)
-        ):
-            # A raw call can follow its typed completion in some stored
-            # histories. Keep the native item and its effective arguments.
-            return
         elif native and call is not None and not call.native:
             # Native tool events use the call ID as their item ID. Enrich the
             # latest matching raw call without changing its first-seen position.
@@ -166,7 +158,7 @@ def project_history(
             occurrence.native = native
             occurrence.recorded_id = recorded_id
         identities[identity] = occurrence
-        if is_execution or item["type"] == "function_call":
+        if kind == "function_call":
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:
             call.output = occurrence
@@ -313,8 +305,19 @@ def project_history(
     for turn_id, turn in turns.items():
         if turn_id in usage:
             turn["usage"] = usage[turn_id]
-    # Reserve recorded IDs before assigning distinct cursors to synthetic occurrences.
-    cursor_ids = {occurrence.value["id"] for occurrence in items if occurrence.recorded_id}
+    # Reserve recorded model IDs first. An execution row keeps its native ID in call_id
+    # when that ID is already used by another row in this snapshot.
+    cursor_ids = {
+        occurrence.value["id"]
+        for occurrence in items
+        if occurrence.recorded_id and occurrence.value["type"] not in _EXECUTION_TYPES
+    }
+    for occurrence in items:
+        item = occurrence.value
+        if item["type"] in _EXECUTION_TYPES:
+            item_id = item["id"]
+            occurrence.recorded_id = item_id not in cursor_ids
+            cursor_ids.add(item_id)
     for index, occurrence in enumerate(items):
         item = occurrence.value
         if not occurrence.recorded_id:
