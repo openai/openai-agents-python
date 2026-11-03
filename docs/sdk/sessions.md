@@ -222,7 +222,7 @@ This example assumes an idle checkpoint. Resume a pending manual turn before upd
 
 If saving fails, the run fails. Unfinished child work can prevent saving. Live processes do not transfer, and saving does not undo completed effects.
 
-### Network policy and offline executors (unreleased)
+### Network policy and offline executors
 
 Restore requires the current application to supply the saved normalized `Environment.network` policy, even if no command used the network. The checkpoint stores only a policy digest and cannot grant access.
 

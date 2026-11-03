@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "interface": "v1",
-  "status": "unreleased",
+  "status": "published",
   "package_version": "0.24.0-alpha.6",
-  "release": null,
+  "release": "v0.24.0-alpha.6",
   "source_ref": "feat/codex-harness",
-  "published_release": null,
-  "published_guide": null,
+  "published_release": "https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6",
+  "published_guide": "https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md",
   "topics": [
     {
       "id": "installation",

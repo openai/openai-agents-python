@@ -540,7 +540,7 @@ Close the Session on its opening event loop and handle release failures from Ses
 
 ### Network and local socket access
 
-**Unreleased.** Set `Environment.network` to a `NetworkPolicy` to configure network destinations and local socket access for native commands. These settings do not control the model connection, Python functions, or MCP clients. Omitting `network` preserves the default executor behavior.
+Set `Environment.network` to a `NetworkPolicy` to configure network destinations and local socket access for native commands. These settings do not control the model connection, Python functions, or MCP clients. Omitting `network` preserves the default executor behavior.
 
 #### Platform requirements
 
@@ -614,7 +614,7 @@ The image and host must support the native executor and its Linux sandbox. Docke
 
 ### Windows named pipes in an offline job
 
-**Unreleased.** For a job-local named pipe on Windows x64:
+For a job-local named pipe on Windows x64:
 
 1. Select `tools=["exec_command"]` and omit `network`. Unix socket grants do not apply.
 2. Have the provisioner resolve the workspace on the Windows executor and pass its canonical path as `Environment.cwd`.
@@ -664,7 +664,7 @@ An executor approval or transform callback cannot observe its own Session, submi
 
 Arguments for `exec_command` and `write_stdin` are JSON objects; `apply_patch` receives a patch string. Native validation still applies after transformation. A result transform runs after the remote effect and cannot undo it. `policy_timeout` bounds transform decisions in seconds and defaults to 30. The SDK rejects invalid, late, or failed decisions. The callbacks cover root and native child calls.
 
-See [programmatic tool calling](configuration.md#programmatic-tool-calling). Saved configuration contains no policy callbacks, credentials, endpoints or network-policy names. The [unreleased network-policy support](#network-and-local-socket-access) also compares the current Environment policy with the recorded digest on restore. This does not redact command history or native debug logs.
+See [programmatic tool calling](configuration.md#programmatic-tool-calling). Saved configuration contains no policy callbacks, credentials, endpoints or network-policy names. The [network-policy support](#network-and-local-socket-access) also compares the current Environment policy with the recorded digest on restore. This does not redact command history or native debug logs.
 
 ## Native children
 

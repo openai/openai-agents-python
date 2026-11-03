@@ -281,7 +281,7 @@ For a Windows x64 job-local named pipe, `network=None` and `cwd` is the provisio
 
 ### NetworkPolicy
 
-**Unreleased.** Configures the managed network policy for native commands:
+Configures the managed network policy for native commands:
 
 ```text
 NetworkPolicy(*, allowed_domains=(), denied_domains=(),

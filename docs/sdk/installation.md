@@ -4,13 +4,21 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 ## Preview availability
 
-The first public preview wheels are not available yet. Follow these steps once they are published. Preview downloads will be attached to versioned [GitHub releases](https://github.com/openai/openai-agents-python/releases).
+[0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) is available as a GitHub prerelease with prebuilt wheels. The release includes checksums in `SHA256SUMS`.
 
 The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides.
 
 ## Requirements
 
-Use standard CPython 3.10 through 3.14. Each release will list the operating systems and architectures covered by its wheels. Choose a wheel that matches your computer and Python version. PyPy and free-threaded Python are not supported by these wheels.
+Use standard CPython 3.10 through 3.14 on one of these platforms:
+
+| Platform | Requirements |
+| --- | --- |
+| Linux | x86_64 with glibc 2.39 or newer, such as Ubuntu 24.04. |
+| macOS | Apple Silicon (arm64), macOS 11 or newer. |
+| Windows | x64 (amd64). |
+
+Choose the wheel for your operating system and CPU architecture. The `cp310-abi3` wheels work with all supported Python versions, including 3.14. Wheels are not provided for Intel Macs, ARM Linux, ARM Windows, Alpine/musl, PyPy or free-threaded Python.
 
 ## Create a Python environment
 
@@ -38,13 +46,25 @@ Run the remaining commands in this activated environment.
 
 ## Install a preview wheel
 
-Once a preview release is available, download the wheel for your platform from that release. Use the release's installation command, or pass the downloaded file's full path to the command below. Replace `WHEEL_FILE.whl` with the actual filename. Do not rename the wheel.
+Run the command for your platform. pip downloads the wheel and installs the SDK with its Python dependencies. The native runtime is already compiled in the wheel.
+
+**Linux x86_64 (glibc 2.39 or newer)**
 
 ```sh
-python -m pip install "/path/to/WHEEL_FILE.whl"
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-manylinux_2_39_x86_64.whl"
 ```
 
-Use a Windows path on Windows, for example `"C:\Users\you\Downloads\WHEEL_FILE.whl"`. pip installs the SDK and its Python dependencies. The SDK's native runtime is already compiled in the wheel.
+**macOS 11 or newer on Apple Silicon**
+
+```sh
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl"
+```
+
+**Windows x64**
+
+```powershell
+python -m pip install "https://github.com/openai/openai-agents-python/releases/download/v0.24.0-alpha.6/openai_agents-0.24.0a6-cp310-abi3-win_amd64.whl"
+```
 
 Check the installed version and native module:
 
@@ -52,7 +72,7 @@ Check the installed version and native module:
 python -c "from importlib.metadata import version; import agents._native; print(version('openai-agents'))"
 ```
 
-Check that the printed version matches the release you downloaded. Continue with the [quickstart](index.md) to set your API key and run your first agent.
+Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`. Continue with the [quickstart](index.md) to set your API key and run your first agent.
 
 ## Examples and upgrades
 

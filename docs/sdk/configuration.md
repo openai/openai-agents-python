@@ -181,4 +181,4 @@ These limits apply:
 - A manual call waits for an application reply in the live Session. Pending code cells cannot be saved as portable checkpoints.
 - `exec` and `wait` are reserved function names.
 
-Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor result transforms](tools.md#executor-policies) require this option. An executor argument transform also supports direct calls.
+Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor argument and result transforms](tools.md#executor-policies) also support direct calls without this option.
