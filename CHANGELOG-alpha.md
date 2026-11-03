@@ -1,6 +1,43 @@
-# Preview changelog (historical)
+# Preview changelog
 
-These entries describe releases from the earlier private preview. They are historical records, not public releases or installable tags in this repository. Build the current `v1` source using the [maintenance guide](packages/codex/MAINTAINING.md).
+Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlier were distributed through the earlier preview program; their release tags are not hosted in this repository.
+
+## 0.24.0-alpha.6 (Unreleased)
+
+Changes since `0.24.0-alpha.5`. This preview expands conversation control, state recovery, and tool policies, and includes public API changes.
+
+### Added
+
+- Control submitted work through a captured `Turn`, with `get_result()`, passive `events()`, manual request handling, steering, and cancellation. Queue prompts with `Session.submit(..., if_busy="queue")`, or steer the active Turn with `if_busy="steer"`.
+- Add `LocalStorage` to reopen conversations from a local profile, and extend portable `SessionState` capture and recovery. Add idle forks, caller-supplied compaction summaries, and checks for feature support and checkpoint readiness. `LocalStorage` profiles cannot export portable checkpoints.
+- Add `NativeOutput` for native strict output and `PromptedOutput` for JSON validated in Python. Optional `max_retries` performs bounded corrections without tools or replaying the task. `LocalStorage` requires `max_retries=0`.
+- Handle live manual tool requests and resume supported pending requests from checkpoints. Add experimental external-job recovery through `agents.experimental.deferred` and an optional MCP Tasks adapter.
+- Select tools for each submission or model step within the Session's opening permissions. Add native web search, native child checklists, and native goals for local-storage Sessions.
+- Validate Python tool return annotations and add tool policies for inspecting arguments and results. Extend native MCP support with argument replacement, result transforms, and application-managed form and URL interactions over supported HTTP, stdio, and model WebSocket paths.
+- Add `NetworkPolicy` for native commands on supported Linux and macOS executors, subject to each platform's network and Unix socket limits. Manage remote executor lifetimes through an `Environment` supplied when opening a Session or running an Agent.
+- Enable native child approvals and form requests with `NativeAgents(interactions=True)`. Children continue to share the Session's tools and application context.
+- Configure native OpenTelemetry export and inspect typed observations. `NativeError` now exposes available provider status codes, error codes, request IDs, and failure categories.
+- Test real SDK sessions and Python tools against local scripted responses with `agents.testing.ScriptedResponses`, without a live model or API key.
+
+### API changes
+
+- Use `Agent.run()` or `Agent.run_sync()` for one-shot calls; the redundant `Runner` aliases have been removed.
+- Replace `Turn.wait()` and `Session.wait()` with `Turn.get_result()` on the captured Turn.
+- Replace `Session.interrupt()` with `Turn.cancel()` for one root Turn or `Session.cancel_all()` for the whole Session.
+- Rename `Subagent.submit()` to `Subagent.start()`. Unify Python callbacks and manual tools under `FunctionTool`; remove the separate `ManualTool` declaration.
+- Agent declarations are immutable. Create a new Agent to change defaults, use `with_output_type()` for an output-type variant, or use supported idle Session updates for an open conversation.
+- Tool selection and Session updates cannot expand the permissions captured when the Session opened. Restored Sessions use current application tools, credentials, and policies.
+
+### Fixed
+
+- Keep each captured Turn's result stable across accepted steering, native continuations, and later submissions. Preserve one-shot manual checkpoints, matching interaction replies, and output-repair state across supported save and restore boundaries.
+- Improve native child cancellation and Session cleanup. Stop native work when result policies expire, and preserve child policy failure reasons when reporting child results.
+- Reject malformed Python tool result envelopes and preserve server errors through MCP result transforms. Support nested OpenAI extension forms and HTTP telemetry export with client certificates.
+
+### Documentation and examples
+
+- Move the preview source to the public repository. Refocus installation guidance on prebuilt wheels and move SDK build instructions to `CONTRIBUTING.md`.
+- Add examples for browser applications, AG-UI streaming, deferred jobs, evaluation, observability, and common application tasks. Remove migration guides from the preview documentation.
 
 ## 0.24.0-alpha.5 (2026-10-21)
 
