@@ -23,7 +23,7 @@ jobs:
       UV_NO_SYNC: "1"
       PYTHONPATH: src
     if: github.repository == 'openai/openai-agents-python'
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     permissions:
       contents: read
     outputs:

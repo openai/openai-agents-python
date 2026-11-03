@@ -24,7 +24,12 @@ permissions:
 jobs:
   build:
     name: Native package (${{ inputs.runner }})
-    runs-on: ${{ inputs.runner }}
+    runs-on: >-
+      ${{ fromJSON(
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64"}' ||
+        toJSON(inputs.runner)
+      ) }}
     # Allow cold builds of the bundled Codex runtime on Windows.
     timeout-minutes: ${{ startsWith(inputs.runner, 'windows-') && 180 || 100 }}
     defaults:
