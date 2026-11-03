@@ -1581,6 +1581,9 @@ impl ThreadState {
                 }
                 let mut value = native_event(None, event)?;
                 receipt.attach_provider_error(&mut value);
+                if !value["msg"]["error"].is_null() {
+                    receipt.attach_policy_failure(&mut value);
+                }
                 value["sdk_unsampled_steering"] = serde_json::json!(steering_tail);
                 return Ok(value);
             }

@@ -31,8 +31,9 @@ from tests.test_native_yielded_executor_owner import (
 @pytest.mark.parametrize(
     "family", [pytest.param("executor", marks=pytest.mark.requires_native_linux_sandbox), "mcp"]
 )
+@pytest.mark.parametrize("terminal_only", [False, True])
 async def test_queued_native_result_expiry_stops_before_next_model_request(
-    responses, tmp_path, monkeypatch, family
+    responses, tmp_path, monkeypatch, family, terminal_only
 ):
     queued = asyncio.Event()
     entered = []
@@ -57,6 +58,19 @@ async def test_queued_native_result_expiry_stops_before_next_model_request(
 
     monkeypatch.setattr(Session, "_invoke_executor_policy", defer_executor)
     monkeypatch.setattr(Session, "_invoke_mcp_policy", defer_mcp)
+
+    class TerminalOnlyEvents(OutputEvents):
+        async def _next_session_event(self):
+            while True:
+                raw = await super()._next_session_event()
+                event = json.loads(raw)
+                if not (
+                    event["msg"]["type"] == "_sdk_model_generation_failed"
+                    and event.get("subagent_id") is None
+                    and event["msg"].get("policy_stop") is True
+                ):
+                    return raw
+
     peer = Peer(label="queued-private-native-result-731b")
     executor_scope = (
         ExecutorPeer(tmp_path / "remote").serve() if family == "executor" else nullcontext()
@@ -89,7 +103,9 @@ async def test_queued_native_result_expiry_stops_before_next_model_request(
         async with Agent(
             instructions="Read once.", tools=tools, provider=provider(responses)
         ).session(environment=environment) as session:
-            captured = OutputEvents(session._native)
+            # Native completion can retire the early policy notice. Exercise
+            # settlement through the real terminal event alone as well.
+            captured = (TerminalOnlyEvents if terminal_only else OutputEvents)(session._native)
             session._native = captured
             turn = await session.submit("Read the private result")
             await queued.wait()
@@ -100,6 +116,14 @@ async def test_queued_native_result_expiry_stops_before_next_model_request(
             )
             with pytest.raises(NativeError, match=expected) as failure:
                 await turn.get_result()
+            if terminal_only and family == "executor":
+                terminal = next(
+                    event["msg"]
+                    for event in captured.events
+                    if event["id"] == turn.turn_id
+                    and event["msg"]["type"] in {"task_complete", "turn_complete"}
+                )
+                assert terminal["_sdk_policy_failure"] == expected
             assert failure.value.__cause__ is None and failure.value.__context__ is None
             assert entered == []
             assert len(responses.requests) == 1

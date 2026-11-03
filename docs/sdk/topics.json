@@ -2,7 +2,7 @@
   "schema_version": 1,
   "interface": "v1",
   "status": "unreleased",
-  "package_version": "0.24.0-alpha.5",
+  "package_version": "0.24.0-alpha.6",
   "release": null,
   "source_ref": "feat/codex-harness",
   "published_release": null,

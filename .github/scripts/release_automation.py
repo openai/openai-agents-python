@@ -21,6 +21,7 @@ from typing import Any
 from urllib.parse import quote
 
 REPO = "openai/openai-agents-python"
+RELEASE_SOURCE_BRANCHES = ("main", "feat/codex-harness")
 BRANCH = "release-please--branches--main"
 CONTRACT = "tests/fixtures/released_api_contract.json"
 FILES = {
@@ -118,26 +119,34 @@ def release_timestamp(value: str) -> datetime:
     return result
 
 
-def qualified_distributions(head: str) -> dict[str, Any]:
+def qualified_distributions(head: str, *, source_branch: str = "main") -> dict[str, Any]:
     """Select the latest exact-commit push run; never fall back to an older success."""
     head = sha(head)
+    if source_branch not in RELEASE_SOURCE_BRANCHES:
+        raise ValueError("Unsupported release source branch")
+    if source_branch != "main" and not re.fullmatch(
+        r"v\d+\.\d+\.\d+-alpha\.\d+", os.environ["RELEASE_TAG"]
+    ):
+        raise ValueError("The preview branch requires an alpha release tag")
     runs = records(
-        f"actions/workflows/tests.yml/runs?head_sha={head}&event=push&branch=main", "workflow_runs"
+        f"actions/workflows/tests.yml/runs?head_sha={head}&event=push"
+        f"&branch={quote(source_branch, safe='')}",
+        "workflow_runs",
     )
     if not runs:
-        raise ValueError("No default-branch Tests run for the release commit")
+        raise ValueError("No source-branch Tests push run for the release commit")
     run = max(runs, key=lambda item: int(item["id"]))
     if (
         run["repository"]["full_name"] != REPO
         or (run.get("head_repository") or {}).get("full_name") != REPO
         or run["path"] != ".github/workflows/tests.yml"
         or run["event"] != "push"
-        or run["head_branch"] != "main"
+        or run["head_branch"] != source_branch
         or run["head_sha"] != head
         or run["status"] != "completed"
         or run["conclusion"] != "success"
     ):
-        raise ValueError("Release requires a successful exact-commit main Tests run")
+        raise ValueError("Release requires a successful exact-commit source-branch Tests run")
     commit = repo_api(f"git/commits/{head}")
     manifest = ".release-please-manifest.json"
     release_version = json.loads(content(manifest, head))["."]
@@ -590,13 +599,20 @@ def main() -> None:
     parser.add_argument("--context", type=Path, default=Path("candidate.json"))
     parser.add_argument("--file", type=Path)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--source-branch", choices=RELEASE_SOURCE_BRANCHES, default="main")
     args = parser.parse_args()
+    if args.source_branch != "main" and args.command != "qualify-distributions":
+        parser.error("--source-branch applies only to qualify-distributions")
     if os.environ.get("GITHUB_REPOSITORY") != REPO:
         raise ValueError("This controller is restricted to the Agents Python repository")
     if args.command == "qualify-distributions":
-        qualified = qualified_distributions(os.environ["RELEASE_SHA"])
+        qualified = qualified_distributions(
+            os.environ["RELEASE_SHA"], source_branch=args.source_branch
+        )
         if args.output_dir is not None:
             collect_distributions(qualified, args.output_dir)
+        if args.file is not None:
+            args.file.write_text(json.dumps(qualified, indent=2) + "\n", encoding="utf-8")
         print(f"Qualified Tests run {qualified['run']['id']} at {qualified['run']['head_sha']}")
     elif args.command == "gate":
         gate()

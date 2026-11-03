@@ -5919,6 +5919,10 @@ class Session(Generic[ContextT, OutputT]):
                 # Observe delivered MCP ends before settled-policy failure bookkeeping.
                 self._observe_mcp(event, state)
                 if kind in {"task_complete", "turn_complete", "turn_aborted"}:
+                    policy_failure = message.get("_sdk_policy_failure")
+                    if policy_failure is not None and not state.failure.done():
+                        state.policy_stop = "expired"
+                        state.failure.set_result(NativeError(policy_failure))
                     # An MCP reader exists only on the initial Core route.
                     if (
                         self._mcp_reader is not None

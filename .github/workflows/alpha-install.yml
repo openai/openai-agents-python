@@ -1,6 +1,10 @@
-name: Verify private alpha installation
+name: Verify preview wheel installation
 
 on:
+  # Register this workflow without changing the stable default branch.
+  push:
+    branches: [feat/codex-harness]
+    paths: [.github/workflows/alpha-install.yml]
   workflow_dispatch:
     inputs:
       tag:
@@ -13,8 +17,10 @@ permissions:
 
 jobs:
   install:
-    # Historical private-alpha installation check; disabled in the public source-only branch.
-    if: ${{ false }}
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'openai/openai-agents-python' &&
+      github.ref == 'refs/heads/feat/codex-harness'
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +44,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: ${{ matrix.python }}
-      - name: Download the private release without a source checkout
+      - name: Download the preview release without a source checkout
         working-directory: ${{ runner.temp }}
         env:
           GH_TOKEN: ${{ github.token }}

@@ -322,11 +322,28 @@ def test_existing_release_tagging_does_not_run_for_the_preview_branch() -> None:
     assert trigger["branches"] == ["main"]
 
 
-def test_v1_source_only_workflows_cannot_publish_or_tag() -> None:
+def test_preview_install_checks_do_not_enable_pypi_or_automatic_tags() -> None:
     workflows = ROOT / ".github/workflows"
-    for name, job in [("publish.yml", "publish"), ("alpha-install.yml", "install")]:
-        workflow = yaml.load((workflows / name).read_text(), Loader=yaml.BaseLoader)
-        assert workflow["jobs"][job]["if"] == "${{ false }}"
+    publish = yaml.load((workflows / "publish.yml").read_text(), Loader=yaml.BaseLoader)
+    assert publish["jobs"]["publish"]["if"] == "${{ false }}"
+    install = yaml.load((workflows / "alpha-install.yml").read_text(), Loader=yaml.BaseLoader)
+    assert install["permissions"] == {"contents": "read"}
+    assert install["on"]["push"] == {
+        "branches": ["feat/codex-harness"],
+        "paths": [".github/workflows/alpha-install.yml"],
+    }
+    assert install["jobs"]["install"]["if"].strip() == (
+        "github.event_name == 'workflow_dispatch' && "
+        "github.repository == 'openai/openai-agents-python' && "
+        "github.ref == 'refs/heads/feat/codex-harness'"
+    )
+    matrix = install["jobs"]["install"]["strategy"]["matrix"]
+    assert matrix["python"] == ["3.10", "3.14"]
+    assert {item["wheel"] for item in matrix["platform"]} == {
+        "manylinux_2_39_x86_64",
+        "win_amd64",
+        "macosx_11_0_arm64",
+    }
     tags = yaml.load((workflows / "release-tag.yml").read_text(), Loader=yaml.BaseLoader)
     assert tags["jobs"]["tag-release"]["if"].startswith("false &&")
     codeql = yaml.load((workflows / "codeql.yml").read_text(), Loader=yaml.BaseLoader)

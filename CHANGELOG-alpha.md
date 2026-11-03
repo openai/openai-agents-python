@@ -31,7 +31,7 @@ Changes since `0.24.0-alpha.5`. This preview expands conversation control, state
 ### Fixed
 
 - Keep each captured Turn's result stable across accepted steering, native continuations, and later submissions. Preserve one-shot manual checkpoints, matching interaction replies, and output-repair state across supported save and restore boundaries.
-- Improve native child cancellation and Session cleanup. Stop native work when result policies expire, and preserve child policy failure reasons when reporting child results.
+- Improve native child cancellation and Session cleanup. Stop native work when result policies expire, and preserve policy failure reasons when reporting root and child results.
 - Reject malformed Python tool result envelopes and preserve server errors through MCP result transforms. Support nested OpenAI extension forms and HTTP telemetry export with client certificates.
 
 ### Documentation and examples

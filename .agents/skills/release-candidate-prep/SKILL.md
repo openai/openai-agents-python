@@ -6,7 +6,7 @@ description: Prepare an isolated manual alpha release candidate for the private 
 # Release Candidate Preparation
 ## Public v1 status
 
-This legacy procedure applies only to the historical private preview repository. Do not run it for public `feat/codex-harness`. Public v1 package publishing is not configured; see [Release status](../../../.github/RELEASING.md). The retained helpers support existing contract and repository tests.
+This legacy procedure applies only to the historical private preview repository. Do not run it for public `feat/codex-harness`. For the public branch, use the [manual GitHub prerelease procedure](../../../.github/RELEASING.md). The retained helpers support existing contract and repository tests.
 
 
 Use this skill when the user explicitly invokes `$release-candidate-prep` with a version such as `0.24.0-alpha.6`, without a leading `v`. This historical procedure prepares a local candidate in the former private repository from refreshed `origin/feat/v1.0-release`. Follow [Private alpha releases](../../../.github/RELEASING.md) after the local handoff. This is the preview's manual release path; no Release Please bot or CLI is needed.

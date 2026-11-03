@@ -832,6 +832,61 @@ def test_release_distribution_qualification_requires_exact_source(
     assert all("per_page=100&page=1" in path for path in publication["reads"] if "?" in path)
 
 
+def test_preview_distribution_requires_explicit_source_branch(publication: dict[str, Any]) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    with pytest.raises(ValueError, match="exact-commit"):
+        automation.qualified_distributions("b" * 40)
+    qualified = automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+    assert qualified["run"]["head_branch"] == "feat/codex-harness"
+    assert any("branch=feat%2Fcodex-harness" in path for path in publication["reads"])
+    windows = next(job for job in publication["jobs"] if job["name"] == "tests-windows (3.14)")
+    windows["conclusion"] = "failure"
+    with pytest.raises(ValueError, match="test gates"):
+        automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+
+
+@pytest.mark.parametrize("tag", ["v0.24.0", "v0.24.0a6"])
+def test_preview_distribution_rejects_noncanonical_alpha_tags(
+    publication: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tag: str
+) -> None:
+    monkeypatch.setenv("RELEASE_TAG", tag)
+    with pytest.raises(ValueError, match="alpha release tag"):
+        automation.qualified_distributions("b" * 40, source_branch="feat/codex-harness")
+    assert publication["reads"] == []
+
+
+def test_release_distribution_rejects_other_source_branches(publication: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="Unsupported release source branch"):
+        automation.qualified_distributions("b" * 40, source_branch="unreviewed")
+    assert publication["reads"] == []
+
+
+def test_preview_qualification_records_the_selected_artifacts(
+    publication: dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    publication["run"]["head_branch"] = "feat/codex-harness"
+    monkeypatch.setenv("GITHUB_REPOSITORY", automation.REPO)
+    monkeypatch.setenv("RELEASE_SHA", "b" * 40)
+    receipt = tmp_path / "qualification.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "release_automation.py",
+            "qualify-distributions",
+            "--source-branch",
+            "feat/codex-harness",
+            "--file",
+            str(receipt),
+        ],
+    )
+    automation.main()
+    saved = json.loads(receipt.read_text())
+    assert saved["run"]["head_sha"] == "b" * 40
+    assert saved["version"] == "0.24.0-alpha.3"
+    assert saved["artifacts"] == publication["artifacts"]
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

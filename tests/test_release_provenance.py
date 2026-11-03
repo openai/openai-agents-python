@@ -36,7 +36,9 @@ def release_repo(tmp_path: Path) -> tuple[Path, str]:
     return repo, sha
 
 
-def _verify(repo: Path, sha: str, tag: str = "v0.23.0") -> subprocess.CompletedProcess[str]:
+def _verify(
+    repo: Path, sha: str, tag: str = "v0.23.0", *, source_branch: str | None = None
+) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env.pop("OPENAI_API_KEY", None)
     return subprocess.run(
@@ -50,6 +52,7 @@ def _verify(repo: Path, sha: str, tag: str = "v0.23.0") -> subprocess.CompletedP
             tag,
             "--expected-sha",
             sha,
+            *(["--source-branch", source_branch] if source_branch is not None else []),
         ],
         cwd=repo,
         env=env,
@@ -57,6 +60,32 @@ def _verify(repo: Path, sha: str, tag: str = "v0.23.0") -> subprocess.CompletedP
         text=True,
         timeout=10,
     )
+
+
+def test_preview_release_uses_its_branch_without_relaxing_main(
+    release_repo: tuple[Path, str],
+) -> None:
+    repo, _ = release_repo
+    _git(repo, "checkout", "-b", "feat/codex-harness")
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "openai-agents"\nversion = "0.24.0-alpha.6"\n'
+    )
+    _git(repo, "commit", "-am", "Prepare preview")
+    sha = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/feat/codex-harness", sha)
+    _git(repo, "tag", "-a", "v0.24.0-alpha.6", "-m", "Preview", sha)
+    assert _verify(repo, sha, "v0.24.0-alpha.6").returncode != 0
+    assert _verify(repo, sha, "v0.24.0-alpha.6", source_branch="feat/codex-harness").returncode == 0
+    _git(repo, "update-ref", "-d", "refs/remotes/origin/feat/codex-harness")
+    assert _verify(repo, sha, "v0.24.0-alpha.6", source_branch="feat/codex-harness").returncode != 0
+
+
+def test_preview_branch_cannot_qualify_a_stable_release(release_repo: tuple[Path, str]) -> None:
+    repo, sha = release_repo
+    _git(repo, "update-ref", "refs/remotes/origin/feat/codex-harness", sha)
+    result = _verify(repo, sha, source_branch="feat/codex-harness")
+    assert result.returncode != 0
+    assert "alpha release tag" in result.stderr
 
 
 def test_valid_release_can_precede_main_tip_without_executing_candidate(

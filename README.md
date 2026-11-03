@@ -12,7 +12,7 @@ Use [Agents API](https://developers.openai.com/api/docs/guides/agents-api/overvi
 
 Install the SDK preview from a prebuilt Python wheel. The wheel includes the native runtime, so you do not need a compiler or Rust toolchain. See the [installation guide](docs/sdk/installation.md) for Python requirements, downloads, and setup.
 
-**Preview wheels are not available yet.** We are preparing the first public preview release. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API shown here.
+Preview wheels are distributed through [GitHub releases](https://github.com/openai/openai-agents-python/releases). Follow the installation guide for release availability and platform-specific commands. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API shown here.
 
 ## Example
 

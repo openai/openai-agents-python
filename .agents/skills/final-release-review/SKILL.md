@@ -6,7 +6,7 @@ description: Review a private preview alpha candidate or release plan against th
 # Final Release Review
 ## Public v1 status
 
-This legacy procedure applies only to the historical private preview repository. Do not run it for public `feat/codex-harness`. Public v1 package publishing is not configured; see [Release status](../../../.github/RELEASING.md). The retained helpers support existing contract and repository tests.
+This legacy procedure applies only to the historical private preview repository. Do not run it for public `feat/codex-harness`. For the public branch, use the [manual GitHub prerelease procedure](../../../.github/RELEASING.md). The retained helpers support existing contract and repository tests.
 
 
 This historical procedure reviews manual alpha candidates in the former private repository on `feat/v1.0-release`. Follow [Private alpha releases](../../../.github/RELEASING.md) for publication. This skill performs a read-only source review; it does not publish, qualify CI wheels, or authorize GitHub writes.
