@@ -110,7 +110,8 @@ async def test_executor_open_reports_connection_refusal_without_requesting_model
         cwd=str(tmp_path),
         headers={"Authorization": "Bearer refused-executor-credential"},
         tools=["exec_command"],
-        connect_timeout=0.5,
+        # Windows can take about two seconds to report a refused loopback connection.
+        connect_timeout=5.0,
     )
     async with timeout(10):
         with pytest.raises(
