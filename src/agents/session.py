@@ -5418,11 +5418,15 @@ class Session(Generic[ContextT, OutputT]):
                 )
 
     def _observe_execution(
-        self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str
+        self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str | None
     ) -> bool:
         item = project_execution_completion(message, thread_id=thread_id, turn_id=turn_id)
         if item is None:
             return False
+        if submission_id is None:
+            # Canonical history still has the completion after the stream loses its owner.
+            self._observations._mark_gap()
+            return True
         self._observations.append(
             ExecutionItemCompleted(
                 session_id=self.id,
@@ -6031,15 +6035,15 @@ class Session(Generic[ContextT, OutputT]):
                         or state.handle is None
                         or state.handle.turn_id != late_turn_id
                     )
-                    and (started := self._observations.turn_started(late_turn_id)) is not None
-                    and self._observe_execution(
+                ):
+                    started = self._observations.turn_started(late_turn_id)
+                    if self._observe_execution(
                         message,
                         thread_id=self.id,
                         turn_id=late_turn_id,
-                        submission_id=started.submission_id,
-                    )
-                ):
-                    continue
+                        submission_id=started.submission_id if started is not None else None,
+                    ):
+                        continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
                         "exec_approval_request",

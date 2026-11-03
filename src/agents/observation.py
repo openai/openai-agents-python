@@ -237,11 +237,19 @@ class _ObservationBuffer:
                 return event
         return None
 
+    def _mark_gap(self) -> None:
+        if self.closed:
+            return
+        self.sequence += 1
+        # Drop the prefix so the retained observations form a contiguous suffix.
+        self.records.clear()
+        self.characters = 0
+        self.notify()
+
     def append(self, event: _ObservationT) -> _ObservationT | None:
         if self.closed:
             return None
-        self.sequence += 1
-        event = replace(event, sequence=self.sequence)
+        event = replace(event, sequence=self.sequence + 1)
         size = sum(
             len(value)
             for definition in fields(event)
@@ -250,17 +258,15 @@ class _ObservationBuffer:
         if isinstance(event, ExecutionItemCompleted):
             size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
         if size > 65_536:
-            # An oversized record is a visible hole. Drop the older prefix too,
-            # so the retained records still form one contiguous suffix.
-            self.records.clear()
-            self.characters = 0
+            self._mark_gap()
         else:
+            self.sequence += 1
             self.records.append((event, size))
             self.characters += size
             while len(self.records) > 256 or self.characters > 65_536:
                 _, removed = self.records.popleft()
                 self.characters -= removed
-        self.notify()
+            self.notify()
         if self.repair_parent is not None and isinstance(event, _SubmissionEvent):
             buffer, parent_id = self.repair_parent
             buffer.append(cast(Observation, replace(event, parent_submission_id=parent_id)))
