@@ -121,7 +121,7 @@ For ongoing diagnostics, follow [telemetry configuration](configuration.md#telem
 
 The synthetic [trace walkthrough](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/trace_walkthrough.py) starts a local OTLP JSON receiver and prints a receipt summary and viewer URL. It needs no collector account or model key. Keep receiver output synthetic.
 
-Run `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`.
+First follow the [example-project setup](installation.md#examples-and-upgrades) to obtain the source files matching your installed wheel. From the directory containing `examples/`, run `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`.
 
 ### Compare evidence
 

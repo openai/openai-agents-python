@@ -1,8 +1,8 @@
 """Use only with an independently offline, job-private Linux or macOS executor.
 
-Install an SDK wheel built from this source revision, following
-packages/codex/MAINTAINING.md. The published alpha.5 wheel lacks NetworkPolicy
-and Turn.get_result().
+Install the SDK preview wheel following docs/sdk/installation.md and use example
+files from the same release. Run from the root of that release's source archive:
+    python -m examples.offline_unix_sockets
 
 The backend must put the exec-server, proxy and DNS resolver inside the offline
 boundary. Exclude host sockets, even on read-only mounts, and close inherited

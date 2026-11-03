@@ -122,7 +122,7 @@ Annotate functions that return these objects with `ToolOutput`, as above. Images
 
 When a function needs application state, use `ToolContext[Application]` as its first parameter. The SDK supplies that parameter and excludes it from the schema the model receives. Pass the application value when opening or running the agent.
 
-First complete the [current-source setup](index.md#before-you-begin), including model credentials. Save this complete script as `context_agent.py`:
+First complete the [installation](installation.md) and [API-key setup](index.md#run-your-first-agent). Save this complete script as `context_agent.py`:
 
 ```python
 import asyncio
@@ -154,7 +154,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Run `.venv/bin/python context_agent.py` on Linux/macOS or `.\.venv\Scripts\python.exe context_agent.py` on Windows. The script prints a greeting for Ada; the model chooses the wording.
+In your activated Python environment, run `python context_agent.py`. The script prints a greeting for Ada; the model chooses the wording.
 
 In `Agent[Account, str]`, `Account` is the application context type and `str` is the final output type. The SDK passes the `Account` instance to the Python function through `ctx.context`; the model does not supply that parameter. The context object itself is not model input. The function's returned display name is a tool result, so the model does receive `"Ada"`.
 
@@ -705,7 +705,11 @@ The root receives `spawn_agent`, `wait_agent`, `send_message`, `followup_task`, 
 
 Children share selected executor, Python, manual, HTTP MCP, and local stdio MCP tools, application context, and policies. Before dispatch, the runtime rejects unknown roles, model-selected override arguments, and unselected calls. Executor permissions apply at every depth.
 
-`NativeAgents` sets native approval policy to `never` for root and child turns. Codex can return permission denials but cannot ask the application to approve escalation. `Environment.approval` still controls selected executor calls but cannot grant extra native permissions. Without `NativeAgents`, existing native approval behavior remains when `Environment.network` is omitted. An explicit [network policy](#network-and-local-socket-access) disables escalation.
+By default, `NativeAgents` sets native approval policy to `never` for root and child turns. Codex can return permission denials but cannot ask the application to approve escalation. `Environment.approval` still controls selected executor calls but cannot grant extra native permissions. Without `NativeAgents`, existing native approval behavior remains when `Environment.network` is omitted. An explicit [network policy](#network-and-local-socket-access) disables escalation.
+
+Set `NativeAgents(interactions=True)` to receive supported child executor approvals, MCP forms and MCP URL requests through `session.interactions()` or `on_interaction`. Requests retain the originating child's identity. HTTP forms must come from a request associated with that child. Background forms without that association remain unsupported. This option does not enable the child's `request_user_input` or `request_permissions` prompts, or root escalation.
+
+With this option, each child turn starts its own stdio MCP connections and closes them when that turn ends. Server process state and subscriptions do not survive between child turns. Unowned server-startup prompts fail child creation.
 
 The root can use structured `output_type`; children return text. Answer manual calls through `on_interaction` or `session.interactions()`. Pending child manual requests cannot be checkpointed.
 
@@ -807,7 +811,7 @@ Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler return
 
 #### Handle native approvals and forms
 
-The handler can receive supported native root requests too. Approval requests use `request.reply("allow_once")` or `request.reply("deny")`. Form requests use `request.reply(values)`; `request.reply(None)` declines a form or URL request. Native acknowledgement means the reply was enqueued, not that an external approval or URL verification succeeded. Supported manual child requests remain distinct from native child prompts.
+The handler can receive supported native root requests too. Approval requests use `request.reply("allow_once")` or `request.reply("deny")`. Form requests use `request.reply(values)`; `request.reply(None)` declines a form or URL request. Native acknowledgement means the reply was enqueued, not that an external approval or URL verification succeeded. Native child requests require `NativeAgents(interactions=True)`; manual child requests do not require that option.
 
 Import `ApprovalRequest` and `ElicitationRequest` from `agents` to distinguish native approval requests from form or URL requests:
 
@@ -815,7 +819,7 @@ Import `ApprovalRequest` and `ElicitationRequest` from `agents` to distinguish n
 | --- | --- | --- | --- |
 | `ApprovalRequest` | `description` | `reply("allow_once")` or `reply("deny")` | `await respond("allow_once")` or `await respond("deny")` |
 | `ElicitationRequest` form | `description` and `schema` | `reply(values)` or `reply(None)` to decline | `await respond(values)` or `await decline()` |
-| `ElicitationRequest` URL | `description`; `schema` is empty | `reply(None)` to decline | `await decline()` |
+| `ElicitationRequest` URL | `description`, `url` and `elicitation_id`; `schema` is empty | `reply_url_accept()` to consent or `reply(None)` to decline | `await accept_url()` to consent or `await decline()` |
 
 This handler requires an asynchronous application function `collect_form_values(description, schema)`. That function must render the supplied fields and return the user's answer mapping, or `None` to decline. Pass `answer_native` as `on_interaction` when the run expects native requests:
 
@@ -836,13 +840,15 @@ async def answer_native(request):
 
 #### Form schemas and handler lifetime
 
-`ElicitationRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints. URL requests support decline only; the SDK does not visit or verify the URL in `description`. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
+`ElicitationRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints. The SDK never visits a URL. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
+
+URL consent does not establish completion or verification. In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server to report completion for that URL interaction. The application decides whether to trust that server's report. A timeout expires the interaction and raises `TimeoutError`. Cancelling the waiter stops only that wait. Keep the Session open while waiting. The preceding handler declines URLs by default.
 
 Handlers may run concurrently. Synchronous handlers run in worker threads and must support concurrent calls. When root work finishes, fails, or is cancelled, the run closes its Session and waits for handlers to finish. Python cannot forcibly stop synchronous worker threads. Use an explicit Session if children must continue after the root finishes or if you need to retry an invalid manual result.
 
 Standard MCP forms support primitive fields and enum-backed multi-select arrays, including titled choices; nested objects and general arrays remain unsupported on that route. OpenAI extension forms support Draft 2020-12 object schemas with nested objects, arrays and single-hop references to local `$defs`. Extension `format` values are annotations; regex keywords, resource identifiers and dynamic references are unsupported. The SDK does not fetch schema resources.
 
-Native prompts from subagents and end-to-end URL verification remain unsupported. Use manual tools for application-owned questions, including supported child manual requests. Live replies do not make code cells, processes or child turns portable.
+Native child interactions require the [explicit opt-in](#shared-tools-and-permissions). Use manual tools for application-owned questions, including supported child manual requests. Live replies do not make code cells, processes or child turns portable.
 
 ### Ask for application approval
 

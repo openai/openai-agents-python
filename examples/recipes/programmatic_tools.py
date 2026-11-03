@@ -1,6 +1,6 @@
 """Aggregate Python tool results in model-generated JavaScript.
 
-Run with a matching source wheel and model credentials:
+Run with a matching SDK preview wheel and model credentials:
     python -m examples.recipes.programmatic_tools
 
 Ordinary calls suffice for a single lookup. Code mode helps when the model must

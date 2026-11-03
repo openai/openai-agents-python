@@ -1,9 +1,7 @@
 """Connect the current SDK to one pre-provisioned Linux executor.
 
-This recipe requires a wheel built from this source revision. The published
-alpha.5 wheel lacks Checklist and Turn.get_result(). See the source-build steps
-in packages/codex/MAINTAINING.md, then install that wheel in Python 3.10+:
-    python -m pip install /path/to/openai_agents-*.whl
+Install the SDK preview wheel following docs/sdk/installation.md and use example
+files from the same release. Run from the root of that release's source archive.
 
 This example supports a Linux executor running the matching Codex exec-server
 behind an authenticated WSS endpoint. The application provisions the executor
@@ -13,7 +11,7 @@ EXECUTOR_TOKEN and OPENAI_API_KEY through your normal credential injection.
 Set SSL_CERT_FILE to your executor CA if it uses a private certificate.
 Optionally set EXECUTOR_CAPABILITIES to one absolute remote capability directory
 and OPENAI_BASE_URL for your configured model provider. Run:
-    python remote_executor.py "Inspect the project and list the next steps"
+    python -m examples.remote_executor "Inspect the project and list the next steps"
 
 The executor owns file and process isolation. Do not assign a host workspace
 or an executor shared with an untrusted tenant. Close the Session before the

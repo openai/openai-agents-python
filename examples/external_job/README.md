@@ -60,7 +60,7 @@ def public_labels(private: object) -> PublicLabels:
 
 Keep the supplied order for ranked results. Choose public names and compute derived values in the projector. Before a job starts, registration rejects result declarations with defaults, renamed output keys, or custom transforms.
 
-If the app needs to control result serialization itself, use `render.match(event)` and submit the matched request's `reply(value)` directly through the session.
+If the app needs to control result serialization itself, use `render.match(event)` and call `await request.respond(value)` on the matched request. In an `Agent.run()` interaction handler, return `request.reply(value)` instead.
 
 ## Stable inputs
 

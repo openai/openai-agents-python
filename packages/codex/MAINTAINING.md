@@ -1,6 +1,8 @@
 # Maintain the native Agents SDK
 
-The build produces one wheel for the root `openai-agents` distribution. Its public Python package is `agents`, and Codex owns every model turn. Use the [v1 SDK guides](../../docs/sdk/index.md) from the same source commit as your build. This snapshot has no public v1 wheels or release tags. Python supplies typed declarations, conversion, and callbacks, and manages its asynchronous tasks.
+The build produces one wheel for the root `openai-agents` distribution, which provides the `agents` Python package. For prebuilt preview wheels, see the [installation guide](../../docs/sdk/installation.md). For source builds, use the [SDK guides](../../docs/sdk/index.md) from the same commit.
+
+Codex owns every model turn. Python supplies typed declarations, conversion, and callbacks, and manages its asynchronous tasks.
 
 ## Build from this source
 

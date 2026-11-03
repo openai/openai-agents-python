@@ -220,7 +220,9 @@ Both types carry a native request's `description`. For `ApprovalRequest`, return
 
 For an `ElicitationRequest` form, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
 
-A URL request has an empty schema and supports only refusal through these APIs. A Session-scoped URL request has no turn or submission ID; the SDK never visits its URL. A native reply confirms only that the SDK queued it. It does not confirm acceptance or completion. See [native interactions and their limits](tools.md#answer-interactions-during-a-one-shot-run).
+A URL request has an empty schema, plus `url` and `elicitation_id`. Return `request.reply_url_accept()` from a one-shot handler or use `await request.accept_url()` in an explicit Session to consent. Decline with `request.reply(None)` or `await request.decline()`.
+
+In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server's completion notification. Keep the Session open while waiting. Consent is not completion, and a server notification is not independent verification. A timeout expires the interaction and raises `TimeoutError`. Cancelling the waiter stops only that wait. A Session-scoped URL request has no turn or submission ID. The SDK never visits its URL. See [native interactions and their limits](tools.md#answer-interactions-during-a-one-shot-run).
 
 ### HttpMCP
 
@@ -327,7 +329,7 @@ Put `Checklist()` in the opening tools to enable native checklist updates, then 
 
 ### NativeAgents
 
-Enables Codex to delegate work to subagents. Include it in `Agent(tools=[...])` or the opening `agent.session(tools=[...])`. Use an explicit compatible model and a Session `Environment` with `exec_command`, `write_stdin` and `apply_patch` selected. Its optional `approval(context, call)` callback returns `bool` or `Awaitable[bool]` to allow or deny native collaboration calls. See [native children](tools.md#native-children) and [native tool decisions](tools.md#native-tool-decisions).
+Enables Codex to delegate work to subagents. Include it in `Agent(tools=[...])` or the opening `agent.session(tools=[...])`. Use an explicit compatible model and a Session `Environment` with `exec_command`, `write_stdin` and `apply_patch` selected. Its optional `approval(context, call)` callback returns `bool` or `Awaitable[bool]` to allow or deny native collaboration calls. `interactions=True` enables supported child approvals, MCP forms and URL requests; it defaults to `False`. See [native children](tools.md#native-children), [child interaction limits](tools.md#shared-tools-and-permissions) and [native tool decisions](tools.md#native-tool-decisions).
 
 ### NativeRole
 

@@ -256,8 +256,8 @@ async def wait_owned_turn(turn: Turn[OutputT], seconds: float) -> Completed[Outp
     """Use only for a root Turn owned by this caller, with no successor policy.
 
     On timeout stop and join precisely this Turn, never whichever one is active
-    later. A stopped child has weaker Subagent.try_cancel semantics. If an
-    operation owns an entire Session including automatic successors, use
+    later. For a child Turn, use Subagent.try_cancel(turn) and check its boolean
+    result. If an operation owns an entire Session including automatic successors, use
     session.cancel_all() at the owning scope instead.
     """
     try:
