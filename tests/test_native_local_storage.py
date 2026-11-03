@@ -10,7 +10,17 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, FunctionTool, LocalStorage, NativeProvider, ToolContext, function_tool
+from agents import (
+    Agent,
+    FunctionTool,
+    LocalRecoveryRequired,
+    LocalStorage,
+    NativeError,
+    NativeProvider,
+    ReconciledCall,
+    ToolContext,
+    function_tool,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import LookupArgs, next_request, provider
@@ -175,6 +185,64 @@ async def test_unknown_local_receipt_never_replays_or_starts_model(responses, tm
     code, rows, err = await _collect(retried)
     assert code != 0 and rows and "unknown tool outcome" in rows[0]["message"], (rows, err)
     assert len(responses.requests) == request_count
+
+
+async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(responses, tmp_path):
+    responses.respond(function_call("record", {"key": "unknown-effect"}, "missing-receipt"))
+    crashed = await _start(responses, tmp_path, "unknown")
+    code, rows, err = await _collect(crashed)
+    assert code == 67 and rows and "opened" in rows[0], (rows, err)
+    thread_id = rows[0]["opened"]
+    storage = LocalStorage(tmp_path / "profile")
+    invoked = []
+
+    @function_tool
+    async def record(key: str) -> str:
+        """Record one application effect."""
+        invoked.append(key)
+        return key
+
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-reconciled-worker")
+    agent = Agent(instructions="Use record for requested work.", tools=[record], provider=provider)
+    async with timeout(40), provider:
+        with pytest.raises(LocalRecoveryRequired) as missing:
+            async with agent.session(storage=storage, resume=thread_id):
+                pytest.fail("Reopen accepted an unknown outcome")
+        (call,) = missing.value.calls
+        assert (call.thread_id, call.call_id, call.name) == (thread_id, "missing-receipt", "record")
+        assert call.arguments == {"key": "unknown-effect"}
+        assert (tmp_path / "effects").read_text() == "unknown:unknown-effect\n"
+        assert len(responses.requests) == 1
+
+        confirmed = ReconciledCall(
+            thread_id=thread_id,
+            turn_id=call.turn_id,
+            call_id=call.call_id,
+            outcome="applied",
+            result="Confirmed application record",
+        )
+        # Repeating the same application receipt after a reconnect must be
+        # safe. The same native call ID must stay fenced across later opens.
+        for receipts in ([confirmed], [confirmed], []):
+            async with agent.session(
+                storage=storage, resume=thread_id, reconciled_calls=receipts
+            ) as session:
+                recorded = [
+                    item
+                    async for item in session.items()
+                    if item["type"] == "function_call_output" and item["call_id"] == call.call_id
+                ]
+                assert len(recorded) == 1
+                assert recorded[0]["turn_id"] == call.turn_id
+                assert recorded[0]["reconciliation"] == "applied"
+        assert len(responses.requests) == 1
+        responses.respond(function_call("record", {"key": "duplicate"}, call.call_id))
+        async with agent.session(storage=storage, resume=thread_id) as session:
+            reuse = await session.submit("Check the existing effect")
+            with pytest.raises(NativeError, match="Cannot reuse an original call identity"):
+                await reuse.get_result()
+        assert invoked == []
+        assert "Confirmed application record" in json.dumps(responses.requests[1]["input"])
 
 
 async def test_local_cannot_export_portable_state(responses, tmp_path):

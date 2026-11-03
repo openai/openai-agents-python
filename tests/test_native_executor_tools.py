@@ -12,6 +12,7 @@ from typing import Any, Literal
 import pytest
 
 from agents import Agent, Environment, NativeError, ToolRef, function_tool
+from agents.observation import ExecutionItemCompleted
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -47,9 +48,33 @@ async def test_selected_remote_process_uses_wss_and_current_directory(
             tools=[],
             provider=provider(responses),
         ).session(environment=tools) as session:
-            result = await (await session.submit("Show the current directory.")).get_result()
+            turn = await session.submit("Show the current directory.")
+            result = await turn.get_result()
             assert result.final_output == "done"
             assert str(peer.root) in tool_output(responses.requests[1], "pwd")
+            [completion] = [
+                event.item
+                async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert completion["type"] == "command_execution"
+            assert completion["thread_id"] == session.id
+            assert completion["turn_id"] == turn.turn_id
+            assert completion["id"] == completion["call_id"] == "pwd"
+            assert completion["exit_code"] == 0
+            assert completion["native_status"] == "completed"
+            assert str(peer.root) in (completion["cwd"] or "")
+            [process_start] = [
+                request
+                for request in peer.requests
+                if request["method"] == "process/start"
+                and request["params"].get("metadata", {}).get("toolCallId") == "pwd"
+            ]
+            assert completion["argv"] == process_start["params"]["argv"]
+            assert str(peer.root) in (completion["output"] or "")
+            assert [
+                item async for item in session.items() if item["type"] == "command_execution"
+            ] == [completion]
             assert set(declarations(responses.requests[0])) == {("functions", "exec_command")}
             assert peer.token not in repr(tools)
             assert peer.token not in str(await session.save_state())
@@ -115,15 +140,28 @@ async def test_native_tty_stdin_and_patch(
         async with Agent(
             instructions="Use the selected tools.", tools=[], provider=provider(responses)
         ).session(environment=selected) as session:
-            assert (
-                await (await session.submit("Write interactively.")).get_result()
-            ).final_output == "done"
+            turn = await session.submit("Write interactively.")
+            assert (await turn.get_result()).final_output == "done"
             assert "remote:hello" in tool_output(responses.requests[2], "stdin")
             assert (peer.root / "result.txt").read_text() == "remote patch\n"
             offered = declarations(responses.requests[0])
             assert set(offered) == {("functions", name) for name in selected.tools}
-            history = json.dumps([item async for item in session.items()])
-            assert all(call in history for call in ("start", "stdin", "patch"))
+            history = [item async for item in session.items()]
+            assert all(call in json.dumps(history) for call in ("start", "stdin", "patch"))
+            [patch] = [
+                event.item
+                async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+                and event.item["type"] == "patch_execution"
+            ]
+            assert patch["type"] == "patch_execution"
+            assert patch["thread_id"] == session.id
+            assert patch["turn_id"] == turn.turn_id
+            assert patch["id"] == patch["call_id"] == "patch"
+            assert patch["native_status"] == "completed"
+            assert any(path.endswith("/result.txt") for path in patch["changes"])
+            assert "result.txt" in (patch["stdout"] or "")
+            assert [item for item in history if item["type"] == "patch_execution"] == [patch]
         methods = {request.get("method") for request in peer.requests}
         assert "process/write" in methods
         assert "fs/writeFile" in methods

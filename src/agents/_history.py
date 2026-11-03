@@ -4,9 +4,10 @@ from dataclasses import dataclass
 from typing import Any, cast
 
 from ._events import SessionItem
-from ._projection import EventProjector, _usage
+from ._projection import EventProjector, _execution_item, _usage, project_execution_completion
 from ._web_projection import project_web_search_item
 from .history import RecordedTurn
+from .turn_receipt import _project_turn_receipt
 
 
 @dataclass
@@ -15,6 +16,47 @@ class _HistoryItem:
     native: bool
     recorded_id: bool
     output: "_HistoryItem | None" = None
+
+
+_EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
+
+
+def _legacy_execution(message: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
+    # These legacy end events have no native thread ID. Never borrow the
+    # reader's ID for an inherited record.
+    if message["type"] == "patch_apply_end":
+        native = {
+            "type": "FileChange",
+            "id": message.get("call_id"),
+            "changes": message.get("changes", {}),
+            "stdout": message.get("stdout"),
+            "stderr": message.get("stderr"),
+            "status": message.get("status"),
+        }
+    elif message["type"] == "mcp_tool_call_end":
+        invocation = message["invocation"]
+        result = message["result"].get("Ok")
+        error = message["result"].get("Err")
+        native = {
+            "type": "McpToolCall",
+            "id": message.get("call_id"),
+            "server": invocation["server"],
+            "tool": invocation["tool"],
+            "arguments": invocation.get("arguments"),
+            "result": result,
+            "error": {"message": error} if error is not None else None,
+            "status": (
+                "completed"
+                if isinstance(result, dict) and result.get("isError") is not True
+                else "failed"
+            ),
+        }
+    else:
+        return None
+    item = _execution_item(native, None, turn_id)
+    if item is not None and message["type"] == "mcp_tool_call_end":
+        item["native_status"] = None
+    return item
 
 
 def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
@@ -82,6 +124,7 @@ def project_history(
 
     def remember(item: dict[str, Any], *, native: bool, recorded_id: bool = True) -> None:
         is_output = item["type"] == "function_call_output"
+        is_execution = item["type"] in _EXECUTION_TYPES
         identity = (
             item["turn_id"],
             "output" if is_output else "item",
@@ -97,6 +140,16 @@ def project_history(
                 occurrence = call.output
             else:
                 occurrence = None
+        elif is_execution and call is not None:
+            occurrence = call
+        elif (
+            item["type"] == "function_call"
+            and call is not None
+            and (call.value["type"] in _EXECUTION_TYPES)
+        ):
+            # A raw call can follow its typed completion in some stored
+            # histories. Keep the native item and its effective arguments.
+            return
         elif native and call is not None and not call.native:
             # Native tool events use the call ID as their item ID. Enrich the
             # latest matching raw call without changing its first-seen position.
@@ -113,7 +166,7 @@ def project_history(
             occurrence.native = native
             occurrence.recorded_id = recorded_id
         identities[identity] = occurrence
-        if item["type"] == "function_call":
+        if is_execution or item["type"] == "function_call":
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:
             call.output = occurrence
@@ -125,22 +178,58 @@ def project_history(
             aborted_turn = None
             if current_turn and current_turn not in turn_order:
                 turn_order.append(current_turn)
+            receipt = _project_turn_receipt(payload)
+            if receipt is not None:
+                receipt_turn_id = receipt["turn_id"]
+                turn = turns.get(receipt_turn_id)
+                if turn is None:
+                    turn = {
+                        "id": receipt_turn_id,
+                        "object": "agent.session.turn",
+                        "session_id": session_id,
+                        "subagent_id": subagent_id,
+                        "status": "in_progress",
+                        "created_at": None,
+                        "started_at": None,
+                        "completed_at": None,
+                        "error": None,
+                        "usage": None,
+                    }
+                    turns[receipt_turn_id] = turn
+                turn["receipt"] = receipt
         elif kind == "token_usage_record":
             usage[payload["turn_id"]] = _usage(payload["turn_token_usage"])
         elif kind == "response_item":
             turn_id = current_turn
-            if turn_id is None and aborted_turn is not None:
+            reconciliation = None
+            if payload.get("type") in {"function_call_output", "custom_tool_call_output"}:
                 metadata = payload.get("internal_chat_message_metadata_passthrough")
-                if (
-                    payload.get("type") in {"function_call_output", "custom_tool_call_output"}
-                    and isinstance(metadata, dict)
-                    and metadata.get("turn_id") == aborted_turn
-                    and (aborted_turn, payload.get("call_id")) in latest_calls
-                ):
-                    turn_id = aborted_turn
+                if isinstance(metadata, dict):
+                    original_turn = metadata.get("turn_id")
+                    call_id = payload.get("call_id")
+                    kinds = metadata.get("content_item_kinds")
+                    if kinds == ["sdk_reconciliation.applied"]:
+                        reconciliation = "applied"
+                    elif kinds == ["sdk_reconciliation.not_applied"]:
+                        reconciliation = "not_applied"
+                    if reconciliation is not None:
+                        if (original_turn, call_id) not in latest_calls:
+                            continue
+                        turn_id = original_turn
+                    elif (
+                        turn_id is None
+                        and aborted_turn is not None
+                        and original_turn == aborted_turn
+                        and (aborted_turn, call_id) in latest_calls
+                    ):
+                        turn_id = aborted_turn
             if turn_id:
                 item = _response_item(payload, turn_id)
                 if item is not None:
+                    if reconciliation is not None:
+                        item["reconciliation"] = reconciliation
+                        if reconciliation == "not_applied":
+                            item["status"] = "failed"
                     remember(item, native=False, recorded_id=bool(payload.get("id")))
         elif kind == "event_msg":
             event_kind = payload["type"]
@@ -168,11 +257,23 @@ def project_history(
                 continue
             if turn_id not in turn_order:
                 turn_order.append(turn_id)
-            current_turn = turn_id
-            aborted_turn = None
             # The live projector can create a fallback final message. History
             # must contain only recorded items, with their original identities.
             message = {**payload, "turn_id": turn_id}
+            execution = cast(
+                dict[str, Any] | None,
+                project_execution_completion(
+                    message, thread_id=message.get("thread_id"), turn_id=turn_id
+                ),
+            ) or _legacy_execution(message, turn_id)
+            if execution is not None:
+                # Background commands may complete after their owning turn
+                # has finished. An execution receipt cannot reopen that turn
+                # or change the owner of subsequent raw response items.
+                remember(execution, native=event_kind == "item_completed")
+                continue
+            current_turn = turn_id
+            aborted_turn = None
             message.pop("last_agent_message", None)
             native_item = payload.get("item", {})
             for event in projector.project({"id": turn_id, "msg": message}):
@@ -191,6 +292,8 @@ def project_history(
                     turn["created_at"] = started
                     turn["started_at"] = started
                     turn["completed_at"] = payload.get("completed_at")
+                    if previous is not None and "receipt" in previous:
+                        turn["receipt"] = previous["receipt"]
                     turns[turn_id] = turn
                 elif (
                     event["type"] == "agent.session.turn.item.added"

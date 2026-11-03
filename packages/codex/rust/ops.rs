@@ -422,6 +422,8 @@ params!(TurnParams {
     #[serde(default)] mode: Mode,
     expected_turn_id: Option<String>,
     expected_previous_turn_id: Option<String>,
+    #[serde(default)] exact_steering: bool,
+    writable_roots: Option<Vec<PathUri>>,
 });
 
 fn rejection(reason: NotSubmittedReason) -> Value {
@@ -475,7 +477,7 @@ async fn start_turn(thread: &CodexThread, value: Value) -> Result<Value> {
 pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
     let mut mutation = Some(state.mutations.lock().await);
     let thread = &state.thread;
-    let p: TurnParams = decode(value)?;
+    let mut p: TurnParams = decode(value)?;
     anyhow::ensure!(
         p.input.is_array()
             && (!matches!(p.mode, Mode::ContinueIfIdle)
@@ -492,7 +494,51 @@ pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value
                 .is_some_and(|mode| mode.reasoning_effort() == Some(ReasoningEffort::Persistent)),
         "replaceable tools support ordinary submit/steer only, without persistent execution"
     );
+    if let Some(roots) = p.writable_roots.take() {
+        ensure!(
+            matches!(p.mode, Mode::StartIfIdle) && p.thread_settings.environments.is_none(),
+            "Writable roots require a new idle native turn"
+        );
+        match prepare_write_selection(state, roots).await {
+            Ok(replacement) => p.thread_settings.environments = Some(replacement),
+            Err(error) => {
+                return Ok(json!({"status": "not_submitted", "reason": {
+                    "type": "writable_roots_refused", "message": error.to_string()
+                }}));
+            }
+        };
+    }
     start_with_params(thread, p, None, Some((state, &mut mutation))).await
+}
+
+async fn prepare_write_selection(
+    state: &crate::engine::ThreadState,
+    roots: Vec<PathUri>,
+) -> Result<TurnEnvironmentSelections> {
+    let thread = &state.thread;
+    let current = thread.environment_selections().await;
+    let [selection] = current.as_slice() else {
+        bail!("Writable roots require one selected native Environment");
+    };
+    let config = thread.config().await;
+    let replacement = crate::environment::replace_writable_roots(
+        selection,
+        &config,
+        &state.engine.manager.environment_manager(),
+        roots,
+    )
+    .await?;
+    if selection != &replacement {
+        ensure!(
+            thread.active_turn_environment_selections().await.is_none()
+                && thread.list_background_terminals().await.is_empty(),
+            "Cannot change writable roots while old executor work is still active"
+        );
+    }
+    Ok(TurnEnvironmentSelections::new(
+        thread.config_snapshot().await.cwd().clone(),
+        vec![replacement],
+    ))
 }
 
 // The SDK's root input and stop paths share this native admission gate. Once
@@ -561,6 +607,14 @@ async fn start_with_params<'a>(
         &mut Option<tokio::sync::MutexGuard<'a, ()>>,
     )>,
 ) -> Result<Value> {
+    ensure!(
+        !p.exact_steering || (managed.is_some() && matches!(p.mode, Mode::Steer)),
+        "exact steering requires a managed steer"
+    );
+    ensure!(
+        p.writable_roots.is_none(),
+        "Writable roots require a managed Session"
+    );
     let input = if p.input.is_array() {
         TurnInput::UserInput {
             content: decode::<Vec<UserInput>>(p.input)?,
@@ -659,6 +713,7 @@ async fn start_with_params<'a>(
             let expected = p
                 .expected_turn_id
                 .context("steer requires expected_turn_id")?;
+            let mut input_id = None;
             if managed.is_some()
                 && let TurnInput::UserInput { client_id, .. } = &mut request.input
             {
@@ -667,12 +722,19 @@ async fn start_with_params<'a>(
                     .get::<crate::python_tools::PythonTools>()
                     .context("Managed steering lost its tool owner")?
                     .admission_ready(&expected)?;
-                *client_id = Some(receipt.steering_client_id());
+                let id = receipt.root_steering_client_id(p.exact_steering)?;
+                if p.exact_steering {
+                    input_id = Some(id.clone());
+                }
+                *client_id = Some(id);
             }
             Ok(match thread.steer_turn(request, expected).await? {
-                SteerSubmission::Steered { turn_id } => {
-                    json!({"status": "steered", "turn_id": turn_id})
-                }
+                SteerSubmission::Steered { turn_id } => match input_id {
+                    Some(input_id) => {
+                        json!({"status": "steered", "turn_id": turn_id, "input_id": input_id})
+                    }
+                    None => json!({"status": "steered", "turn_id": turn_id}),
+                },
                 SteerSubmission::NotSubmitted { reason } => rejection(reason),
             })
         }

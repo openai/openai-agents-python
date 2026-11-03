@@ -18,7 +18,8 @@ from concurrent.futures import Future
 from contextlib import AbstractAsyncContextManager, contextmanager, suppress
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
+from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
@@ -30,7 +31,7 @@ from ._events import SessionItem
 from ._function_tools import FunctionTool, Tool, ToolContext
 from ._history import project_history
 from ._native_async import _NativeCompletionError
-from ._projection import _error_code
+from ._projection import _error_code, project_execution_completion
 from .agent import (
     Agent,
     ContextT,
@@ -40,7 +41,7 @@ from .agent import (
     _copy_model_settings,
     _SyncRun,
 )
-from .executor import Environment, EnvironmentSource, ExecutorContext
+from .executor import Environment, EnvironmentSource, ExecutorContext, _writable_roots
 from .history import RecordedTurn
 from .input import UserInput, _native_input
 from .manual import (
@@ -81,8 +82,10 @@ from .native_interception import (
     _NativeInterception,
 )
 from .observation import (
+    ApiRateLimitsUpdated,
     ContextCompacted,
     EventStream,
+    ExecutionItemCompleted,
     OutputTextDelta,
     SubagentLifecycle,
     ToolFinished,
@@ -92,6 +95,8 @@ from .observation import (
     UsageUpdated,
     _ObservationBuffer,
 )
+from .rate_limits import ApiRateLimits, _api_rate_limits
+from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall, _uncertain_call
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
@@ -105,7 +110,8 @@ from .tools import (
     _CapturedFunction,
     _ToolCatalog,
 )
-from .turn import PendingRequests, Turn, _child_turn, _root_turn
+from .turn import PendingRequests, SteeringReceipt, Turn, _child_turn, _root_turn
+from .turn_receipt import _load_instruction_files
 from .usage import TokenUsageInfo, _token_usage_info
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -513,6 +519,7 @@ class _Submission:
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None
+    writable_roots: tuple[str, ...] | None = None
 
     def add_callback(self, task: asyncio.Task[None]) -> None:
         self.callbacks.add(task)
@@ -1330,6 +1337,8 @@ class Session(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
         _captured_api_key: str | None = None,
     ) -> Session[ContextT, OutputT]:
         if storage is not None and not isinstance(storage, LocalStorage):
@@ -1343,6 +1352,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise ValueError("resume requires the original LocalStorage profile")
             if not isinstance(resume, str) or not resume:
                 raise TypeError("resume must be a nonempty native Session ID")
+        reconciliation = tuple(reconciled_calls)
+        if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
+            raise TypeError("reconciled_calls must contain ReconciledCall records")
+        if reconciliation and resume is None:
+            raise ValueError("reconciled_calls requires a LocalStorage resume")
         if state is not None and (model is not None or model_settings is not None):
             raise ValueError(
                 "Opening model and model_settings overrides cannot be used with state; "
@@ -1380,6 +1394,9 @@ class Session(Generic[ContextT, OutputT]):
                 programmatic_tool_calling=agent.programmatic_tool_calling,
             )
         programmatic_tool_calling = agent.programmatic_tool_calling
+        instructions, instruction_receipts = _load_instruction_files(
+            agent.instructions, instruction_files
+        )
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
         checkpoint = None
@@ -1395,7 +1412,7 @@ class Session(Generic[ContextT, OutputT]):
             # Capture caller-owned data before the first await. The native
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
-            _check_checkpoint(saved, agent.instructions)
+            _check_checkpoint(saved, instructions)
             # The binding still consumes its original idle/manual format.
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
@@ -1442,7 +1459,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
         output = _prepare_spec(agent.output_type)
         mcp_names = _tool_names(allowed_mcp)
-        instructions = agent.instructions
         model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
@@ -1634,11 +1650,10 @@ class Session(Generic[ContextT, OutputT]):
                         else "codex-code-mode-host"
                     )
                 )
-            if any(
+            if (executor is not None and executor._is_local) or any(
                 isinstance(server, StdioMCP) and server.location == "host" for server in allowed_mcp
             ):
-                # Reserve Core's lazy owner only for explicitly declared processes.
-                # This does not select a workspace or grant shell tools.
+                # Provision the helper for an explicit local executor or host MCP.
                 helpers = Path(__file__).parent / "bin"
                 runtime["codex_self_exe"] = str(
                     helpers
@@ -1729,7 +1744,7 @@ class Session(Generic[ContextT, OutputT]):
                         {
                             "agents.enabled": True,
                             "features.multi_agent_v2": {
-                                "subagent_developer_instructions": agent.instructions,
+                                "subagent_developer_instructions": instructions,
                                 "enabled": True,
                                 "tool_namespace": "collaboration",
                                 "expose_spawn_agent_model_overrides": False,
@@ -1968,11 +1983,19 @@ class Session(Generic[ContextT, OutputT]):
                 session._opening_agent = agent
                 session._bindings = agent.tools
                 session._executor = executor
+                if executor is not None and executor.writable_roots is not None:
+                    session._writable_roots = _writable_roots(executor.writable_roots)
                 session._native_agents = native_agents
                 session._storage = storage
                 if checkpoint is not None:
                     session._repair_turns = saved.repair_turns
                     session._repair_items = saved.repair_items
+                    if saved.executor_policy_digest is not None and (
+                        saved.executor_policy_digest != await session._executor_policy_digest()
+                    ):
+                        raise ValueError(
+                            "Checkpoint and Environment must agree on the applied executor policy"
+                        )
                 if restored_defaults is not None:
                     session._default_tools = restored_defaults
                 if (
@@ -2021,21 +2044,30 @@ class Session(Generic[ContextT, OutputT]):
                         await session._publish_startup(thread.call("list_subagents"))
                     )
                     recorded: dict[str, list[RecordedTurn]] = {}
+                    recorded_items: list[SessionItem] = []
+                    unknown: list[UncertainCall] = []
                     for subagent_id in [None, *(child["id"] for child in descendants)]:
                         history = json.loads(
                             await session._publish_startup(thread.read_thread_history(subagent_id))
                         )
                         turns, items = project_history(history, session.id, subagent_id)
-                        recorded[subagent_id if subagent_id is not None else session.id] = turns
-                        if any(
-                            item["type"] == "function_call"
-                            and item["status"] in ("in_progress", "incomplete")
+                        thread_id = subagent_id if subagent_id is not None else session.id
+                        recorded[thread_id] = turns
+                        recorded_items.extend(items)
+                        unknown.extend(
+                            _uncertain_call(thread_id, item)
                             for item in items
-                        ):
-                            raise RuntimeError(
-                                "Native local history has an unknown tool outcome; "
-                                "reconcile its external effect before reopening"
-                            )
+                            if item["type"] == "function_call"
+                            and item["status"] in ("in_progress", "incomplete")
+                        )
+                    if unknown and (
+                        not reconciliation or any(call.thread_id != session.id for call in unknown)
+                    ):
+                        raise LocalRecoveryRequired(
+                            tuple(unknown),
+                            tuple(turn for turns in recorded.values() for turn in turns),
+                            tuple(recorded_items),
+                        )
                     for child in descendants:
                         if child["status"] == "closed":
                             continue
@@ -2052,6 +2084,25 @@ class Session(Generic[ContextT, OutputT]):
                                 "Native local history has an active descendant; "
                                 "its runtime cannot be restored"
                             )
+                    missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
+                    supplied = {
+                        (call.thread_id, call.turn_id, call.call_id) for call in reconciliation
+                    }
+                    prior = {
+                        (session.id, item["turn_id"], item["call_id"])
+                        for item in recorded_items
+                        if item["type"] == "function_call_output" and "reconciliation" in item
+                    }
+                    if (
+                        len(supplied) != len(reconciliation)
+                        or not missing <= supplied <= missing | prior
+                    ):
+                        raise ValueError("Reconciliation must cover every unresolved call once")
+                    await session._publish_startup(
+                        thread._reconcile_local_calls(
+                            json.dumps([asdict(call) for call in reconciliation])
+                        )
+                    )
                 if (
                     web_search is not None
                     and web_search.route == "hosted"
@@ -2072,7 +2123,13 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError("Native model update acknowledgement did not match")
                 if checkpoint is None:
                     if (
-                        await session._publish_startup(thread._update_instructions(instructions))
+                        await session._publish_startup(
+                            thread._update_instructions(
+                                instructions, json.dumps(instruction_receipts)
+                            )
+                            if instruction_receipts
+                            else thread._update_instructions(instructions)
+                        )
                         is not True
                     ):
                         raise NativeError("Native instruction update acknowledgement did not match")
@@ -2232,6 +2289,7 @@ class Session(Generic[ContextT, OutputT]):
             tuple[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents, ...] | None
         ) = None
         self._executor: Environment[Any] | None = None
+        self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents | None = None
         self._interception: _NativeInterception | None = None
@@ -2267,6 +2325,7 @@ class Session(Generic[ContextT, OutputT]):
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
         self._observations = _ObservationBuffer(self.id)
+        self._api_rate_limit_snapshot = ApiRateLimits()
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
         self._reader = asyncio.create_task(self._read_events())
@@ -2294,8 +2353,9 @@ class Session(Generic[ContextT, OutputT]):
         """Observe all turns until this Session ends.
 
         after is a retained global sequence, with zero replaying the retained
-        suffix. Gaps report unavailable observations. This reader never exposes
-        authority to answer a request; use interactions for live requests.
+        suffix. Gaps report unavailable observations. Use items() to recover
+        recorded completions, including completions after a turn settles.
+        Use interactions() for live requests that need an answer.
         """
         self._check_loop()
         self._check_callback_operation("observe its own Session")
@@ -2595,6 +2655,21 @@ class Session(Generic[ContextT, OutputT]):
                 return self._last_turn
         return None
 
+    def rate_limits(self) -> ApiRateLimits:
+        """Read the latest available limits reported by this API-key provider.
+
+        Missing values are unknown. This snapshot cannot determine account
+        plan limits, credit balances or whether the provider will admit work.
+        """
+        self._check_loop()
+        return self._api_rate_limit_snapshot
+
+    async def _executor_policy_digest(self) -> str | None:
+        if self._executor is None:
+            return None
+        policy = await self._native._executor_policies()
+        return hashlib.sha256(policy.encode("utf-8")).hexdigest()
+
     @property
     def restored_turn(self) -> Turn[Any] | None:
         """The initially restored pending root, even after another turn starts.
@@ -2617,6 +2692,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
+        writable_roots: Sequence[str | PathLike[str]] | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2629,6 +2705,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
+        writable_roots: Sequence[str | PathLike[str]] | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2651,6 +2728,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue", "steer"] = "reject",
+        writable_roots: Sequence[str | PathLike[str]] | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -2659,8 +2737,9 @@ class Session(Generic[ContextT, OutputT]):
         tools=None uses this Session's last accepted update, or opening defaults. An explicit
         sequence selects only already bound tools; [] permits no model tools. A new
         submit rejects busy work by default; if_busy="queue" registers FIFO new work.
-        if_busy="steer" disallows all overrides even when idle and awaits a real
-        steering receipt for the exact captured active root. It never retries.
+        if_busy="steer" disallows overrides and awaits native acceptance for
+        the captured active root. For strict native-turn targeting, pass
+        expected_turn_id to Turn.steer instead.
         New work returns before native admission; await Turn.get_result() for completion.
         before_step(turn, *, step_index) may narrow admitted tools before
         sampling. Return None to use the captured operation default, or a
@@ -2669,8 +2748,13 @@ class Session(Generic[ContextT, OutputT]):
         can be cancelled before any model request.
         Keep this Turn to wait with the chosen type, steer or cancel exactly it.
 
-        Selection cannot install new declarations, endpoints, credentials or
-        permissions. Each native step retains its immutable selected router for
+        writable_roots replaces the additional directories granted to new
+        executor work, starting with this native turn. The Environment cwd
+        remains writable. An empty sequence clears additional grants and
+        None keeps the last applied policy. The network rules stay fixed.
+        This control requires a strict Environment and an idle graph.
+        Selection cannot install new declarations, endpoints or credentials.
+        Each native step retains its immutable selected router for
         direct, deferred-search and generated-code calls.
         A static subset can be suspended and restored under the existing native
         checkpoint conditions, against current opening declarations.
@@ -2684,9 +2768,12 @@ class Session(Generic[ContextT, OutputT]):
         if if_busy not in ("reject", "queue", "steer"):
             raise ValueError("if_busy must be 'reject', 'queue', or 'steer'")
         if if_busy == "steer" and (
-            output_type is not None or tools is not None or before_step is not None
+            output_type is not None
+            or tools is not None
+            or before_step is not None
+            or writable_roots is not None
         ):
-            raise TypeError("if_busy='steer' cannot override output_type, tools or before_step")
+            raise TypeError("if_busy='steer' cannot override the new turn's settings")
         if self._mutation is not None or self._checkpoint_task is not None:
             raise SessionBusyError("Session is changing or saving its state")
         if if_busy == "steer" and self._active is not None:
@@ -2697,6 +2784,13 @@ class Session(Generic[ContextT, OutputT]):
             return captured
         output = self._default_output if output_type is None else _prepare_spec(output_type)
         parts = _native_input(input)
+        roots = None
+        if writable_roots is not None:
+            if self._executor is None:
+                raise CapabilityError("Writable roots require a Session Environment")
+            if self._native_agents is not None:
+                raise CapabilityError("Writable roots cannot change with NativeAgents")
+            roots = _writable_roots(writable_roots)
         if output.mode == "prompted":
             parts.append(
                 {
@@ -2709,28 +2803,48 @@ class Session(Generic[ContextT, OutputT]):
                 }
             )
         return await self._start(
-            parts, output, tools=tools, before_step=before_step, enqueue=if_busy != "reject"
+            parts,
+            output,
+            tools=tools,
+            before_step=before_step,
+            enqueue=if_busy != "reject",
+            writable_roots=roots,
         )
 
-    async def _steer(self, turn: Turn[Any], input: UserInput) -> None:
+    async def _steer(
+        self, turn: Turn[Any], input: UserInput, *, expected_turn_id: str | None = None
+    ) -> SteeringReceipt | None:
         self._check_owner(turn)
         self._check_open()
         self._check_callback_operation("steer its own Session")
         self._check_graph_admission()
+        if expected_turn_id is not None and (
+            not isinstance(expected_turn_id, str) or not expected_turn_id
+        ):
+            raise ValueError("expected_turn_id must be a nonempty native root turn ID")
         if turn.child_id is not None:
+            if expected_turn_id is not None:
+                raise ValueError("Exact steering requires a root Turn")
             assert turn.instance_id is not None
             await self._submit_child_input(
                 turn.child_id, turn.instance_id, turn._native.incarnation, input, turn
             )
-            return
+            return None
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
-        if any(state.issued is turn for state, _ in self._pending):
+        if expected_turn_id is None and any(state.issued is turn for state, _ in self._pending):
             raise RuntimeError("Cannot steer queued work")
         parts = _native_input(input)
         while True:
             state = self._owned_submission(turn)
-            if state is None:
+            if state is None or (
+                expected_turn_id is not None
+                and (
+                    state.handle is None
+                    or state.handle.turn_id != expected_turn_id
+                    or state.terminal.done()
+                )
+            ):
                 raise StaleTurnError("Turn is no longer active")
             if state.stopping or state.failure.done() or state.restored_pending or state.repairing:
                 raise RuntimeError("Current turn cannot accept steering input")
@@ -2741,9 +2855,14 @@ class Session(Generic[ContextT, OutputT]):
                 raise RuntimeError("Current turn cannot accept steering input")
             # Revalidation above can wait for an owned successor before sending.
             # After sending, surface Core's receipt without retry or retarget.
-            encoded = json.dumps(
-                {"mode": "steer", "expected_turn_id": handle.turn_id, "input": parts}
-            )
+            request: dict[str, Any] = {
+                "mode": "steer",
+                "expected_turn_id": handle.turn_id,
+                "input": parts,
+            }
+            if expected_turn_id is not None:
+                request["exact_steering"] = True
+            encoded = json.dumps(request)
             try:
                 response = await self._native._submit(encoded)
             except RuntimeError as exc:
@@ -2757,7 +2876,12 @@ class Session(Generic[ContextT, OutputT]):
                 raise StaleTurnError("Native Turn no longer accepts this steering input")
             if receipt["status"] != "steered" or receipt["turn_id"] != handle.turn_id:
                 raise NativeError(f"Native input was not submitted: {receipt.get('reason')}")
-            return
+            if expected_turn_id is not None:
+                input_id = receipt.get("input_id")
+                if not isinstance(input_id, str) or not input_id:
+                    raise NativeError("Native steering acceptance did not include an input ID")
+                return SteeringReceipt(self.id, expected_turn_id, handle.submission_id, input_id)
+            return None
 
     async def _start_child(self, child: Subagent, input: UserInput) -> Turn[str]:
         if child._session is not self:
@@ -3298,6 +3422,8 @@ class Session(Generic[ContextT, OutputT]):
             options = json.loads(self._native_options)
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
+            if self._writable_roots is not None:
+                options["runtime"]["environment"]["writable_roots"] = self._writable_roots
             opening = self._opening_agent.tools
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),
@@ -3619,6 +3745,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         enqueue: bool = False,
+        writable_roots: tuple[str, ...] | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         self._check_open()
@@ -3691,6 +3818,7 @@ class Session(Generic[ContextT, OutputT]):
             operation_slots=slots,
             operation_mcp=mcp,
             operation_refs=operation_refs,
+            writable_roots=writable_roots,
         )
         if input is not None:
             issued = _root_turn(self, None, uuid4().hex, state.completion)
@@ -4776,15 +4904,20 @@ class Session(Generic[ContextT, OutputT]):
                         request["expected_previous_turn_id"] = state.continued_from
                     if state.output.mode == "native":
                         request["start"] = {"final_output_json_schema": state.output.schema}
+                    if state.writable_roots is not None:
+                        request["writable_roots"] = state.writable_roots
                     receipt = json.loads(await self._native._submit(json.dumps(request)))
                 if receipt["status"] != "started":
                     confirmed_rejection = receipt["status"] == "not_submitted"
+                    reason = receipt["reason"]
                     problem = NativeError(
-                        f"Native input was not submitted: {receipt['reason']['type']}"
+                        reason.get("message") or f"Native input was not submitted: {reason['type']}"
                     )
                     if confirmed_rejection:
                         problem._effects = "not_started"
                     raise problem
+                if state.writable_roots is not None:
+                    self._writable_roots = state.writable_roots
                 if (
                     input is not None
                     and self._environment_lease is not None
@@ -5235,6 +5368,19 @@ class Session(Generic[ContextT, OutputT]):
         message = event["msg"]
         kind = message["type"]
         if kind == "token_count" and event["id"] == handle.turn_id:
+            if "api_rate_limits" in message:
+                snapshot = _api_rate_limits(message["api_rate_limits"])
+                if snapshot is not None:
+                    self._observations.append(
+                        ApiRateLimitsUpdated(
+                            session_id=self.id,
+                            turn_id=handle.turn_id,
+                            submission_id=handle.submission_id,
+                            snapshot=snapshot,
+                        )
+                    )
+                if message.get("info") is None and message.get("rate_limits") is None:
+                    return
             self._observations.append(
                 UsageUpdated(
                     session_id=self.id,
@@ -5244,7 +5390,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
             )
         elif message.get("thread_id") == thread_id and message.get("turn_id") == handle.turn_id:
-            if kind == "agent_message_content_delta":
+            if kind == "item_completed" and self._observe_execution(
+                message,
+                thread_id=thread_id,
+                turn_id=handle.turn_id,
+                submission_id=handle.submission_id,
+            ):
+                return
+            elif kind == "agent_message_content_delta":
                 self._observations.append(
                     OutputTextDelta(
                         session_id=self.id,
@@ -5263,6 +5416,22 @@ class Session(Generic[ContextT, OutputT]):
                         item_id=message["item"]["id"],
                     )
                 )
+
+    def _observe_execution(
+        self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str
+    ) -> bool:
+        item = project_execution_completion(message, thread_id=thread_id, turn_id=turn_id)
+        if item is None:
+            return False
+        self._observations.append(
+            ExecutionItemCompleted(
+                session_id=self.id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                item=item,
+            )
+        )
+        return True
 
     def _observe_mcp(self, event: dict[str, Any], state: _CallbackState) -> None:
         handle = state.handle
@@ -5566,6 +5735,13 @@ class Session(Generic[ContextT, OutputT]):
         else:
             state = self._child_callback_state(event["subagent_id"], incarnation, turn_id)
         if state.completion.done():
+            if kind == "item_completed":
+                self._observe_execution(
+                    message,
+                    thread_id=event["subagent_id"],
+                    turn_id=turn_id,
+                    submission_id=state.handle.submission_id,
+                )
             return
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
@@ -5750,6 +5926,10 @@ class Session(Generic[ContextT, OutputT]):
                 if event is None:
                     break
                 message = event.get("msg", {})
+                if message.get("type") == "token_count" and "api_rate_limits" in message:
+                    snapshot = _api_rate_limits(message["api_rate_limits"])
+                    if snapshot is not None:
+                        self._api_rate_limit_snapshot = snapshot
                 if message.get("type") == "elicitation_status":
                     key = (message["server_name"], message["request_id"])
                     url_question = self._url_completions.get(key)
@@ -5842,6 +6022,24 @@ class Session(Generic[ContextT, OutputT]):
                     await self._read_child_event(event)
                     continue
                 state = self._active
+                if (
+                    message.get("type") == "item_completed"
+                    and message.get("thread_id") == self.id
+                    and isinstance(late_turn_id := message.get("turn_id"), str)
+                    and (
+                        state is None
+                        or state.handle is None
+                        or state.handle.turn_id != late_turn_id
+                    )
+                    and (started := self._observations.turn_started(late_turn_id)) is not None
+                    and self._observe_execution(
+                        message,
+                        thread_id=self.id,
+                        turn_id=late_turn_id,
+                        submission_id=started.submission_id,
+                    )
+                ):
+                    continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
                         "exec_approval_request",
@@ -6101,14 +6299,22 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.terminal.done()
                 and not state.failure.done()
             ):
-                state.failure.set_result(NativeError("Native event stream ended before settlement"))
+                state.failure.set_result(
+                    NativeError(
+                        "Native event stream ended before settlement", category="connection_failed"
+                    )
+                )
             if self._native_agents is not None:
                 cast(Any, self._native)._finish_child_event_reader()
                 for child in self._child_callbacks.values():
                     if not child.observed.done():
                         child.observed.set_result(None)
                     if not child.completion.done() and not child.failure.done():
-                        child.failure.set_result(NativeError("Native child event stream ended"))
+                        child.failure.set_result(
+                            NativeError(
+                                "Native child event stream ended", category="connection_failed"
+                            )
+                        )
             self._finish_failed_observations()
 
     async def _read_mcp_results(self) -> None:
@@ -6965,6 +7171,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         probe: bool = False,
     ) -> str:
+        executor_policy_digest = await self._executor_policy_digest()
         if active is not None:
             if not await self._manual_ready(active):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
@@ -7122,6 +7329,7 @@ class Session(Generic[ContextT, OutputT]):
             payload["network_policy_digest"] = (
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
+            payload["executor_policy_digest"] = executor_policy_digest
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions)
             raw = state.to_json()

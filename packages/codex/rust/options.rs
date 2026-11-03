@@ -276,10 +276,9 @@ impl ThreadOptions {
             .insert(roots.unwrap_or_default());
         options.environments = match (self.environments, environment) {
             (Some(environments), _) => Some(ops::environments(environments)?),
-            (None, Some(env)) => {
-                let windows_executor = env.is_windows_executor(environment_manager).await?;
-                Some(vec![env.selection(&options.config, windows_executor)])
-            }
+            (None, Some(env)) => Some(vec![
+                env.selection(&options.config, environment_manager).await?,
+            ]),
             (None, None) => None,
         };
         options.reserved_thread_id = self.reserved_thread_id;

@@ -10,6 +10,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import FrozenInstanceError, dataclass, field, replace
+from pathlib import Path
 from threading import RLock
 from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .recovery import ReconciledCall
     from .schema import OutputSpec
     from .session import (
         Completed,
@@ -483,6 +485,8 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
+        instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -498,6 +502,8 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
+        instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -513,6 +519,8 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -528,6 +536,8 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -572,8 +582,13 @@ class Agent(Generic[ContextT, OutputT]):
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
-        provider. Missing tool receipts are rejected as unknown effects, not
-        replayed. Local storage and portable ``state`` cannot be combined.
+        provider. An unknown tool outcome raises LocalRecoveryRequired. Check
+        the effect using application records and pass reconciled_calls on
+        reopen. The SDK records those outcomes without running those calls.
+        Local storage and portable ``state`` cannot be combined.
+
+        Pass instruction_files to load trusted UTF-8 files as application
+        instructions. Each file's receipt identifies the exact bytes loaded.
         """
         from .session import Session, _close_after_error
 
@@ -588,6 +603,8 @@ class Agent(Generic[ContextT, OutputT]):
             model=model,
             model_settings=model_settings,
             tool_selection=tools,
+            instruction_files=instruction_files,
+            reconciled_calls=reconciled_calls,
         )
         try:
             yield session

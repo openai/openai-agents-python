@@ -12,6 +12,7 @@ mod environment;
 mod extensions;
 mod goals;
 mod live;
+mod local_reconciliation;
 mod manual_checkpoint;
 mod mcp_result_control;
 mod mcp_roster;
@@ -153,11 +154,9 @@ async fn close_engine_owner(owner: Arc<std::sync::Mutex<EngineOwner>>) -> PyResu
         inner.release_native_threads();
         let mut state = owner.lock().map_err(py_error)?;
         if state.live.is_some() {
-            state.remote_drain = inner
-                .manager
-                .environment_manager()
-                .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                .and_then(|environment| environment.subscribe_connection_state());
+            state.remote_drain =
+                environment::selected_executor(&inner.manager.environment_manager())
+                    .and_then(|environment| environment.subscribe_connection_state());
             state.live.take();
         }
     }
@@ -393,11 +392,9 @@ impl Engine {
                 inner.release_native_threads();
                 let mut state = owner.lock().map_err(py_error)?;
                 if state.live.is_some() {
-                    state.remote_drain = inner
-                        .manager
-                        .environment_manager()
-                        .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                        .and_then(|environment| environment.subscribe_connection_state());
+                    state.remote_drain =
+                        environment::selected_executor(&inner.manager.environment_manager())
+                            .and_then(|environment| environment.subscribe_connection_state());
                     state.live.take();
                 }
             }
@@ -1375,6 +1372,35 @@ impl NativeThread {
         })
     }
 
+    fn _reconcile_local_calls<'py>(
+        &self,
+        py: Python<'py>,
+        receipts_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            async_bridge::retain_writer_operation(async move {
+                let _context_operation = _context_operation;
+                local_reconciliation::reconcile(&inner, &receipts_json)
+                    .await
+                    .map_err(py_error)
+            })
+            .await
+        })
+    }
+
+    fn _executor_policies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let policies = local_reconciliation::executor_policies(&inner)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&policies).map_err(py_error)
+        })
+    }
+
     // Managed ingress: the SDK holds its single active owner until terminal
     // settlement. Keep raw Compact blocked because it replaces active work.
     fn _compact<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1466,11 +1492,19 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (instructions, instruction_files_json=None))]
     fn _update_instructions<'py>(
         &self,
         py: Python<'py>,
         instructions: String,
+        instruction_files_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let files = instruction_files_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .unwrap_or_default();
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
@@ -1487,7 +1521,7 @@ impl NativeThread {
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             // Once publication begins, any error can conceal changed native history.
-            application_instructions::publish(&inner.thread, instructions)
+            application_instructions::publish_with_files(&inner.thread, instructions, files)
                 .await
                 .map_err(py_error)?;
             Ok(true)
@@ -2308,14 +2342,9 @@ impl NativeThread {
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
-            if inner
-                .engine
-                .manager
-                .environment_manager()
-                .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                .is_none()
+            if environment::selected_executor(&inner.engine.manager.environment_manager()).is_none()
             {
-                return Err(py_error("Session has no remote executor"));
+                return Err(py_error("Session has no executor"));
             }
             let tools = inner
                 .thread

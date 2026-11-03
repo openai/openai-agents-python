@@ -67,7 +67,23 @@
     {
       "path": "0017-native-policy-expiry-admission.patch",
       "sha256": "4406a07b8bcd9769595ba9295e10986311e8b3fd96bcfeda3d9dfe13a3095048"
+    },
+    {
+      "path": "0018-api-key-rate-limits.patch",
+      "sha256": "7214955c12f507f0534a7813205eeba656265aa6d919aa3704ec5a47f3ea7d64"
+    },
+    {
+      "path": "0019-retained-execution-completions.patch",
+      "sha256": "c96852d1582d17b99e5ffaafa110c471fd3af697a7b384afa15e86955897af10"
+    },
+    {
+      "path": "0020-sdk-turn-receipts.patch",
+      "sha256": "adde1ffbb9badd9e1470febaf27cbdb832d25f501eaa87ceaa880e45ad5590e0"
+    },
+    {
+      "path": "0021-redact-executor-startup-tracing.patch",
+      "sha256": "2febc726d78dd113512306c3bd59d9eaf4b233ff18cba8559af20e94c918b7a0"
     }
   ],
-  "result_tree": "66f4dc7319790001e362f9dc425916708efe4729"
+  "result_tree": "48146b9581d2557f1f6083bc65668a6ff9a1b748"
 }

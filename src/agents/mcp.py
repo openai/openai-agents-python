@@ -252,13 +252,22 @@ class StdioMCP(_MCP[ContextT_contra]):
     def _config(self, environment: Environment[Any] | None = None) -> dict[str, object]:
         config = super()._config(environment)
         config.update(command=self.command, args=list(self.args))
+        env_vars = self.env_vars
+        if environment is not None and environment._is_local:
+            env_vars = tuple(
+                name for name in env_vars if name.upper() not in {"OPENAI_API_KEY", "CODEX_API_KEY"}
+            )
         if self.location == "environment":
             if environment is None:
                 raise ValueError(
                     f"StdioMCP location={self.location!r} requires a Session environment"
                 )
-            config["environment_id"] = "remote"
-            config["env_vars"] = [{"name": name, "source": "remote"} for name in self.env_vars]
+            if environment._is_local:
+                config["environment_id"] = "local"
+                config["env_vars"] = list(env_vars)
+            else:
+                config["environment_id"] = "remote"
+                config["env_vars"] = [{"name": name, "source": "remote"} for name in env_vars]
             cwd = self.cwd if self.cwd is not None else environment.cwd
             if cwd.startswith("file:"):
                 uri = urlsplit(cwd)
@@ -271,7 +280,7 @@ class StdioMCP(_MCP[ContextT_contra]):
                     cwd = path
             config["cwd"] = cwd
         else:
-            config["env_vars"] = list(self.env_vars)
+            config["env_vars"] = list(env_vars)
             if self.cwd is not None:
                 config["cwd"] = self.cwd
         return config

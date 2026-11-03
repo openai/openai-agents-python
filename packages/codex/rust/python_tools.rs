@@ -216,6 +216,7 @@ pub(crate) struct TurnAdmission {
     // Private namespace for SDK steers of this exact runtime, including same-ID recovery.
     steering_namespace: String,
     steering_tail: AtomicBool,
+    exact_steering: OnceLock<bool>,
     provider_error: Mutex<Option<(Value, Value)>>,
     policy_failure: OnceLock<&'static str>,
 }
@@ -302,6 +303,18 @@ impl TurnAdmission {
             self.steering_namespace,
             codex_protocol::ThreadId::new()
         )
+    }
+
+    pub(crate) fn root_steering_client_id(&self, exact: bool) -> Result<String> {
+        ensure!(
+            *self.exact_steering.get_or_init(|| exact) == exact,
+            "Cannot mix exact and continuation steering on a native turn"
+        );
+        Ok(if exact {
+            format!("agents-exact-steer:{}", codex_protocol::ThreadId::new())
+        } else {
+            self.steering_client_id()
+        })
     }
 
     fn record_steering(&self, client_id: Option<&str>) {
@@ -2190,6 +2203,7 @@ impl TurnLifecycleContributor for PythonContributor {
                         codex_protocol::ThreadId::new()
                     ),
                     steering_tail: AtomicBool::new(false),
+                    exact_steering: OnceLock::new(),
                     provider_error: Mutex::default(),
                     policy_failure: OnceLock::new(),
                 });

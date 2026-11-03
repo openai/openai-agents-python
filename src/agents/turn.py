@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, overload
 
 if TYPE_CHECKING:
     from .input import UserInput
     from .manual import Interaction
     from .observation import EventStream
-    from .session import Completed, Session
+    from .rate_limits import ApiRateLimits
+    from .session import Completed, NativeError, Session, TurnStoppedError
 
 OutputT = TypeVar("OutputT")
 
@@ -22,6 +23,28 @@ class PendingRequests(Generic[OutputT]):
 
     turn: Turn[OutputT]
     requests: tuple[Interaction, ...] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class SteeringReceipt:
+    """Native acceptance of one input for an exact root turn.
+
+    Acceptance does not establish that the model sampled the input.
+    """
+
+    session_id: str
+    turn_id: str
+    submission_id: str
+    input_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class TurnNeedsAttention:
+    """A settled turn and the latest Session-level API limits at read time."""
+
+    reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited"]
+    error: NativeError | TurnStoppedError
+    rate_limits: ApiRateLimits
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -64,9 +87,58 @@ class Turn(Generic[OutputT]):
         """
         return await self._session._wait_for_request_or_result(self)
 
-    async def steer(self, input: UserInput) -> None:
-        """Steer this submitted task's current native step, never another task."""
-        await self._session._steer(self, input)
+    async def wait_for_attention(
+        self,
+    ) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:
+        """Wait for a result, an answerable request, or a known supervisory stop.
+
+        Other failures still raise. Use an asyncio timeout for a caller deadline.
+        Timing out cancels only this wait. A connection failure can leave earlier
+        tool effects uncertain, so reconcile them before attempting new work.
+        """
+        from .session import NativeError, TurnStoppedError
+
+        reason: Literal["interrupted", "connection_lost", "quota_blocked", "rate_limited"]
+        try:
+            return await self.wait_for_request_or_result()
+        except TurnStoppedError as error:
+            return TurnNeedsAttention("interrupted", error, self._session.rate_limits())
+        except NativeError as error:
+            if error.category == "connection_failed":
+                reason = "connection_lost"
+            elif error.category == "rate_limit_exceeded":
+                reason = "rate_limited"
+            elif error.category in {
+                "session_budget_exceeded",
+                "usage_limit_exceeded",
+                "credit_balance_exhausted",
+                "project_spend_limit_exceeded",
+                "organization_spend_limit_exceeded",
+                "organization_usage_limit_exceeded",
+                "billing_not_active",
+            }:
+                reason = "quota_blocked"
+            else:
+                raise
+            return TurnNeedsAttention(reason, error, self._session.rate_limits())
+
+    @overload
+    async def steer(self, input: UserInput) -> None: ...
+
+    @overload
+    async def steer(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt: ...
+
+    async def steer(
+        self, input: UserInput, *, expected_turn_id: str | None = None
+    ) -> SteeringReceipt | None:
+        """Steer the current step, or require one exact native root turn.
+
+        Pass the ID from a TurnStarted observation for strict steering. A stale
+        target raises StaleTurnError. Strict input cannot start a continuation.
+        Use one steering mode per native turn. If the caller cancels the wait
+        after sending input, its acceptance may be unknown.
+        """
+        return await self._session._steer(self, input, expected_turn_id=expected_turn_id)
 
     async def cancel(self, *, mode: Literal["graceful", "force"] = "force") -> None:
         """Stop and join this root's callbacks and cells. A settled root is a no-op.

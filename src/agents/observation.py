@@ -7,21 +7,27 @@ durable log. Use Turn.get_result and canonical history for authoritative results
 from __future__ import annotations
 
 import asyncio
+import json
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar, cast
 
+from ._events import ExecutionItem
+from .rate_limits import ApiRateLimits
 from .usage import TokenUsageInfo
 
 if TYPE_CHECKING:
     from .turn import Turn
 
 __all__ = [
+    "ApiRateLimitsUpdated",
     "ContextCompacted",
     "EventGap",
     "EventStream",
+    "ExecutionItemCompleted",
     "Observation",
     "OutputTextDelta",
     "SubagentLifecycle",
@@ -87,6 +93,14 @@ class UsageUpdated(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ApiRateLimitsUpdated(_SubmissionEvent):
+    """Rate-limit fields reported on a provider response for this turn."""
+
+    snapshot: ApiRateLimits
+    type: Literal["api_rate_limits_updated"] = field(default="api_rate_limits_updated", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ContextCompacted(_SubmissionEvent):
     """Core completed this native context-compaction item."""
 
@@ -121,6 +135,22 @@ class ToolFinished(_SubmissionEvent):
     status: Literal["completed", "failed", "cancelled"]
     family: Literal["function", "mcp"] = "function"
     type: Literal["tool_finished"] = field(default="tool_finished", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionItemCompleted(_SubmissionEvent):
+    """Core reported the end of a command, patch, or MCP call.
+
+    Match the item's thread, turn, and item IDs to its retained record in
+    Session.items() after an EventGap or reopen. Pass subagent_id for a child
+    thread. Core bounds command output and MCP results before retention.
+    Calls interrupted before Core reports a completion may have no item.
+    """
+
+    item: ExecutionItem
+    type: Literal["execution_item_completed"] = field(
+        default="execution_item_completed", init=False
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -164,9 +194,11 @@ Observation: TypeAlias = (
     | SubagentLifecycle
     | OutputTextDelta
     | UsageUpdated
+    | ApiRateLimitsUpdated
     | ContextCompacted
     | ToolStarted
     | ToolFinished
+    | ExecutionItemCompleted
     | SessionEnded
     | EventGap
 )
@@ -198,6 +230,13 @@ class _ObservationBuffer:
         self.changed.set()
         self.changed = asyncio.Event()
 
+    def turn_started(self, turn_id: str) -> TurnStarted | None:
+        """Find the retained owner of a late native completion."""
+        for event, _ in reversed(self.records):
+            if isinstance(event, TurnStarted) and event.turn_id == turn_id:
+                return event
+        return None
+
     def append(self, event: _ObservationT) -> _ObservationT | None:
         if self.closed:
             return None
@@ -208,6 +247,8 @@ class _ObservationBuffer:
             for definition in fields(event)
             if isinstance(value := getattr(event, definition.name), str)
         )
+        if isinstance(event, ExecutionItemCompleted):
+            size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
         if size > 65_536:
             # An oversized record is a visible hole. Drop the older prefix too,
             # so the retained records still form one contiguous suffix.
@@ -280,6 +321,8 @@ class EventStream(AsyncIterator[Observation]):
                 for event, _ in records:
                     if event.sequence > self._after:
                         self._after = event.sequence
+                        if isinstance(event, ExecutionItemCompleted):
+                            event = replace(event, item=deepcopy(event.item))
                         if self._turn is None:
                             return event
                         owners = {step.submission_id for step in self._turn._steps()}

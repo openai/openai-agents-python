@@ -5,6 +5,12 @@ Unsupported items and records without a usable identity or turn ID are omitted.
 Tool-call and result identities can derive from their call ID; repeated occurrences
 with derived identities receive distinct cursor IDs. Each Session iterator reads one
 history snapshot; later iterators can observe newer history.
+
+Command, patch, and MCP completions use their native item ID as their call ID.
+Match them to ExecutionItemCompleted by thread ID, turn ID, and item ID. Older
+records can lack the native thread ID or the completed item. Core can truncate
+command output and replace a large MCP result with a text preview before
+retention. A call interrupted before Core records a completion may have no item.
 """
 
 from dataclasses import dataclass
@@ -13,6 +19,7 @@ from typing import Any, Literal
 from typing_extensions import NotRequired, TypedDict
 
 from ._events import Failure, TokenUsage
+from .turn_receipt import TurnReceipt
 
 
 @dataclass(frozen=True)
@@ -34,6 +41,7 @@ class RecordedTurn(TypedDict):
     Output-correction attempts instead retain their own native session and
     turn IDs, with parent_session_id and parent_turn_id naming the original.
     Their usage is per recorded turn, never a sum of cumulative snapshots.
+    Older records can omit receipt. When present, it describes a sampling attempt.
     """
 
     id: str
@@ -49,3 +57,4 @@ class RecordedTurn(TypedDict):
     # Present only on separate native output-correction attempts.
     parent_session_id: NotRequired[str]
     parent_turn_id: NotRequired[str]
+    receipt: NotRequired[TurnReceipt]

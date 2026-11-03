@@ -25,6 +25,7 @@ from agents import (
     ReplaceArguments,
     function_tool,
 )
+from agents.observation import ExecutionItemCompleted
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -952,6 +953,17 @@ async def test_failed_direct_result_policy_does_not_publish_original_output(
             assert error.value.__cause__ is None
             assert error.value.__context__ is None
             history = json.loads(await captured.read_thread_history(None))
+            [completion] = [
+                event.item
+                async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert completion["type"] == "command_execution"
+            assert completion["id"] == "direct-fail"
+            assert completion["output"] == "Native tool output withheld by result policy"
+            assert [
+                item async for item in session.items() if item["type"] == "command_execution"
+            ] == [completion]
         assert entered == ["direct-fail"]
         assert (peer.root / "effect").read_text() == "once"
         assert len(responses.requests) == 1

@@ -28,7 +28,9 @@ async def _openssl(*arguments: str) -> None:
     assert process.returncode == 0, error.decode()
 
 
-async def test_certificate(root: Path, names: str) -> tuple[Path, ssl.SSLContext]:
+async def test_certificate(
+    root: Path, names: str, *, issuer_name: str = "Native executor fixture CA"
+) -> tuple[Path, ssl.SSLContext]:
     ca, key = root / "ca.pem", root / "ca.key"
     cert, server_key, csr = root / "server.pem", root / "server.key", root / "server.csr"
     await _openssl(
@@ -44,7 +46,7 @@ async def test_certificate(root: Path, names: str) -> tuple[Path, ssl.SSLContext
         "-days",
         "1",
         "-subj",
-        "/CN=Native executor fixture CA",
+        f"/CN={issuer_name}",
     )
     await _openssl(
         "req",
