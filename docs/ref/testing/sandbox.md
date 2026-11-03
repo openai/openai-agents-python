@@ -1,3 +1,0 @@
-# `Sandbox`
-
-::: agents.testing.sandbox

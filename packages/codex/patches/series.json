@@ -1,0 +1,73 @@
+{
+  "patches": [
+    {
+      "path": "0001-native-schema-recovery.patch",
+      "sha256": "0475333a50ed947defc509f9f103bf9dd6362c3c62805da14f8f3e254942ed11"
+    },
+    {
+      "path": "0002-native-vm-state.patch",
+      "sha256": "3ddf7b5a6750206d745b9737e7be3236cbda780c0b3d04687f744524cc7d0857"
+    },
+    {
+      "path": "0003-native-result-policy.patch",
+      "sha256": "6994759ddf8b20811b59ebb7e11b342ca6c36c5122ea148bf00bb34964282636"
+    },
+    {
+      "path": "0004-native-step-tools.patch",
+      "sha256": "d3ab3d3fa34f9c6e77bdd1d0c860393c9eca02e507f2707badda47526384986b"
+    },
+    {
+      "path": "0005-native-child-prompts.patch",
+      "sha256": "66bfa7c9c3db182331317b363f240c3caead34ed020ebe264ddd2cc9bdf3bdad"
+    },
+    {
+      "path": "0006-native-nested-forms.patch",
+      "sha256": "11accb94149ce49e5cf14dd2355f7b53e3333b7e8b05e126cbd9b79c2a1142e4"
+    },
+    {
+      "path": "0007-native-url-completion.patch",
+      "sha256": "e2f1cc2d188cb55301b93626b2efd035e5cb9601840891b84645be41ab72da14"
+    },
+    {
+      "path": "0008-native-response-integrity.patch",
+      "sha256": "26b68a4e1f477f06ca9366a5bf16739822092c4839a3f31122a3fa3dd0a37087"
+    },
+    {
+      "path": "0009-native-core-layout-depth.patch",
+      "sha256": "b455a5fd0c460c49de55c06beb367a39a5de37a7a0accbcf2a4a5292a69942d2"
+    },
+    {
+      "path": "0010-application-apps-tool-exposure.patch",
+      "sha256": "d73b32925b7a33df076f1cd0a2a2e900daac1f9b91efca451eb8e2e3d25e97b8"
+    },
+    {
+      "path": "0011-retained-router-admission.patch",
+      "sha256": "6dc6861bba53dcfc4645be3cde65fc36a16018577f06ab062b0b46580b4839e4"
+    },
+    {
+      "path": "0012-yielded-cell-worker-lifetime.patch",
+      "sha256": "2da557bf876b81bc1ad1e4a95963e7bc75a61670077ae46beb1fc76b8b4bd4d9"
+    },
+    {
+      "path": "0013-core-auth-elicitation-test-repair.patch",
+      "sha256": "5c3c2bc72a6634a7cc57a03d5f5e68bbd0bd123c9292c6010cdb4888e77cee5b"
+    },
+    {
+      "path": "0014-owned-stdio-test-event-projection.patch",
+      "sha256": "d8e1cfcd3a2c98a21bf0897cb401ce6e7a7520f6869091af9ed5776ae763d984"
+    },
+    {
+      "path": "0015-open-tracker-transfer-test-quiescence.patch",
+      "sha256": "a490a7d007c206c56fd91c22de72271c15451577166259b74bd2ef354b8fd24c"
+    },
+    {
+      "path": "0016-owned-stdio-test-per-server-authority.patch",
+      "sha256": "927c51aa5431999c94031b334f88bf404b871ee174bba1ed5b19e0f1951b4d3c"
+    },
+    {
+      "path": "0017-native-policy-expiry-admission.patch",
+      "sha256": "4406a07b8bcd9769595ba9295e10986311e8b3fd96bcfeda3d9dfe13a3095048"
+    }
+  ],
+  "result_tree": "66f4dc7319790001e362f9dc425916708efe4729"
+}

@@ -13,9 +13,11 @@ concurrency:
 
 jobs:
   checks:
+    if: github.repository == 'openai/openai-agents-python'
     permissions:
       contents: read
       pull-requests: read
+      actions: read
     runs-on: ubuntu-latest
 
     steps:
@@ -52,28 +54,29 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: python -I control/.github/scripts/release_automation.py verify-publication
       - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           version: "0.11.14"
           enable-cache: false
           python-version: "3.14"
-      - name: Check release source
+      - name: Check release lock
         working-directory: release-source
-        shell: bash
         env:
-          OPENAI_API_KEY: fake-for-tests
           UV_LOCKED: "1"
-        run: |
-          for python_version in 3.10 3.11 3.12 3.13 3.14; do
-            UV_PYTHON="$python_version" make sync tests
-          done
-          make typecheck
+        run: uv lock --check
+      - name: Verify qualified release distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: python -I control/.github/scripts/release_automation.py qualify-distributions
 
   build:
-    # Test processes and filesystem mutations stay on the checks runner.
+    # Assemble distributions on a fresh runner after release qualification.
     needs: checks
     permissions:
       contents: read
+      actions: read
     runs-on: ubuntu-latest
     outputs:
       artifact-id: ${{ steps.upload.outputs.artifact-id }}
@@ -105,18 +108,17 @@ jobs:
         run: >-
           python -I control/.github/scripts/verify_release.py
           --repo release-source --tag "$RELEASE_TAG" --expected-sha "$RELEASE_SHA"
-      - name: Setup uv
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: false
-          python-version: "3.14"
-      - name: Build package
-        working-directory: release-source
-        run: uv build
+      - name: Collect qualified release distributions
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: >-
+          python -I control/.github/scripts/release_automation.py qualify-distributions
+          --output-dir release-source/dist
       - name: Store distributions
         id: upload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: python-distributions-${{ github.run_attempt }}
           path: release-source/dist/
@@ -124,6 +126,8 @@ jobs:
           retention-days: 7
 
   publish:
+    # Public v1 starts with source builds only. Enable publishing in a reviewed release change.
+    if: ${{ false }}
     needs: build
     environment:
       name: pypi
@@ -135,7 +139,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Download distributions
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           artifact-ids: ${{ needs.build.outputs.artifact-id }}
           path: dist/

@@ -1,0 +1,230 @@
+diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
+index b0d029dcf471d028319062e3c7df9bd24e3b9c9b..9b85b3c2d7d66ebd79215f3770935d319a38425e 100644
+--- a/codex-rs/core/src/mcp_tool_call_tests.rs
++++ b/codex-rs/core/src/mcp_tool_call_tests.rs
+@@ -1585,6 +1585,91 @@ fn codex_apps_auth_classification_requires_the_trusted_server_and_connector() {
+     );
+ }
+ 
++async fn codex_apps_auth_prepared_call(
++    session: &Session,
++    turn_context: &TurnContext,
++) -> (wiremock::MockServer, codex_mcp::McpRuntime, PreparedMcpCall) {
++    assert!(!session.has_personal_apps_registration());
++    let server = wiremock::MockServer::start().await;
++    wiremock::Mock::given(wiremock::matchers::method("POST"))
++        .respond_with(|request: &wiremock::Request| {
++            let request: serde_json::Value = request.body_json().expect("MCP JSON request");
++            let Some(id) = request.get("id") else {
++                return wiremock::ResponseTemplate::new(202);
++            };
++            let result = match request["method"].as_str().expect("MCP method") {
++                "initialize" => serde_json::json!({
++                    "protocolVersion": request["params"]["protocolVersion"],
++                    "capabilities": {"tools": {}},
++                    "serverInfo": {"name": "auth-elicitation-fixture", "version": "1"},
++                }),
++                "tools/list" => serde_json::json!({"tools": [{
++                    "name": "search", "inputSchema": {"type": "object"},
++                }]}),
++                method => panic!("unexpected MCP method: {method}"),
++            };
++            wiremock::ResponseTemplate::new(200)
++                .set_body_json(serde_json::json!({"jsonrpc": "2.0", "id": id, "result": result}))
++        })
++        .mount(&server)
++        .await;
++    let server_config: McpServerConfig = serde_json::from_value(serde_json::json!({
++        "url": server.uri(),
++    }))
++    .expect("test MCP server config");
++    let mut config = (*mcp_config_for_test(&turn_context.config)).clone();
++    let mut catalog = codex_mcp::ResolvedMcpCatalog::builder();
++    catalog.register(codex_mcp::McpServerRegistration::from_hosted_apps(
++        "auth-elicitation-fixture",
++        0,
++        server_config.clone(),
++    ));
++    config.mcp_server_catalog = catalog.build();
++    let mcp_servers = HashMap::from([(
++        CODEX_APPS_MCP_SERVER_NAME.to_string(),
++        codex_mcp::EffectiveMcpServer::from_host_config(server_config),
++    )]);
++    config.set_server_permission_profiles(&mcp_servers, std::iter::empty());
++    let runtime = codex_mcp::McpRuntime::new(codex_mcp::McpRuntimeInput {
++        startup_policy: codex_mcp::McpStartupPolicy::Eager,
++        config: Arc::new(config),
++        plugins_available: false,
++        ready_selected_capability_roots: Vec::new(),
++        mcp_servers,
++        submit_id: "auth-elicitation-fixture".to_string(),
++        tx_event: None,
++        startup_cancellation_token: tokio_util::sync::CancellationToken::new(),
++        runtime_context: codex_mcp::McpRuntimeContext::new(
++            session.services.turn_environments.environment_manager(),
++            turn_context.config.cwd.to_path_buf(),
++        ),
++        codex_apps_tools_cache: codex_connectors::ConnectorRuntimeManager::new_without_cache(),
++        tool_catalog_cache: codex_mcp::McpToolCatalogCache::default(),
++        codex_apps_tools_cache_key: codex_connectors::ConnectorRuntimeContextKey::personal(
++            None, None,
++        ),
++        client_mcp_extensions: codex_protocol::mcp::ClientMcpExtensions::default(),
++        auth: None,
++        auth_manager: None,
++        elicitation_reviewer: None,
++        elicitation_lifecycle: None,
++    })
++    .await;
++    let binding = runtime
++        .current_binding_for_call(CODEX_APPS_MCP_SERVER_NAME)
++        .await
++        .expect("fixture server started");
++    let prepared_call = binding
++        .prepare_call(CODEX_APPS_MCP_SERVER_NAME, "search")
++        .expect("fixture tool has a captured client and permission authority");
++    assert_eq!(prepared_call.server_name(), CODEX_APPS_MCP_SERVER_NAME);
++    assert_eq!(
++        prepared_call.config().approval_policy.value(),
++        turn_context.config.permissions.approval_policy.value()
++    );
++    (server, runtime, prepared_call)
++}
++
+ #[tokio::test]
+ async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result() {
+     let (session, mut turn_context, rx_event) = make_session_and_context_with_rx().await;
+@@ -1594,20 +1679,25 @@ async fn codex_apps_auth_elicitation_feature_disabled_returns_original_result()
+     Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
+     let result = codex_apps_auth_failure_result();
+     let metadata = codex_apps_auth_failure_metadata();
++    let (_server, runtime, prepared_call) =
++        codex_apps_auth_prepared_call(&session, &turn_context).await;
++    let trusted_auth_plan = auth_plan_for_call("call_123", Some(&metadata), &result);
++    assert!(trusted_auth_plan.is_some());
+ 
+     let returned = maybe_request_codex_apps_auth_elicitation(
+         &session,
+         &turn_context,
+-        turn_context.approval_policy(),
++        &prepared_call,
+         "call_123",
+-        CODEX_APPS_MCP_SERVER_NAME,
+         Some(&metadata),
++        trusted_auth_plan,
+         result.clone(),
+     )
+     .await;
+ 
+     assert_eq!(returned, result);
+     assert!(rx_event.try_recv().is_err());
++    runtime.shutdown().await;
+ }
+ 
+ #[tokio::test]
+@@ -1617,22 +1707,32 @@ async fn codex_apps_auth_elicitation_disallowed_by_policy_returns_original_resul
+     features.enable(Feature::AuthElicitation);
+     let mutable_turn_context = Arc::get_mut(&mut turn_context).expect("single turn context ref");
+     Arc::make_mut(&mut mutable_turn_context.config).features = ManagedFeatures::from(features);
++    Arc::make_mut(&mut mutable_turn_context.config)
++        .permissions
++        .approval_policy
++        .set(AskForApproval::Never)
++        .expect("test setup should allow updating approval policy");
+     let result = codex_apps_auth_failure_result();
+     let metadata = codex_apps_auth_failure_metadata();
++    let (_server, runtime, prepared_call) =
++        codex_apps_auth_prepared_call(&session, &turn_context).await;
++    let trusted_auth_plan = auth_plan_for_call("call_123", Some(&metadata), &result);
++    assert!(trusted_auth_plan.is_some());
+ 
+     let returned = maybe_request_codex_apps_auth_elicitation(
+         &session,
+         &turn_context,
+-        AskForApproval::Never,
++        &prepared_call,
+         "call_123",
+-        CODEX_APPS_MCP_SERVER_NAME,
+         Some(&metadata),
++        trusted_auth_plan,
+         result.clone(),
+     )
+     .await;
+ 
+     assert_eq!(returned, result);
+     assert!(rx_event.try_recv().is_err());
++    runtime.shutdown().await;
+ }
+ 
+ #[tokio::test]
+@@ -1655,20 +1755,25 @@ async fn codex_apps_auth_elicitation_granular_mcp_disabled_returns_original_resu
+         .expect("test setup should allow updating approval policy");
+     let result = codex_apps_auth_failure_result();
+     let metadata = codex_apps_auth_failure_metadata();
++    let (_server, runtime, prepared_call) =
++        codex_apps_auth_prepared_call(&session, &turn_context).await;
++    let trusted_auth_plan = auth_plan_for_call("call_123", Some(&metadata), &result);
++    assert!(trusted_auth_plan.is_some());
+ 
+     let returned = maybe_request_codex_apps_auth_elicitation(
+         &session,
+         &turn_context,
+-        turn_context.approval_policy(),
++        &prepared_call,
+         "call_123",
+-        CODEX_APPS_MCP_SERVER_NAME,
+         Some(&metadata),
++        trusted_auth_plan,
+         result.clone(),
+     )
+     .await;
+ 
+     assert_eq!(returned, result);
+     assert!(rx_event.try_recv().is_err());
++    runtime.shutdown().await;
+ }
+ 
+ #[test_case::test_case(SessionSource::Exec; "root")]
+@@ -1685,18 +1790,23 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
+     *session.active_turn.lock().await = Some(ActiveTurn::default());
+     let result = codex_apps_auth_failure_result();
+     let metadata = codex_apps_auth_failure_metadata();
++    let (_server, runtime, prepared_call) =
++        codex_apps_auth_prepared_call(&session, &turn_context).await;
++    let trusted_auth_plan = auth_plan_for_call("call_123", Some(&metadata), &result);
++    assert!(trusted_auth_plan.is_some());
+ 
+     let request_task = tokio::spawn({
+         let session = Arc::clone(&session);
+         let turn_context = Arc::clone(&turn_context);
++        let result = result.clone();
+         async move {
+             maybe_request_codex_apps_auth_elicitation(
+                 &session,
+                 &turn_context,
+-                turn_context.approval_policy(),
++                &prepared_call,
+                 "call_123",
+-                CODEX_APPS_MCP_SERVER_NAME,
+                 Some(&metadata),
++                trusted_auth_plan,
+                 result,
+             )
+             .await
+@@ -1738,13 +1848,9 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
+         .await
+         .expect("auth elicitation task timed out")
+         .expect("auth elicitation task failed");
+-    assert_eq!(
+-        returned.content,
+-        vec![serde_json::json!({
+-            "type": "text",
+-            "text": "Authentication for Google Calendar was requested and accepted. Retry this tool call now.",
+-        })]
+-    );
++    // Legacy consent has no connector-completion authority.
++    assert_eq!(returned, result);
++    runtime.shutdown().await;
+ }
+ 
+ #[test]

@@ -485,7 +485,21 @@ def test_workflows_keep_preparation_isolated_and_remove_cloud_review() -> None:
     assert jobs["update"]["environment"] == "release"
     assert "codex-action" not in json.dumps(workflow)
     assert "OPENAI_API_KEY" not in json.dumps(workflow)
-    assert "make check-prospective-released-api-contract" in json.dumps(jobs["contract"])
+    preparation = next(
+        step
+        for step in jobs["contract"]["steps"]
+        if step.get("name") == "Freeze and validate the candidate public API"
+    )
+    assert preparation["env"] == {
+        "VERSION": "${{ needs.discover.outputs.version }}",
+        "UV_FROZEN": "1",
+        "UV_NO_SYNC": "1",
+    }
+    assert preparation["run"].splitlines() == [
+        "uv sync --group dev --no-install-project",
+        'make check-released-api-contract VERSION="$VERSION"',
+        'make update-released-api-contract VERSION="$VERSION"',
+    ]
     readiness = yaml.load(
         (ROOT / ".github/workflows/release-readiness.yml").read_text(), Loader=yaml.BaseLoader
     )
@@ -677,3 +691,453 @@ def test_refresh_authorization_uses_current_event_sender_permission(
         assert output.read_text() == (
             "authorized=true\n" if permission in {"write", "admin"} else "authorized=false\n"
         )
+
+
+@pytest.fixture
+def publication(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    import copy
+    import hashlib
+    import io
+    import tarfile
+    import zipfile
+
+    head = "b" * 40
+    run = {
+        "id": 42,
+        "run_attempt": 1,
+        "head_sha": head,
+        "head_branch": "main",
+        "event": "push",
+        "status": "completed",
+        "conclusion": "success",
+        "path": ".github/workflows/tests.yml",
+        "repository": {"full_name": automation.REPO},
+        "head_repository": {"full_name": automation.REPO},
+    }
+    jobs = [
+        {
+            "name": name,
+            "conclusion": "success",
+            "status": "completed",
+            "run_id": 42,
+            "head_sha": head,
+            "run_attempt": 1,
+            "started_at": "2026-10-18T00:00:00Z",
+            "completed_at": "2026-10-18T00:30:00Z",
+        }
+        for name in [
+            "native-linux / Native package (ubuntu-24.04)",
+            "native-windows / Native package (windows-latest)",
+            "native-macos / Native package (macos-latest)",
+            "lint",
+            "typecheck",
+            "mypy-win32",
+            "native-macos-sandbox",
+            "tests (3.10)",
+            "tests (3.11)",
+            "tests (3.12)",
+            "tests (3.13)",
+            "tests (3.14)",
+            "tests-windows (3.10)",
+            "tests-windows (3.14)",
+        ]
+    ]
+    for identifier, job in enumerate(jobs, 1):
+        job["id"] = identifier
+    payloads, artifacts = {}, []
+    for number, (name, platform) in enumerate(
+        [
+            ("native-Linux-X64", "manylinux_2_39_x86_64"),
+            ("native-Windows-X64", "win_amd64"),
+            ("native-macOS-ARM64", "macosx_11_0_arm64"),
+        ],
+        1,
+    ):
+        wheel = io.BytesIO()
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr(
+                "openai_agents-0.24.0a3.dist-info/METADATA",
+                "Name: openai-agents\nVersion: 0.24.0-alpha.3\n",
+            )
+            archive.writestr(
+                "openai_agents-0.24.0a3.dist-info/WHEEL",
+                f"Root-Is-Purelib: false\nTag: cp310-abi3-{platform}\n",
+            )
+        outer = io.BytesIO()
+        with zipfile.ZipFile(outer, "w") as archive:
+            archive.writestr(f"openai_agents-0.24.0a3-cp310-abi3-{platform}.whl", wheel.getvalue())
+            archive.writestr("exec-server-fixture", "not a release file")
+            archive.writestr("installed.json", "not a release file")
+            if number == 1:
+                source = io.BytesIO()
+                with tarfile.open(fileobj=source, mode="w:gz") as tar:
+                    metadata = b"Name: openai-agents\nVersion: 0.24.0a3\n"
+                    member = tarfile.TarInfo("openai_agents-0.24.0a3/PKG-INFO")
+                    member.size = len(metadata)
+                    tar.addfile(member, io.BytesIO(metadata))
+                archive.writestr("openai_agents-0.24.0a3.tar.gz", source.getvalue())
+        payloads[number] = outer.getvalue()
+        artifacts.append(
+            {
+                "id": number,
+                "name": name,
+                "expired": False,
+                "created_at": "2026-10-18T00:15:00Z",
+                "workflow_run": {"id": 42, "head_sha": head},
+                "digest": "sha256:" + hashlib.sha256(payloads[number]).hexdigest(),
+            }
+        )
+    state = {
+        "run": run,
+        "runs": [run],
+        "jobs": jobs,
+        "artifacts": artifacts,
+        "payloads": payloads,
+        "old_version": "0.24.0-alpha.2",
+        "reads": [],
+    }
+
+    def api(path: str) -> Any:
+        state["reads"].append(path)
+        if path.startswith("actions/workflows/tests.yml/runs?"):
+            return {"total_count": len(state["runs"]), "workflow_runs": state["runs"]}
+        if path.startswith("git/commits/"):
+            return {"parents": [{"sha": "c" * 40}]}
+        if "/jobs?" in path:
+            return {"total_count": len(jobs), "jobs": jobs}
+        if "/artifacts?" in path:
+            return {"total_count": len(artifacts), "artifacts": artifacts}
+        if path == "actions/runs/42":
+            return copy.deepcopy(state.get("after_run", run))
+        raise AssertionError(path)
+
+    monkeypatch.setattr(automation, "repo_api", api)
+    monkeypatch.setattr(
+        automation,
+        "content",
+        lambda path, ref: json.dumps(
+            {".": "0.24.0-alpha.3" if ref == head else state["old_version"]}
+        ),
+    )
+    monkeypatch.setenv("RELEASE_TAG", "v0.24.0-alpha.3")
+    return state
+
+
+def test_release_distribution_qualification_requires_exact_source(
+    publication: dict[str, Any],
+) -> None:
+    qualified = automation.qualified_distributions("b" * 40)
+    assert qualified["run"]["id"] == 42
+    assert len(qualified["artifacts"]) == 3
+    assert all("per_page=100&page=1" in path for path in publication["reads"] if "?" in path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("head_sha", "d" * 40),
+        ("head_branch", "feature"),
+        ("event", "pull_request"),
+        ("status", "in_progress"),
+        ("conclusion", "failure"),
+        ("path", ".github/workflows/other.yml"),
+        ("head_repository", {"full_name": "elsewhere/fork"}),
+    ],
+)
+def test_release_distribution_rejects_unqualified_run(
+    publication: dict[str, Any],
+    field: str,
+    value: Any,
+) -> None:
+    publication["run"][field] = value
+    with pytest.raises(ValueError, match="exact-commit"):
+        automation.qualified_distributions("b" * 40)
+
+
+def test_release_distribution_does_not_fall_back_to_old_success(
+    publication: dict[str, Any],
+) -> None:
+    publication["runs"].append({**publication["run"], "id": 43, "conclusion": "failure"})
+    with pytest.raises(ValueError, match="exact-commit"):
+        automation.qualified_distributions("b" * 40)
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        "native-windows / Native package (windows-latest)",
+        "tests (3.12)",
+        "tests-windows (3.14)",
+        "typecheck",
+        "native-macos-sandbox",
+    ],
+)
+def test_release_distribution_requires_native_and_sdk_gates(
+    publication: dict[str, Any],
+    job: str,
+) -> None:
+    next(item for item in publication["jobs"] if item["name"] == job)["conclusion"] = "skipped"
+    with pytest.raises(ValueError, match="test gates"):
+        automation.qualified_distributions("b" * 40)
+
+
+@pytest.mark.parametrize("defect", ["missing", "expired", "duplicate", "wrong_source", "no_digest"])
+def test_release_distribution_rejects_incomplete_artifacts(
+    publication: dict[str, Any],
+    defect: str,
+) -> None:
+    artifacts = publication["artifacts"]
+    if defect == "missing":
+        artifacts.pop()
+    elif defect == "expired":
+        artifacts[1]["expired"] = True
+    elif defect == "duplicate":
+        artifacts.append(artifacts[0].copy())
+    elif defect == "wrong_source":
+        artifacts[0]["workflow_run"]["head_sha"] = "d" * 40
+    else:
+        artifacts[0].pop("digest")
+    with pytest.raises(ValueError, match="artifact"):
+        automation.qualified_distributions("b" * 40)
+
+
+@pytest.mark.parametrize(
+    "rerun_platforms,expired_prior",
+    [((), False), ((0,), False), ((0,), True), ((1,), False), ((0, 1, 2), False)],
+)
+def test_release_distribution_selects_each_latest_producer(
+    publication: dict[str, Any], rerun_platforms: tuple[int, ...], expired_prior: bool
+) -> None:
+    # A failed-jobs rerun can retain successful producers from the previous attempt.
+    publication["run"]["run_attempt"] = 2
+    expected = [1, 2, 3]
+    for platform in rerun_platforms:
+        job = publication["jobs"][platform]
+        publication["jobs"].append(
+            {
+                **job,
+                "id": job["id"] + 100,
+                "run_attempt": 2,
+                "started_at": "2026-10-18T01:00:00Z",
+                "completed_at": "2026-10-18T01:30:00Z",
+            }
+        )
+        old = publication["artifacts"][platform]
+        old["expired"] = expired_prior
+        publication["artifacts"].append(
+            {
+                **old,
+                "id": old["id"] + 100,
+                "expired": False,
+                "created_at": "2026-10-18T01:15:00Z",
+            }
+        )
+        expected[platform] += 100
+    publication["jobs"].reverse()
+    publication["artifacts"].reverse()
+    result = automation.qualified_distributions("b" * 40)
+    assert [item["id"] for item in result["artifacts"]] == expected
+
+
+@pytest.mark.parametrize("job_index", [0, 3])
+def test_release_distribution_rejects_failed_latest_producer(
+    publication: dict[str, Any], job_index: int
+) -> None:
+    publication["run"]["run_attempt"] = 2
+    publication["jobs"].append(
+        {
+            **publication["jobs"][job_index],
+            "id": 101,
+            "run_attempt": 2,
+            "conclusion": "failure",
+            "started_at": "2026-10-18T01:00:00Z",
+            "completed_at": "2026-10-18T01:30:00Z",
+        }
+    )
+    with pytest.raises(ValueError, match="test gates"):
+        automation.qualified_distributions("b" * 40)
+
+
+def test_release_distribution_rejects_same_attempt_job_ambiguity(
+    publication: dict[str, Any],
+) -> None:
+    publication["jobs"].append({**publication["jobs"][0], "id": 101})
+    with pytest.raises(ValueError, match="Ambiguous release producer"):
+        automation.qualified_distributions("b" * 40)
+
+
+def test_release_distribution_rejects_same_producer_ambiguity(publication: dict[str, Any]) -> None:
+    publication["artifacts"].append({**publication["artifacts"][0], "id": 101})
+    with pytest.raises(ValueError, match="ambiguous"):
+        automation.qualified_distributions("b" * 40)
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("run_id", 41),
+        ("head_sha", "d" * 40),
+        ("run_attempt", 2),
+        ("started_at", None),
+        ("completed_at", "2026-10-17T00:00:00Z"),
+        ("started_at", "2026-10-18T00:00:00"),
+    ],
+)
+def test_release_distribution_rejects_unbound_producer(
+    publication: dict[str, Any], field: str, value: Any
+) -> None:
+    publication["jobs"][0][field] = value
+    with pytest.raises(ValueError, match="producer|timestamp"):
+        automation.qualified_distributions("b" * 40)
+
+
+@pytest.mark.parametrize("created_at", [None, "2026-10-17T00:15:00Z", "2026-10-18T01:15:00Z"])
+def test_release_distribution_rejects_artifact_outside_producer(
+    publication: dict[str, Any], created_at: str | None
+) -> None:
+    publication["artifacts"][0]["created_at"] = created_at
+    with pytest.raises(ValueError, match="artifact|timestamp"):
+        automation.qualified_distributions("b" * 40)
+
+
+def test_release_distribution_requires_version_bump(publication: dict[str, Any]) -> None:
+    publication["old_version"] = "0.24.0-alpha.3"
+    with pytest.raises(ValueError, match="advance"):
+        automation.qualified_distributions("b" * 40)
+
+
+def test_release_record_pagination_rejects_incomplete_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        automation,
+        "repo_api",
+        Mock(
+            side_effect=[
+                {"total_count": 2, "jobs": [{"id": 1}]},
+                {"total_count": 2, "jobs": []},
+            ]
+        ),
+    )
+    with pytest.raises(ValueError, match="Incomplete"):
+        automation.records("actions/runs/42/jobs?filter=latest", "jobs")
+
+
+@pytest.mark.parametrize(
+    "second",
+    [
+        {"total_count": 2, "jobs": [{"id": 1}]},
+        {"total_count": 1, "jobs": []},
+    ],
+)
+def test_release_record_pagination_rejects_changed_or_duplicate_results(
+    monkeypatch: pytest.MonkeyPatch,
+    second: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(
+        automation,
+        "repo_api",
+        Mock(
+            side_effect=[
+                {"total_count": 2, "jobs": [{"id": 1}]},
+                second,
+            ]
+        ),
+    )
+    with pytest.raises(ValueError, match="Incomplete"):
+        automation.records("actions/runs/42/jobs?filter=latest", "jobs")
+
+
+def test_release_record_pagination_reads_all_pages(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetch = Mock(
+        side_effect=[
+            {"total_count": 2, "jobs": [{"id": 1}]},
+            {"total_count": 2, "jobs": [{"id": 2}]},
+        ]
+    )
+    monkeypatch.setattr(automation, "repo_api", fetch)
+    assert automation.records("actions/runs/42/jobs?filter=latest", "jobs") == [
+        {"id": 1},
+        {"id": 2},
+    ]
+    assert fetch.call_args_list[-1].args[0].endswith("&per_page=100&page=2")
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [None, "digest", "rerun", "wheel_version", "metadata_version", "platform_tag", "missing_sdist"],
+)
+def test_release_collection_keeps_only_exact_distributions(
+    publication: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    defect: str | None,
+) -> None:
+    import hashlib
+    import io
+    import zipfile
+
+    qualified = automation.qualified_distributions("b" * 40)
+    if defect == "digest":
+        publication["payloads"][1] += b"changed"
+    elif defect == "rerun":
+        publication["after_run"] = {**publication["run"], "run_attempt": 2}
+    elif defect in {"wheel_version", "metadata_version", "platform_tag", "missing_sdist"}:
+        output = io.BytesIO()
+        with zipfile.ZipFile(io.BytesIO(publication["payloads"][1])) as original:
+            with zipfile.ZipFile(output, "w") as changed:
+                for name in original.namelist():
+                    if defect == "missing_sdist" and name.endswith(".tar.gz"):
+                        continue
+                    target = (
+                        name.replace("0.24.0a3", "0.24.0a4")
+                        if defect == "wheel_version" and name.endswith(".whl")
+                        else name
+                    )
+                    data = original.read(name)
+                    if name.endswith(".whl") and defect in {"metadata_version", "platform_tag"}:
+                        wheel_bytes = io.BytesIO()
+                        with zipfile.ZipFile(io.BytesIO(data)) as wheel:
+                            with zipfile.ZipFile(wheel_bytes, "w") as replacement:
+                                for member in wheel.namelist():
+                                    content = wheel.read(member)
+                                    if member.endswith("METADATA") and defect == "metadata_version":
+                                        content = content.replace(b"alpha.3", b"alpha.4")
+                                    if member.endswith("WHEEL") and defect == "platform_tag":
+                                        content = content.replace(
+                                            b"manylinux_2_39_x86_64", b"win_amd64"
+                                        )
+                                    replacement.writestr(member, content)
+                        data = wheel_bytes.getvalue()
+                    changed.writestr(target, data)
+        publication["payloads"][1] = output.getvalue()
+        qualified["artifacts"][0]["digest"] = (
+            "sha256:" + hashlib.sha256(output.getvalue()).hexdigest()
+        )
+
+    def download(command: list[str], **kwargs: Any) -> None:
+        assert command[:2] == ["gh", "api"]
+        assert kwargs["check"] is True
+        identifier = int(command[-1].split("/")[-2])
+        kwargs["stdout"].write(publication["payloads"][identifier])
+
+    monkeypatch.setattr(automation.subprocess, "run", download)
+    destination = tmp_path / "dist"
+    if defect:
+        expected_error = {
+            "digest": "digest mismatch",
+            "rerun": "run changed",
+            "wheel_version": "filename",
+            "metadata_version": "Distribution metadata",
+            "platform_tag": "Wheel metadata",
+            "missing_sdist": "exactly one sdist",
+        }[defect]
+        with pytest.raises(ValueError, match=expected_error):
+            automation.collect_distributions(qualified, destination)
+        assert list(destination.iterdir()) == []
+    else:
+        automation.collect_distributions(qualified, destination)
+        assert {path.name for path in destination.iterdir()} == {
+            "openai_agents-0.24.0a3-cp310-abi3-manylinux_2_39_x86_64.whl",
+            "openai_agents-0.24.0a3-cp310-abi3-win_amd64.whl",
+            "openai_agents-0.24.0a3-cp310-abi3-macosx_11_0_arm64.whl",
+            "openai_agents-0.24.0a3.tar.gz",
+        }

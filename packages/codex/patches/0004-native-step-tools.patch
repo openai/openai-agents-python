@@ -1,0 +1,468 @@
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index ee4b3d900cdcec8f3637e8d03f86b216d63d4e55..aa00a3cb02bbce4f9bb673b8ecccc5c173f46eba 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -71,15 +71,19 @@ pub(super) async fn run_remote_compact_v2_attempt(
+     let trace_input_history = compaction_trace
+         .is_enabled()
+         .then(|| history.raw_items().cloned().collect());
++    let tool_router = &step_context.tool_router;
++    let selected = crate::tools::spec_plan::has_selected_tool_plan(&step_context.extension_data);
+     let (mut input, prompt_input_metadata): (Vec<_>, Vec<_>) = history
+         .for_prompt_annotated(&turn_context.model_info().input_modalities)
+         .into_iter()
+-        .map(|envelope| (envelope.item, envelope.metadata))
++        .filter_map(|mut envelope| {
++            (!selected || tool_router.project_tool_catalog_item(&mut envelope.item))
++                .then_some((envelope.item, envelope.metadata))
++        })
+         .unzip();
+     sess.services
+         .executed_tool_calls
+         .attach_to_compaction_prompt(&mut input);
+-    let tool_router = &step_context.tool_router;
+     input.push(ResponseItem::CompactionTrigger {});
+     let prompt = Prompt {
+         input,
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index 9bc54aec5318d1c0879289f54a1dffcc6699a9a7..53e295061c291d02677873d8eb581a891b950f02 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -51,6 +51,9 @@ pub(crate) struct StepContext {
+ impl StepContext {
+     pub(crate) fn uses_incremental_tools(&self) -> bool {
+         self.settings.model_info.use_responses_lite
++            // Append-only schema deltas cannot retract a selected step's tools.
++            // The existing full-catalog route replaces the provider roster.
++            && !crate::tools::spec_plan::has_selected_tool_plan(&self.extension_data)
+             && self
+                 .turn
+                 .config
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index d92917472cc237275aef5aad22ce044e540b7964..7ca72c699067df1c532494826a2970a3aa7aedfb 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1575,6 +1575,10 @@ pub(crate) fn build_prompt(
+     base_instructions: BaseInstructions,
+ ) -> Prompt {
+     let turn_context = &step_context.turn;
++    let mut input = input;
++    if crate::tools::spec_plan::has_selected_tool_plan(&step_context.extension_data) {
++        input.retain_mut(|item| step_context.tool_router.project_tool_catalog_item(item));
++    }
+     Prompt {
+         input,
+         tools: if step_context.uses_incremental_tools() {
+@@ -1853,16 +1857,19 @@ pub(crate) async fn built_tools(
+             .instrument(trace_span!("built_tools.load_discoverable_tools"))
+             .await
+         };
+-    Ok(Arc::new(build_tool_router(
+-        sess,
+-        turn_context,
+-        model_info,
+-        environments,
+-        mcp,
+-        apps_enabled,
+-        step_store,
+-        tool_suggest_candidates.as_ref(),
+-    )?))
++    Ok(Arc::new(
++        build_tool_router(
++            sess,
++            turn_context,
++            model_info,
++            environments,
++            mcp,
++            apps_enabled,
++            step_store,
++            tool_suggest_candidates.as_ref(),
++        )
++        .await?,
++    ))
+ }
+ 
+ #[derive(Debug)]
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index fbf0e773be5b2d00031db23ce3b97aa170448d48..c8f3e9f796dc2a9a999527d3d93e38643cf1e2de 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -206,6 +206,36 @@ impl ToolRouter {
+             })
+     }
+ 
++    /// Projects only schema-addition metadata for a complete selected catalog.
++    /// Call IDs, arguments, results and stored history remain unchanged.
++    pub(crate) fn project_tool_catalog_item(&self, item: &mut ResponseItem) -> bool {
++        match item {
++            ResponseItem::AdditionalTools { .. } => false,
++            ResponseItem::ToolSearchOutput { tools, .. } => {
++                tools.retain_mut(|spec| {
++                    let Some(name) = spec["name"].as_str().map(str::to_owned) else {
++                        return false;
++                    };
++                    if spec["type"] == "namespace" {
++                        let Some(members) = spec["tools"].as_array_mut() else {
++                            return false;
++                        };
++                        members.retain(|member| {
++                            member["name"].as_str().is_some_and(|leaf| {
++                                self.exposes_tool(&ToolName::namespaced(&name, leaf))
++                            })
++                        });
++                        !members.is_empty()
++                    } else {
++                        self.exposes_tool(&ToolName::plain(name))
++                    }
++                });
++                true
++            }
++            _ => true,
++        }
++    }
++
+     pub(crate) fn deferred_tool_namespaces(&self) -> BTreeMap<String, String> {
+         self.registry.deferred_tool_namespaces()
+     }
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index e5ab1500eebd33dd64b361d2ec6dddd6780302fb..95c339c24ccc299aae7440a97992d3dbce768746 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -120,7 +120,7 @@ struct CoreToolPlanContext<'a> {
+ 
+ #[instrument(level = "trace", skip_all)]
+ #[allow(clippy::too_many_arguments)]
+-pub(crate) fn build_tool_router(
++pub(crate) async fn build_tool_router(
+     session: &Session,
+     turn_context: &TurnContext,
+     model_info: &ModelInfo,
+@@ -172,21 +172,102 @@ pub(crate) fn build_tool_router(
+         &mut registry,
+     );
+     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
+-    let hosted_specs = hosted_model_tool_specs(
++    let mut hosted_specs = hosted_model_tool_specs(
+         turn_context,
+         model_info,
+         standalone_web_search_tool.as_slice(),
+     );
+ 
+-    finalize_tool_router(
++    // Keep one immutable selected plan with the issuing step, including helper
++    // identities. Every downstream catalog is derived from the retained registry.
++    let selection = if let Some(selected) = step_store.get::<SelectedStepTools>() {
++        selected
++    } else {
++        let mut candidates = registry
++            .entries()
++            .map(|entry| entry.runtime.tool_name())
++            .chain(hosted_specs.iter().map(|spec| ToolName::plain(spec.name())))
++            .collect::<Vec<_>>();
++        if matches!(
++            effective_tool_mode(turn_context, model_info),
++            ToolMode::CodeMode | ToolMode::CodeModeOnly
++        ) {
++            candidates.extend([
++                ToolName::plain(codex_code_mode::PUBLIC_TOOL_NAME),
++                ToolName::plain(codex_code_mode::WAIT_TOOL_NAME),
++            ]);
++        }
++        if model_info.supports_search_tool
++            && registry.entries().any(|tool| tool.exposure.is_deferred())
++        {
++            candidates.push(ToolName::plain(TOOL_SEARCH_TOOL_NAME));
++        }
++        let mut selected = None;
++        for contributor in session.services.extensions.tool_contributors().iter() {
++            if let Some(names) = contributor
++                .select_tools_for_step(
++                    &session.services.session_extension_data,
++                    &session.services.thread_extension_data,
++                    &turn_context.extension_data,
++                    step_store,
++                    &candidates,
++                )
++                .await
++                .map_err(CodexErrorDetails::InvalidRequest)?
++            {
++                let names = names
++                    .into_iter()
++                    .map(ToolName::with_default_namespace)
++                    .collect::<HashSet<_>>();
++                if names.iter().any(|name| {
++                    !candidates
++                        .iter()
++                        .any(|candidate| candidate.clone().with_default_namespace() == *name)
++                }) {
++                    return Err(CodexErrorDetails::InvalidRequest(
++                        "Step selection exceeds admitted tools".into(),
++                    )
++                    .into());
++                }
++                candidates.retain(|name| names.contains(&name.clone().with_default_namespace()));
++                selected = Some(names);
++            }
++        }
++        step_store.insert(SelectedStepTools(selected));
++        step_store
++            .get::<SelectedStepTools>()
++            .expect("selected step plan")
++    };
++    if let Some(selected) = &selection.0 {
++        let removed = registry
++            .entries()
++            .map(|entry| entry.runtime.tool_name())
++            .filter(|name| !selected.contains(&name.clone().with_default_namespace()))
++            .collect::<Vec<_>>();
++        for name in removed {
++            registry.remove(&name);
++        }
++        hosted_specs.retain(|spec| {
++            selected.contains(&ToolName::plain(spec.name()).with_default_namespace())
++        });
++    }
++    finalize_selected_tool_router(
+         turn_context,
+         model_info,
+         registry,
+         hosted_specs,
+         &session.services.tool_search_handler_cache,
++        selection.0.as_ref(),
+     )
+ }
+ 
++struct SelectedStepTools(Option<HashSet<ToolName>>);
++
++pub(crate) fn has_selected_tool_plan(step: &ExtensionData) -> bool {
++    step.get::<SelectedStepTools>()
++        .is_some_and(|selected| selected.0.is_some())
++}
++
+ /// Use the effective mode because the model can override the thread's configured mode.
+ fn code_mode_only_strict_3p_tools(turn_context: &TurnContext, model_info: &ModelInfo) -> bool {
+     effective_tool_mode(turn_context, model_info) == ToolMode::CodeModeOnly
+@@ -367,13 +448,35 @@ pub(crate) fn extension_tool_executors<'a>(
+ }
+ 
+ #[instrument(level = "trace", skip_all)]
++#[cfg(test)]
+ pub(crate) fn finalize_tool_router(
++    turn_context: &TurnContext,
++    model_info: &ModelInfo,
++    registry: ToolRegistry,
++    hosted_specs: Vec<ToolSpec>,
++    tool_search_handler_cache: &ToolSearchHandlerCache,
++) -> CodexResult<ToolRouter> {
++    finalize_selected_tool_router(
++        turn_context,
++        model_info,
++        registry,
++        hosted_specs,
++        tool_search_handler_cache,
++        None,
++    )
++}
++
++fn finalize_selected_tool_router(
+     turn_context: &TurnContext,
+     model_info: &ModelInfo,
+     mut registry: ToolRegistry,
+     mut hosted_specs: Vec<ToolSpec>,
+     tool_search_handler_cache: &ToolSearchHandlerCache,
++    selected: Option<&HashSet<ToolName>>,
+ ) -> CodexResult<ToolRouter> {
++    let allows = |name: &ToolName| {
++        selected.is_none_or(|names| names.contains(&name.clone().with_default_namespace()))
++    };
+     hosted_specs.retain(|spec| registry.tool_policy.allows(&ToolName::plain(spec.name())));
+     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
+     enforce_strict_3p_tools(turn_context, model_info, &mut registry);
+@@ -390,7 +493,8 @@ pub(crate) fn finalize_tool_router(
+         }
+     }
+     let tool_search_name = ToolName::plain(TOOL_SEARCH_TOOL_NAME);
+-    if model_info.supports_search_tool
++    if allows(&tool_search_name)
++        && model_info.supports_search_tool
+         && registry.entries().any(|tool| {
+             tool.runtime.tool_name() != tool_search_name
+                 && tool.exposure.is_deferred()
+@@ -434,6 +538,15 @@ pub(crate) fn finalize_tool_router(
+     .map_err(|error| CodexErrorDetails::InvalidRequest(error.to_string()))?;
+     let code_mode_tool_names =
+         register_code_mode_executors(turn_context, model_info, &mut registry, &indirect_prefixes);
++    for name in [
++        codex_code_mode::PUBLIC_TOOL_NAME,
++        codex_code_mode::WAIT_TOOL_NAME,
++    ] {
++        let name = ToolName::plain(name);
++        if !allows(&name) {
++            registry.remove(&name);
++        }
++    }
+     let include_tool_namespaces_info = turn_context
+         .config
+         .tool_registry
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 952d1a7866dc689ef35ef8ef3d4c3e367408ff54..df3ae9d77ae163f97d45f40b7972ff0fc791ba4f 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -601,6 +601,7 @@ async fn reviewer_tool_policy_exclude_optional_core_tools() {
+         &turn.extension_data,
+         /*tool_suggest_candidates*/ None,
+     )
++    .await
+     .expect("build internal Guardian tool router");
+ 
+     assert_eq!(
+@@ -653,6 +654,7 @@ async fn reviewer_tool_policy_respect_managed_shell_restrictions() {
+             &turn.extension_data,
+             /*tool_suggest_candidates*/ None,
+         )
++        .await
+         .expect("build internal Guardian tool router");
+ 
+         assert_eq!(
+@@ -689,6 +691,7 @@ async fn reviewer_tool_policy_preserve_code_mode() {
+         &turn.extension_data,
+         /*tool_suggest_candidates*/ None,
+     )
++    .await
+     .expect("build internal Guardian tool router");
+ 
+     assert!(
+@@ -759,6 +762,7 @@ async fn reviewer_tool_policy_require_managed_secondary_environments() {
+             &turn.extension_data,
+             /*tool_suggest_candidates*/ None,
+         )
++        .await
+         .expect("build internal Guardian tool router");
+ 
+         assert_eq!(
+@@ -3205,3 +3209,93 @@ async fn hosted_web_search_and_standalone_image_generation_follow_runtime_gates(
+ 
+ #[path = "spec_plan_strict_third_party_tests.rs"]
+ mod strict_third_party;
++
++struct StepSelector {
++    calls: std::sync::atomic::AtomicUsize,
++    names: Vec<ToolName>,
++}
++
++impl codex_extension_api::ToolContributor for StepSelector {
++    fn tools(
++        &self,
++        _: &codex_extension_api::ExtensionData,
++        _: &codex_extension_api::ExtensionData,
++    ) -> Vec<Arc<dyn for<'call> ToolExecutor<ExtensionToolCall<'call>>>> {
++        Vec::new()
++    }
++
++    fn select_tools_for_step<'a>(
++        &'a self,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a codex_extension_api::ExtensionData,
++        _: &'a [ToolName],
++    ) -> codex_extension_api::ExtensionFuture<'a, Result<Option<Vec<ToolName>>, String>> {
++        Box::pin(async move {
++            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++            Ok(Some(self.names.clone()))
++        })
++    }
++}
++
++#[tokio::test]
++async fn selected_empty_plan_removes_builtin_runtimes_and_generated_helpers() {
++    let (mut session, mut turn) = make_session_and_context().await;
++    Arc::make_mut(&mut turn.config).update_plan_enabled = true;
++    set_feature(&mut turn, Feature::CodeMode, true);
++    let selector = Arc::new(StepSelector {
++        calls: Default::default(),
++        names: Vec::new(),
++    });
++    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::default();
++    extensions.tool_contributor(selector.clone());
++    session.services.extensions = Arc::new(extensions.build());
++    let turn = Arc::new(turn);
++    let step = StepContext::for_test(turn);
++    for _ in 0..2 {
++        let router = super::build_tool_router(
++            &session,
++            step.turn.as_ref(),
++            &step.settings.model_info,
++            &step.environments,
++            &step.mcp,
++            false,
++            &step.extension_data,
++            None,
++        )
++        .await
++        .expect("empty selected plan");
++        assert!(router.model_visible_specs().is_empty());
++        for name in ["update_plan", "exec", "wait", "tool_search"] {
++            assert!(!router.exposes_tool(&ToolName::plain(name)), "{name}");
++        }
++    }
++    assert_eq!(selector.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++}
++
++#[tokio::test]
++async fn selected_plan_cannot_admit_an_unknown_runtime() {
++    let (mut session, turn) = make_session_and_context().await;
++    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::default();
++    extensions.tool_contributor(Arc::new(StepSelector {
++        calls: Default::default(),
++        names: vec![ToolName::plain("outside_opening")],
++    }));
++    session.services.extensions = Arc::new(extensions.build());
++    let step = StepContext::for_test(Arc::new(turn));
++    assert!(
++        super::build_tool_router(
++            &session,
++            step.turn.as_ref(),
++            &step.settings.model_info,
++            &step.environments,
++            &step.mcp,
++            false,
++            &step.extension_data,
++            None,
++        )
++        .await
++        .is_err()
++    );
++}
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 61cdbe4da7226222954ea98d4d7bb622e35fafd9..68376b78b131594050e2e42e0d82591d74861120 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -7,6 +7,7 @@ use codex_protocol::items::TurnItem;
+ use codex_protocol::protocol::TokenUsageInfo;
+ use codex_tools::ToolCall;
+ use codex_tools::ToolExecutor;
++use codex_tools::ToolName;
+ 
+ use crate::ExtensionData;
+ use crate::ExtensionMetrics;
+@@ -350,6 +351,19 @@ pub trait ToolContributor: Send + Sync {
+         thread_store: &ExtensionData,
+     ) -> Vec<Arc<dyn for<'call> ToolExecutor<ToolCall<'call>>>>;
+ 
++    /// Narrows the complete candidate catalog before a sampling step is finalized.
++    /// An error prevents sampling. None preserves the admitted catalog.
++    fn select_tools_for_step<'a>(
++        &'a self,
++        _session_store: &'a ExtensionData,
++        _thread_store: &'a ExtensionData,
++        _turn_store: &'a ExtensionData,
++        _step_store: &'a ExtensionData,
++        _candidates: &'a [ToolName],
++    ) -> ExtensionFuture<'a, Result<Option<Vec<ToolName>>, String>> {
++        Box::pin(async { Ok(None) })
++    }
++
+     /// Returns native tools bound to one sampling step.
+     fn tools_for_step(
+         &self,

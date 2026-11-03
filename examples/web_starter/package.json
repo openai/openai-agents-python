@@ -1,0 +1,9 @@
+{
+  "name": "agents-web-starter",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": { "build": "esbuild client.mjs --bundle --format=esm --platform=browser --outfile=client.js" },
+  "dependencies": { "ai": "6.0.315", "zod": "4.6.7" },
+  "devDependencies": { "esbuild": "0.25.12", "playwright": "1.58.2" }
+}

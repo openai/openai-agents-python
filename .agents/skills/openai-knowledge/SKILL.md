@@ -30,7 +30,7 @@ Base your answer on the fetched text and quote or paraphrase it precisely. Do no
 
 ### 3) If MCP is not configured, guide setup (do not change config unless asked)
 
-Provide one of these setup options, then ask the user to restart the Codex session so the tools load:
+Provide one of these setup options, then check whether the tools are available. Use the client's supported MCP reload or restart action if needed:
 
 - CLI:
   - `codex mcp add openaiDeveloperDocs --url https://developers.openai.com/mcp`

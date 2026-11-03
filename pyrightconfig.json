@@ -1,16 +1,22 @@
 {
-  "include": ["src", "tests"],
-  "exclude": [],
-  "extraPaths": ["."],
+  "include": [
+    "src/agents",
+    "tests/test_native_agent_typing.py",
+    "tests/test_native_agent_checkpoint_typing.py",
+    "tests/test_native_mcp_typing.py",
+    "tests/test_native_mcp_mypy.py",
+    "tests/test_native_manual_tools_typing.py"
+  ],
+  "exclude": [
+    "tests/test_native_agent_typing_errors.py"
+  ],
+  "extraPaths": [
+    "src",
+    "."
+  ],
   "pythonVersion": "3.10",
   "typeCheckingMode": "basic",
-  "reportAttributeAccessIssue": "none",
-  "reportArgumentType": "none",
-  "reportGeneralTypeIssues": "none",
-  "reportIndexIssue": "none",
-  "reportMissingImports": "none",
+  "reportMissingImports": "error",
   "reportPrivateImportUsage": "none",
-  "reportSelfClsParameterName": "none",
-  "reportTypedDictNotRequiredAccess": "none",
   "reportUnsupportedDunderAll": "none"
 }

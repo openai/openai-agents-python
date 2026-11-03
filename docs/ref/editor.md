@@ -1,3 +1,0 @@
-# `Editor`
-
-::: agents.editor

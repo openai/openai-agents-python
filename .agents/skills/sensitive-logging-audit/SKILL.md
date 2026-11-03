@@ -16,7 +16,8 @@ The collector is only a syntax-based search aid. It does not resolve Python alia
 ### 1. Establish the review surface
 
 - Work in the current checkout and preserve unrelated changes.
-- Read `src/agents/_debug.py`, `src/agents/logger.py`, and the affected callers.
+- Use the [SDK maintainer reference map](../../references/README.md) to find the affected owner, then read its current callers and diagnostics.
+- Record the controls and defaults that govern redaction on that path. Follow native diagnostics at their owner when the affected path crosses the Python boundary.
 - Treat exception messages, arguments, tracebacks, causes, contexts, notes, names, URLs, and arbitrary values as potentially sensitive.
 - Read [the Python redaction validation matrix](references/redaction-validation.md).
 
@@ -37,7 +38,7 @@ The collector does not follow assignments such as `emit = logger.error`. Search 
 ```bash
 rg -n '\.(debug|info|warning|warn|error|exception|critical|fatal|log)\b' src/agents
 rg -n '\b(print|pprint|pp|warn|warn_explicit|write|writelines|print_exc|print_exception)\b' src/agents
-rg -n 'DONT_LOG_(MODEL|TOOL)_DATA|log_(model|tool|model_and_tool)_action' src/agents
+rg -n -i 'redact|sensitive|diagnostic|logging|trace' src/agents packages/codex/rust
 ```
 
 Do not turn collector coverage or a textual guard into a security conclusion. Trace producers and callers.
@@ -59,17 +60,17 @@ Record evidence in the audit report. The script does not validate or inherit dis
 
 Before changing runtime behavior, use `$implementation-strategy`.
 
-- Check the relevant `_debug.DONT_LOG_MODEL_DATA` and `_debug.DONT_LOG_TOOL_DATA` flags before formatting or inspecting sensitive values.
-- Redact mixed model/tool values when either flag disables data logging.
+- Apply the affected path's redaction controls before formatting or inspecting sensitive values.
+- For mixed model/tool values, require both applicable policies to allow sensitive logging.
 - In redacted mode, emit a fixed message and omit sensitive `args`, `extra`, and `exc_info`.
 - Build diagnostic-only context lazily so redacted mode never reads it.
-- Preserve useful diagnostics when sensitive-data logging is explicitly enabled.
+- Preserve diagnostic detail only where the current contract explicitly allows it.
 - Keep logging failure from changing fallback, cleanup, event, rejection, or cancellation behavior.
 - For MCP URLs, remove credentials, query parameters, and fragments in diagnostic mode; never use sanitized names as a substitute for fixed redacted messages.
 
 ### 5. Prove caller behavior
 
-Add tests at every changed caller boundary. Inspect the complete `LogRecord`, not only rendered text. Test both redacted policies, diagnostic mode, hostile objects, exception chains, and the caller's observable fallback or cleanup behavior as applicable.
+Add tests at every changed caller boundary. Inspect the complete `LogRecord`, not only rendered text. Test supported redaction controls, allowed diagnostic modes, hostile objects, exception chains, and the caller's observable fallback or cleanup behavior as applicable.
 
 ### 6. Re-run and close out
 

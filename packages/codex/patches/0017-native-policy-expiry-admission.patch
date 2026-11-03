@@ -1,0 +1,109 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index b2d2b03a197dfea7e0a70010776dc1319feb20f6..b013cf69524230e466a0782dcb5d102b05a077b3 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1780,6 +1780,7 @@ impl ModelClientSession {
+                 client_setup.api_auth,
+             )
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
++            crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = client.stream_request(request, options).await;
+ 
+             match stream_result {
+@@ -2091,6 +2092,7 @@ impl ModelClientSession {
+                     ),
+                 ],
+             );
++            crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = websocket_connection
+                 .stream_request(
+                     ws_request,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 2f989f16b659b57fefb2f24d81d9be4305b69bba..c59b85ab821f9c1178ff4e88abadbc9c44e97af9 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -51,6 +51,9 @@ struct BoundInterceptor {
+     admission: Option<Arc<dyn ModelToolAdmission>>,
+ }
+ impl ModelResponseInterceptor for BoundInterceptor {
++    fn admit_request(&self) -> Result<(), String> {
++        self.inner.admit_request()
++    }
+     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
+         self.inner
+             .intercept_with_tool_admission(stream, self.admission)
+@@ -90,6 +93,15 @@ pub(crate) fn tool_admission(
+     })
+ }
+ 
++pub(crate) fn admit_request(
++    interceptors: &[Box<dyn ModelResponseInterceptor>],
++) -> Result<(), String> {
++    for interceptor in interceptors {
++        interceptor.admit_request()?;
++    }
++    Ok(())
++}
++
+ pub(crate) fn intercept_stream(
+     mut stream: ModelResponseStream,
+     interceptors: Vec<Box<dyn ModelResponseInterceptor>>,
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index cf943d3f63c71e91f53c9f5e0affec369cd100cf..3a0354128911d78c0f6db2ea43dbaf16c2dd4859 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -261,3 +261,37 @@ async fn prepared_interceptors_keep_the_original_admission_across_overlapping_re
+         );
+     }
+ }
++
++#[test]
++fn request_admission_rechecks_the_captured_interceptor_before_transport() {
++    use std::sync::atomic::{AtomicBool, Ordering};
++    struct Captured(Arc<AtomicBool>);
++    impl ModelResponseInterceptor for Captured {
++        fn admit_request(&self) -> Result<(), String> {
++            if self.0.load(Ordering::Acquire) {
++                Err("original request revoked".into())
++            } else {
++                Ok(())
++            }
++        }
++        fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream {
++            stream
++        }
++    }
++    let stopped = Arc::new(AtomicBool::new(false));
++    let original: Vec<Box<dyn ModelResponseInterceptor>> = vec![Box::new(BoundInterceptor {
++        inner: Box::new(Captured(stopped.clone())),
++        admission: None,
++    })];
++    let successor: Vec<Box<dyn ModelResponseInterceptor>> = vec![Box::new(BoundInterceptor {
++        inner: Box::new(Captured(Arc::new(AtomicBool::new(false)))),
++        admission: None,
++    })];
++    assert!(admit_request(&original).is_ok());
++    stopped.store(true, Ordering::Release);
++    assert_eq!(
++        admit_request(&original).unwrap_err(),
++        "original request revoked"
++    );
++    assert!(admit_request(&successor).is_ok());
++}
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 3a46ae51030beac9ad2b4aa00bab728e5f0c29a2..692de0b4f44326b0d3835da4a8b72e51fced5638 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -52,6 +52,12 @@ pub trait ModelToolAdmission: Send + Sync + std::fmt::Debug {
+ /// Interceptors compose in registration order; dropping their stream must release unfinished work.
+ /// Trusted host implementations must bound any model-visible content they synthesize.
+ pub trait ModelResponseInterceptor: Send + Sync {
++    /// Admit this captured request immediately before provider transport starts.
++    /// Hosts may revoke its original owner without affecting a later request.
++    fn admit_request(&self) -> Result<(), String> {
++        Ok(())
++    }
++
+     /// Bind immutable routing evidence before wrapping this request's stream.
+     /// Existing interceptors keep their behavior; configured policies can reject missing evidence.
+     fn intercept_with_tool_admission(

@@ -6,7 +6,7 @@ description: Prepare the required local PR title, description, and branch sugges
 # PR Draft Summary
 
 ## Purpose
-Produce the PR-ready summary required in this repository after eligible code work is complete: a concise summary plus a PR-ready title and draft description that begins with "This pull request <verb> ...". The block should be ready to paste into a PR for openai-agents-python.
+Produce the PR-ready summary required in this repository after eligible code work is complete: a concise summary plus a PR-ready title and draft description that begins with "This pull request <verb> ...". The block should be ready to paste into a PR for this repository.
 
 ## When to Trigger
 - An explicit user request for a PR draft takes precedence over the automatic-trigger exclusions below.
@@ -22,33 +22,33 @@ Produce the PR-ready summary required in this repository after eligible code wor
 - Untracked files: `git ls-files --others --exclude-standard` (use with `git status -sb` to ensure they are surfaced; `--stat` does not include them).
 - Changed files: `git diff --name-only` (unstaged) and `git diff --name-only --cached` (staged); sizes via `git diff --stat` and `git diff --stat --cached`.
 - Latest release tag (prefer remote-aware lookup): `LATEST_RELEASE_TAG=$(.agents/skills/final-release-review/scripts/find_latest_release_tag.sh origin 'v*' 2>/dev/null || git tag -l 'v*' --sort=-v:refname | head -n1)`.
-- Base reference (use the branch's upstream, fallback to `origin/main`):
-  - `BASE_REF=$(git rev-parse --abbrev-ref --symbolic-full-name @{upstream} 2>/dev/null || echo origin/main)`.
-  - `BASE_COMMIT=$(git merge-base --fork-point "$BASE_REF" HEAD || git merge-base "$BASE_REF" HEAD || echo "$BASE_REF")`.
+- Base reference: use the target ref and final-base commit given in the request or handoff. This includes a handoff from a detached worktree. Without a supplied target, use the verified base branch of an existing PR being worked on. Otherwise inspect `origin` and use its remote default branch. Set `BASE_REF` to that verified ref. A feature branch's tracking ref does not establish the PR base.
+- Set `BASE_COMMIT` to the supplied final-base commit. If none was supplied, compute it with `BASE_COMMIT=$(git merge-base --fork-point "$BASE_REF" HEAD || git merge-base "$BASE_REF" HEAD)`. Verify that the ref and commit exist; stop if the base cannot be resolved.
+- Committed changes: `git diff --name-status "${BASE_COMMIT}" HEAD`, `git diff --stat "${BASE_COMMIT}" HEAD`, and the complete patch from `git diff "${BASE_COMMIT}" HEAD`.
 - Commits ahead of the base fork point: `git log --oneline --no-merges ${BASE_COMMIT}..HEAD`.
 - Category signals for this repo: runtime (`src/agents/`), tests (`tests/`), examples (`examples/`), docs (`docs/`, `mkdocs.yml`), build/test config (`pyproject.toml`, `uv.lock`, `Makefile`, `.github/`).
 
 ## Workflow
-1) Run the commands above without asking the user; compute `BASE_REF`/`BASE_COMMIT` first so later commands reuse them.
+1) Run the commands above without asking the user; compute `BASE_REF`/`BASE_COMMIT` first so later commands reuse them. Read the complete committed patch, staged and unstaged patches, and untracked file contents. Reuse previously reviewed complete diffs only when they still match the current base, head and working tree.
 2) If there are no staged/unstaged/untracked changes and no commits ahead of `${BASE_COMMIT}`, reply briefly that no code changes were detected and skip emitting the PR block.
 3) Infer change type from the touched paths listed under "Category signals"; classify as feature, fix, refactor, or docs-with-impact, and flag backward-compatibility risk only when the diff changes released public APIs, external config, persisted data, serialized state, or wire protocols. Judge that risk against `LATEST_RELEASE_TAG`, not unreleased branch-only churn.
-4) Summarize changes in 1–3 short sentences using the key paths (top 5) and `git diff --stat` output; explicitly call out untracked files from `git status -sb`/`git ls-files --others --exclude-standard` because `--stat` does not include them. If the working tree is clean but there are commits ahead of `${BASE_COMMIT}`, summarize using those commit messages.
+4) Summarize the final change in 1–3 short sentences using the complete diffs, key paths (top 5) and their diff statistics; explicitly call out untracked files from `git status -sb`/`git ls-files --others --exclude-standard` because `--stat` does not include them. Derive the summary and compatibility assessment from the resulting changes, including committed work on a clean tree. Use commit messages only as hints about intent and history.
 5) Choose the lead verb for the description: feature → `adds`, bug fix → `fixes`, refactor/perf → `improves` or `updates`, docs-only → `updates`.
-6) Suggest a branch name. If already off main, keep it; otherwise propose `feat/<slug>`, `fix/<slug>`, or `docs/<slug>` based on the primary area (e.g., `docs/pr-draft-summary-guidance`).
-7) If the current branch matches `issue-<number>` (digits only), keep that branch suggestion. Optionally pull light issue context (for example via the GitHub API) when available, but do not block or retry if it is not. When an issue number is present, use the native same-repository reference `#<number>` and include an auto-closing line such as `This pull request resolves #<number>.`. Do not add the explicit issue URL or wrap the reference in a Markdown link.
+6) Keep the user's chosen branch or an existing task branch. If no task branch exists and the checkout is detached or on the repository's verified default branch, suggest `feat/<slug>`, `fix/<slug>`, or `docs/<slug>` based on the primary area (e.g., `docs/pr-draft-summary-guidance`). A tracking branch alone does not identify the PR base.
+7) If the current branch matches `issue-<number>` (digits only), keep that branch suggestion. The branch name alone does not identify the issue's repository. For any linked issue, verify its repository from the request or read-only issue metadata before adding a reference or closing line. Use `#<number>` for the destination repository and `owner/repo#<number>` for another repository. Include a closing line only when the final change resolves that verified issue. If issue ownership is unresolved, omit the closing line. Do not add the explicit issue URL or wrap the reference in a Markdown link.
 8) Draft the PR title and description using the template below. Apply the repository-wide GitHub paste-readiness rule: use exactly `#123` for same-repository issues or PRs and `owner/repo#123` for cross-repository references; never emit `[PR #123](https://github.com/owner/repo/pull/123)`, `[#123](...)`, Codex navigation links, local file links, Codex-only citation markers or footnotes, or app directives in the copy-ready block. Preserve ordinary descriptive links to API docs, design notes, and other targets without native GitHub issue or pull-request syntax.
-9) Normalize references before returning the block: replace every same-repository URL or `openai/openai-agents-python#<number>` reference with `#<number>`, replace every cross-repository issue or pull-request URL with `owner/repo#<number>`, then rescan the full block. Do not return it while a Markdown-linked issue or pull-request label, a same-repository qualified reference, or a bare GitHub issue or pull-request URL remains.
+9) Normalize references before returning the block: identify the destination repository, then replace only its issue and pull-request URLs or qualified references with `#<number>`, replace every cross-repository issue or pull-request URL with `owner/repo#<number>`, then rescan the full block. Do not return it while a Markdown-linked issue or pull-request label, a same-repository qualified reference, or a bare GitHub issue or pull-request URL remains.
 10) Output only the block in "Output Format". Keep any surrounding status note minimal and in English.
 
 ## Output Format
-When closing out a task, add this concise Markdown block (English only) after any brief status note unless the task falls under the documented skip cases or the user says they do not want it.
+When closing out a task, add this concise Markdown block (English only) after any brief status note unless the task falls under the documented skip cases or the user says they do not want it. For an existing branch, give only its name. Include `git checkout -b <branch>` only for a new suggestion. Do not run the command or change branches.
 
 ```
 # Pull Request Draft
 
 ## Branch name suggestion
 
-git checkout -b <kebab-case suggestion, e.g., feat/pr-draft-summary-skill>
+<existing branch name or command to create a new suggested branch>
 
 ## Title
 
@@ -56,7 +56,23 @@ git checkout -b <kebab-case suggestion, e.g., feat/pr-draft-summary-skill>
 
 ## Description
 
-<include what you changed plus a draft pull request title and description for your local changes; start the description with prose such as "This pull request resolves/updates/adds ..." using a verb that matches the change (you can use bullets later), explain the change background (for bugs, clearly describe the bug, symptoms, or repro; for features, what is needed and why), any behavior changes or considerations to be aware of, and you do not need to mention tests you ran.>
+Use the sections in `.github/PULL_REQUEST_TEMPLATE/pull_request_template.md`:
+
+### Summary
+
+<describe the problem, resulting behavior and relevant compatibility limits>
+
+### Test plan
+
+<list completed verification and its result; state any missing checks and why they could not run>
+
+### Issue number
+
+<include a verified issue reference when applicable; otherwise state that none is linked>
+
+### Checks
+
+<copy the repository template's checkboxes and mark only the checks that were completed>
 ```
 
-Keep it tight—no redundant prose around the block, and avoid repeating details between `Changes` and the description. Tests do not need to be listed unless specifically requested.
+Keep the description concise and avoid repeating the summary. The Test plan must report the verification already performed and any remaining gaps. Do not mark a required check complete without evidence.

@@ -1,0 +1,115 @@
+diff --git a/codex-rs/codex-mcp/src/owned_stdio_tests.rs b/codex-rs/codex-mcp/src/owned_stdio_tests.rs
+index a26ecbf0cc89e8ea20db69248f7ff64e012d4271..c0e519841de534c0a0a0fe6da6cace4a6476b6fb 100644
+--- a/codex-rs/codex-mcp/src/owned_stdio_tests.rs
++++ b/codex-rs/codex-mcp/src/owned_stdio_tests.rs
+@@ -38,7 +38,13 @@
+ record('eof_exit')
+ "#;
+ 
+-fn input(home: &Path, log: &Path, label: &str, tx: Sender<Event>) -> McpRuntimeInput {
++fn input(
++    home: &Path,
++    log: &Path,
++    label: &str,
++    tx: Sender<Event>,
++    runtime_context: &McpRuntimeContext,
++) -> McpRuntimeInput {
+     let server: codex_config::McpServerConfig = serde_json::from_value(serde_json::json!({
+         "command": "python3", "args": ["-u", "-c", SERVER, log, label],
+         "required": true, "enabled_tools": ["search"],
+@@ -46,6 +52,9 @@
+     .expect("stdio config");
+     let mut config = crate::mcp::tests::test_mcp_config(home.to_path_buf());
+     config.permission_profile = PermissionProfile::Disabled;
++    config
++        .server_permission_profiles
++        .insert("docs".to_owned(), PermissionProfile::Disabled);
+     config.client_elicitation_capability =
+         rmcp::model::ElicitationCapability::default().with_form(Default::default());
+     let mut catalog = crate::ResolvedMcpCatalog::builder();
+@@ -66,10 +75,7 @@
+         submit_id: "admission".to_owned(),
+         tx_event: Some(tx),
+         startup_cancellation_token: CancellationToken::new(),
+-        runtime_context: McpRuntimeContext::new(
+-            Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+-            home.to_path_buf(),
+-        ),
++        runtime_context: runtime_context.clone(),
+         codex_apps_tools_cache: ConnectorRuntimeManager::new_without_cache(),
+         tool_catalog_cache: McpToolCatalogCache::default(),
+         codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(None, None),
+@@ -98,6 +104,10 @@
+         let home = tempfile::tempdir()?;
+         let log = home.path().join("processes");
+         std::fs::create_dir(&log)?;
++        let runtime_context = McpRuntimeContext::new(
++            Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++            home.path().to_path_buf(),
++        );
+         let (tx, rx) = async_channel::unbounded();
+         let runtime = McpRuntime::empty(true);
+         runtime.enable_full_access_form_input();
+@@ -110,7 +120,13 @@
+         );
+         runtime.set_stdio_admission(owner.clone());
+         runtime
+-            .replace(input(home.path(), &log, "old", tx.clone()))
++            .replace(input(
++                home.path(),
++                &log,
++                "old",
++                tx.clone(),
++                &runtime_context,
++            ))
+             .await;
+         runtime.validate_required_servers().await?;
+         let old_binding = runtime.current_binding().await.expect("old binding");
+@@ -122,7 +138,13 @@
+         assert_eq!(original.turn_id.as_deref(), Some("one-admission"));
+         // A changed command forces a new connection, while the old request/binding stay alive.
+         runtime
+-            .replace(input(home.path(), &log, "current", tx.clone()))
++            .replace(input(
++                home.path(),
++                &log,
++                "current",
++                tx.clone(),
++                &runtime_context,
++            ))
+             .await;
+         runtime.validate_required_servers().await?;
+         let current_binding = runtime.current_binding().await.expect("current binding");
+@@ -136,7 +158,7 @@
+         assert_ne!(current.id, original.id);
+         // An unchanged refresh reuses the current connection and must not retain it twice.
+         runtime
+-            .replace(input(home.path(), &log, "current", tx))
++            .replace(input(home.path(), &log, "current", tx, &runtime_context))
+             .await;
+         assert_eq!(runtime.stdio_retirement.lock().unwrap().len(), 2);
+         runtime.retire_owned_stdio().await?;
+@@ -154,12 +176,14 @@
+         );
+         let processes = std::fs::read_dir(&log)?.collect::<Result<Vec<_>, _>>()?;
+         assert_eq!(processes.len(), 2);
++        let mut labels = Vec::new();
+         for process in processes {
+             let rows = std::fs::read_to_string(process.path())?;
+             let values = rows
+                 .lines()
+                 .map(serde_json::from_str::<serde_json::Value>)
+                 .collect::<Result<Vec<_>, _>>()?;
++            labels.push(values[0]["label"].as_str().unwrap().to_owned());
+             assert!(values.iter().any(|row| row["event"] == "pending"));
+             assert!(
+                 values.iter().any(|row| {
+@@ -176,6 +200,8 @@
+                     .success()
+             );
+         }
++        labels.sort();
++        assert_eq!(labels, vec!["current", "old"]);
+         anyhow::Ok(())
+     })
+     .await?

@@ -1,3 +1,0 @@
-# `Guardrails`
-
-::: agents.guardrail

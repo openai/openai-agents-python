@@ -1,0 +1,691 @@
+diff --git a/codex-rs/core/src/mcp_tool_call_tests.rs b/codex-rs/core/src/mcp_tool_call_tests.rs
+index 5aec67a19310da2ba51005b5559847a03c5abd6d..b0d029dcf471d028319062e3c7df9bd24e3b9c9b 100644
+--- a/codex-rs/core/src/mcp_tool_call_tests.rs
++++ b/codex-rs/core/src/mcp_tool_call_tests.rs
+@@ -1750,6 +1750,7 @@ async fn codex_apps_auth_elicitation_enabled_by_default_requests_elicitation(
+ #[test]
+ fn mcp_tool_call_ids_are_added_to_request_meta() {
+     let origin = crate::tools::context::ToolCallOrigin {
++        call_id: "original-call".to_string(),
+         item_id: Some(ResponseItemId::from_server("fc-live".to_string())),
+         window_id: "thread-live:2".to_string(),
+     };
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 7b14f934c972ac163040c7371f715b9943a954b0..3046f1b8d91f6a090908cb2af6cb4e22c4ad95d0 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2270,7 +2270,13 @@ impl Session {
+     }
+ 
+     /// Persist the event to rollout and send it to clients.
+-    pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
++    pub(crate) async fn send_event(&self, turn_context: &TurnContext, mut msg: EventMsg) {
++        if !crate::tools::builtin_result_policy::filter_event(
++            &turn_context.extension_data,
++            &mut msg,
++        ) {
++            return;
++        }
+         let legacy_source = msg.clone();
+         if let EventMsg::Error(error) = &legacy_source
+             && error
+@@ -2563,8 +2569,9 @@ impl Session {
+     pub(crate) async fn emit_turn_item_completed(
+         &self,
+         turn_context: &TurnContext,
+-        item: TurnItem,
++        mut item: TurnItem,
+     ) {
++        crate::tools::builtin_result_policy::filter_item(&turn_context.extension_data, &mut item);
+         record_turn_ttfm_metric(turn_context, &item).await;
+         for contributor in self.services.extensions.turn_lifecycle_contributors() {
+             contributor
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f4457a8fee6a2e60f9d8e9d0efab184b64ab1da2
+--- /dev/null
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -0,0 +1,255 @@
++//! Whole-result policy for the three native Environment tools only.
++use crate::function_tool::FunctionCallError;
++use crate::tools::context::ToolInvocation;
++use codex_extension_api::{BuiltinToolResultInput, ExtensionData, ToolLifecycleContributor};
++use codex_protocol::items::TurnItem;
++use codex_protocol::models::ResponseInputItem;
++use codex_protocol::protocol::EventMsg;
++use codex_tools::{JsonToolOutput, ToolOutput, ToolPayload};
++use serde_json::Value;
++use std::collections::HashSet;
++use std::sync::{Arc, Mutex};
++
++const WITHHELD: &str = "Native tool output withheld by result policy";
++
++// A turn can finish before its process watcher. Keep the mark in the original
++// turn store, which that watcher already owns; never clear it at tool finish.
++#[derive(Default)]
++pub(crate) struct ControlledOutputs(Mutex<HashSet<String>>);
++
++pub(crate) fn mark(store: &ExtensionData, call_id: &str) {
++    store
++        .get_or_init(ControlledOutputs::default)
++        .0
++        .lock()
++        .expect("result policy poisoned")
++        .insert(call_id.to_owned());
++}
++pub(crate) fn controlled(store: &ExtensionData, call_id: &str) -> bool {
++    store.get::<ControlledOutputs>().is_some_and(|state| {
++        state
++            .0
++            .lock()
++            .expect("result policy poisoned")
++            .contains(call_id)
++    })
++}
++
++pub(crate) fn capture(invocation: &ToolInvocation) -> Option<Arc<dyn ToolLifecycleContributor>> {
++    if !invocation.tool_name.is_default_namespace()
++        || !matches!(
++            invocation.tool_name.name.as_str(),
++            "exec_command" | "write_stdin" | "apply_patch"
++        )
++    {
++        return None;
++    }
++    let owner = invocation
++        .session
++        .services
++        .extensions
++        .tool_lifecycle_contributors()
++        .iter()
++        .find(|owner| {
++            owner.controls_builtin_result(
++                &invocation.session.services.thread_extension_data,
++                &invocation.tool_name,
++            )
++        })
++        .cloned()?;
++    mark(&invocation.turn.extension_data, &invocation.call_id);
++    Some(owner)
++}
++
++// Redact before lifecycle observers, tracing, legacy projections and rollout.
++// Whole-result callbacks cannot authorize a partial chunk in advance.
++pub(crate) fn filter_item(store: &ExtensionData, item: &mut TurnItem) {
++    match item {
++        TurnItem::CommandExecution(item) if controlled(store, &item.id) => {
++            item.aggregated_output = Some(WITHHELD.into());
++        }
++        TurnItem::FileChange(item) if controlled(store, &item.id) => {
++            item.stdout = Some(WITHHELD.into());
++            item.stderr = None;
++        }
++        _ => {}
++    }
++}
++pub(crate) fn filter_event(store: &ExtensionData, event: &mut EventMsg) -> bool {
++    match event {
++        EventMsg::ExecCommandOutputDelta(item) if controlled(store, &item.call_id) => return false,
++        EventMsg::ExecCommandEnd(item) if controlled(store, &item.call_id) => {
++            item.aggregated_output = WITHHELD.into();
++        }
++        EventMsg::PatchApplyEnd(item) if controlled(store, &item.call_id) => {
++            item.stdout = WITHHELD.into();
++            item.stderr.clear();
++        }
++        EventMsg::ItemCompleted(item) => filter_item(store, &mut item.item),
++        _ => {}
++    }
++    true
++}
++
++struct AcceptedOutput {
++    inner: JsonToolOutput,
++    hook_input: Option<Value>,
++    hook_id: String,
++    hook_response: bool,
++    token_limit: Option<usize>,
++}
++impl ToolOutput for AcceptedOutput {
++    fn log_output(&self) -> String {
++        self.inner.log_output()
++    }
++    fn success_for_logging(&self) -> bool {
++        self.inner.success_for_logging()
++    }
++    fn contains_external_context(&self) -> bool {
++        self.inner.contains_external_context()
++    }
++    fn fallback_token_limit_override(&self) -> Option<usize> {
++        self.token_limit
++    }
++    fn to_response_item(&self, id: &str, payload: &ToolPayload) -> ResponseInputItem {
++        self.inner.to_response_item(id, payload)
++    }
++    fn code_mode_result(&self, payload: &ToolPayload) -> Value {
++        self.inner.code_mode_result(payload)
++    }
++    fn post_tool_use_id(&self, _: &str) -> String {
++        self.hook_id.clone()
++    }
++    fn post_tool_use_input(&self, _: &ToolPayload) -> Option<Value> {
++        self.hook_input.clone()
++    }
++    fn post_tool_use_response(&self, id: &str, payload: &ToolPayload) -> Option<Value> {
++        self.hook_response
++            .then(|| self.inner.post_tool_use_response(id, payload))
++            .flatten()
++    }
++    // No raw backing output or content-bearing tool_result_metadata survives.
++}
++
++pub(crate) fn failure() -> FunctionCallError {
++    FunctionCallError::RespondToModel(WITHHELD.into())
++}
++
++pub(crate) async fn accept(
++    invocation: &ToolInvocation,
++    owner: &dyn ToolLifecycleContributor,
++    raw: Box<dyn ToolOutput>,
++) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++    let hook_input = raw.post_tool_use_input(&invocation.payload);
++    let hook_id = raw.post_tool_use_id(&invocation.call_id);
++    let hook_response = raw
++        .post_tool_use_response(&invocation.call_id, &invocation.payload)
++        .is_some();
++    let success = raw.success_for_logging();
++    let external = raw.contains_external_context();
++    let token_limit = raw.fallback_token_limit_override();
++    let value = raw.code_mode_result(&invocation.payload);
++    drop(raw);
++    let source = super::lifecycle::extension_tool_call_source(invocation.source.clone());
++    let outer_call_id = if matches!(source, codex_tools::ToolCallSource::CodeMode { .. }) {
++        invocation
++            .originating_call()
++            .await
++            .map(|origin| origin.call_id)
++    } else {
++        None
++    };
++    let accepted = owner
++        .on_builtin_tool_result(BuiltinToolResultInput {
++            model: &invocation.step_context.settings.model_info.slug,
++            thread_store: &invocation.session.services.thread_extension_data,
++            turn_store: &invocation.turn.extension_data,
++            turn_id: &invocation.turn.sub_id,
++            call_id: &invocation.call_id,
++            outer_call_id: outer_call_id.as_deref(),
++            tool_name: &invocation.tool_name,
++            payload: &invocation.payload,
++            source,
++            result: &value,
++            cancelled: Box::pin(invocation.cancellation_token.cancelled()),
++        })
++        .await
++        .map_err(|_| failure())?;
++    let mut inner = JsonToolOutput::with_success(accepted, Some(success));
++    if external {
++        inner = inner.with_external_context();
++    }
++    Ok(Box::new(AcceptedOutput {
++        inner,
++        hook_input,
++        hook_id,
++        hook_response,
++        token_limit,
++    }))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use codex_protocol::protocol::{ExecCommandOutputDeltaEvent, ExecOutputStream};
++    use serde_json::json;
++
++    #[test]
++    fn original_turn_mark_survives_and_does_not_affect_successor() {
++        let original = ExtensionData::new("original");
++        let successor = ExtensionData::new("successor");
++        let mut delta = EventMsg::ExecCommandOutputDelta(ExecCommandOutputDeltaEvent {
++            call_id: "reused-id".into(),
++            stream: ExecOutputStream::Stdout,
++            chunk: b"private-result".to_vec(),
++        });
++        assert!(filter_event(&original, &mut delta));
++        mark(&original, "reused-id");
++        assert!(!filter_event(&original, &mut delta));
++        assert!(filter_event(&successor, &mut delta));
++    }
++
++    #[test]
++    fn accepted_output_owns_every_projection_without_raw_backing_state() {
++        let output = AcceptedOutput {
++            inner: JsonToolOutput::with_success(json!({"output":"accepted"}), Some(false))
++                .with_external_context(),
++            hook_input: Some(json!({"command":"read"})),
++            hook_id: "original-exec".into(),
++            hook_response: true,
++            token_limit: Some(42),
++        };
++        for payload in [
++            ToolPayload::Function {
++                arguments: "{}".into(),
++            },
++            ToolPayload::Custom {
++                input: "patch".into(),
++            },
++        ] {
++            assert_eq!(
++                output.code_mode_result(&payload),
++                json!({"output":"accepted"})
++            );
++            assert_eq!(
++                output.post_tool_use_response("call", &payload),
++                Some(json!({"output":"accepted"}))
++            );
++            assert!(
++                serde_json::to_string(&output.to_response_item("call", &payload))
++                    .unwrap()
++                    .contains("accepted")
++            );
++            assert_eq!(
++                output.post_tool_use_input(&payload),
++                Some(json!({"command":"read"}))
++            );
++        }
++        assert_eq!(output.log_output(), "{\"output\":\"accepted\"}");
++        assert!(!output.success_for_logging());
++        assert!(output.contains_external_context());
++        assert_eq!(output.post_tool_use_id("call"), "original-exec");
++        assert_eq!(output.fallback_token_limit_override(), Some(42));
++        assert!(output.tool_result_metadata().is_none());
++    }
++}
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index 1b02ab7abfcbc5c84100330dbaf25e8f02dc134e..f436321ffa93bfc3b7bf0fd5f2bbe1912e46ee61 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -83,6 +83,8 @@ pub struct ToolInvocation {
+ /// Identity of the model call that started a tool invocation, retained across code-mode waits.
+ #[derive(Clone)]
+ pub(crate) struct ToolCallOrigin {
++    /// Original Codex call ID, independent of compactable conversation history.
++    pub(crate) call_id: String,
+     /// Best-effort lookup: invocations without a matching history item still
+     /// retain their known window ID.
+     pub(crate) item_id: Option<ResponseItemId>,
+@@ -116,6 +118,7 @@ impl ToolInvocation {
+                 _ => None,
+             });
+         Some(ToolCallOrigin {
++            call_id: self.call_id.clone(),
+             item_id,
+             window_id: self.session.current_window_id().await,
+         })
+diff --git a/codex-rs/core/src/tools/mod.rs b/codex-rs/core/src/tools/mod.rs
+index 41ed0189b8bfd80d938a16073b2af5c40b18d2f9..0b25a32342f91d06e1df19fbfc05591c47a1b1f9 100644
+--- a/codex-rs/core/src/tools/mod.rs
++++ b/codex-rs/core/src/tools/mod.rs
+@@ -1,4 +1,5 @@
+ mod approvals;
++pub(crate) mod builtin_result_policy;
+ pub(crate) mod call_trace;
+ mod catalog_parameters;
+ pub(crate) mod code_mode;
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index fb2fad72bd5fddf6ee6196c850fb31fb0692aa63..73f7b89f263db8d0e81a9ac5be174e46cee67cc0 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -684,6 +684,11 @@ impl ToolRegistry {
+ 
+         let log_payload = tool_log_payload(&invocation.payload, &invocation.source);
+ 
++        let result_owner = if tool.is_third_party_tool() {
++            None
++        } else {
++            super::builtin_result_policy::capture(&invocation)
++        };
+         let result = otel
+             .log_tool_result_with_tags(
+                 &tool_name,
+@@ -691,7 +696,14 @@ impl ToolRegistry {
+                 log_payload.as_ref(),
+                 &tool_result_tags,
+                 &extra_trace_fields,
+-                || handle_any_tool(tool.as_ref(), invocation.clone(), call_state.as_deref()),
++                || {
++                    handle_any_tool(
++                        tool.as_ref(),
++                        invocation.clone(),
++                        call_state.as_deref(),
++                        result_owner.as_deref(),
++                    )
++                },
+                 |result| {
+                     (
+                         result.result.log_output(),
+@@ -810,10 +822,18 @@ async fn handle_any_tool(
+     tool: &dyn CoreToolRuntime,
+     invocation: ToolInvocation,
+     call_state: Option<&ToolCallState>,
++    result_owner: Option<&dyn codex_extension_api::ToolLifecycleContributor>,
+ ) -> Result<AnyToolResult, FunctionCallError> {
+     let call_id = invocation.call_id.clone();
+     let payload = invocation.payload.clone();
+-    let output = tool.handle(invocation.clone()).await?;
++    let output = match tool.handle(invocation.clone()).await {
++        Ok(output) => match result_owner {
++            Some(owner) => super::builtin_result_policy::accept(&invocation, owner, output).await?,
++            None => output,
++        },
++        Err(_) if result_owner.is_some() => return Err(super::builtin_result_policy::failure()),
++        Err(error) => return Err(error),
++    };
+     let post_tool_use_payload =
+         CoreToolRuntime::post_tool_use_payload(tool, &invocation, output.as_ref());
+     let result = AnyToolResult {
+diff --git a/codex-rs/core/src/tools/runtimes/apply_patch.rs b/codex-rs/core/src/tools/runtimes/apply_patch.rs
+index ddd5771737da1cc9dc3f8b719734d9525cd48534..c9e6d6a7e908343bde30fc98b06e450a03bb1d32 100644
+--- a/codex-rs/core/src/tools/runtimes/apply_patch.rs
++++ b/codex-rs/core/src/tools/runtimes/apply_patch.rs
+@@ -222,7 +222,12 @@ impl ToolRuntime<ApplyPatchRequest, ApplyPatchRuntimeOutput> for ApplyPatchRunti
+         if sandbox_denied {
+             // TODO(iceweasel): Report executor filesystem sandbox backends like process/start so
+             // executor-managed apply_patch denials can emit backend-specific violation telemetry.
+-            if attempt.sandbox != SandboxType::None {
++            if attempt.sandbox != SandboxType::None
++                && !crate::tools::builtin_result_policy::controlled(
++                    &_ctx.step_context.turn.extension_data,
++                    &_ctx.call_id,
++                )
++            {
+                 record_filesystem_sandbox_violation(attempt.sandbox, &output);
+             }
+             return Err(ToolError::Codex(CodexErr::Sandbox(SandboxErr::Denied {
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 28af9b02290f9ac4b9dc9efa2eb3476df45cf556..187ff33b9672f252307bc82aa40a17b56960e226 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -189,6 +189,7 @@ impl Default for UnifiedExecProcessManager {
+ }
+ 
+ struct ProcessEntry {
++    output_policy_store: Option<Arc<codex_extension_api::ExtensionData>>,
+     process: Arc<UnifiedExecProcess>,
+     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
+     call_id: String,
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+index 1b8af5bc0d6f47598b615901e80155712948b556..3552ffd28f9fc65984c5674baad927f61a9659f5 100644
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -137,6 +137,7 @@ async fn exec_command_with_tty(
+     let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+     if process_started_alive {
+         let entry = ProcessEntry {
++            output_policy_store: None,
+             process: Arc::clone(&process),
+             plugin_metrics_sidecar: None,
+             call_id: context.call_id.clone(),
+@@ -613,6 +614,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+     manager.process_store.lock().await.processes.insert(
+         process_id,
+         ProcessEntry {
++            output_policy_store: None,
+             process,
+             plugin_metrics_sidecar: None,
+             call_id: "call".to_string(),
+@@ -699,6 +701,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+     manager.process_store.lock().await.processes.insert(
+         process_id,
+         ProcessEntry {
++            output_policy_store: None,
+             process: Arc::clone(&process),
+             plugin_metrics_sidecar: None,
+             call_id: "call".to_string(),
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 8305c02894737e70708a19b9dace6fee8d425ae5..ae6f00d1ac4f4640fd9fb7eab6024e290d3aa51f 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -114,6 +114,7 @@ pub(crate) struct UnifiedExecProcess {
+     output_task: Option<JoinHandle<()>>,
+     sandbox_type: Option<SandboxType>,
+     timed_out: AtomicBool,
++    suppress_output_diagnostics: AtomicBool,
+     _spawn_lifecycle: Option<SpawnLifecycleHandle>,
+     // The shell may still need to replay this file after process startup returns.
+     pub(crate) _shell_snapshot: Option<Arc<ShellSnapshotFile>>,
+@@ -157,6 +158,7 @@ impl UnifiedExecProcess {
+             output_task: None,
+             sandbox_type,
+             timed_out: AtomicBool::new(false),
++            suppress_output_diagnostics: AtomicBool::new(false),
+             _spawn_lifecycle: spawn_lifecycle,
+             _shell_snapshot: None,
+         }
+@@ -337,7 +339,7 @@ impl UnifiedExecProcess {
+             ..Default::default()
+         };
+         let likely_sandbox_denial = is_likely_sandbox_denied(sandbox_type, &exec_output);
+-        if likely_sandbox_denial {
++        if likely_sandbox_denial && !self.suppress_output_diagnostics.load(Ordering::Acquire) {
+             record_filesystem_sandbox_violation(sandbox_type, &exec_output);
+         }
+         if executor_reported_denial || likely_sandbox_denial {
+@@ -355,10 +357,20 @@ impl UnifiedExecProcess {
+         Ok(())
+     }
+ 
++    #[cfg(test)]
+     pub(super) async fn from_spawned(
+         spawned: SpawnedPty,
+         sandbox_type: SandboxType,
+         spawn_lifecycle: SpawnLifecycleHandle,
++    ) -> Result<Self, UnifiedExecError> {
++        Self::from_spawned_with_output_policy(spawned, sandbox_type, spawn_lifecycle, false).await
++    }
++
++    pub(super) async fn from_spawned_with_output_policy(
++        spawned: SpawnedPty,
++        sandbox_type: SandboxType,
++        spawn_lifecycle: SpawnLifecycleHandle,
++        controlled: bool,
+     ) -> Result<Self, UnifiedExecError> {
+         let SpawnedPty {
+             session: process_handle,
+@@ -372,6 +384,9 @@ impl UnifiedExecProcess {
+             Some(sandbox_type),
+             Some(spawn_lifecycle),
+         );
++        if controlled {
++            managed.withhold_output_diagnostics();
++        }
+         managed.output_task = Some(Self::spawn_local_output_task(
+             output_rx,
+             managed.output_handles().clone(),
+@@ -412,14 +427,30 @@ impl UnifiedExecProcess {
+         Ok(managed)
+     }
+ 
++    #[cfg(test)]
+     pub(super) async fn from_exec_server_started(
+         started: StartedExecProcess,
++    ) -> Result<Self, UnifiedExecError> {
++        Self::from_exec_server_started_with_output_policy(started, false).await
++    }
++
++    pub(super) fn withhold_output_diagnostics(&self) {
++        self.suppress_output_diagnostics
++            .store(true, Ordering::Release);
++    }
++
++    pub(super) async fn from_exec_server_started_with_output_policy(
++        started: StartedExecProcess,
++        controlled: bool,
+     ) -> Result<Self, UnifiedExecError> {
+         let process_handle = ProcessHandle::ExecServer(Arc::clone(&started.process));
+         // Older peers do not report this field. In that case, skip local
+         // classification rather than attributing a violation to a guessed backend.
+         let sandbox_type = started.sandbox_type;
+         let mut managed = Self::new(process_handle, sandbox_type, /*spawn_lifecycle*/ None);
++        if controlled {
++            managed.withhold_output_diagnostics();
++        }
+         let output_handles = managed.output_handles().clone();
+         managed.output_task = Some(Self::spawn_exec_server_output_task(
+             started,
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 8c0cfcfd0406f80967cebb44d5cb66fdd2e590da..211d99de7cf4e92c21779712cb31dc1b0f1c4426 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -891,6 +891,15 @@ impl UnifiedExecProcessManager {
+                 .processes
+                 .get(&process_id)
+                 .ok_or(UnifiedExecError::UnknownProcessId { process_id })?;
++            if crate::tools::builtin_result_policy::controlled(
++                &context.step_context.turn.extension_data,
++                &context.call_id,
++            ) {
++                entry.process.withhold_output_diagnostics();
++                if let Some(store) = &entry.output_policy_store {
++                    crate::tools::builtin_result_policy::mark(store, &entry.call_id);
++                }
++            }
+             // Capture the original call even if this interaction is cancelled while queued.
+             if let Some(call_id) = trace_id(&entry.call_id) {
+                 tracing::Span::current().record("original_exec_call_id", call_id);
+@@ -1208,6 +1217,7 @@ impl UnifiedExecProcessManager {
+         let plugin_metrics_sidecar =
+             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+         let entry = ProcessEntry {
++            output_policy_store: Some(Arc::clone(&context.step_context.turn.extension_data)),
+             process: Arc::clone(&process),
+             plugin_metrics_sidecar: plugin_metrics_sidecar.clone(),
+             call_id: context.call_id.clone(),
+@@ -1317,6 +1327,12 @@ impl UnifiedExecProcessManager {
+         mut spawn_lifecycle: SpawnLifecycleHandle,
+         environment: &codex_exec_server::Environment,
+     ) -> Result<UnifiedExecProcess, UnifiedExecError> {
++        let controlled = tool_ctx.is_some_and(|ctx| {
++            crate::tools::builtin_result_policy::controlled(
++                &ctx.step_context.turn.extension_data,
++                &ctx.call_id,
++            )
++        });
+         let inherited_fds = spawn_lifecycle.inherited_fds();
+ 
+         if environment.is_remote() || request.exec_server_shell_snapshot.is_some() {
+@@ -1353,7 +1369,10 @@ impl UnifiedExecProcessManager {
+             }
+             .map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
+             spawn_lifecycle.after_spawn();
+-            return UnifiedExecProcess::from_exec_server_started(started).await;
++            return UnifiedExecProcess::from_exec_server_started_with_output_policy(
++                started, controlled,
++            )
++            .await;
+         }
+ 
+         // TODO(anp): Keep PathUri through the local PTY/process launch boundary.
+@@ -1425,7 +1444,13 @@ impl UnifiedExecProcessManager {
+         spawn_lifecycle.after_spawn();
+         let spawned =
+             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
+-        UnifiedExecProcess::from_spawned(spawned, request.sandbox, spawn_lifecycle).await
++        UnifiedExecProcess::from_spawned_with_output_policy(
++            spawned,
++            request.sandbox,
++            spawn_lifecycle,
++            controlled,
++        )
++        .await
+     }
+ 
+     #[tracing::instrument(
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index ce56681e68b43214f3baebcf144234a394ef44e7..29563c68b61e0734137b1bb640e1c348262d227d 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -637,6 +637,7 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+         store.processes.insert(
+             process_id,
+             ProcessEntry {
++                output_policy_store: None,
+                 process: if is_exited {
+                     Arc::clone(&exited_process)
+                 } else {
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 61cdbe4da7226222954ea98d4d7bb622e35fafd9..ccec0ab9905d865ce90e6f8662c7fd61b00b3e2f 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -44,6 +44,7 @@ pub use thread_lifecycle::ThreadReadyInput;
+ pub use thread_lifecycle::ThreadResumeInput;
+ pub use thread_lifecycle::ThreadStartInput;
+ pub use thread_lifecycle::ThreadStopInput;
++pub use tool_lifecycle::BuiltinToolResultInput;
+ pub use tool_lifecycle::CommandStartInput;
+ pub use tool_lifecycle::McpToolContext;
+ pub use tool_lifecycle::McpToolResultInput;
+@@ -367,6 +368,25 @@ pub trait ToolContributor: Send + Sync {
+ /// rewriting the invocation. Use `ToolContributor` for owning a tool implementation
+ /// and hooks for policy that changes tool payloads.
+ pub trait ToolLifecycleContributor: Send + Sync {
++    /// Opt into whole-result control for selected native Environment tools.
++    /// The host preserves ordinary streaming when this returns false.
++    fn controls_builtin_result(
++        &self,
++        _thread: &ExtensionData,
++        _name: &codex_tools::ToolName,
++    ) -> bool {
++        false
++    }
++
++    /// Return accepted JSON, or withhold the result on any failure.
++    /// A configured owner cannot silently fall back to the original result.
++    fn on_builtin_tool_result<'a>(
++        &'a self,
++        _input: BuiltinToolResultInput<'a>,
++    ) -> crate::ExtensionFuture<'a, Result<serde_json::Value, ()>> {
++        Box::pin(async { Err(()) })
++    }
++
+     /// Observe direct calls before readiness, dispatch waiting, and hooks, including blocked calls.
+     /// Excludes nested code-mode calls. Observers must return promptly.
+     fn on_tool_dispatch(&self, _input: ToolDispatchInput<'_>) {}
+diff --git a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+index 3b31eaaf56dc3cde30f79ac56b5793be90f7e7af..dee49cfa68d80144d65bce4222ad6e35b49728f1 100644
+--- a/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/tool_lifecycle.rs
+@@ -255,3 +255,21 @@ pub struct ToolDispatchInput<'a> {
+     /// Tool name supplied to dispatch, before pre-tool hooks run.
+     pub tool_name: &'a ToolName,
+ }
++
++/// Selected native Environment result before host projections and observers.
++/// The host withholds early output events for controlled calls.
++pub struct BuiltinToolResultInput<'a> {
++    /// Model captured by the issuing step, including delayed nested completion.
++    pub model: &'a str,
++    pub thread_store: &'a ExtensionData,
++    pub turn_store: &'a ExtensionData,
++    pub turn_id: &'a str,
++    pub call_id: &'a str,
++    pub outer_call_id: Option<&'a str>,
++    pub tool_name: &'a ToolName,
++    pub payload: &'a ToolPayload,
++    pub source: ToolCallSource,
++    pub result: &'a serde_json::Value,
++    /// Cancellation of this exact native invocation, including yielded cells.
++    pub cancelled: crate::ExtensionFuture<'a, ()>,
++}
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index c8436c8feb86ffbab63d73cf2d81b920b226b6b7..b9404fcff17be53c18637a950e1e94a66cb853d5 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -47,6 +47,7 @@ pub use codex_tools::parse_tool_input_schema_without_compaction;
+ pub use contributors::ApprovalDecision;
+ pub use contributors::ApprovalDecisionInput;
+ pub use contributors::ApprovalReviewContributor;
++pub use contributors::BuiltinToolResultInput;
+ pub use contributors::CommandStartInput;
+ pub use contributors::ConfigContributor;
+ pub use contributors::ContextContributor;

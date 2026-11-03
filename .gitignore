@@ -10,6 +10,13 @@ __pycache__/
 # C extensions
 *.so
 
+# Native assets are produced and verified by the SDK wheel build.
+/src/agents/bin/
+/src/agents/licenses/
+/src/agents/*.dll
+/src/agents/*.dylib
+/src/openai_agents.libs/
+
 # Distribution / packaging
 .Python
 build/
@@ -142,14 +149,6 @@ cython_debug/
 
 # Ruff stuff:
 .ruff_cache/
-
-# Example runtime state
-# Dapr example components may contain database credentials.
-/components/
-statestore-postgres.yaml
-statestore-postgres.yaml.*
-examples/sandbox/extensions/daytona/usaspending_text2sql/.audit_log.jsonl
-examples/sandbox/extensions/daytona/usaspending_text2sql/.session_state.json
 
 # PyPI configuration file
 .pypirc

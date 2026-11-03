@@ -19,7 +19,15 @@ SUBPROCESS_TIMEOUT_SECONDS = 60
 
 def _environment() -> dict[str, str]:
     env = os.environ.copy()
-    for key in ("OPENAI_API_KEY", "BASE_SHA", "HEAD_SHA", "GITHUB_OUTPUT"):
+    for key in (
+        "OPENAI_API_KEY",
+        "BASE_SHA",
+        "HEAD_SHA",
+        "GITHUB_OUTPUT",
+        "GITHUB_EVENT_NAME",
+        "GITHUB_REF",
+        "GITHUB_SHA",
+    ):
         env.pop(key, None)
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     env["GIT_CONFIG_GLOBAL"] = os.devnull
@@ -37,6 +45,16 @@ def _git(repo: Path, *args: str) -> str:
         env=_environment(),
         timeout=SUBPROCESS_TIMEOUT_SECONDS,
     ).stdout.strip()
+
+
+def workflow_bash(repo: Path) -> str:
+    if os.name == "nt":
+        # GitHub Actions uses Git for Windows' Bash for workflow steps.
+        git_exec_path = Path(_git(repo, "--exec-path"))
+        return str(git_exec_path.parents[2] / "bin/bash.exe")
+    bash = shutil.which("bash")
+    assert bash is not None
+    return bash
 
 
 def _commit(repo: Path, *paths: str) -> str:
@@ -68,20 +86,13 @@ def _detect(
     extra_env: dict[str, str] | None = None,
     bash_args: list[str] | None = None,
 ) -> bool:
-    if os.name == "nt":
-        # Resolve Git for Windows' Bash instead of the system WSL launcher.
-        git_exec_path = Path(_git(repo, "--exec-path"))
-        bash = str(git_exec_path.parents[2] / "bin/bash.exe")
-    else:
-        bash = shutil.which("bash")
-        assert bash is not None
     output = repo.parent / "github-output"
     output.write_text("", encoding="utf-8")
     env = _environment()
     env.update(extra_env or {})
     env["GITHUB_OUTPUT"] = output.as_posix()
     result = subprocess.run(
-        [bash, *(bash_args or [DETECTOR.as_posix(), mode, base, head])],
+        [workflow_bash(repo), *(bash_args or [DETECTOR.as_posix(), mode, base, head])],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -95,56 +106,90 @@ def _detect(
 
 
 @pytest.mark.parametrize(
-    ("path", "code", "docs", "docs_only"),
+    ("mode", "expected"),
+    [("code", True), ("docs", True), ("docs-only", False), ("docs-deploy", False)],
+)
+@pytest.mark.parametrize("missing_base", [False, True])
+def test_manual_verification_checks_unchanged_tree_without_deploying(
+    change_repo: tuple[Path, str], mode: str, expected: bool, missing_base: bool
+) -> None:
+    repo, head = change_repo
+    assert (
+        _detect(
+            repo,
+            mode,
+            "" if missing_base else head,
+            head,
+            extra_env={"GITHUB_EVENT_NAME": "workflow_dispatch"},
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "code", "docs", "docs_only", "docs_deploy"),
     [
-        ("src/agents/run.py", True, False, False),
-        ("tests/test_release_provenance.py", True, False, False),
-        ("integration_tests/test_contract.py", True, False, False),
-        ("examples/basic.py", True, False, False),
-        (".github/scripts/detect-changes.sh", True, False, False),
-        (".github/scripts/check_optional_truthiness.py", True, False, False),
-        (".github/scripts/run_serial_tests.py", True, False, False),
-        (".github/scripts/run-asyncio-teardown-stability.sh", True, False, False),
-        (".github/scripts/verify_release.py", True, False, False),
-        (".github/scripts/run_integration_tests.py", True, False, False),
-        (".github/scripts/run_examples.sh", True, False, False),
-        (".github/scripts/update_released_api_contract.py", True, False, False),
-        (".github/scripts/run_repo_skill_tests.py", True, False, False),
-        (".github/workflows/tests.yml", True, False, False),
-        (".github/workflows/release-readiness-refresh.yml", True, False, False),
-        (".github/workflows/docs.yml", True, True, False),
-        (".github/workflows/publish.yml", True, False, False),
-        (".github/workflows/repo-skills.yml", True, False, False),
-        (".github/workflows/release-please.yml", True, False, False),
-        ("release-please-config.json", True, False, False),
-        (".release-please-manifest.json", True, False, False),
-        ("pyproject.toml", True, False, False),
-        ("uv.lock", True, True, False),
-        ("Makefile", True, False, False),
-        ("pyrightconfig.json", True, False, False),
-        (".agents/skills/code-change-verification/SKILL.md", True, False, False),
-        (".agents/skills/examples-run-analysis/SKILL.md", True, False, False),
-        ("docs/scripts/generate_ref_files.py", True, True, True),
-        ("docs/index.md", False, True, True),
-        ("docs/日本語 guide.md", False, True, True),
+        ("src/agents/agent.py", True, False, False, False),
+        ("tests/test_release_provenance.py", True, False, False, False),
+        ("packages/codex/tests/test_package_surface.py", True, False, False, False),
+        ("examples/basic.py", True, False, False, False),
+        (".github/scripts/detect-changes.sh", True, False, False, False),
+        (".github/scripts/check_optional_truthiness.py", True, False, False, False),
+        (".github/scripts/run_serial_tests.py", True, False, False, False),
+        (
+            ".github/scripts/run-asyncio-teardown-stability.sh",
+            True,
+            False,
+            False,
+            False,
+        ),
+        (".github/scripts/verify_release.py", True, False, False, False),
+        ("packages/codex/scripts/verify_installed.py", True, False, False, False),
+        ("packages/codex/scripts/hatch_build.py", True, False, False, False),
+        (".github/scripts/update_released_api_contract.py", True, False, False, False),
+        (".github/scripts/run_repo_skill_tests.py", True, False, False, False),
+        (".github/workflows/tests.yml", True, True, False, False),
+        (".github/workflows/release-readiness-refresh.yml", True, False, False, False),
+        (".github/workflows/docs.yml", True, True, False, True),
+        (".github/workflows/publish.yml", True, False, False, False),
+        (".github/workflows/repo-skills.yml", True, False, False, False),
+        (".github/workflows/release-please.yml", True, False, False, False),
+        ("release-please-config.json", True, False, False, False),
+        (".release-please-manifest.json", True, False, False, False),
+        ("pyproject.toml", True, False, False, False),
+        ("uv.lock", True, True, False, True),
+        ("Makefile", True, False, False, False),
+        ("pyrightconfig.json", True, False, False, False),
+        (".agents/skills/code-change-verification/SKILL.md", True, False, False, False),
+        (".agents/skills/code-change-verification/scripts/run.sh", True, False, False, False),
+        ("docs/native-alpha/index.md", True, True, True, True),
+        ("docs/sdk/topics.json", True, True, True, True),
+        ("docs/assets/diagram.png", False, True, True, True),
+        ("docs/日本語 guide.md", True, True, True, True),
         pytest.param(
             "docs/line\nbreak.md",
-            False,
+            True,
+            True,
             True,
             True,
             marks=pytest.mark.skipif(os.name == "nt", reason="Windows forbids newlines in paths."),
         ),
-        ("mkdocs.yml", False, True, True),
-        ("mkdocs-yml", False, False, False),
-        ("README.md", False, False, False),
-        ("AGENTS.md", False, False, False),
-        (".github/RELEASING.md", False, False, False),
-        (".github/dependabot.yml", False, False, False),
-        (".github/workflows/codeql.yml", False, False, False),
+        ("mkdocs.yml", True, True, True, True),
+        ("mkdocs-yml", False, False, False, False),
+        ("README.md", True, False, False, False),
+        ("AGENTS.md", False, False, False, False),
+        (".github/RELEASING.md", False, False, False, False),
+        (".github/dependabot.yml", False, False, False, False),
+        (".github/workflows/codeql.yml", False, False, False, False),
     ],
 )
 def test_changed_paths_select_owning_checks(
-    change_repo: tuple[Path, str], path: str, code: bool, docs: bool, docs_only: bool
+    change_repo: tuple[Path, str],
+    path: str,
+    code: bool,
+    docs: bool,
+    docs_only: bool,
+    docs_deploy: bool,
 ) -> None:
     repo, base = change_repo
     head = _commit(repo, path)
@@ -153,9 +198,107 @@ def test_changed_paths_select_owning_checks(
         ("code", code),
         ("docs", docs),
         ("docs-only", docs_only),
-        ("docs-deploy", docs),
+        ("docs-deploy", docs_deploy),
     ):
         assert _detect(repo, mode, base, head) is expected, mode
+
+
+def _pr_merge(repo: Path, *, code: str = "") -> tuple[str, str]:
+    """Create a real merge after the target moved past the PR event base."""
+    _git(repo, "checkout", "-b", "proposal")
+    pr_paths = ["docs/assets/diagram.png"]
+    if code == "proposal":
+        pr_paths.append("src/agents/run.py")
+    _commit(repo, *pr_paths)
+    _git(repo, "checkout", "main")
+    target = _commit(repo, ".github/workflows/codex-python.yml")
+    _git(repo, "merge", "--no-ff", "--no-commit", "proposal")
+    resolution_paths = ("src/agents/resolution.py",) if code == "resolution" else ()
+    return target, _commit(repo, *resolution_paths)
+
+
+def _pr_event(head: str) -> dict[str, str]:
+    return {
+        "GITHUB_EVENT_NAME": "pull_request",
+        "GITHUB_REF": "refs/pull/267/merge",
+        "GITHUB_SHA": head,
+    }
+
+
+@pytest.mark.parametrize("code", ["", "proposal", "resolution"])
+def test_pr_merge_uses_actual_target_parent(change_repo: tuple[Path, str], code: str) -> None:
+    repo, event_base = change_repo
+    _, merge = _pr_merge(repo, code=code)
+    event = _pr_event(merge)
+    # An upstream workflow edit alone must not make an asset-only docs PR run native builds.
+    assert _detect(repo, "code", event_base, merge, extra_env=event) is bool(code)
+    assert _detect(repo, "docs", event_base, merge, extra_env=event)
+
+
+@pytest.mark.parametrize("remote_available", [True, False])
+def test_pr_merge_shallow_checkout_resolves_first_parent_or_requires_checks(
+    change_repo: tuple[Path, str], tmp_path: Path, remote_available: bool
+) -> None:
+    repo, event_base = change_repo
+    target, merge = _pr_merge(repo)
+    clone = tmp_path / "checkout"
+    _git(tmp_path, "clone", "--depth=1", repo.as_uri(), str(clone))
+    assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
+    missing = subprocess.run(
+        ["git", "-C", str(clone), "cat-file", "-e", f"{target}^{{commit}}"],
+        env=_environment(),
+        capture_output=True,
+        check=False,
+        timeout=SUBPROCESS_TIMEOUT_SECONDS,
+    )
+    assert missing.returncode != 0
+    if not remote_available:
+        _git(clone, "remote", "remove", "origin")
+    assert _detect(clone, "code", event_base, merge, extra_env=_pr_event(merge)) is (
+        not remote_available
+    )
+    assert _detect(clone, "docs", event_base, merge, extra_env=_pr_event(merge))
+
+
+@pytest.mark.parametrize("context", ["push", "merge_group", "manual", "wrong_ref", "wrong_sha"])
+def test_non_pr_merge_context_keeps_complete_event_range(
+    change_repo: tuple[Path, str], context: str
+) -> None:
+    repo, event_base = change_repo
+    _, merge = _pr_merge(repo)
+    event = _pr_event(merge)
+    if context in {"push", "merge_group"}:
+        event["GITHUB_EVENT_NAME"] = context
+    elif context == "manual":
+        event = {}
+    elif context == "wrong_ref":
+        event["GITHUB_REF"] = "refs/heads/proposal"
+    else:
+        event["GITHUB_SHA"] = event_base
+    # A push/group includes the upstream workflow; its before/base must stay in use.
+    assert _detect(repo, "code", event_base, merge, extra_env=event)
+    assert _detect(repo, "docs", event_base, merge, extra_env=event)
+
+
+@pytest.mark.parametrize("kind", ["non_merge", "unavailable"])
+def test_unverified_pr_merge_requires_checks(change_repo: tuple[Path, str], kind: str) -> None:
+    repo, base = change_repo
+    plain = _commit(repo, "docs/new.md")
+    head = plain if kind == "non_merge" else MISSING_SHA
+    # Even an empty supplied range cannot claim a non-merge object was a PR merge.
+    assert _detect(repo, "code", plain, head, extra_env=_pr_event(head))
+    assert _detect(repo, "docs", plain, head, extra_env=_pr_event(head))
+
+
+def test_pr_optimization_cannot_authorize_docs_deployment(
+    change_repo: tuple[Path, str],
+) -> None:
+    repo, event_base = change_repo
+    _, merge = _pr_merge(repo)
+    event = _pr_event(merge)
+    # Deployment modes must still see the mixed original range.
+    assert not _detect(repo, "docs-only", event_base, merge, extra_env=event)
+    assert not _detect(repo, "docs-deploy", event_base, merge, extra_env=event)
 
 
 def test_mixed_push_builds_docs_and_checks_code_without_deploying(
@@ -274,14 +417,18 @@ def test_failed_diff_cannot_skip_checks_or_authorize_deployment(
         assert _detect(repo, mode, base, head, bash_args=[*bash_args, mode, base, head]) is expected
 
 
-def test_empty_diff_does_not_run_checks_or_deploy(change_repo: tuple[Path, str]) -> None:
+def test_empty_diff_does_not_run_checks_or_deploy(
+    change_repo: tuple[Path, str],
+) -> None:
     repo, base = change_repo
 
     for mode in ("code", "docs", "docs-only", "docs-deploy"):
         assert not _detect(repo, mode, base, base)
 
 
-def test_rename_into_docs_still_counts_removed_code(change_repo: tuple[Path, str]) -> None:
+def test_rename_into_docs_still_counts_removed_code(
+    change_repo: tuple[Path, str],
+) -> None:
     repo, _ = change_repo
     base = _commit(repo, "src/old.py")
     (repo / "docs").mkdir()
@@ -294,7 +441,9 @@ def test_rename_into_docs_still_counts_removed_code(change_repo: tuple[Path, str
     assert not _detect(repo, "docs-deploy", base, head)
 
 
-def test_code_mode_retains_merge_base_and_head_fallback(change_repo: tuple[Path, str]) -> None:
+def test_code_mode_retains_merge_base_and_head_fallback(
+    change_repo: tuple[Path, str],
+) -> None:
     repo, base = change_repo
     _git(repo, "update-ref", "refs/remotes/origin/main", base)
     _commit(repo, "src/agents/run.py")
@@ -310,9 +459,12 @@ def test_custom_pattern_mode_is_preserved(change_repo: tuple[Path, str]) -> None
     assert not _detect(repo, r"^other/", base, head)
 
 
-def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Path, str]) -> None:
+def test_docs_workflow_requires_positive_detector_evidence(
+    change_repo: tuple[Path, str],
+) -> None:
     workflow = yaml.load(
-        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
     )
     assert workflow["on"] == {
         "push": {
@@ -337,15 +489,30 @@ def test_docs_workflow_requires_positive_detector_evidence(change_repo: tuple[Pa
     head = _commit(repo, "docs/index.md")
     bash_args = ["-euo", "pipefail", "-c", detection["run"]]
     assert _detect(
-        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+        repo,
+        "",
+        "",
+        "",
+        extra_env={"BASE_SHA": base, "HEAD_SHA": head},
+        bash_args=bash_args,
     )
     head = _commit(repo, "src/agents/run.py")
     assert not _detect(
-        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+        repo,
+        "",
+        "",
+        "",
+        extra_env={"BASE_SHA": base, "HEAD_SHA": head},
+        bash_args=bash_args,
     )
     head = _commit(repo, "uv.lock")
     assert _detect(
-        repo, "", "", "", extra_env={"BASE_SHA": base, "HEAD_SHA": head}, bash_args=bash_args
+        repo,
+        "",
+        "",
+        "",
+        extra_env={"BASE_SHA": base, "HEAD_SHA": head},
+        bash_args=bash_args,
     )
 
 
@@ -372,7 +539,8 @@ def test_deployment_input_changes_build_and_deploy_docs(
 
 def test_docs_build_and_publish_have_separate_permissions() -> None:
     workflow = yaml.load(
-        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
     )
     assert workflow["permissions"] == {}
     assert workflow["concurrency"] == {
@@ -405,7 +573,8 @@ def test_docs_build_and_publish_have_separate_permissions() -> None:
 @pytest.mark.skipif(shutil.which("rsync") is None, reason="Publishing uses rsync on Ubuntu")
 def test_docs_publish_static_artifact_to_existing_branch(tmp_path: Path) -> None:
     workflow = yaml.load(
-        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"), Loader=yaml.BaseLoader
+        (ROOT / ".github/workflows/docs.yml").read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
     )
     publish = next(
         step
@@ -454,24 +623,883 @@ def test_docs_publish_static_artifact_to_existing_branch(tmp_path: Path) -> None
     assert _git(published, "remote", "get-url", "origin") == remote.as_posix()
 
 
-def test_packaged_contract_jobs_skip_before_requesting_runners() -> None:
+def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     jobs = yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text())["jobs"]
-    producer = jobs["prospective-release-contract"]
-    assert producer["outputs"]["run"] == "${{ steps.changes.outputs.run }}"
-    detector = next(step for step in producer["steps"] if step.get("id") == "changes")
-    assert detector["run"].startswith("./.github/scripts/detect-changes.sh code ")
+    assert "prospective-release-contract" not in jobs
+    assert not any(name.startswith("packaged-contract-") for name in jobs)
+    for platform in ("linux", "macos"):
+        assert jobs[f"native-{platform}"]["needs"] == "changes"
+        assert jobs[f"native-{platform}"]["if"] == "needs.changes.outputs.code == 'true'"
+    workflow = yaml.safe_load((ROOT / ".github/workflows/codex-python.yml").read_text())
+    steps = workflow["jobs"]["build"]["steps"]
+    names = [step.get("name", "") for step in steps]
+    build = names.index("Build the SDK and native runtime together")
+    verify = names.index("Test fresh installations without a checkout on the import path")
+    upload = names.index("Share the package and test executor")
+    assert build < verify < upload
+    assert "if" not in steps[build] and "if" not in steps[upload]
+    assert steps[verify]["if"] == "runner.os == 'Linux'"
+    assert "for version in 3.10 3.11 3.12; do" in steps[verify]["run"]
+    assert 'cd "$RUNNER_TEMP"' in steps[verify]["run"]
+    assert "env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX" in steps[verify]["run"]
+    assert "-I verify_installed.py" in steps[verify]["run"]
+    assert steps[upload]["with"]["if-no-files-found"] == "error"
+    assert all("continue-on-error" not in steps[index] for index in (build, verify, upload))
 
-    for name in ("packaged-contract-310", "packaged-contract-314", "packaged-contract-windows"):
-        job = jobs[name]
-        assert job["needs"] == "prospective-release-contract"
-        # This must guard job scheduling, not just steps after a runner is allocated.
-        assert job["if"] == "needs.prospective-release-contract.outputs.run == 'true'"
 
-    # Required check contexts must still exist when the scheduler skips a job.
-    for suffix, version in (("310", "3.10"), ("314", "3.14")):
-        job = jobs[f"packaged-contract-{suffix}"]
-        assert job["name"] == f"packaged-contract ({version})"
-        assert "strategy" not in job
-        assert job["env"]["OPENAI_AGENTS_INTEGRATION_PYTHON"] == version
-        setup = next(step for step in job["steps"] if step.get("name") == "Setup uv")
-        assert setup["with"]["python-version"] == version
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "routine_code",
+        "routine_docs",
+        "manifest_reformatted",
+        "release_version",
+        "exact_commits",
+        "missing_base",
+        "zero_base",
+        "unavailable_base",
+        "missing_head",
+        "unavailable_head",
+        "missing_manifest",
+        "invalid_manifest",
+        "missing_root_version",
+        "empty_version",
+        "non_string_version",
+    ],
+)
+@pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
+def test_committed_version_controls_windows_scheduling(
+    change_repo: tuple[Path, str], monkeypatch: pytest.MonkeyPatch, scenario: str, event: str
+) -> None:
+    repo, _ = change_repo
+    workflow_path = ".github/workflows/tests.yml"
+    workflow = yaml.load((ROOT / workflow_path).read_text(), Loader=yaml.BaseLoader)
+    changes = workflow["jobs"]["changes"]
+    gate = next(step for step in changes["steps"] if step.get("id") == "release-windows")
+    assert gate["env"] == {
+        "V1_QUALIFICATION": (
+            "${{ github.ref_name == 'feat/codex-harness' || "
+            "github.base_ref == 'feat/codex-harness' || "
+            "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
+        ),
+        "DEFAULT_BRANCH_PUSH": (
+            "${{ github.event_name == 'push' && "
+            "github.ref_name == github.event.repository.default_branch }}"
+        ),
+        "BASE_SHA": (
+            "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha "
+            "|| github.event.before }}"
+        ),
+        "HEAD_SHA": "${{ github.sha }}",
+    }
+    assert changes["outputs"]["windows"] == "${{ steps.release-windows.outputs.run }}"
+    assert "if" not in gate
+
+    manifest = repo / ".release-please-manifest.json"
+    manifest.write_text('{".": "0.24.0-alpha.3"}\n', encoding="utf-8")
+    base = _commit(repo)
+    if scenario == "manifest_reformatted":
+        manifest.write_text('{\n  ".": "0.24.0-alpha.3",\n  "other": "2.0"\n}\n')
+    elif scenario == "release_version":
+        manifest.write_text('{".": "0.24.0-alpha.4"}\n')
+    elif scenario == "missing_manifest":
+        manifest.unlink()
+    elif scenario == "invalid_manifest":
+        manifest.write_text("this is not JSON")
+    elif scenario == "missing_root_version":
+        manifest.write_text('{"other": "0.24.0-alpha.4"}')
+    elif scenario == "empty_version":
+        manifest.write_text('{".": ""}')
+    elif scenario == "non_string_version":
+        manifest.write_text('{".": null}')
+    path = "docs/index.md" if scenario == "routine_docs" else "src/agents/run.py"
+    head = _commit(repo) if scenario == "release_version" else _commit(repo, path)
+    if scenario == "release_version":
+        # A root version change itself must start all dependent producers/tests.
+        assert _detect(repo, "code", base, head)
+    elif scenario == "exact_commits":
+        # Checked-out HEAD and the worktree must not replace the supplied event head.
+        manifest.write_text('{".": "0.24.0-alpha.8"}\n')
+        _commit(repo)
+        manifest.write_text('{".": "0.24.0-alpha.9"}\n')
+    elif scenario == "missing_base":
+        base = ""
+    elif scenario == "zero_base":
+        base = ZERO_SHA
+    elif scenario == "unavailable_base":
+        base = MISSING_SHA
+    elif scenario == "missing_head":
+        head = ""
+    elif scenario == "unavailable_head":
+        head = MISSING_SHA
+
+    output = repo.parent / "version-output"
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("BASE_SHA", base)
+    monkeypatch.setenv("HEAD_SHA", head)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    monkeypatch.delenv("DEFAULT_BRANCH_PUSH", raising=False)
+    script = gate["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    invalid = {
+        "missing_head",
+        "unavailable_head",
+        "missing_manifest",
+        "invalid_manifest",
+        "missing_root_version",
+        "empty_version",
+        "non_string_version",
+    }
+    if event != "workflow_dispatch":
+        invalid.update({"missing_base", "zero_base", "unavailable_base"})
+    if scenario in invalid:
+        with pytest.raises(SystemExit, match="Cannot compare release versions"):
+            exec(compile(script, workflow_path, "exec"), {})
+        assert not output.exists()
+    else:
+        exec(compile(script, workflow_path, "exec"), {})
+        assert output.read_text() == (
+            "run=true\n"
+            if event == "workflow_dispatch" or scenario == "release_version"
+            else "run=false\n"
+        )
+
+
+def test_default_branch_code_push_requests_windows_without_a_release(
+    change_repo: tuple[Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, _ = change_repo
+    workflow_path = ".github/workflows/tests.yml"
+    workflow = yaml.load((ROOT / workflow_path).read_text(), Loader=yaml.BaseLoader)
+    gate = next(
+        step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "release-windows"
+    )
+    (repo / ".release-please-manifest.json").write_text('{".": "0.24.0-alpha.3"}\n')
+    base = _commit(repo)
+    head = _commit(repo, "src/agents/session.py")
+    assert _detect(repo, "code", base, head)
+    output = repo.parent / "default-push-windows-output"
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("BASE_SHA", base)
+    monkeypatch.setenv("HEAD_SHA", head)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "push")
+    monkeypatch.setenv("DEFAULT_BRANCH_PUSH", "true")
+    script = gate["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    exec(compile(script, workflow_path, "exec"), {})
+    assert output.read_text() == "run=true\n"
+
+
+def test_windows_jobs_follow_the_selected_native_producer() -> None:
+    workflow = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
+    assert "workflow_dispatch" in workflow["on"]
+    jobs = workflow["jobs"]
+    for platform in ("linux", "macos"):
+        producer = jobs[f"native-{platform}"]
+        assert producer["needs"] == "changes"
+        assert producer["if"] == "needs.changes.outputs.code == 'true'"
+    producer = jobs["native-windows"]
+    assert producer["needs"] == "changes"
+    assert producer["if"] == (
+        "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
+    )
+    suites = jobs["tests-windows"]
+    assert suites["needs"] == "native-windows" and "if" not in suites
+    assert suites["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
+    assert suites["runs-on"] == "windows-latest"
+    assert "packaged-contract-windows" not in jobs
+    win_typecheck = jobs["mypy-win32"]
+    assert win_typecheck["needs"] == "native-linux"
+    assert win_typecheck["runs-on"] == "ubuntu-latest"
+    assert "if" not in win_typecheck
+
+
+@pytest.mark.parametrize(
+    ("event", "ref", "base", "head_repo", "code", "expected"),
+    [
+        pytest.param(
+            "pull_request", "199/merge", "main", "example/sdk", "true", True, id="default-pr"
+        ),
+        pytest.param(
+            "pull_request",
+            "199/merge",
+            "feature/parent",
+            "example/sdk",
+            "true",
+            True,
+            id="stacked-pr",
+        ),
+        pytest.param(
+            "pull_request",
+            "199/merge",
+            "feature/parent",
+            "example/fork",
+            "true",
+            False,
+            id="fork-stacked-pr",
+        ),
+        pytest.param(
+            "pull_request", "199/merge", "main", "example/fork", "true", False, id="fork-pr"
+        ),
+        pytest.param("push", "main", "", "", "true", True, id="default-push"),
+        pytest.param("push", "feature/parent", "", "", "true", False, id="other-push"),
+        pytest.param(
+            "merge_group",
+            "gh-readonly-queue/main/pr-199",
+            "main",
+            "example/sdk",
+            "true",
+            False,
+            id="merge-group",
+        ),
+        pytest.param(
+            "pull_request",
+            "199/merge",
+            "feature/parent",
+            "example/sdk",
+            "false",
+            False,
+            id="stacked-docs",
+        ),
+        pytest.param("push", "main", "", "", "false", False, id="default-docs"),
+    ],
+)
+def test_native_selection_only_runs_for_trusted_code_events(
+    event: str, ref: str, base: str, head_repo: str, code: str, expected: bool
+) -> None:
+    import re
+
+    workflow = yaml.load((ROOT / ".github/workflows/tests.yml").read_text(), Loader=yaml.BaseLoader)
+    selection = next(
+        step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "native-source"
+    )
+    values = {
+        "steps.changes.outputs.run": code,
+        "github.event_name": event,
+        "github.ref_name": ref,
+        "github.base_ref": base,
+        "github.event.repository.default_branch": "main",
+        "github.event.pull_request.head.repo.full_name": head_repo,
+        "github.repository": "example/sdk",
+    }
+    # Evaluate the workflow's actual Boolean condition with event values, including
+    # an absent PR head for pushes. Unknown contexts fail rather than becoming truthy.
+    condition = re.sub(
+        r"\b(?:steps|github)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+",
+        lambda match: repr(values[match.group()]),
+        selection["if"],
+    )
+    condition = condition.replace("&&", " and ").replace("||", " or ")
+    assert eval(condition, {"__builtins__": {}}, {}) is expected
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "reuse",
+        "trusted_push_to_pr",
+        "stacked_pr",
+        "stacked_pr_native_changed",
+        "reused_push",
+        "no_history",
+        "pre_native",
+        "untrusted",
+        "wrong_workflow",
+        "wrong_branch",
+        "dispatch",
+        "in_progress",
+        "failed_run",
+        "pending_python_producer_failed",
+        "pending_python_producer_in_progress",
+        "pending_python_native_changed",
+        "pending_python_untrusted",
+        "pending_python_expired",
+        "pending_python_missing_artifact",
+        "pending_python_release_missing_windows_job",
+        "current_run",
+        "unrelated_source",
+        "native_changed",
+        "build_payload_changed",
+        "build_payload_changed_modified",
+        "build_payload_changed_native_changed",
+        "version_and_docs",
+        "retired_realtime_extra",
+        "retired_realtime_extra_dependency_changed",
+        "retired_realtime_extra_build_changed",
+        "retired_realtime_extra_native_changed",
+        "build_metadata_changed",
+        "dependency_lock_changed",
+        "producer_changed",
+        "forwarding_changed",
+        "selector_changed",
+        "historical_repack",
+        "native_workflow_changed",
+        "redirected_download",
+        "producer_failed",
+        "producer_in_progress",
+        "missing_job",
+        "expired",
+        "missing_artifact",
+        "paginated",
+        "incomplete_jobs",
+        "incomplete_artifacts",
+        "api_error",
+        "pr_same",
+        "pr_default_merged",
+        "push_session_storage",
+        "push_session_storage_native_build_changed",
+        "push_session_storage_other_doc_changed",
+        "push_package_demos",
+        "push_package_demos_native_build_changed",
+        "push_package_demos_native_changed",
+        "push_package_demos_build_metadata_changed",
+        "push_native_config",
+        "push_native_config_native_build_changed",
+        "push_native_config_native_changed",
+        "push_external_environments",
+        "push_external_environments_native_build_changed",
+        "push_native_examples",
+        "push_native_examples_native_build_changed",
+        "routine_two_platforms",
+        "release_complete",
+        "release_two_platforms",
+        "release_missing_windows_job",
+        "release_missing_windows_artifact",
+        "release_expired_windows_artifact",
+        "release_split_donors",
+        "unknown_two_platforms",
+        "unknown_complete",
+    ],
+)
+def test_native_build_selection(
+    change_repo: tuple[Path, str], monkeypatch: pytest.MonkeyPatch, scenario: str
+) -> None:
+    import io
+    import json
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
+    scenario = scenario.removeprefix("pending_python_")
+    repo, initial = change_repo
+    workflow_path = ".github/workflows/tests.yml"
+    workflow_text = (ROOT / workflow_path).read_text()
+    payload_files = [
+        repo / "packages/codex/scripts" / name
+        for name in ("build.py", "hatch_build.py", "native_helpers.py")
+    ]
+    if scenario.startswith("build_payload_changed"):
+        # Every producer-code change needs a new build; no historical blob-pair bypass.
+        for path in payload_files:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"before {path.name}\n")
+    native_workflow_path = ".github/workflows/codex-python.yml"
+    native_workflow_text = (ROOT / native_workflow_path).read_text()
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    assert "workflow_dispatch" in workflow["on"]
+    changes = workflow["jobs"]["changes"]
+    selection = next(step for step in changes["steps"] if step.get("id") == "native-source")
+    assert selection["env"]["REQUIRE_WINDOWS"] == "${{ steps.release-windows.outputs.run }}"
+    for name in ("native-linux", "native-windows", "native-macos"):
+        assert workflow["jobs"][name]["with"]["native_source_run"] == (
+            "${{ needs.changes.outputs.native_source_run }}"
+        )
+    assert changes["outputs"]["native_source_run"] == "${{ steps.native-source.outputs.run_id }}"
+    for path, contents in (
+        (workflow_path, workflow_text),
+        (native_workflow_path, native_workflow_text),
+    ):
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(contents)
+    if scenario in {"selector_changed", "historical_repack"}:
+        (repo / workflow_path).write_text(
+            workflow_text.replace("# Search a bounded history.", "# Prior selector.")
+        )
+    if scenario == "forwarding_changed":
+        (repo / workflow_path).write_text(
+            workflow_text.replace(
+                "${{ needs.changes.outputs.native_source_run }}",
+                "${{ inputs.native_source_run || '' }}",
+            )
+        )
+    native_workflow = repo / native_workflow_path
+    if scenario == "redirected_download":
+        native_workflow.write_text(
+            native_workflow_text.replace(
+                "run-id: ${{ steps.native-source.outputs.run_id }}", "run-id: 999"
+            )
+        )
+    if scenario == "native_workflow_changed":
+        native_workflow.write_text(
+            native_workflow_text.replace('python-version: "3.12"', 'python-version: "3.11"')
+        )
+    project = (
+        '[project]\nname = "openai-agents"\nversion = "0.23.1"\n'
+        '[build-system]\nrequires = ["hatchling"]\n'
+    )
+    lock = (
+        '[[package]]\nname = "openai-agents"\nversion = "0.23.1"\n'
+        'source = {editable = "."}\n'
+        '[[package]]\nname = "pydantic"\nversion = "2.12.2"\n'
+        'source = {registry = "https://pypi.org/simple"}\n'
+    )
+    realtime_project = 'realtime = ["websockets>=15.0,<17"]\n'
+    realtime_lock = 'realtime = [{name = "websockets"}]\n'
+    realtime_requirement = (
+        '  {name = "websockets", marker = "extra == \'realtime\'", specifier = ">=15.0,<17"},\n'
+    )
+    # Historical donor transitions prove that removing Python-only callers cannot
+    # conceal changes to compiled inputs. These paths describe the old donor,
+    # not the current SDK inventory. Current routing cases use current paths above.
+    retired_caller_paths = (
+        "packages/codex/demos/_common.py",
+        "packages/codex/demos/decision_notebook.py",
+        "packages/codex/demos/deferred_environment.py",
+        "packages/codex/demos/incident_room.py",
+        "packages/codex/demos/release_desk.py",
+        "packages/codex/demos/sandbox_coder.py",
+        "packages/codex/demos/data/incident/deployments.json",
+        "packages/codex/demos/data/incident/logs.json",
+        "packages/codex/demos/data/incident/metrics.json",
+        "packages/codex/demos/data/incident/runbook.json",
+        "packages/codex/demos/data/notebook/project.md",
+        "packages/codex/demos/data/shop/README.md",
+        "packages/codex/demos/data/shop/shop.py",
+        "packages/codex/demos/data/shop/test_shop.py",
+        "packages/codex/examples/approvals.py",
+        "packages/codex/examples/cancellation.py",
+        "packages/codex/examples/checkpoint.py",
+        "packages/codex/examples/managed_jobs.py",
+        "packages/codex/examples/sessions.py",
+        "packages/codex/examples/subagents.py",
+        "packages/codex/examples/tools_streaming.py",
+    )
+    retired_model_test = '  "packages/codex/tests/test_turn_model_step_limit.py",\n'
+    if scenario.startswith("retired_realtime_extra"):
+        project = project.replace(
+            "[build-system]",
+            '[project.optional-dependencies]\nvoice = ["numpy"]\n'
+            + realtime_project
+            + "[build-system]",
+        )
+        lock = lock.replace(
+            '[[package]]\nname = "pydantic"',
+            '[package.optional-dependencies]\nvoice = [{name = "numpy"}]\n'
+            + realtime_lock
+            + '[package.metadata]\nprovides-extras = ["voice", "realtime"]\n'
+            + 'requires-dist = [\n  {name = "numpy", marker = "extra == \'voice\'"},\n'
+            + realtime_requirement
+            + ']\n[[package]]\nname = "pydantic"',
+        )
+    if scenario.startswith("push_package_demos"):
+        project += (
+            "[tool.pytest.ini_options]\ntestpaths = [\n"
+            '  "tests",\n'
+            + retired_model_test
+            + '  "packages/codex/tests/test_public_sdk_history.py",\n]\n'
+        )
+        for path in retired_caller_paths:
+            retired_demo = repo / path
+            retired_demo.parent.mkdir(parents=True, exist_ok=True)
+            retired_demo.write_text("# Demo or fixture present in the qualified source\n")
+    (repo / "pyproject.toml").write_text(project)
+    (repo / "uv.lock").write_text(lock)
+    if scenario == "pre_native":
+        native_workflow.unlink()
+    base = _commit(repo)
+    if scenario.startswith("build_payload_changed"):
+        for path in payload_files:
+            path.write_text(f"after {path.name}\n")
+        if scenario == "build_payload_changed_modified":
+            payload_files[0].write_text("unreviewed compiler flags\n")
+    native_workflow.write_text(native_workflow_text)
+    (repo / workflow_path).write_text(workflow_text)
+    if scenario.startswith("retired_realtime_extra"):
+        project = project.replace(realtime_project, "")
+        lock = (
+            lock.replace(realtime_lock, "")
+            .replace('["voice", "realtime"]', '["voice"]')
+            .replace(realtime_requirement, "")
+        )
+        if scenario.endswith("dependency_changed"):
+            lock = lock.replace("2.12.2", "2.13.0")
+        elif scenario.endswith("build_changed"):
+            project = project.replace('["hatchling"]', '["hatchling", "maturin"]')
+        (repo / "pyproject.toml").write_text(project)
+        (repo / "uv.lock").write_text(lock)
+    if scenario in {
+        "version_and_docs",
+        "build_metadata_changed",
+        "dependency_lock_changed",
+    }:
+        project = project.replace("0.23.1", "0.24.0a1")
+        lock = lock.replace("0.23.1", "0.24.0a1")
+        if scenario == "build_metadata_changed":
+            project = project.replace('["hatchling"]', '["hatchling", "maturin"]')
+        if scenario == "dependency_lock_changed":
+            lock = lock.replace("2.12.2", "2.13.0")
+        (repo / "pyproject.toml").write_text(project)
+        (repo / "uv.lock").write_text(lock)
+        for path in (
+            "README.md",
+            "CHANGELOG-alpha.md",
+            "examples/README.md",
+            "docs/native-alpha/sessions.md",
+            "packages/codex/README.md",
+            "docs/native-alpha/index.md",
+            "docs/native-alpha/reference.md",
+            ".github/RELEASING.md",
+            ".github/workflows/alpha-install.yml",
+            "release-please-config.json",
+            ".release-please-manifest.json",
+        ):
+            target = repo / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("Alpha release\n")
+    if scenario == "producer_changed":
+        (repo / workflow_path).write_text(
+            workflow_text.replace("runner: windows-latest", "runner: windows-2022")
+        )
+    additional_paths: tuple[str, ...] = ()
+    if scenario == "version_and_docs":
+        additional_paths = (
+            "examples/README.md",
+            "docs/native-alpha/reference.md",
+            "docs/assets/images/agents-sdk-v0-v1-architecture.png",
+        )
+    elif scenario.startswith("retired_realtime_extra"):
+        additional_paths = (
+            "Makefile",
+            "mkdocs.yml",
+            "integration_tests/pytest.ini",
+            "integration_tests/README.md",
+            "tests/README.md",
+            "src/agents/realtime/README.md",
+            "tests/realtime/README.md",
+            ".github/scripts/run_integration_tests.py",
+            ".github/scripts/update_released_api_contract.py",
+            "tests/fixtures/released_api_contract_policy.json",
+            "examples/model_providers/custom_provider.py",
+            "examples/realtime/README.md",
+            "docs/assets/images/agents-sdk-v0-v1-architecture.png",
+        )
+    elif scenario.startswith("push_session_storage"):
+        additional_paths = (
+            "packages/codex/scripts/session_storage.py",
+            "packages/codex/docs/SESSION_STORAGE.md",
+        )
+        if scenario == "push_session_storage_native_build_changed":
+            additional_paths += ("packages/codex/scripts/native_env.py",)
+        elif scenario == "push_session_storage_other_doc_changed":
+            additional_paths += ("packages/codex/docs/UNREVIEWED.md",)
+    elif scenario.startswith("push_package_demos"):
+        for path in retired_caller_paths:
+            (repo / path).unlink()
+        project = project.replace(retired_model_test, "")
+        if scenario == "push_package_demos_build_metadata_changed":
+            project = project.replace('["hatchling"]', '["hatchling", "maturin"]')
+        (repo / "pyproject.toml").write_text(project)
+        additional_paths = (
+            "packages/codex/demos/README.md",
+            "packages/codex/docs/AFTER_TOOLS.md",
+            "packages/codex/docs/APPLICATION_COMPACTION.md",
+            "packages/codex/docs/AUTOMATIC_CAPTURE.md",
+            "packages/codex/docs/CONFIGURATION.md",
+            "packages/codex/docs/CONVERSATION_CONTROL.md",
+            "packages/codex/docs/EVENTS.md",
+            "packages/codex/docs/EXTERNAL_ENVIRONMENTS.md",
+            "packages/codex/docs/HTTP_MODEL_ADAPTER.md",
+            "packages/codex/docs/KNOWN_RESULT_RECOVERY.md",
+            "packages/codex/docs/MANAGED_AGENTS.md",
+            "packages/codex/docs/MCP_TOOL_REFRESH.md",
+            "packages/codex/docs/NATIVE_FLEX.md",
+            "packages/codex/docs/NATIVE_INTERCEPTION.md",
+            "packages/codex/docs/NATIVE_MCP_RESULTS.md",
+            "packages/codex/docs/RECEIVED_USAGE.md",
+            "packages/codex/docs/REPLACEABLE_TOOLS.md",
+            "packages/codex/docs/RESPONSE_CONTROL.md",
+            "packages/codex/docs/SDK_COMPATIBILITY.md",
+            "packages/codex/docs/SDK_MCP.md",
+            "packages/codex/docs/SDK_MODELS.md",
+            "packages/codex/docs/SDK_TOOL_CONTROLS.md",
+            "packages/codex/docs/SURFACE.md",
+            "packages/codex/docs/TOOL_ELIGIBILITY.md",
+            "packages/codex/docs/WORKFLOW_CONTRACTS.md",
+            "packages/codex/examples/agents_as_tools.py",
+        )
+        if scenario == "push_package_demos_native_build_changed":
+            additional_paths += ("packages/codex/scripts/native_env.py",)
+    elif scenario.startswith("push_native_config"):
+        additional_paths = (
+            "src/agents/options.py",
+            "src/agents/config.py",
+        )
+        if scenario == "push_native_config_native_build_changed":
+            additional_paths += ("packages/codex/scripts/native_env.py",)
+    elif scenario.startswith("push_external_environments"):
+        additional_paths = ("packages/codex/docs/EXTERNAL_ENVIRONMENTS.md",)
+        if scenario == "push_external_environments_native_build_changed":
+            additional_paths += ("packages/codex/scripts/native_env.py",)
+    elif scenario.startswith("push_native_examples"):
+        additional_paths = (
+            "examples/basic.py",
+            "examples/typed_context.py",
+            "examples/conversation.py",
+        )
+        if scenario == "push_native_examples_native_build_changed":
+            additional_paths += ("packages/codex/scripts/native_env.py",)
+    if scenario.startswith("stacked_pr"):
+        # The candidate PR's own diff may be pure Python while its parent changes
+        # native inputs relative to the trusted default-branch donor.
+        if scenario == "stacked_pr_native_changed":
+            _commit(repo, "packages/codex/Cargo.toml")
+        else:
+            _commit(repo, "src/agents/parent.py")
+    head = _commit(
+        repo,
+        "packages/codex/Cargo.toml"
+        if scenario
+        in {
+            "native_changed",
+            "push_package_demos_native_changed",
+            "push_native_config_native_changed",
+            "build_payload_changed_native_changed",
+            "retired_realtime_extra_native_changed",
+        }
+        else "src/agents/agent.py",
+        *additional_paths,
+    )
+    if scenario == "unrelated_source":
+        _git(repo, "checkout", "-b", "unrelated", initial)
+        donor = _commit(repo, "unrelated.txt")
+        _git(repo, "checkout", "main")
+    else:
+        donor = base
+    repository = "example/sdk"
+    pr_donor = scenario in {"pr_same", "pr_default_merged"}
+    source = {
+        "id": 456 if scenario == "current_run" else 123,
+        "head_sha": donor,
+        "repository": {"full_name": repository, "id": 10},
+        "head_repository": {
+            "full_name": "example/fork" if scenario == "untrusted" else repository,
+            "id": 10,
+        },
+        "path": ".github/workflows/other.yml" if scenario == "wrong_workflow" else workflow_path,
+        "event": "pull_request"
+        if pr_donor
+        else "workflow_dispatch"
+        if scenario == "dispatch"
+        else "push",
+        "head_branch": "feature" if pr_donor or scenario == "wrong_branch" else "main",
+        "status": "in_progress" if pending_python else "completed",
+        "conclusion": None
+        if pending_python
+        else "failure"
+        if scenario == "failed_run"
+        else "success",
+    }
+    if pr_donor:
+        # Supply a valid old-policy PR, including its immutable execution commit.
+        execution_sha = _git(
+            repo,
+            "commit-tree",
+            _git(repo, "rev-parse", f"{base}^{{tree}}"),
+            "-p",
+            initial,
+            "-p",
+            base,
+            "-m",
+            "Synthetic PR execution merge",
+        )
+        source["referenced_workflows"] = [
+            {
+                "path": f"{repository}/{native_workflow_path}@{execution_sha}",
+                "ref": "refs/pull/199/merge",
+                "sha": execution_sha,
+            }
+        ]
+    jobs = [
+        {
+            "name": f"native-{name} / Native package ({runner})",
+            "status": "completed",
+            "conclusion": "success",
+            "steps": [
+                {
+                    "name": "Build the shared test executor",
+                    "conclusion": "skipped"
+                    if scenario in {"reused_push", "historical_repack"}
+                    else "success",
+                }
+            ],
+        }
+        for name, runner in (
+            ("linux", "ubuntu-24.04"),
+            ("windows", "windows-latest"),
+            ("macos", "macos-latest"),
+        )
+    ]
+    if scenario == "producer_failed":
+        jobs[0]["conclusion"] = "failure"
+    if scenario == "producer_in_progress":
+        jobs[0].update(status="in_progress", conclusion=None)
+    if scenario in {"missing_job", "pre_native"}:
+        jobs.pop()
+    artifacts = [
+        {"name": name, "expired": scenario == "expired"}
+        for name in ("native-Linux-X64", "native-Windows-X64", "native-macOS-ARM64")
+    ]
+    if scenario == "missing_artifact":
+        artifacts.pop()
+    if scenario in {
+        "routine_two_platforms",
+        "release_two_platforms",
+        "release_split_donors",
+        "unknown_two_platforms",
+    }:
+        jobs[1]["conclusion"] = "skipped"
+        artifacts.pop(1)
+    if scenario == "release_missing_windows_job":
+        jobs.pop(1)
+    if scenario == "release_missing_windows_artifact":
+        artifacts.pop(1)
+    if scenario == "release_expired_windows_artifact":
+        artifacts[1]["expired"] = True
+    if scenario == "paginated":
+        jobs[:0] = [{"name": "other", "conclusion": "success", "steps": []} for _ in range(100)]
+        artifacts[:0] = [{"name": "other", "expired": False} for _ in range(100)]
+    if pending_python or scenario == "failed_run":
+        jobs.append(
+            {
+                "name": "tests (3.14)",
+                "status": "in_progress" if pending_python else "completed",
+                "conclusion": None if pending_python else "failure",
+            }
+        )
+
+    def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
+        url = request.full_url
+        if scenario == "api_error":
+            raise urllib.error.URLError("API unavailable")
+        if "/workflows/" in url:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            status_matches = "status" not in query or source["status"] in query["status"]
+            # Return PR runs even for a filtered search to exercise the trust gate itself.
+            response = {
+                "workflow_runs": [] if scenario == "no_history" or not status_matches else [source]
+            }
+            if scenario == "release_split_donors":
+                response["workflow_runs"].append({**source, "id": 124})
+        elif "/pulls/" in url:
+            response = {
+                "merged": True,
+                "head": {"sha": base, "repo": {"id": 10}},
+                "base": {"ref": "main", "repo": {"id": 10}},
+                "merge_commit_sha": base,
+            }
+        else:
+            key = "jobs" if "/jobs?" in url else "artifacts"
+            items = jobs if key == "jobs" else artifacts
+            if scenario == "release_split_donors" and "/runs/124/" in url:
+                items = (
+                    [
+                        {
+                            "name": "native-windows / Native package (windows-latest)",
+                            "conclusion": "success",
+                        }
+                    ]
+                    if key == "jobs"
+                    else [{"name": "native-Windows-X64", "expired": False}]
+                )
+            if scenario == f"incomplete_{key}":
+                items = []
+            page = int(urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)["page"][0])
+            response = {
+                "total_count": 3 if scenario == f"incomplete_{key}" else len(items),
+                key: items[(page - 1) * 100 : page * 100],
+            }
+        return io.StringIO(json.dumps(response))
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    output = repo / "output"
+    for key, value in {
+        "GITHUB_REPOSITORY": repository,
+        "GITHUB_API_URL": "https://api.example.invalid",
+        "GITHUB_SERVER_URL": "https://github.example.invalid",
+        "GITHUB_SHA": head,
+        "GITHUB_RUN_ID": "456",
+        "GITHUB_HEAD_REF": "feature",
+        "CURRENT_PR": (
+            "199"
+            if scenario in {"pr_same", "trusted_push_to_pr"} or scenario.startswith("stacked_pr")
+            else ""
+        ),
+        "CURRENT_PR_HEAD": head,
+        "GITHUB_BASE_REF": "feature/parent" if scenario.startswith("stacked_pr") else "main",
+        "GITHUB_OUTPUT": str(output),
+        "DEFAULT_BRANCH": "main",
+        "GH_TOKEN": "placeholder",
+        "REQUIRE_WINDOWS": (
+            ""
+            if scenario.startswith("unknown_")
+            else "true"
+            if scenario.startswith("release_") or scenario == "version_and_docs"
+            else "false"
+        ),
+    }.items():
+        monkeypatch.setenv(key, value)
+    script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    if scenario.startswith("incomplete_"):
+        with pytest.raises(SystemExit, match="Incomplete source metadata"):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario == "api_error":
+        with pytest.raises(urllib.error.URLError, match="API unavailable"):
+            exec(compile(script, workflow_path, "exec"), {})
+    else:
+        exec(compile(script, workflow_path, "exec"), {})
+    assert (output.read_text() if output.exists() else "") == (
+        "run_id=123\n"
+        if scenario
+        in {
+            "reuse",
+            "in_progress",
+            "failed_run",
+            "trusted_push_to_pr",
+            "stacked_pr",
+            "reused_push",
+            "version_and_docs",
+            "paginated",
+            "push_native_config",
+            "push_external_environments",
+            "push_native_examples",
+            "routine_two_platforms",
+            "release_complete",
+            "unknown_complete",
+        }
+        else ""
+    )
+
+
+@pytest.mark.parametrize("event", ["push", "pull_request", "merge_group"])
+def test_v1_qualification_requests_windows_without_a_release_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, event: str
+) -> None:
+    workflow_path = ".github/workflows/tests.yml"
+    workflow = yaml.load((ROOT / workflow_path).read_text(), Loader=yaml.BaseLoader)
+    gate = next(
+        step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "release-windows"
+    )
+    output = tmp_path / "windows-output"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_EVENT_NAME", event)
+    monkeypatch.setenv("V1_QUALIFICATION", "true")
+    monkeypatch.setenv("BASE_SHA", ZERO_SHA)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    script = gate["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    with pytest.raises(SystemExit) as result:
+        exec(compile(script, workflow_path, "exec"), {})
+    assert result.value.code == 0
+    assert output.read_text() == "run=true\n"

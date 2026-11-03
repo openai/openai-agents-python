@@ -1,0 +1,229 @@
+diff --git a/codex-rs/codex-mcp/src/elicitation.rs b/codex-rs/codex-mcp/src/elicitation.rs
+index 9707940..b82bf78 100644
+--- a/codex-rs/codex-mcp/src/elicitation.rs
++++ b/codex-rs/codex-mcp/src/elicitation.rs
+@@ -437,6 +437,8 @@ impl ElicitationRequestManager {
+                                 ..
+                             },
+                         ) => !requested_schema.properties.is_empty(),
++                        // A raw schema may require input through root constraints alone.
++                        Elicitation::RawMcpForm { .. } => true,
+                         Elicitation::OpenAiElicitationForm {
+                             requested_schema, ..
+                         } => requested_schema
+@@ -511,6 +513,15 @@ impl ElicitationRequestManager {
+                             meta: None,
+                         });
+                     }
++                    Elicitation::RawMcpForm {
++                        meta,
++                        message,
++                        requested_schema,
++                    } => ElicitationRequest::Form {
++                        meta,
++                        message,
++                        requested_schema,
++                    },
+                     Elicitation::OpenAiForm {
+                         meta,
+                         message,
+@@ -569,6 +580,21 @@ fn can_auto_accept_elicitation(elicitation: &Elicitation) -> bool {
+             // Auto-accept confirm/approval elicitations without schema requirements.
+             requested_schema.properties.is_empty()
+         }
++        Elicitation::RawMcpForm {
++            requested_schema, ..
++        } => requested_schema.as_object().is_some_and(|schema| {
++            // Boolean additionalProperties is safe for {}, but RMCP drops it.
++            // Preserve this exact empty primitive case without ignoring constraints.
++            schema.len() == 3
++                && schema.get("type").and_then(Value::as_str) == Some("object")
++                && schema
++                    .get("properties")
++                    .and_then(Value::as_object)
++                    .is_some_and(serde_json::Map::is_empty)
++                && schema
++                    .get("additionalProperties")
++                    .is_some_and(Value::is_boolean)
++        }),
+         Elicitation::Mcp(_)
+         | Elicitation::OpenAiForm { .. }
+         | Elicitation::OpenAiElicitationForm { .. }
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index c62ff61..e350f34 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -985,11 +985,20 @@ async fn review_guardian_mcp_elicitation(
+         match guardian_elicitation_review_request(&request, originating_call_id) {
+             GuardianElicitationReview::NotRequested => return Ok(None),
+             GuardianElicitationReview::Decline(reason) => {
+-                let Elicitation::Mcp(elicitation) = &request.elicitation else {
+-                    return Ok(None);
++                let elicitation = match &request.elicitation {
++                    Elicitation::Mcp(elicitation) => serde_json::to_value(elicitation),
++                    Elicitation::RawMcpForm {
++                        meta,
++                        message,
++                        requested_schema,
++                    } => Ok(serde_json::json!({
++                        "mode": "form", "_meta": meta, "message": message,
++                        "requestedSchema": requested_schema,
++                    })),
++                    _ => return Ok(None),
+                 };
+                 crate::guardian::ReviewAction {
+-                    action: serde_json::to_value(elicitation)
++                    action: elicitation
+                         .map(|elicitation| {
+                             serde_json::json!({
+                                 "tool": "mcp_elicitation",
+@@ -1064,6 +1073,18 @@ fn guardian_elicitation_review_request(
+                 "guardian MCP elicitation review does not support this elicitation mode",
+             );
+         }
++        Elicitation::RawMcpForm { .. } => {
++            return if request.elicitation.meta().is_some_and(|meta| {
++                metadata_str(meta, MCP_ELICITATION_REQUEST_TYPE_KEY)
++                    == Some(MCP_ELICITATION_REQUEST_TYPE_APPROVAL_REQUEST)
++            }) {
++                GuardianElicitationReview::Decline(
++                    "guardian MCP elicitation review does not support raw approval schemas",
++                )
++            } else {
++                GuardianElicitationReview::NotRequested
++            };
++        }
+         Elicitation::OpenAiForm { .. }
+         | Elicitation::OpenAiElicitationForm { .. }
+         | Elicitation::UserVerification { .. } => {
+diff --git a/codex-rs/core/src/session/mcp_tests.rs b/codex-rs/core/src/session/mcp_tests.rs
+index 28c099f..777c1f9 100644
+--- a/codex-rs/core/src/session/mcp_tests.rs
++++ b/codex-rs/core/src/session/mcp_tests.rs
+@@ -296,3 +296,32 @@ fn guardian_elicitation_timeout_uses_acting_model_instructions() {
+         );
+     }
+ }
++
++#[test]
++fn raw_standard_approval_metadata_retains_guardian_rejection() {
++    for kind in ["mcp_tool_call", "malformed"] {
++        let mut request = form_request(None);
++        request.elicitation = Elicitation::RawMcpForm {
++            meta: Some(json!({
++                "codex_request_type": "approval_request", "codex_approval_kind": kind,
++                "tool_name": "search", "tool_params": {},
++            })),
++            message: "Synthetic raw approval".to_owned(),
++            requested_schema: json!({"type":"object", "properties":{}, "allOf":[{"required":["answer"]}]}),
++        };
++        assert!(matches!(
++            guardian_elicitation_review_request(&request, None),
++            GuardianElicitationReview::Decline(_)
++        ));
++    }
++    let mut request = form_request(None);
++    request.elicitation = Elicitation::RawMcpForm {
++        meta: None,
++        message: "Synthetic ordinary form".to_owned(),
++        requested_schema: json!({"type":"object", "properties":{}}),
++    };
++    assert!(matches!(
++        guardian_elicitation_review_request(&request, None),
++        GuardianElicitationReview::NotRequested
++    ));
++}
+diff --git a/codex-rs/rmcp-client/src/elicitation_client_service.rs b/codex-rs/rmcp-client/src/elicitation_client_service.rs
+index 2ef94e2..d22d374 100644
+--- a/codex-rs/rmcp-client/src/elicitation_client_service.rs
++++ b/codex-rs/rmcp-client/src/elicitation_client_service.rs
+@@ -338,9 +338,33 @@ fn custom_mcp_elicitation(request: CustomRequest) -> Result<Elicitation, rmcp::E
+     let raw_params = request
+         .params
+         .ok_or_else(|| rmcp::ErrorData::invalid_params("missing params", None))?;
+-    let params: rmcp::model::ElicitRequestParams = serde_json::from_value(raw_params)
+-        .map_err(|err| rmcp::ErrorData::invalid_params(err.to_string(), None))?;
+-    Ok(Elicitation::Mcp(params))
++    let is_form = raw_params.as_object().is_some_and(|params| {
++        params
++            .get("mode")
++            .is_none_or(|mode| mode.as_str() == Some("form"))
++    });
++    if !is_form {
++        let params = serde_json::from_value(raw_params).map_err(|_| {
++            rmcp::ErrorData::invalid_params("invalid MCP elicitation parameters", None)
++        })?;
++        return Ok(Elicitation::Mcp(params));
++    }
++    let form: OpenAiFormRequestParams = serde_json::from_value(raw_params.clone())
++        .map_err(|_| rmcp::ErrorData::invalid_params("invalid MCP form parameters", None))?;
++    // Keep primitive behavior only if its typed codec preserves the complete schema.
++    if let Ok(params) = serde_json::from_value::<rmcp::model::ElicitRequestParams>(raw_params)
++        && let rmcp::model::ElicitRequestParams::FormElicitationParams {
++            requested_schema, ..
++        } = &params
++        && serde_json::to_value(requested_schema).ok().as_ref() == Some(&form.requested_schema)
++    {
++        return Ok(Elicitation::Mcp(params));
++    }
++    Ok(Elicitation::RawMcpForm {
++        meta: form.meta,
++        message: form.message,
++        requested_schema: form.requested_schema,
++    })
+ }
+ 
+ fn openai_form_elicitation(request: CustomRequest) -> Result<Elicitation, rmcp::ErrorData> {
+@@ -385,7 +409,8 @@ fn restore_context_meta(
+             .meta_mut()
+             .get_or_insert_with(RequestMetaObject::new)
+             .extend(context_meta),
+-        Elicitation::OpenAiForm { meta, .. }
++        Elicitation::RawMcpForm { meta, .. }
++        | Elicitation::OpenAiForm { meta, .. }
+         | Elicitation::OpenAiElicitationForm { meta, .. }
+         | Elicitation::UserVerification { meta, .. } => {
+             let meta = meta
+@@ -507,12 +532,12 @@ mod tests {
+ 
+         let request = serde_json::from_value::<ServerRequest>(request)
+             .expect("legacy form elicitations must deserialize without a mode");
+-        let ServerRequest::ElicitRequest(request) = request else {
+-            panic!("legacy elicitation/create must dispatch to the typed handler");
++        let ServerRequest::CustomRequest(request) = request else {
++            panic!("legacy elicitation/create must preserve the raw request");
+         };
+-        let ElicitRequestParams::FormElicitationParams {
++        let Elicitation::Mcp(ElicitRequestParams::FormElicitationParams {
+             requested_schema, ..
+-        } = request.params
++        }) = custom_mcp_elicitation(request).expect("legacy primitive schema must remain typed")
+         else {
+             panic!("an omitted legacy elicitation mode must default to form");
+         };
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index 39dc2cd..bf8465a 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -312,6 +312,11 @@ fn remaining_operation_timeout(
+ #[derive(Debug, Clone, PartialEq)]
+ pub enum Elicitation {
+     Mcp(ElicitRequestParams),
++    RawMcpForm {
++        meta: Option<serde_json::Value>,
++        message: String,
++        requested_schema: serde_json::Value,
++    },
+     OpenAiForm {
+         meta: Option<serde_json::Value>,
+         message: String,
+@@ -334,7 +339,8 @@ impl Elicitation {
+     pub fn meta(&self) -> Option<&serde_json::Map<String, serde_json::Value>> {
+         match self {
+             Self::Mcp(request) => request.meta().map(|meta| &meta.0.0),
+-            Self::OpenAiForm { meta, .. }
++            Self::RawMcpForm { meta, .. }
++            | Self::OpenAiForm { meta, .. }
+             | Self::OpenAiElicitationForm { meta, .. }
+             | Self::UserVerification { meta, .. } => {
+                 meta.as_ref().and_then(serde_json::Value::as_object)

@@ -1,0 +1,13 @@
+diff --git a/codex-rs/codex-mcp/src/owned_stdio_tests.rs b/codex-rs/codex-mcp/src/owned_stdio_tests.rs
+index ab57a30ebdfd43c114aff5966290737487ed7bc3..a26ecbf0cc89e8ea20db69248f7ff64e012d4271 100644
+--- a/codex-rs/codex-mcp/src/owned_stdio_tests.rs
++++ b/codex-rs/codex-mcp/src/owned_stdio_tests.rs
+@@ -85,7 +85,7 @@
+     rx: &async_channel::Receiver<Event>,
+ ) -> codex_protocol::approvals::ElicitationRequestEvent {
+     loop {
+-        if let EventMsg::ElicitationRequest(request) = rx.recv().await.expect("native event") {
++        if let EventMsg::ElicitationRequest(request) = rx.recv().await.expect("native event").msg {
+             return request;
+         }
+     }

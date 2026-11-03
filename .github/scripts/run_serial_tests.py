@@ -51,7 +51,7 @@ def main() -> None:
     if sys.platform == "win32":
         # Windows has no process replacement: os.execv spawns a child and
         # terminates this process with 0, so the caller sees success no matter
-        # how pytest exits. Mirror run_integration_tests.py and wait instead.
+        # how pytest exits. Wait for pytest and preserve its status instead.
         completed = subprocess.run(command, check=False)
         raise SystemExit(completed.returncode)
     os.execv(sys.executable, command)

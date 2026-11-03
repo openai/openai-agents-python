@@ -1,622 +1,185 @@
-import logging
-import sys
-import threading
-from typing import TYPE_CHECKING, Any, Literal
+"""Python agents with a native Codex model loop and explicit session ownership."""
 
-from openai import AsyncOpenAI
-
-from . import _config, sandbox
-from .agent import (
-    Agent,
-    AgentBase,
-    AgentToolStreamEvent,
-    StopAtTools,
-    ToolsToFinalOutputFunction,
-    ToolsToFinalOutputResult,
-)
-from .agent_output import AgentOutputSchema, AgentOutputSchemaBase
-from .apply_diff import apply_diff
-from .computer import AsyncComputer, Button, Computer, Environment
-from .editor import ApplyPatchEditor, ApplyPatchOperation, ApplyPatchResult
-from .exceptions import (
-    AgentsException,
-    InputGuardrailTripwireTriggered,
-    MaxTurnsExceeded,
-    MCPToolCancellationError,
-    ModelBehaviorError,
-    ModelRefusalError,
-    ModelTimeoutError,
-    OutputGuardrailTripwireTriggered,
-    RunErrorDetails,
-    ToolInputGuardrailTripwireTriggered,
-    ToolOutputGuardrailTripwireTriggered,
-    ToolTimeoutError,
-    UserError,
-)
-from .guardrail import (
-    GuardrailFunctionOutput,
-    InputGuardrail,
-    InputGuardrailResult,
-    OutputGuardrail,
-    OutputGuardrailResult,
-    input_guardrail,
-    output_guardrail,
-)
-from .handoffs import (
-    Handoff,
-    HandoffInputData,
-    HandoffInputFilter,
-    default_handoff_history_mapper,
-    get_conversation_history_wrappers,
-    handoff,
-    nest_handoff_history,
-    reset_conversation_history_wrappers,
-    set_conversation_history_wrappers,
-)
-from .items import (
-    CompactionItem,
-    HandoffCallItem,
-    HandoffOutputItem,
-    InputItem,
-    ItemHelpers,
-    MCPApprovalRequestItem,
-    MCPApprovalResponseItem,
-    MCPListToolsItem,
-    MessageOutputItem,
-    ModelResponse,
-    ReasoningItem,
-    RunItem,
-    ToolApprovalItem,
-    ToolCallItem,
-    ToolCallOutputItem,
-    ToolSearchCallItem,
-    ToolSearchOutputItem,
-    TResponseInputItem,
-)
-from .lifecycle import AgentHooks, RunHooks
-from .memory import (
-    OpenAIConversationsSession,
-    OpenAIResponsesCompactionArgs,
-    OpenAIResponsesCompactionAwareSession,
-    OpenAIResponsesCompactionSession,
-    Session,
-    SessionABC,
-    SessionSettings,
-    is_openai_responses_compaction_aware_session,
-)
-from .model_settings import ModelSettings
-from .models.interface import Model, ModelProvider, ModelTracing
-from .models.multi_provider import MultiProvider
-from .models.openai_agent_registration import OpenAIAgentRegistrationConfig
-from .models.openai_chatcompletions import OpenAIChatCompletionsModel
-from .models.openai_provider import OpenAIProvider
-from .models.openai_responses import (
-    OpenAIResponsesModel,
-    OpenAIResponsesWebSocketOptions,
-    OpenAIResponsesWSModel,
-)
-from .prompts import DynamicPromptFunction, GenerateDynamicPromptData, Prompt
-from .repl import run_demo_loop
-from .responses_websocket_session import ResponsesWebSocketSession, responses_websocket_session
-from .result import AgentToolInvocation, RunResult, RunResultStreaming
-from .retry import (
-    ModelRetryAdvice,
-    ModelRetryAdviceRequest,
-    ModelRetryBackoffSettings,
-    ModelRetryNormalizedError,
-    ModelRetrySettings,
-    RetryDecision,
-    RetryPolicy,
-    RetryPolicyContext,
-    retry_policies,
-)
-from .run import (
-    OutputGuardrailBlockedMessageArgs,
-    OutputGuardrailBlockedMessageFormatter,
-    ReasoningItemIdPolicy,
-    RunConfig,
-    Runner,
-    ToolErrorFormatter,
-    ToolErrorFormatterArgs,
-    ToolExecutionConfig,
-    ToolNameCollisionPolicy,
-    ToolNotFoundBehavior,
-)
-from .run_context import AgentHookContext, RunContextWrapper, TContext
-from .run_error_handlers import (
-    RunErrorData,
-    RunErrorHandler,
-    RunErrorHandlerInput,
-    RunErrorHandlerResult,
-    RunErrorHandlers,
-)
-from .run_state import RunState
-from .stream_events import (
-    AgentUpdatedStreamEvent,
-    RawResponsesStreamEvent,
-    RunItemStreamEvent,
-    StreamEvent,
-)
-from .tool import (
-    ApplyPatchTool,
-    ApplyPatchToolCustomDataContext,
-    ApplyPatchToolCustomDataExtractor,
-    CodeInterpreterTool,
-    ComputerProvider,
-    ComputerTool,
-    ComputerToolCustomDataContext,
-    ComputerToolCustomDataExtractor,
-    CustomTool,
-    CustomToolCustomDataContext,
-    CustomToolCustomDataExtractor,
-    FileSearchTool,
-    FunctionTool,
-    FunctionToolCustomDataContext,
-    FunctionToolCustomDataExtractor,
-    FunctionToolResult,
-    HostedMCPTool,
-    ImageGenerationTool,
-    ImageGenerationToolConfig,
-    LocalShellCommandRequest,
-    LocalShellExecutor,
-    LocalShellTool,
-    MCPToolApprovalFunction,
-    MCPToolApprovalFunctionResult,
-    MCPToolApprovalRequest,
-    ProgrammaticToolCallingTool,
-    ShellActionRequest,
-    ShellCallData,
-    ShellCallOutcome,
-    ShellCommandOutput,
-    ShellCommandRequest,
-    ShellExecutor,
-    ShellResult,
-    ShellTool,
-    ShellToolContainerAutoEnvironment,
-    ShellToolContainerNetworkPolicy,
-    ShellToolContainerNetworkPolicyAllowlist,
-    ShellToolContainerNetworkPolicyDisabled,
-    ShellToolContainerNetworkPolicyDomainSecret,
-    ShellToolContainerReferenceEnvironment,
-    ShellToolContainerSkill,
-    ShellToolEnvironment,
-    ShellToolHostedEnvironment,
-    ShellToolInlineSkill,
-    ShellToolInlineSkillSource,
-    ShellToolLocalEnvironment,
-    ShellToolLocalSkill,
-    ShellToolSkillReference,
-    Tool,
-    ToolCaller,
-    ToolOrigin,
-    ToolOriginType,
-    ToolOutputFileContent,
-    ToolOutputFileContentDict,
-    ToolOutputImage,
-    ToolOutputImageDict,
-    ToolOutputText,
-    ToolOutputTextDict,
-    ToolSearchTool,
-    WebSearchTool,
-    WebSearchToolImageSettings,
-    default_tool_error_function,
-    dispose_resolved_computers,
-    function_tool,
-    resolve_computer,
-    tool_namespace,
-)
-from .tool_guardrails import (
-    ToolGuardrailFunctionOutput,
-    ToolInputGuardrail,
-    ToolInputGuardrailData,
-    ToolInputGuardrailResult,
-    ToolOutputGuardrail,
-    ToolOutputGuardrailData,
-    ToolOutputGuardrailResult,
-    tool_input_guardrail,
-    tool_output_guardrail,
-)
-from .tracing import (
-    AgentSpanData,
-    CustomSpanData,
-    FunctionSpanData,
-    GenerationSpanData,
-    GuardrailSpanData,
-    HandoffSpanData,
-    MCPListToolsSpanData,
-    ResponseSpanData,
-    Span,
-    SpanData,
-    SpanError,
-    SpeechGroupSpanData,
-    SpeechSpanData,
-    TaskSpanData,
-    Trace,
-    TracingProcessor,
-    TranscriptionSpanData,
-    TurnSpanData,
-    add_trace_processor,
-    agent_span,
-    custom_span,
-    flush_traces,
-    function_span,
-    gen_span_id,
-    gen_trace_id,
-    generation_span,
-    get_current_span,
-    get_current_trace,
-    guardrail_span,
-    handoff_span,
-    mcp_tools_span,
-    response_span,
-    set_trace_processors,
-    set_trace_provider,
-    set_tracing_disabled,
-    set_tracing_export_api_key,
-    speech_group_span,
-    speech_span,
-    task_span,
-    trace,
-    transcription_span,
-    turn_span,
-)
-from .usage import Usage
-from .version import __version__
+from importlib import import_module
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from .memory.sqlite_session import SQLiteSession
+    from ._function_tools import (
+        FunctionTool as FunctionTool,
+        Tool as Tool,
+        ToolContext as ToolContext,
+        function_tool as function_tool,
+    )
+    from .agent import (
+        Agent as Agent,
+        ModelSettings as ModelSettings,
+        NativeProvider as NativeProvider,
+    )
+    from .executor import (
+        Environment as Environment,
+        EnvironmentSource as EnvironmentSource,
+        ExecutorContext as ExecutorContext,
+        NetworkPolicy as NetworkPolicy,
+    )
+    from .input import (
+        InputImage as InputImage,
+        InputText as InputText,
+        UserInput as UserInput,
+        UserMessage as UserMessage,
+    )
+    from .manual import (
+        ActionReply as ActionReply,
+        ActionRequested as ActionRequested,
+        ApprovalRequest as ApprovalRequest,
+        ElicitationRequest as ElicitationRequest,
+        Interaction as Interaction,
+        VerificationProof as VerificationProof,
+        VerificationRequest as VerificationRequest,
+    )
+    from .mcp import (
+        ChatGPTAppsMCP as ChatGPTAppsMCP,
+        HostedVerificationMCP as HostedVerificationMCP,
+        HttpMCP as HttpMCP,
+        MCPCallContext as MCPCallContext,
+        MCPResultContext as MCPResultContext,
+        StdioMCP as StdioMCP,
+    )
+    from .native_agents import (
+        ChildInvocation as ChildInvocation,
+        NativeAgents as NativeAgents,
+        NativeRole as NativeRole,
+    )
+    from .native_interception import (
+        Allow as Allow,
+        Deny as Deny,
+        NativeToolCall as NativeToolCall,
+        ReplaceArguments as ReplaceArguments,
+        StopTurn as StopTurn,
+    )
+    from .schema import (
+        NativeOutput as NativeOutput,
+        OutputSpec as OutputSpec,
+        OutputValidationError as OutputValidationError,
+        PromptedOutput as PromptedOutput,
+    )
+    from .session import (
+        Capabilities as Capabilities,
+        CapabilityError as CapabilityError,
+        Completed as Completed,
+        FeatureName as FeatureName,
+        FeatureSupport as FeatureSupport,
+        InteractionExpiredError as InteractionExpiredError,
+        InteractionRequired as InteractionRequired,
+        NativeError as NativeError,
+        Session as Session,
+        SessionBusyError as SessionBusyError,
+        StaleTurnError as StaleTurnError,
+        TurnStoppedError as TurnStoppedError,
+    )
+    from .state import (
+        ChecklistState as ChecklistState,
+        ChecklistStep as ChecklistStep,
+        CheckpointStatus as CheckpointStatus,
+        LocalStorage as LocalStorage,
+        NativeGoal as NativeGoal,
+        SessionState as SessionState,
+    )
+    from .subagents import Subagent as Subagent
+    from .tools import (
+        Checklist as Checklist,
+        NativeGoals as NativeGoals,
+        ToolCallInfo as ToolCallInfo,
+        ToolOutput as ToolOutput,
+        ToolOutputImage as ToolOutputImage,
+        ToolOutputText as ToolOutputText,
+        ToolRef as ToolRef,
+        WebSearch as WebSearch,
+    )
+    from .turn import PendingRequests as PendingRequests, Turn as Turn
+
+_MODULES = {
+    "Allow": ".native_interception",
+    "Deny": ".native_interception",
+    "ReplaceArguments": ".native_interception",
+    "NativeToolCall": ".native_interception",
+    "StopTurn": ".native_interception",
+    "ExecutorContext": ".executor",
+    "ChildInvocation": ".native_agents",
+    "NativeAgents": ".native_agents",
+    "NativeRole": ".native_agents",
+    "Environment": ".executor",
+    "EnvironmentSource": ".executor",
+    "NetworkPolicy": ".executor",
+    "Checklist": ".tools",
+    "NativeGoals": ".tools",
+    "NativeGoal": ".state",
+    "WebSearch": ".tools",
+    "SessionState": ".state",
+    "ChecklistState": ".state",
+    "ChecklistStep": ".state",
+    "ActionReply": ".manual",
+    "ActionRequested": ".manual",
+    "ApprovalRequest": ".manual",
+    "ElicitationRequest": ".manual",
+    "VerificationRequest": ".manual",
+    "VerificationProof": ".manual",
+    "Interaction": ".manual",
+    "Agent": ".agent",
+    "ModelSettings": ".agent",
+    "NativeProvider": ".agent",
+    "NativeOutput": ".schema",
+    "PromptedOutput": ".schema",
+    "OutputSpec": ".schema",
+    "OutputValidationError": ".schema",
+    "CheckpointStatus": ".state",
+    "LocalStorage": ".state",
+    "InputImage": ".input",
+    "InputText": ".input",
+    "UserMessage": ".input",
+    "UserInput": ".input",
+    "MCPResultContext": ".mcp",
+    "StdioMCP": ".mcp",
+    "HttpMCP": ".mcp",
+    "HostedVerificationMCP": ".mcp",
+    "ChatGPTAppsMCP": ".mcp",
+    "FunctionTool": "._function_tools",
+    "Tool": "._function_tools",
+    "ToolRef": ".tools",
+    "ToolOutput": ".tools",
+    "ToolOutputText": ".tools",
+    "ToolOutputImage": ".tools",
+    "ToolContext": "._function_tools",
+    "ToolCallInfo": ".tools",
+    "MCPCallContext": ".mcp",
+    "function_tool": "._function_tools",
+    "Completed": ".session",
+    "Capabilities": ".session",
+    "CapabilityError": ".session",
+    "FeatureName": ".session",
+    "FeatureSupport": ".session",
+    "InteractionExpiredError": ".session",
+    "StaleTurnError": ".session",
+    "TurnStoppedError": ".session",
+    "InteractionRequired": ".session",
+    "NativeError": ".session",
+    "Session": ".session",
+    "SessionBusyError": ".session",
+    "Turn": ".turn",
+    "PendingRequests": ".turn",
+    "Subagent": ".subagents",
+}
+
+__all__ = list(_MODULES)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))
 
 
 def __getattr__(name: str) -> Any:
-    if name == "SQLiteSession":
-        from .memory.sqlite_session import SQLiteSession
-
-        globals()[name] = SQLiteSession
-        return SQLiteSession
-
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
-def set_default_openai_key(key: str, use_for_tracing: bool = True) -> None:
-    """Set the default OpenAI API key to use for LLM requests (and optionally tracing()). This is
-    only necessary if the OPENAI_API_KEY environment variable is not already set.
-
-    If provided, this key will be used instead of the OPENAI_API_KEY environment variable.
-
-    Args:
-        key: The OpenAI key to use.
-        use_for_tracing: Whether to also use this key to send traces to OpenAI. Defaults to True
-            If False, you'll either need to set the OPENAI_API_KEY environment variable or call
-            set_tracing_export_api_key() with the API key you want to use for tracing.
-    """
-    _config.set_default_openai_key(key, use_for_tracing)
-
-
-def set_default_openai_client(client: AsyncOpenAI, use_for_tracing: bool = True) -> None:
-    """Set the default OpenAI client to use for LLM requests and/or tracing. If provided, this
-    client will be used instead of the default OpenAI client.
-
-    Args:
-        client: The OpenAI client to use.
-        use_for_tracing: Whether to use the API key from this client for uploading traces. If False,
-            you'll either need to set the OPENAI_API_KEY environment variable or call
-            set_tracing_export_api_key() with the API key you want to use for tracing.
-    """
-    _config.set_default_openai_client(client, use_for_tracing)
-
-
-def set_default_openai_api(api: Literal["chat_completions", "responses"]) -> None:
-    """Set the default API to use for OpenAI LLM requests. By default, we will use the responses API
-    but you can set this to use the chat completions API instead.
-    """
-    _config.set_default_openai_api(api)
-
-
-def set_default_openai_responses_transport(transport: Literal["http", "websocket"]) -> None:
-    """Set the default transport for OpenAI Responses API requests.
-
-    By default, the Responses API uses the HTTP transport. Set this to ``"websocket"`` to use
-    websocket transport when the OpenAI provider resolves a Responses model.
-    """
-    _config.set_default_openai_responses_transport(transport)
-
-
-def set_default_openai_agent_registration(
-    config: OpenAIAgentRegistrationConfig | dict[str, Any] | None,
-) -> None:
-    """Set the default OpenAI agent registration config.
-
-    This controls the agent harness ID that OpenAI providers resolve from SDK configuration. If
-    this is not set, providers fall back to the ``OPENAI_AGENT_HARNESS_ID`` environment variable.
-    """
-    _config.set_default_openai_agent_registration(config)
-
-
-def set_default_openai_harness(harness_id: str | None) -> None:
-    """Set the default OpenAI agent harness ID for SDK-managed OpenAI providers.
-
-    Passing ``None`` clears the default and restores environment variable fallback.
-    """
-    _config.set_default_openai_harness(harness_id)
-
-
-_verbose_stdout_handler: "logging.StreamHandler[Any] | None" = None
-_verbose_stdout_handler_lock = threading.Lock()
-
-
-def enable_verbose_stdout_logging() -> None:
-    """Enables verbose logging to stdout. This is useful for debugging."""
-    global _verbose_stdout_handler
-
-    logger = logging.getLogger("openai.agents")
-    with _verbose_stdout_handler_lock:
-        logger.setLevel(logging.DEBUG)
-        stream = sys.stdout if sys.stdout is not None else sys.stderr
-
-        if _verbose_stdout_handler is None:
-            _verbose_stdout_handler = logging.StreamHandler(stream)
-        else:
-            _verbose_stdout_handler.acquire()
-            try:
-                _verbose_stdout_handler.stream = stream
-            finally:
-                _verbose_stdout_handler.release()
-
-        logger.addHandler(_verbose_stdout_handler)
-
-
-__all__ = [
-    "Agent",
-    "AgentBase",
-    "AgentToolStreamEvent",
-    "StopAtTools",
-    "ToolsToFinalOutputFunction",
-    "ToolsToFinalOutputResult",
-    "default_handoff_history_mapper",
-    "get_conversation_history_wrappers",
-    "nest_handoff_history",
-    "reset_conversation_history_wrappers",
-    "set_conversation_history_wrappers",
-    "Runner",
-    "apply_diff",
-    "run_demo_loop",
-    "Model",
-    "ModelProvider",
-    "ModelTracing",
-    "ModelSettings",
-    "ModelRetryAdvice",
-    "ModelRetryAdviceRequest",
-    "ModelRetryBackoffSettings",
-    "ModelRetryNormalizedError",
-    "ModelRetrySettings",
-    "RetryDecision",
-    "RetryPolicy",
-    "RetryPolicyContext",
-    "retry_policies",
-    "OpenAIChatCompletionsModel",
-    "MultiProvider",
-    "OpenAIProvider",
-    "OpenAIAgentRegistrationConfig",
-    "OpenAIResponsesModel",
-    "OpenAIResponsesWSModel",
-    "AgentOutputSchema",
-    "AgentOutputSchemaBase",
-    "Computer",
-    "AsyncComputer",
-    "Environment",
-    "Button",
-    "AgentsException",
-    "InputGuardrailTripwireTriggered",
-    "OutputGuardrailTripwireTriggered",
-    "ToolInputGuardrailTripwireTriggered",
-    "ToolOutputGuardrailTripwireTriggered",
-    "DynamicPromptFunction",
-    "GenerateDynamicPromptData",
-    "Prompt",
-    "MaxTurnsExceeded",
-    "MCPToolCancellationError",
-    "ModelBehaviorError",
-    "ModelRefusalError",
-    "ModelTimeoutError",
-    "ToolTimeoutError",
-    "UserError",
-    "InputGuardrail",
-    "InputGuardrailResult",
-    "OutputGuardrail",
-    "OutputGuardrailResult",
-    "GuardrailFunctionOutput",
-    "input_guardrail",
-    "output_guardrail",
-    "ToolInputGuardrail",
-    "ToolOutputGuardrail",
-    "ToolGuardrailFunctionOutput",
-    "ToolInputGuardrailData",
-    "ToolInputGuardrailResult",
-    "ToolOutputGuardrailData",
-    "ToolOutputGuardrailResult",
-    "tool_input_guardrail",
-    "tool_output_guardrail",
-    "handoff",
-    "Handoff",
-    "HandoffInputData",
-    "HandoffInputFilter",
-    "TResponseInputItem",
-    "InputItem",
-    "MessageOutputItem",
-    "ModelResponse",
-    "RunItem",
-    "HandoffCallItem",
-    "HandoffOutputItem",
-    "ToolApprovalItem",
-    "MCPApprovalRequestItem",
-    "MCPApprovalResponseItem",
-    "MCPListToolsItem",
-    "ToolCallItem",
-    "ToolCallOutputItem",
-    "ToolSearchCallItem",
-    "ToolSearchOutputItem",
-    "ToolOrigin",
-    "ToolOriginType",
-    "ReasoningItem",
-    "ItemHelpers",
-    "RunHooks",
-    "AgentHooks",
-    "Session",
-    "SessionABC",
-    "SessionSettings",
-    "SQLiteSession",
-    "OpenAIConversationsSession",
-    "OpenAIResponsesCompactionSession",
-    "OpenAIResponsesCompactionArgs",
-    "OpenAIResponsesCompactionAwareSession",
-    "is_openai_responses_compaction_aware_session",
-    "CompactionItem",
-    "AgentHookContext",
-    "RunContextWrapper",
-    "TContext",
-    "RunErrorDetails",
-    "RunErrorData",
-    "RunErrorHandler",
-    "RunErrorHandlerInput",
-    "RunErrorHandlerResult",
-    "RunErrorHandlers",
-    "AgentToolInvocation",
-    "RunResult",
-    "RunResultStreaming",
-    "ResponsesWebSocketSession",
-    "RunConfig",
-    "OutputGuardrailBlockedMessageArgs",
-    "OutputGuardrailBlockedMessageFormatter",
-    "ToolNameCollisionPolicy",
-    "ReasoningItemIdPolicy",
-    "ToolExecutionConfig",
-    "ToolErrorFormatter",
-    "ToolErrorFormatterArgs",
-    "ToolNotFoundBehavior",
-    "RunState",
-    "RawResponsesStreamEvent",
-    "RunItemStreamEvent",
-    "AgentUpdatedStreamEvent",
-    "StreamEvent",
-    "FunctionTool",
-    "FunctionToolCustomDataContext",
-    "FunctionToolCustomDataExtractor",
-    "FunctionToolResult",
-    "ComputerTool",
-    "ComputerToolCustomDataContext",
-    "ComputerToolCustomDataExtractor",
-    "ComputerProvider",
-    "CustomTool",
-    "CustomToolCustomDataContext",
-    "CustomToolCustomDataExtractor",
-    "FileSearchTool",
-    "CodeInterpreterTool",
-    "ImageGenerationTool",
-    "ImageGenerationToolConfig",
-    "LocalShellCommandRequest",
-    "LocalShellExecutor",
-    "LocalShellTool",
-    "ShellActionRequest",
-    "ShellCallData",
-    "ShellCallOutcome",
-    "ShellCommandOutput",
-    "ShellCommandRequest",
-    "ShellToolLocalSkill",
-    "ShellToolSkillReference",
-    "ShellToolInlineSkillSource",
-    "ShellToolInlineSkill",
-    "ShellToolContainerSkill",
-    "ShellToolContainerNetworkPolicyDomainSecret",
-    "ShellToolContainerNetworkPolicyAllowlist",
-    "ShellToolContainerNetworkPolicyDisabled",
-    "ShellToolContainerNetworkPolicy",
-    "ShellToolLocalEnvironment",
-    "ShellToolContainerAutoEnvironment",
-    "ShellToolContainerReferenceEnvironment",
-    "ShellToolHostedEnvironment",
-    "ShellToolEnvironment",
-    "ShellExecutor",
-    "ShellResult",
-    "ShellTool",
-    "ApplyPatchEditor",
-    "ApplyPatchOperation",
-    "ApplyPatchResult",
-    "ApplyPatchTool",
-    "ApplyPatchToolCustomDataContext",
-    "ApplyPatchToolCustomDataExtractor",
-    "ProgrammaticToolCallingTool",
-    "Tool",
-    "ToolCaller",
-    "WebSearchTool",
-    "WebSearchToolImageSettings",
-    "HostedMCPTool",
-    "MCPToolApprovalFunction",
-    "MCPToolApprovalRequest",
-    "MCPToolApprovalFunctionResult",
-    "ToolOutputText",
-    "ToolOutputTextDict",
-    "ToolOutputImage",
-    "ToolOutputImageDict",
-    "ToolOutputFileContent",
-    "ToolOutputFileContentDict",
-    "ToolSearchTool",
-    "function_tool",
-    "tool_namespace",
-    "resolve_computer",
-    "dispose_resolved_computers",
-    "Usage",
-    "add_trace_processor",
-    "agent_span",
-    "custom_span",
-    "flush_traces",
-    "function_span",
-    "generation_span",
-    "get_current_span",
-    "get_current_trace",
-    "guardrail_span",
-    "handoff_span",
-    "response_span",
-    "set_trace_processors",
-    "set_trace_provider",
-    "set_tracing_disabled",
-    "speech_group_span",
-    "transcription_span",
-    "speech_span",
-    "mcp_tools_span",
-    "task_span",
-    "trace",
-    "turn_span",
-    "Trace",
-    "TracingProcessor",
-    "SpanError",
-    "Span",
-    "SpanData",
-    "AgentSpanData",
-    "CustomSpanData",
-    "FunctionSpanData",
-    "GenerationSpanData",
-    "GuardrailSpanData",
-    "HandoffSpanData",
-    "SpeechGroupSpanData",
-    "SpeechSpanData",
-    "MCPListToolsSpanData",
-    "ResponseSpanData",
-    "TaskSpanData",
-    "TranscriptionSpanData",
-    "TurnSpanData",
-    "set_default_openai_key",
-    "set_default_openai_client",
-    "set_default_openai_api",
-    "set_default_openai_responses_transport",
-    "OpenAIResponsesWebSocketOptions",
-    "set_default_openai_harness",
-    "set_default_openai_agent_registration",
-    "responses_websocket_session",
-    "set_tracing_export_api_key",
-    "enable_verbose_stdout_logging",
-    "gen_trace_id",
-    "gen_span_id",
-    "default_tool_error_function",
-    "sandbox",
-    "__version__",
-]
+    module = _MODULES.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    value = getattr(import_module(module, __name__), name)
+    globals()[name] = value
+    return value

@@ -1,0 +1,346 @@
+--- a/crates/rmcp/src/service.rs
++++ b/crates/rmcp/src/service.rs
+@@ -253,6 +253,17 @@
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ #[expect(clippy::exhaustive_structs, reason = "intentionally exhaustive")]
+ pub struct OriginatingRequestId(pub RequestId);
++
++/// Opt-in local context for requests arriving on this outbound HTTP response stream.
++/// The transport copies only this carrier, never the outer request extensions.
++/// Callers should store weak provenance here; this value is never serialized.
++/// Its presence does not imply the originating operation is still live.
++#[derive(Clone, Default)]
++#[expect(
++    clippy::exhaustive_structs,
++    reason = "intentionally exhaustive local context carrier"
++)]
++pub struct ResponseStreamContext(pub crate::model::Extensions);
+ 
+ /// Marker in an inbound request's non-serialized [`Extensions`] recording
+ /// which HTTP response stream it arrived on: the receive-side mirror of
+--- a/crates/rmcp/src/transport/streamable_http_client.rs
++++ b/crates/rmcp/src/transport/streamable_http_client.rs
+@@ -813,6 +813,7 @@
+         >,
+         sse_worker_tx: tokio::sync::mpsc::Sender<ServerJsonRpcMessage>,
+         origin: InboundStreamOrigin,
++        response_context: Option<crate::service::ResponseStreamContext>,
+         request_ct: CancellationToken,
+         stream_ct: CancellationToken,
+         uses_modern_http: bool,
+@@ -826,7 +827,7 @@
+                 Ok(())
+             }
+             result = Self::execute_sse_stream(
+-                sse_stream.as_mut(), sse_worker_tx, origin, true, stream_ct.clone(),
++                sse_stream.as_mut(), sse_worker_tx, origin, response_context, true, stream_ct.clone(),
+             ) => result,
+         }
+     }
+@@ -836,6 +837,7 @@
+         + Send,
+         sse_worker_tx: tokio::sync::mpsc::Sender<ServerJsonRpcMessage>,
+         origin: InboundStreamOrigin,
++        response_context: Option<crate::service::ResponseStreamContext>,
+         close_on_response: bool,
+         ct: CancellationToken,
+     ) -> Result<(), StreamableHttpError<C::Error>> {
+@@ -857,6 +859,13 @@
+             // for the client receive-side association check.
+             if let ServerJsonRpcMessage::Request(request) = &mut message {
+                 request.request.extensions_mut().insert(origin.clone());
++                // Preserve only the caller's opt-in, local response context. In
++                // particular, do not copy the outer request map (which can own a turn).
++                // Capture before queueing: terminal messages on another stream can
++                // retire an ID before this already-read request reaches its handler.
++                if let Some(context) = &response_context {
++                    request.request.extensions_mut().insert(context.clone());
++                }
+             }
+             let is_response = matches!(
+                 message,
+@@ -926,6 +935,7 @@
+                         sse_stream,
+                         sse_worker_tx,
+                         InboundStreamOrigin::Unassociated,
++                        None,
+                         false,
+                         transport_task_ct.child_token(),
+                     )
+@@ -1641,6 +1651,14 @@
+                         }
+                         Ok(StreamableHttpPostResponse::Sse(stream, ..)) => {
+                             let stream_request_id = request_id;
++                            let response_context = match &message {
++                                ClientJsonRpcMessage::Request(request) => request
++                                    .request
++                                    .extensions()
++                                    .get::<crate::service::ResponseStreamContext>()
++                                    .cloned(),
++                                _ => None,
++                            };
+                             let sse_stream = Self::response_sse_to_jsonrpc(
+                                 stream,
+                                 session_id.clone(),
+@@ -1680,6 +1698,7 @@
+                                     sse_stream,
+                                     stream_tx,
+                                     origin,
++                                    response_context,
+                                     request_ct,
+                                     stream_ct,
+                                     uses_modern_http,
+@@ -2185,6 +2204,7 @@
+                 stream,
+                 tx,
+                 origin.clone(),
++                None,
+                 false,
+                 CancellationToken::new(),
+             )
+@@ -2201,12 +2221,209 @@
+                 Some(&origin),
+                 "inbound requests must carry their stream origin"
+             );
++            assert!(
++                request
++                    .request
++                    .extensions()
++                    .get::<crate::service::ResponseStreamContext>()
++                    .is_none()
++            );
+             // Responses are correlated by JSON-RPC id; no marker needed or added.
+             assert!(matches!(
+                 rx.recv().await.expect("response forwarded"),
+                 ServerJsonRpcMessage::Response(_)
+             ));
+         }
++    }
++
++    #[derive(Clone)]
++    struct ResponseContextClient;
++
++    impl StreamableHttpClient for ResponseContextClient {
++        type Error = std::io::Error;
++
++        async fn post_message(
++            &self,
++            _uri: Arc<str>,
++            message: ClientJsonRpcMessage,
++            _session_id: Option<Arc<str>>,
++            _auth_header: Option<String>,
++            _custom_headers: HashMap<HeaderName, HeaderValue>,
++        ) -> Result<StreamableHttpPostResponse, StreamableHttpError<Self::Error>> {
++            let wire = serde_json::to_value(&message).expect("serialize outbound message");
++            assert!(
++                wire.get("extensions").is_none(),
++                "local context stays off wire"
++            );
++            match wire["method"].as_str() {
++                Some("initialize") => Ok(StreamableHttpPostResponse::Json(
++                    serde_json::from_value(json!({
++                        "jsonrpc": "2.0", "id": wire["id"],
++                        "result": {
++                            "protocolVersion": "2025-11-25",
++                            "capabilities": {},
++                            "serverInfo": {"name": "context-fixture", "version": "1"}
++                        }
++                    }))
++                    .expect("initialize response"),
++                    None,
++                )),
++                Some("notifications/initialized") => Ok(StreamableHttpPostResponse::Accepted),
++                Some("tools/list") => {
++                    let request = json!({
++                        "jsonrpc": "2.0", "id": 9, "method": "elicitation/create",
++                        "params": {
++                            "mode": "url", "message": "Consent", "url": "https://example.invalid/",
++                            "elicitationId": "context-fixture"
++                        }
++                    });
++                    let error = json!({
++                        "jsonrpc": "2.0", "id": wire["id"],
++                        "error": {"code": -32042, "message": "URL interaction required", "data": {"elicitations": []}}
++                    });
++                    Ok(StreamableHttpPostResponse::Sse(
++                        futures::stream::iter([request, error].map(|message| {
++                            Ok(Sse {
++                                event: None,
++                                data: Some(message.to_string()),
++                                id: None,
++                                retry: None,
++                            })
++                        }))
++                        .boxed(),
++                        None,
++                    ))
++                }
++                _ => Err(StreamableHttpError::UnexpectedServerResponse(
++                    "unexpected POST".into(),
++                )),
++            }
++        }
++
++        async fn delete_session(
++            &self,
++            _uri: Arc<str>,
++            _session_id: Arc<str>,
++            _auth_header: Option<String>,
++            _custom_headers: HashMap<HeaderName, HeaderValue>,
++        ) -> Result<(), StreamableHttpError<Self::Error>> {
++            Ok(())
++        }
++
++        async fn get_stream(
++            &self,
++            _uri: Arc<str>,
++            _session_id: Option<Arc<str>>,
++            _last_event_id: Option<String>,
++            _auth_header: Option<String>,
++            _custom_headers: HashMap<HeaderName, HeaderValue>,
++        ) -> Result<BoxedSseStream, StreamableHttpError<Self::Error>> {
++            Err(StreamableHttpError::ServerDoesNotSupportSse)
++        }
++    }
++
++    #[tokio::test]
++    async fn post_stream_carries_only_opt_in_weak_context() {
++        use crate::transport::Transport;
++
++        tokio::time::timeout(Duration::from_secs(5), async {
++            for opted_in in [false, true] {
++                let mut transport = StreamableHttpClientTransport::with_client(
++                    ResponseContextClient,
++                    StreamableHttpClientTransportConfig::with_uri("http://localhost/mcp"),
++                );
++                transport
++                    .send(
++                        serde_json::from_value(json!({
++                            "jsonrpc": "2.0", "id": 0, "method": "initialize",
++                            "params": {
++                                "protocolVersion": "2025-11-25", "capabilities": {},
++                                "clientInfo": {"name": "context-test", "version": "1"}
++                            }
++                        }))
++                        .expect("initialize request"),
++                    )
++                    .await
++                    .expect("send initialize");
++                assert!(matches!(
++                    transport.receive().await,
++                    Some(ServerJsonRpcMessage::Response(_))
++                ));
++                transport
++                    .send(
++                        serde_json::from_value(json!({
++                            "jsonrpc": "2.0", "method": "notifications/initialized"
++                        }))
++                        .expect("initialized notification"),
++                    )
++                    .await
++                    .expect("send initialized");
++                let owner = Arc::new(());
++                let weak_owner = Arc::downgrade(&owner);
++                let unselected = Arc::new(());
++                let weak_unselected = Arc::downgrade(&unselected);
++                let mut outgoing: ClientJsonRpcMessage = serde_json::from_value(json!({
++                    "jsonrpc": "2.0", "id": 3, "method": "tools/list", "params": {}
++                }))
++                .expect("tools/list request");
++                let ClientJsonRpcMessage::Request(request) = &mut outgoing else {
++                    panic!("expected outbound request");
++                };
++                request.request.extensions_mut().insert(unselected);
++                if opted_in {
++                    let mut context = crate::model::Extensions::new();
++                    context.insert(weak_owner.clone());
++                    request
++                        .request
++                        .extensions_mut()
++                        .insert(crate::service::ResponseStreamContext(context));
++                }
++                transport.send(outgoing).await.expect("send tools/list");
++                drop(owner);
++                let Some(ServerJsonRpcMessage::Request(request)) = transport.receive().await else {
++                    panic!("expected actual inbound SSE request");
++                };
++                assert_eq!(
++                    request.request.extensions().get::<InboundStreamOrigin>(),
++                    Some(&InboundStreamOrigin::OutboundRequest(RequestId::Number(3)))
++                );
++                assert!(request.request.extensions().get::<Arc<()>>().is_none());
++                assert!(
++                    weak_unselected.upgrade().is_none(),
++                    "outer request map must not be retained"
++                );
++                let context = request
++                    .request
++                    .extensions()
++                    .get::<crate::service::ResponseStreamContext>();
++                if opted_in {
++                    let weak = context
++                        .expect("explicit context forwarded")
++                        .0
++                        .get::<std::sync::Weak<()>>()
++                        .expect("weak context present even after expiration");
++                    assert!(std::sync::Weak::ptr_eq(weak, &weak_owner));
++                    assert!(
++                        weak.upgrade().is_none(),
++                        "the carrier must not retain its owner"
++                    );
++                } else {
++                    assert!(
++                        context.is_none(),
++                        "non-opted-in root operations keep no call context"
++                    );
++                }
++                let Some(ServerJsonRpcMessage::Error(error)) = transport.receive().await else {
++                    panic!("expected the original final error");
++                };
++                assert_eq!(error.id, Some(RequestId::Number(3)));
++                assert_eq!(error.error.code.0, -32042);
++                assert_eq!(error.error.data, Some(json!({"elicitations": []})));
++                transport.close().await.expect("close transport");
++            }
++        })
++        .await
++        .expect("worker context probe completes");
+     }
+ 
+     type ReconnectAttempt = (Option<String>, Option<String>);
+@@ -2403,11 +2620,17 @@
+             );
+ 
+         let origin = InboundStreamOrigin::OutboundRequest(RequestId::Number(3));
++        let owner = Arc::new(());
++        let weak_owner = Arc::downgrade(&owner);
++        let mut local_context = crate::model::Extensions::new();
++        local_context.insert(weak_owner.clone());
++        drop(owner);
+         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+         StreamableHttpClientWorker::<ResumedRequestClient>::execute_sse_stream(
+             sse_stream,
+             tx,
+             origin.clone(),
++            Some(crate::service::ResponseStreamContext(local_context)),
+             true,
+             CancellationToken::new(),
+         )
+@@ -2428,6 +2651,17 @@
+             Some(&origin),
+             "origin marker must survive SSE resumption"
+         );
++        let forwarded_context = request
++            .request
++            .extensions()
++            .get::<crate::service::ResponseStreamContext>()
++            .expect("local context survives the resumed POST stream");
++        let forwarded_owner = forwarded_context
++            .0
++            .get::<std::sync::Weak<()>>()
++            .expect("expired weak context remains distinguishable from no context");
++        assert!(std::sync::Weak::ptr_eq(forwarded_owner, &weak_owner));
++        assert!(forwarded_owner.upgrade().is_none());
+         assert!(matches!(
+             rx.recv().await.expect("response forwarded"),
+             ServerJsonRpcMessage::Response(_)

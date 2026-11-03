@@ -16,17 +16,19 @@ Use this skill as the explicit transition from an agreed implementation scope to
 
 ## 1. Establish the task boundary
 
-Record the original requirement, success criteria, intended target (`origin/main` unless the user states otherwise), task-owned paths, compatibility boundary, intentionally unsupported cases, and required repository skills. For a multi-step task, create and maintain the repository's required ExecPlan. An ExecPlan, review packet, ledger, trace, or temporary report is operational-only by default even when repository policy requires creating it; do not add it to the shipped-path manifest unless the original requirement or repository policy explicitly makes that exact path a committed deliverable.
+Record the original requirement, success criteria, intended target (the user's branch, or the repository's remote default branch when none is given), task-owned paths, compatibility boundary, intentionally unsupported cases, and required repository skills. For a multi-step task, create and maintain the repository's required ExecPlan. An ExecPlan, review packet, ledger, trace, or temporary report is operational-only by default even when repository policy requires creating it; do not add it to the shipped-path manifest unless the original requirement or repository policy explicitly makes that exact path a committed deliverable.
+
+Record the target branch name as `<target-branch>`. Replace that placeholder in the commands below before running them. Use this branch throughout the workflow.
 
 If the current directory is a worktree previously created for this same task in the current conversation, resume it. Otherwise, continue from the user's current checkout only long enough to create a new worktree.
 
-## 2. Create a detached worktree from current main
+## 2. Create a detached worktree from the target branch
 
 1. Verify the source checkout's raw status without modifying it.
-2. Fetch `origin main`. If the fetch fails, stop rather than claiming a stale ref is current.
-3. Record the fetched `origin/main` commit.
+2. Run `git fetch origin <target-branch>`. If the fetch fails, stop rather than claiming a stale ref is current.
+3. Record the fetched `origin/<target-branch>` commit.
 4. Choose a unique task-oriented path under the configured Codex worktree root. Check both the filesystem and `git worktree list`; never reuse or delete a collision.
-5. Run `git worktree add --detach <worktree> origin/main` and perform all subsequent implementation work there.
+5. Run `git worktree add --detach <worktree> origin/<target-branch>` and perform all subsequent implementation work there.
 6. Confirm the new worktree is detached at the recorded commit and initially clean.
 
 Do not create the final branch yet. A detached worktree makes the eventual `$pr-draft-summary` branch suggestion authoritative and prevents temporary naming from becoming accidental output.
@@ -45,22 +47,22 @@ When the user asks to complete another author's pull request:
 
 1. Refresh the PR metadata, head, discussion, and complete three-dot diff through read-only access.
 2. Confirm that the PR is still an appropriate takeover source. Do not treat an already merged PR as an active takeover.
-3. Apply the original PR's complete task diff onto the worktree based on current `origin/main`; do not derive the final branch from the contributor branch and do not preserve its intermediate commit topology.
+3. Apply the original PR's complete task diff onto the worktree based on current `origin/<target-branch>`; do not derive the final branch from the contributor branch and do not preserve its intermediate commit topology.
 4. Record the original PR number, PR author login, verified commit identity, existing valid `Co-authored-by` trailers, linked issues, and the original intent that the replacement must preserve.
 5. If a valid author identity cannot be obtained from the PR's commits, stop before committing and ask the user. Never invent an email address.
 
-## 4. Replay the complete task onto the latest main
+## 4. Replay the complete task onto the latest target branch
 
-After implementation, focused tests, and formatting are stable, fetch `origin main` again. If it advanced:
+After implementation, focused tests, and formatting are stable, run `git fetch origin <target-branch>` again. If it advanced:
 
 1. Confirm that every local change is task-owned.
 2. Save tracked and untracked task changes in a uniquely named temporary stash.
-3. Rebase the detached HEAD onto `origin/main`. With no task commits, this updates the empty local commit range to the new base.
+3. Rebase the detached HEAD onto `origin/<target-branch>`. With no task commits, this updates the empty local commit range to the new base.
 4. Reapply the stash and confirm it was removed only after a clean application.
 5. Resolve conflicts only when the requirement and surrounding source make the correct result unambiguous. Otherwise preserve the stash and conflict evidence, then stop for user direction.
 6. Rerun formatting and every focused check affected by the new base.
 
-Record this observed `origin/main` commit as the final-base candidate. Do not call an older base "latest" merely because its changes appear unrelated.
+Record this observed `origin/<target-branch>` commit as the final-base candidate. Do not call an older base "latest" merely because its changes appear unrelated.
 
 ## 5. Complete final review and verification
 
@@ -70,7 +72,7 @@ Run `$code-change-verification` after clean review whenever its SDK eligibility 
 
 ## 6. Generate the complete PR handoff
 
-Invoke `$pr-draft-summary` only after review and verification apply to the final content. Give it a self-contained packet containing the original requirement, implementation scope contract, important decisions and intent, complete changed-path inventory including untracked files, final diff and statistics, compatibility notes, issue references, and takeover provenance.
+Invoke `$pr-draft-summary` only after review and verification apply to the final content. Give it a self-contained packet containing the original requirement, implementation scope contract, recorded target ref and final-base commit, important decisions and intent, complete changed-path inventory including untracked files, final diff and statistics, compatibility notes, issue references, and takeover provenance. Require `$pr-draft-summary` to use that target ref as `BASE_REF` and that final-base commit as `BASE_COMMIT`, including when HEAD is detached.
 
 The worktree is intentionally detached. Tell `$pr-draft-summary` to treat the current branch value `HEAD` as "no branch yet" and require a concrete unused branch-name suggestion; never accept `HEAD` as the suggestion. The description must explain the complete final change and its motivation, not only the last review fix.
 
@@ -78,9 +80,9 @@ For a takeover, begin the description with prose such as `This pull request supe
 
 If the diff, scope, base, behavior claim, issue relationship, or provenance changes after generation, regenerate the entire PR handoff.
 
-## 7. Recheck main and create one commit
+## 7. Recheck the target branch and create one commit
 
-Fetch `origin main` once more immediately before creating the branch. If it differs from the final-base candidate, return to section 4 and replay onto the new base. Apply the selected review tier's base-change rules in `$implementation-final-review`; only high-risk work uses the verified base-advance closure in [high-risk-review.md](../implementation-final-review/references/high-risk-review.md) step 20. Recheck relevant upstream dependencies and tooling before retaining review evidence. Rerun applicable final verification on the new base and regenerate the PR handoff; obtain affected independent re-review whenever the selected tier requires it. Once stable:
+Run `git fetch origin <target-branch>` once more immediately before creating the branch. If it differs from the final-base candidate, return to section 4 and replay onto the new base. Apply the selected review tier's base-change rules in `$implementation-final-review`; only high-risk work uses the verified base-advance closure in [high-risk-review.md](../implementation-final-review/references/high-risk-review.md) step 20. Recheck relevant upstream dependencies and tooling before retaining review evidence. Rerun applicable final verification on the new base and regenerate the PR handoff; obtain affected independent re-review whenever the selected tier requires it. Once stable:
 
 1. Check whether the suggested branch exists locally, remotely, or in another worktree. Ask `$pr-draft-summary` for the next available numeric suffix and regenerate the handoff before creating a colliding branch.
 2. Create the exact suggested branch in the task worktree.

@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "interface": "v1",
+  "status": "unreleased",
+  "package_version": "0.24.0-alpha.5",
+  "release": null,
+  "source_ref": "feat/codex-harness",
+  "published_release": null,
+  "published_guide": null,
+  "topics": [
+    {
+      "id": "versions",
+      "path": "versions.md",
+      "aliases": [
+        "install",
+        "wheel",
+        "SDK version",
+        "coding agent docs"
+      ]
+    },
+    {
+      "id": "start",
+      "path": "index.md",
+      "aliases": [
+        "quickstart",
+        "first agent"
+      ]
+    },
+    {
+      "id": "migrate-v0",
+      "path": "migration.md",
+      "aliases": [
+        "Runner",
+        "handoff",
+        "guardrails",
+        "RunState",
+        "migration"
+      ]
+    },
+    {
+      "id": "choose",
+      "path": "choosing.md#choose-feature-combinations",
+      "aliases": [
+        "feature combinations",
+        "LocalStorage",
+        "manual suspend"
+      ]
+    },
+    {
+      "id": "providers",
+      "path": "providers.md",
+      "aliases": [
+        "custom endpoint",
+        "Responses",
+        "OpenAI base URL",
+        "WebSockets"
+      ]
+    },
+    {
+      "id": "recipes",
+      "path": "recipes.md",
+      "aliases": [
+        "RAG",
+        "PDF",
+        "memory",
+        "specialist",
+        "image input",
+        "programmatic tools",
+        "attachments",
+        "citations",
+        "parallel",
+        "concurrency",
+        "FastAPI"
+      ]
+    },
+    {
+      "id": "tools",
+      "path": "tools.md",
+      "aliases": [
+        "function_tool",
+        "MCP",
+        "approval",
+        "human in the loop",
+        "MCP authentication"
+      ]
+    },
+    {
+      "id": "sessions",
+      "path": "sessions.md",
+      "aliases": [
+        "persistence",
+        "streaming",
+        "Stop",
+        "EventGap",
+        "checkpoint",
+        "conversation history"
+      ]
+    },
+    {
+      "id": "testing",
+      "path": "testing.md",
+      "aliases": [
+        "no key",
+        "ScriptedResponses",
+        "simulate",
+        "eval"
+      ]
+    },
+    {
+      "id": "configure",
+      "path": "configuration.md",
+      "aliases": [
+        "structured output",
+        "telemetry",
+        "trace"
+      ]
+    },
+    {
+      "id": "operate",
+      "path": "troubleshooting.md",
+      "aliases": [
+        "timeout",
+        "usage",
+        "error",
+        "diagnose",
+        "rate limits",
+        "token budget",
+        "retry",
+        "tracing",
+        "OpenTelemetry"
+      ]
+    },
+    {
+      "id": "api",
+      "path": "reference.md",
+      "aliases": [
+        "API reference"
+      ]
+    }
+  ]
+}

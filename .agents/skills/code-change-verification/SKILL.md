@@ -12,8 +12,8 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 ## Quick start
 
 1. Keep this skill at `./.agents/skills/code-change-verification` so it loads automatically for the repository.
-2. Codex on macOS/Linux: `/usr/bin/env -u OPENAI_API_KEY OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
-3. Other macOS/Linux environments: `env UV_DEFAULT_INDEX=https://pypi.org/simple bash .agents/skills/code-change-verification/scripts/run.sh`.
+2. Codex on macOS/Linux: `/usr/bin/env -u OPENAI_API_KEY OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 bash .agents/skills/code-change-verification/scripts/run.sh`.
+3. Other macOS/Linux environments: `bash .agents/skills/code-change-verification/scripts/run.sh`.
 4. Windows: `powershell -ExecutionPolicy Bypass -File .agents/skills/code-change-verification/scripts/run.ps1`.
 5. On macOS/Linux, the script runs `make format`, `make lint`, `make typecheck`, and `make tests` sequentially and stops at the first failure. Parallelism inside each Make target, including pytest workers, is unchanged.
 6. The Bash script streams each command's output directly. The Windows wrapper retains parallel lint, typecheck, and test steps with periodic heartbeat updates.
@@ -31,9 +31,9 @@ Ensure work is only marked complete after formatting, linting, type checking, an
 
 Repository verification and all child processes must remain in the normal Codex workspace sandbox. Never request elevated sandbox permissions for the verification wrapper, and never retry the wrapper with broader host access after a failure.
 
-On macOS, tests marked `requires_native_macos_sandbox` need to start their own `sandbox-exec` process. The Codex command sets `OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1`, which skips only that marker before nested sandbox creation. All other tests remain enabled. Ordinary local and CI runs do not set this variable and therefore keep the marked tests enabled.
+The Codex command sets `OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1`. On macOS, this skips `requires_native_macos_sandbox` tests, which start their own `sandbox-exec` process. On Linux, it skips `requires_native_linux_sandbox` tests, which need native Linux sandbox capabilities outside the Codex outer sandbox. Other platform and test-selection rules still apply.
 
-The marked tests run separately on a disposable GitHub-hosted macOS runner. If that trusted runner is unavailable, report the missing native-macOS coverage; do not compensate by weakening the Codex sandbox boundary.
+Ordinary local and CI runs without this variable keep the native-sandbox tests enabled on their matching host platform. The macOS checks run in the separate GitHub-hosted macOS job; the Linux checks run in the Linux test jobs. Use trusted CI results for the coverage excluded locally. If those results are unavailable, report the missing native-macOS or native-Linux coverage. Never weaken the Codex sandbox boundary to obtain it.
 
 ## Environment setup
 

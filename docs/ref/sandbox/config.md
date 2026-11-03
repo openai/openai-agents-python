@@ -1,3 +1,0 @@
-# `Config`
-
-::: agents.sandbox.config

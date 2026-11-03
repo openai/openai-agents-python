@@ -6,7 +6,7 @@ permissions: {}
 jobs:
   authorize:
     name: Authorize readiness refresh
-    if: github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main'
+    if: github.repository == 'openai/openai-agents-python' && github.event.pull_request.head.ref == 'release-please--branches--main' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.base.ref == 'main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -1,0 +1,2198 @@
+diff --git a/codex-rs/code-mode-protocol/src/session.rs b/codex-rs/code-mode-protocol/src/session.rs
+index 7f9f8cb7c01cfffbd84249943ce574c4bfa92c54..6035481658ae5fb0d8bbcd617a80dd7198ffff1f 100644
+--- a/codex-rs/code-mode-protocol/src/session.rs
++++ b/codex-rs/code-mode-protocol/src/session.rs
+@@ -172,6 +172,21 @@ pub trait CodeModeSession: Send + Sync {
+         preempt: Option<CancellationToken>,
+     ) -> CodeModeSessionResultFuture<'a, StartedCell>;
+ 
++    /// Captures execution ownership before the future moves to an owned startup task.
++    /// Construction must not start native work; dropping an unpolled future releases the capture.
++    /// Providers without task-bound ownership retain their existing execution behavior.
++    fn execute_owned(
++        self: Arc<Self>,
++        request: ExecuteRequest,
++        delegate: Arc<dyn CodeModeSessionDelegate>,
++        preempt: Option<CancellationToken>,
++    ) -> CodeModeSessionResultFuture<'static, StartedCell>
++    where
++        Self: 'static,
++    {
++        Box::pin(async move { self.execute(request, delegate, preempt).await })
++    }
++
+     /// Waits for a cell, yielding the observation if `preempt` is signaled while the cell continues.
+     fn wait<'a>(
+         &'a self,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 61b921a26e61de101da37c6027696192d4f9f29c..ef861ed4de8cdd71d2506e049dc35b38cc4012ee 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1632,7 +1632,7 @@ async fn run_sampling_request(
+         Arc::clone(&step_context),
+         Arc::clone(&turn_diff_tracker),
+     );
+-    let _code_mode_worker = sess.services.code_mode_service.start_turn_worker(
++    sess.services.code_mode_service.bind_step_runtime(
+         &sess,
+         Arc::clone(&step_context),
+         Arc::clone(&turn_diff_tracker),
+diff --git a/codex-rs/core/src/tools/code_mode/delegate.rs b/codex-rs/core/src/tools/code_mode/delegate.rs
+index 9e4429a4b167d2705189b8631af3610297f19d3d..be574714ac3856d1eba80f1fabeb8847bb814c70 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate.rs
+@@ -1,6 +1,7 @@
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::sync::Mutex;
++use std::sync::OnceLock;
+ use std::sync::Weak;
+ 
+ use crate::tools::context::ToolCallOrigin;
+@@ -15,10 +16,10 @@ use codex_protocol::ThreadId;
+ use codex_protocol::models::FunctionCallOutputPayload;
+ use codex_protocol::models::ResponseItem;
+ use codex_utils_output_truncation::with_serialization_allowance;
+-use serde_json::Value as JsonValue;
+ use tokio::sync::oneshot;
+ use tokio::sync::watch;
+ use tokio_util::sync::CancellationToken;
++use tokio_util::task::TaskTracker;
+ use tracing::Instrument;
+ 
+ use super::PUBLIC_TOOL_NAME;
+@@ -32,271 +33,514 @@ use crate::tools::ExecutedToolCalls;
+ use crate::tools::call_trace;
+ use crate::tools::context::SharedTurnDiffTracker;
+ use crate::tools::parallel::ToolCallRuntime;
++use crate::tools::parallel::WeakToolCallRuntime;
+ 
+ pub(super) struct CodeModeDispatchBroker {
+     thread_id: ThreadId,
+-    dispatch_tx: async_channel::Sender<DispatchMessage>,
+-    dispatch_rx: async_channel::Receiver<DispatchMessage>,
+-    dispatch_gates: Arc<Mutex<HashMap<CellId, CellDispatchGate>>>,
++    state: Mutex<DispatchState>,
+     executed_tool_calls: ExecutedToolCalls,
+ }
++#[derive(Default)]
++struct DispatchState {
++    closed: bool,
++    cells: HashMap<CellId, Weak<CellDispatchReceipt>>,
++    all: Vec<Weak<CellDispatchReceipt>>,
++    // Keep physical cleanup reachable after the provider drops its delegate.
++    retired: Vec<Arc<CellDispatchReceipt>>,
++}
+ 
+-/// Retains the step advertised to one execution, including callbacks after it yields.
++/// A live cell keeps its original plan; idle routing metadata never keeps Session alive.
+ pub(super) struct CodeModeCellDelegate {
+     pub(super) broker: Arc<CodeModeDispatchBroker>,
+     pub(super) step_context: Arc<StepContext>,
++    pub(super) receipt: Arc<CellDispatchReceipt>,
++    runtime: Arc<WeakToolCallRuntime>,
+ }
+-
+-struct CellDispatchGate {
++pub(super) struct CellDispatchReceipt {
++    cell_id: OnceLock<CellId>,
+     ready: watch::Sender<bool>,
+-    // Callbacks may create the gate before exec attaches its origin. None means
+-    // no origin is attached; Some retains the original item and window across
+-    // waits, even if the best-effort item lookup found no ID.
+-    originating_call: Option<ToolCallOrigin>,
++    originating_call: Mutex<Option<ToolCallOrigin>>,
++    closed: CancellationToken,
++    tasks: TaskTracker,
++    forced: CancellationToken,
++    backend_closed: CancellationToken,
++    // The tracked startup owns backend termination until its first observation is claimed.
++    startup: std::sync::atomic::AtomicBool,
++    cleanup_error: Mutex<Option<String>>,
++}
++impl CellDispatchReceipt {
++    fn new() -> Self {
++        Self {
++            cell_id: OnceLock::new(),
++            ready: watch::channel(false).0,
++            originating_call: Mutex::new(None),
++            closed: CancellationToken::new(),
++            tasks: TaskTracker::new(),
++            forced: CancellationToken::new(),
++            backend_closed: CancellationToken::new(),
++            startup: std::sync::atomic::AtomicBool::new(false),
++            cleanup_error: Mutex::new(None),
++        }
++    }
++    pub(super) fn cell_id(&self) -> Option<CellId> {
++        self.cell_id.get().cloned()
++    }
++    pub(super) async fn join(&self) -> Result<(), String> {
++        self.tasks.wait().await;
++        match self
++            .cleanup_error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone()
++        {
++            Some(error) => Err(error),
++            None => Ok(()),
++        }
++    }
++    pub(super) fn failed_cleanup(&self, error: String) {
++        let mut failed = self
++            .cleanup_error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if failed.is_none() {
++            *failed = Some(error);
++        }
++    }
++    fn has_cleanup_error(&self) -> bool {
++        self.cleanup_error
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .is_some()
++    }
++    pub(super) async fn joined<T>(&self, result: Result<T, String>) -> Result<T, String> {
++        match (result, self.join().await) {
++            (Err(error), Err(cleanup)) if error != cleanup => {
++                Err(format!("{error}; cleanup failed: {cleanup}"))
++            }
++            (_, Err(cleanup)) => Err(cleanup),
++            (result, Ok(())) => result,
++        }
++    }
+ }
+ 
+ impl CodeModeDispatchBroker {
+     pub(super) fn new(thread_id: ThreadId, executed_tool_calls: ExecutedToolCalls) -> Self {
+-        let (dispatch_tx, dispatch_rx) = async_channel::unbounded();
+         Self {
+             thread_id,
+-            dispatch_tx,
+-            dispatch_rx,
+-            dispatch_gates: Arc::new(Mutex::new(HashMap::new())),
++            state: Mutex::new(DispatchState::default()),
+             executed_tool_calls,
+         }
+     }
+-
+-    pub(super) fn mark_cell_ready_for_dispatch(
++    pub(super) fn bind_step_runtime(
+         &self,
+-        cell_id: &CellId,
+-        originating_call: Option<ToolCallOrigin>,
++        session: Arc<Session>,
++        step_context: Arc<StepContext>,
++        tracker: SharedTurnDiffTracker,
+     ) {
+-        let ready = {
+-            let mut dispatch_gates = self
+-                .dispatch_gates
++        step_context.extension_data.get_or_init(|| {
++            ToolCallRuntime::new(session, Arc::clone(&step_context), tracker).downgrade()
++        });
++    }
++    pub(super) fn delegate(
++        self: &Arc<Self>,
++        step_context: Arc<StepContext>,
++    ) -> Result<Arc<CodeModeCellDelegate>, String> {
++        let runtime = step_context
++            .extension_data
++            .get::<WeakToolCallRuntime>()
++            .ok_or_else(|| "code mode step dispatcher is unavailable".to_string())?;
++        if !runtime.belongs_to(&step_context) {
++            return Err("code mode step dispatcher changed".into());
++        }
++        let receipt = Arc::new(CellDispatchReceipt::new());
++        {
++            let mut state = self
++                .state
+                 .lock()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+-            let gate = dispatch_gates
+-                .entry(cell_id.clone())
+-                .or_insert_with(|| CellDispatchGate {
+-                    ready: watch::channel(false).0,
+-                    originating_call: None,
+-                });
+-            gate.originating_call = originating_call;
+-            gate.ready.clone()
+-        };
+-        ready.send_replace(true);
++            if state.closed {
++                return Err("code mode dispatcher is closed".into());
++            }
++            state
++                .retired
++                .retain(|receipt| !receipt.tasks.is_empty() || receipt.has_cleanup_error());
++            state.all.retain(|receipt| receipt.strong_count() > 0);
++            state.all.push(Arc::downgrade(&receipt));
++        }
++        Ok(Arc::new(CodeModeCellDelegate {
++            broker: Arc::clone(self),
++            step_context,
++            receipt,
++            runtime,
++        }))
+     }
+-
+-    pub(super) fn cell_originating_call(&self, cell_id: &CellId) -> Option<ToolCallOrigin> {
+-        self.dispatch_gates
++    fn bind_locked(
++        state: &mut DispatchState,
++        cell_id: &CellId,
++        receipt: &Arc<CellDispatchReceipt>,
++        allow_closed: bool,
++    ) -> Result<(), String> {
++        if !allow_closed && (state.closed || receipt.closed.is_cancelled()) {
++            return Err("code mode cell is closed".into());
++        }
++        if receipt
++            .cell_id
++            .get()
++            .is_some_and(|original| original != cell_id)
++        {
++            return Err("code mode cell identity changed".into());
++        }
++        if state
++            .cells
++            .get(cell_id)
++            .and_then(Weak::upgrade)
++            .is_some_and(|current| !Arc::ptr_eq(&current, receipt))
++        {
++            return Err("code mode cell identity is already owned".into());
++        }
++        let _ = receipt.cell_id.set(cell_id.clone());
++        state.cells.retain(|_, receipt| receipt.strong_count() > 0);
++        state.cells.insert(cell_id.clone(), Arc::downgrade(receipt));
++        Ok(())
++    }
++    pub(super) fn register_cell(
++        &self,
++        cell_id: &CellId,
++        receipt: &Arc<CellDispatchReceipt>,
++    ) -> Result<(), String> {
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        Self::bind_locked(&mut state, cell_id, receipt, true)
++    }
++    pub(super) fn receipt(&self, cell_id: &CellId) -> Option<Arc<CellDispatchReceipt>> {
++        self.state
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .cells
+             .get(cell_id)
+-            .and_then(|gate| gate.originating_call.clone())
++            .and_then(Weak::upgrade)
+     }
+-
+-    pub(super) fn close_cell(&self, cell_id: &CellId) {
+-        let mut dispatch_gates = self
+-            .dispatch_gates
++    pub(super) fn receipts(&self) -> Vec<Arc<CellDispatchReceipt>> {
++        self.state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .all
++            .iter()
++            .filter_map(Weak::upgrade)
++            .collect()
++    }
++    pub(super) fn mark_cell_ready_for_dispatch(
++        &self,
++        cell_id: &CellId,
++        originating_call: Option<ToolCallOrigin>,
++    ) {
++        let state = self
++            .state
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        dispatch_gates.remove(cell_id);
++        if let Some(receipt) = state.cells.get(cell_id).and_then(Weak::upgrade)
++            && !receipt.closed.is_cancelled()
++        {
++            *receipt
++                .originating_call
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner) = originating_call;
++            receipt.ready.send_replace(true);
++        }
++    }
++    pub(super) fn cell_originating_call(&self, cell_id: &CellId) -> Option<ToolCallOrigin> {
++        self.receipt(cell_id).and_then(|receipt| {
++            receipt
++                .originating_call
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .clone()
++        })
++    }
++    fn close_locked(&self, state: &mut DispatchState, receipt: &Arc<CellDispatchReceipt>) {
++        if !receipt.closed.is_cancelled() {
++            // Registration, close and physical submission use this same lock.
++            receipt.closed.cancel();
++            receipt.tasks.close();
++            if let Some(cell_id) = receipt.cell_id.get() {
++                self.executed_tool_calls.finish_cell_recording(cell_id);
++            }
++            state
++                .retired
++                .retain(|receipt| !receipt.tasks.is_empty() || receipt.has_cleanup_error());
++            if !receipt.tasks.is_empty() {
++                state.retired.push(Arc::clone(receipt));
++            }
++        }
++    }
++    pub(super) fn finish_cell_recording(&self, cell_id: &CellId) {
+         self.executed_tool_calls.finish_cell_recording(cell_id);
+     }
+-
+-    pub(super) fn active_cell_ids(&self) -> Vec<CellId> {
+-        self.dispatch_gates
++    pub(super) fn close_receipt(&self, receipt: &Arc<CellDispatchReceipt>) -> bool {
++        let mut state = self
++            .state
+             .lock()
+-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+-            .keys()
+-            .cloned()
+-            .collect()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        receipt.forced.cancel();
++        self.close_locked(&mut state, receipt);
++        receipt.startup.load(std::sync::atomic::Ordering::Acquire)
++    }
++    pub(super) fn retire_receipt(&self, receipt: &Arc<CellDispatchReceipt>) {
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        receipt.backend_closed.cancel();
++        self.close_locked(&mut state, receipt);
++    }
++    fn finish_startup(&self, receipt: &Arc<CellDispatchReceipt>) -> bool {
++        let _state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if receipt.forced.is_cancelled() {
++            return false;
++        }
++        receipt
++            .startup
++            .store(false, std::sync::atomic::Ordering::Release);
++        true
++    }
++    fn startup_finished(&self, receipt: &Arc<CellDispatchReceipt>) {
++        let _state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        receipt
++            .startup
++            .store(false, std::sync::atomic::Ordering::Release);
++    }
++    pub(super) fn close_all(&self) -> Vec<Arc<CellDispatchReceipt>> {
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        state.closed = true;
++        let receipts: Vec<_> = state.all.iter().filter_map(Weak::upgrade).collect();
++        for receipt in &receipts {
++            receipt.forced.cancel();
++            self.close_locked(&mut state, receipt);
++        }
++        receipts
++    }
++    pub(super) async fn execute(
++        self: &Arc<Self>,
++        backend: Arc<dyn codex_code_mode::CodeModeSession>,
++        request: codex_code_mode::ExecuteRequest,
++        delegate: Arc<CodeModeCellDelegate>,
++        preempt: Option<CancellationToken>,
++    ) -> Result<codex_code_mode::StartedCell, String> {
++        let receipt = Arc::clone(&delegate.receipt);
++        // Capture task-bound backend ownership on the issuing tool task. The
++        // tracked startup task polls this future only after admission below.
++        let execution = Arc::clone(&backend).execute_owned(request, delegate, preempt);
++        let cancellation = CancellationToken::new();
++        let cancel_on_drop = cancellation.clone().drop_guard();
++        let (response_tx, response_rx) = oneshot::channel();
++        {
++            let state = self
++                .state
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            if state.closed || receipt.closed.is_cancelled() {
++                return Err("code mode execution was interrupted before startup".into());
++            }
++            receipt
++                .startup
++                .store(true, std::sync::atomic::Ordering::Release);
++            let broker = Arc::clone(self);
++            let owned = Arc::clone(&receipt);
++            receipt.tasks.spawn(async move {
++                broker
++                    .start_execution(backend, execution, owned, cancellation, response_tx)
++                    .await;
++            });
++        }
++        let result = response_rx
++            .await
++            .unwrap_or_else(|_| Err("code mode startup dispatcher stopped".into()));
++        cancel_on_drop.disarm();
++        match result {
++            Ok(started) => Ok(started),
++            Err(error) => {
++                self.close_receipt(&receipt);
++                receipt.joined(Err(error)).await
++            }
++        }
+     }
+ 
+-    pub(super) fn start_turn_worker(
+-        &self,
+-        session: Arc<Session>,
+-        step_context: Arc<StepContext>,
+-        tracker: SharedTurnDiffTracker,
+-    ) -> CodeModeDispatchWorker {
+-        let tool_runtime = ToolCallRuntime::new(Arc::clone(&session), step_context, tracker);
+-        let host = Arc::new(CoreTurnHost {
+-            session,
+-            tool_runtime,
+-        });
+-        let dispatch_rx = self.dispatch_rx.clone();
+-        let dispatch_gates = Arc::clone(&self.dispatch_gates);
+-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+-        tokio::spawn(async move {
+-            loop {
+-                let message = tokio::select! {
+-                    _ = &mut shutdown_rx => break,
+-                    message = dispatch_rx.recv() => message.ok(),
+-                };
+-                let Some(message) = message else {
+-                    break;
+-                };
+-                match message {
+-                    DispatchMessage::Notify {
+-                        call_id,
+-                        cell_id,
+-                        text,
+-                        output_token_limit,
+-                        cancellation_token,
+-                        response_tx,
+-                    } => {
+-                        let response = if wait_until_cell_ready_for_dispatch(
+-                            &dispatch_gates,
+-                            &cell_id,
+-                            &cancellation_token,
+-                        )
+-                        .await
+-                        {
+-                            host.notify(call_id, cell_id, text, output_token_limit)
+-                                .await
+-                        } else {
+-                            remove_dispatch_gate(&dispatch_gates, &cell_id);
+-                            Err("code mode notification cancelled".to_string())
+-                        };
+-                        let _ = response_tx.send(response);
+-                    }
+-                    DispatchMessage::InvokeTool {
+-                        invocation,
+-                        step_context,
+-                        mut dispatch_trace,
+-                        cancellation_token,
+-                        response_tx,
+-                    } => {
+-                        let cell_id = invocation.cell_id.clone();
+-                        if !wait_until_cell_ready_for_dispatch(
+-                            &dispatch_gates,
+-                            &cell_id,
+-                            &cancellation_token,
+-                        )
+-                        .await
+-                        {
+-                            let outcome = if cancellation_token.is_cancelled() {
+-                                DispatchInterruption::Cancelled
+-                            } else {
+-                                DispatchInterruption::CellClosed
+-                            };
+-                            dispatch_trace.interruption = Some(outcome);
+-                            remove_dispatch_gate(&dispatch_gates, &cell_id);
+-                            continue;
+-                        }
+-                        let Some(step_context) = step_context
+-                            .upgrade()
+-                            .filter(|_| !cancellation_token.is_cancelled())
+-                        else {
+-                            let _ = response_tx
+-                                .send(Err("code mode nested tool call cancelled".to_string()));
+-                            continue;
+-                        };
+-                        let track_completeness =
+-                            ExecutedToolCalls::is_enabled(&step_context.turn.config.features);
+-                        let host = Arc::clone(&host);
+-                        let dispatch_gates = Arc::clone(&dispatch_gates);
+-                        let span = dispatch_trace.span.clone();
+-                        tokio::spawn(async move {
+-                            let invocation = {
+-                                let dispatch_gate = track_completeness.then(|| {
+-                                    dispatch_gates
+-                                        .lock()
+-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+-                                });
+-                                if dispatch_gate.as_ref().is_some_and(|gates| {
+-                                    cancellation_token.is_cancelled()
+-                                        || !gates.contains_key(&cell_id)
+-                                }) {
+-                                    let outcome = if cancellation_token.is_cancelled() {
+-                                        DispatchInterruption::Cancelled
+-                                    } else {
+-                                        DispatchInterruption::CellClosed
+-                                    };
+-                                    dispatch_trace.interruption = Some(outcome);
+-                                    return;
+-                                }
+-                                // Submission and cell closure share this gate.
+-                                span.in_scope(|| {
+-                                    dispatch_trace.interruption = None;
+-                                    host.submit_tool(
+-                                        invocation,
+-                                        step_context,
+-                                        dispatch_trace.call_id.clone(),
+-                                        cancellation_token.clone(),
+-                                    )
+-                                })
+-                                .instrument(span)
+-                            };
+-                            tokio::pin!(invocation);
+-                            let response = tokio::select! {
+-                                biased;
+-                                _ = cancellation_token.cancelled() => invocation.await,
+-                                response = &mut invocation => response,
+-                            };
+-                            let _ = response_tx.send(response);
+-                        });
+-                    }
++    async fn start_execution(
++        self: Arc<Self>,
++        backend: Arc<dyn codex_code_mode::CodeModeSession>,
++        execution: codex_code_mode::CodeModeSessionResultFuture<
++            'static,
++            codex_code_mode::StartedCell,
++        >,
++        receipt: Arc<CellDispatchReceipt>,
++        cancellation: CancellationToken,
++        response_tx: oneshot::Sender<Result<codex_code_mode::StartedCell, String>>,
++    ) {
++        tokio::pin!(execution);
++        let started = tokio::select! {
++            biased;
++            _ = cancellation.cancelled() => { self.close_receipt(&receipt); execution.await },
++            _ = receipt.forced.cancelled() => execution.await,
++            result = &mut execution => result,
++        };
++        let started = match started {
++            Ok(started) => started,
++            Err(error) => {
++                self.close_receipt(&receipt);
++                if let Some(cell_id) = receipt.cell_id() {
++                    self.terminate_startup(&backend, &cell_id, &receipt).await;
++                } else {
++                    self.startup_finished(&receipt);
+                 }
++                let _ = response_tx.send(Err(error));
++                return;
++            }
++        };
++        let cell_id = started.cell_id.clone();
++        if let Err(error) = self.register_cell(&cell_id, &receipt) {
++            self.close_receipt(&receipt);
++            self.terminate_startup(&backend, &cell_id, &receipt).await;
++            let _ = response_tx.send(Err(error));
++            return;
++        }
++        let (initial_tx, initial_rx) = oneshot::channel();
++        let (claimed_tx, claimed_rx) = oneshot::channel();
++        let initial_cancel = CancellationToken::new();
++        let cancel_initial_on_drop = initial_cancel.clone().drop_guard();
++        let response_receipt = Arc::clone(&receipt);
++        let wrapped = codex_code_mode::StartedCell::from_future(cell_id.clone(), async move {
++            // The guard is captured even when this future has never been polled.
++            let result = initial_rx
++                .await
++                .unwrap_or_else(|_| Err("code mode initial response stopped".into()));
++            let _ = claimed_tx.send(());
++            cancel_initial_on_drop.disarm();
++            if matches!(
++                &result,
++                Ok(codex_code_mode::RuntimeResponse::Yielded { .. })
++            ) {
++                result
++            } else {
++                response_receipt.joined(result).await
+             }
+         });
+-        CodeModeDispatchWorker {
+-            shutdown_tx: Some(shutdown_tx),
++        let delivered = response_tx.send(Ok(wrapped)).is_ok();
++        if !delivered {
++            self.close_receipt(&receipt);
++        }
++        let initial = started.initial_response();
++        tokio::pin!(initial);
++        let outcome = tokio::select! {
++            biased;
++            _ = cancellation.cancelled() => { self.close_receipt(&receipt); None },
++            _ = initial_cancel.cancelled() => { self.close_receipt(&receipt); None },
++            _ = receipt.forced.cancelled() => None,
++            outcome = &mut initial => Some(outcome),
++        };
++        let Some(outcome) = outcome else {
++            self.terminate_startup(&backend, &cell_id, &receipt).await;
++            let _ = initial_tx.send(Err(
++                "code mode execution was interrupted during startup".into()
++            ));
++            return;
++        };
++        if outcome.is_err() {
++            self.close_receipt(&receipt);
++            self.terminate_startup(&backend, &cell_id, &receipt).await;
++            let _ = initial_tx.send(outcome);
++            return;
++        }
++        let yielded = matches!(
++            &outcome,
++            Ok(codex_code_mode::RuntimeResponse::Yielded { .. })
++        );
++        if !yielded {
++            self.retire_receipt(&receipt);
+         }
++        let delivered = initial_tx.send(outcome).is_ok();
++        if yielded && delivered {
++            let claimed = tokio::select! {
++                biased;
++                _ = cancellation.cancelled() => false,
++                _ = initial_cancel.cancelled() => false,
++                _ = receipt.forced.cancelled() => false,
++                _ = receipt.closed.cancelled() => true, // backend already closed the cell
++                claimed = claimed_rx => claimed.is_ok(),
++            };
++            if claimed && self.finish_startup(&receipt) {
++                return;
++            }
++        } else if !yielded {
++            self.startup_finished(&receipt);
++            return;
++        }
++        self.close_receipt(&receipt);
++        self.terminate_startup(&backend, &cell_id, &receipt).await;
+     }
+-}
+ 
+-fn dispatch_gate(
+-    dispatch_gates: &Mutex<HashMap<CellId, CellDispatchGate>>,
+-    cell_id: &CellId,
+-) -> watch::Sender<bool> {
+-    let mut dispatch_gates = match dispatch_gates.lock() {
+-        Ok(dispatch_gates) => dispatch_gates,
+-        Err(poisoned) => poisoned.into_inner(),
+-    };
+-    dispatch_gates
+-        .entry(cell_id.clone())
+-        .or_insert_with(|| CellDispatchGate {
+-            ready: watch::channel(false).0,
+-            originating_call: None,
+-        })
+-        .ready
+-        .clone()
+-}
++    async fn terminate_startup(
++        &self,
++        backend: &Arc<dyn codex_code_mode::CodeModeSession>,
++        cell_id: &CellId,
++        receipt: &Arc<CellDispatchReceipt>,
++    ) {
++        if !receipt.backend_closed.is_cancelled()
++            && let Err(error) = backend.terminate(cell_id.clone()).await
++            && !receipt.backend_closed.is_cancelled()
++        {
++            receipt.failed_cleanup(error);
++        }
++        self.retire_receipt(receipt);
++        self.startup_finished(receipt);
++    }
+ 
+-fn remove_dispatch_gate(
+-    dispatch_gates: &Mutex<HashMap<CellId, CellDispatchGate>>,
+-    cell_id: &CellId,
+-) {
+-    let mut dispatch_gates = match dispatch_gates.lock() {
+-        Ok(dispatch_gates) => dispatch_gates,
+-        Err(poisoned) => poisoned.into_inner(),
+-    };
+-    dispatch_gates.remove(cell_id);
++    fn spawn<T: Send + 'static>(
++        &self,
++        receipt: &Arc<CellDispatchReceipt>,
++        cell_id: &CellId,
++        future: impl std::future::Future<Output = T> + Send + 'static,
++    ) -> Result<oneshot::Receiver<T>, String> {
++        let (response_tx, response_rx) = oneshot::channel();
++        let mut state = self
++            .state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        Self::bind_locked(&mut state, cell_id, receipt, false)?;
++        // TaskTracker::close does not fence spawn; the shared lock does.
++        receipt.tasks.spawn(async move {
++            let _ = response_tx.send(future.await);
++        });
++        Ok(response_rx)
++    }
+ }
+ 
+ async fn wait_until_cell_ready_for_dispatch(
+-    dispatch_gates: &Mutex<HashMap<CellId, CellDispatchGate>>,
+-    cell_id: &CellId,
+-    cancellation_token: &CancellationToken,
++    receipt: &CellDispatchReceipt,
++    cancellation: &CancellationToken,
+ ) -> bool {
+-    if cancellation_token.is_cancelled() {
+-        return false;
+-    }
+-    let mut ready_rx = dispatch_gate(dispatch_gates, cell_id).subscribe();
++    let mut ready = receipt.ready.subscribe();
+     loop {
+-        if *ready_rx.borrow_and_update() {
++        if cancellation.is_cancelled() || receipt.closed.is_cancelled() {
++            return false;
++        }
++        if *ready.borrow_and_update() {
+             return true;
+         }
+         tokio::select! {
+-            changed = ready_rx.changed() => {
+-                if changed.is_err() {
+-                    return false;
+-                }
+-            }
+-            _ = cancellation_token.cancelled() => return false,
++            changed = ready.changed() => if changed.is_err() { return false; },
++            _ = cancellation.cancelled() => return false,
++            _ = receipt.closed.cancelled() => return false,
+         }
+     }
+ }
+@@ -332,29 +576,48 @@ impl CodeModeSessionDelegate for CodeModeCellDelegate {
+             );
+             let mut dispatch_trace =
+                 Box::new(NestedToolDispatchTrace::new(self.broker.thread_id, call_id));
+-            if cancellation_token.is_cancelled() {
+-                dispatch_trace.interruption = Some(DispatchInterruption::Cancelled);
+-                return Err("code mode nested tool call cancelled".to_string());
+-            }
+-            let (response_tx, response_rx) = oneshot::channel();
+-            // Only the worker can tell whether dispatch beats cancellation once the call is queued.
+-            self.broker
+-                .dispatch_tx
+-                .send(DispatchMessage::InvokeTool {
+-                    invocation,
+-                    step_context: Arc::downgrade(&self.step_context),
+-                    dispatch_trace,
+-                    cancellation_token: cancellation_token.clone(),
+-                    response_tx,
+-                })
+-                .await
+-                .map_err(|_| "code mode nested tool dispatcher is unavailable".to_string())?;
+-            tokio::select! {
+-                response = response_rx => response
+-                    .map_err(|_| "code mode nested tool dispatcher stopped".to_string())?,
+-                _ = cancellation_token.cancelled() => {
+-                    Err("code mode nested tool call cancelled".to_string())
++            let cancellation = cancellation_token.child_token();
++            let _cancel_on_drop = cancellation.clone().drop_guard();
++            let request_cancellation = cancellation.clone();
++            let broker = Arc::clone(&self.broker);
++            let receipt = Arc::clone(&self.receipt);
++            let runtime = Arc::clone(&self.runtime);
++            let cell_id = invocation.cell_id.clone();
++            let response = self.broker.spawn(&self.receipt, &cell_id, async move {
++                if !wait_until_cell_ready_for_dispatch(&receipt, &request_cancellation).await {
++                    dispatch_trace.interruption = Some(if request_cancellation.is_cancelled() {
++                        DispatchInterruption::Cancelled
++                    } else { DispatchInterruption::CellClosed });
++                    return Err("code mode nested tool call cancelled".to_string());
++                }
++                let span = dispatch_trace.span.clone();
++                let invocation = {
++                    let state = broker.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
++                    if state.closed || receipt.closed.is_cancelled() || request_cancellation.is_cancelled() {
++                        dispatch_trace.interruption = Some(DispatchInterruption::Cancelled);
++                        return Err("code mode nested tool call cancelled".to_string());
++                    }
++                    let Some((session, step_context, runtime)) = runtime.upgrade() else {
++                        return Err("code mode nested tool dispatcher stopped".to_string());
++                    };
++                    // Submit while close is fenced; retain only the original router/tracker/gate.
++                    span.in_scope(|| {
++                        dispatch_trace.interruption = None;
++                        submit_nested_tool(session, step_context, runtime, invocation,
++                            dispatch_trace.call_id.clone(), request_cancellation.clone())
++                    }).map_err(|error| error.to_string())?
++                }.instrument(span);
++                tokio::pin!(invocation);
++                tokio::select! {
++                    biased;
++                    _ = receipt.closed.cancelled() => { request_cancellation.cancel(); invocation.await.map_err(|error| error.to_string()) },
++                    _ = request_cancellation.cancelled() => invocation.await.map_err(|error| error.to_string()),
++                    result = &mut invocation => result.map_err(|error| error.to_string()),
+                 }
++            })?;
++            tokio::select! {
++                result = response => result.map_err(|_| "code mode nested tool dispatcher stopped".to_string())?,
++                _ = cancellation.cancelled() => Err("code mode nested tool call cancelled".to_string()),
+             }
+         })
+     }
+@@ -367,129 +630,82 @@ impl CodeModeSessionDelegate for CodeModeCellDelegate {
+         cancellation_token: CancellationToken,
+     ) -> NotificationFuture<'a> {
+         Box::pin(async move {
+-            if cancellation_token.is_cancelled() {
+-                return Err("code mode notification cancelled".to_string());
+-            }
+-            let (response_tx, response_rx) = oneshot::channel();
+-            self.broker
+-                .dispatch_tx
+-                .send(DispatchMessage::Notify {
+-                    call_id,
+-                    cell_id,
+-                    text,
+-                    output_token_limit: with_serialization_allowance(
+-                        self.step_context
+-                            .settings
+-                            .model_info
+-                            .truncation_policy
+-                            .into(),
+-                    )
+-                    .token_budget(),
+-                    cancellation_token: cancellation_token.clone(),
+-                    response_tx,
+-                })
+-                .await
+-                .map_err(|_| "code mode notification dispatcher is unavailable".to_string())?;
+-            tokio::select! {
+-                response = response_rx => response
+-                    .map_err(|_| "code mode notification dispatcher stopped".to_string())?,
+-                _ = cancellation_token.cancelled() => {
+-                    Err("code mode notification cancelled".to_string())
++            let cancellation = cancellation_token.child_token();
++            let _cancel_on_drop = cancellation.clone().drop_guard();
++            let request_cancellation = cancellation.clone();
++            let receipt = Arc::clone(&self.receipt);
++            let runtime = Arc::clone(&self.runtime);
++            let output_token_limit = with_serialization_allowance(
++                self.step_context
++                    .settings
++                    .model_info
++                    .truncation_policy
++                    .into(),
++            )
++            .token_budget();
++            let response = self.broker.spawn(&self.receipt, &cell_id.clone(), async move {
++                if !wait_until_cell_ready_for_dispatch(&receipt, &request_cancellation).await {
++                    return Err("code mode notification cancelled".to_string());
++                }
++                let Some((session, _, _)) = runtime.upgrade() else {
++                    return Err("code mode notification dispatcher stopped".to_string());
++                };
++                let notification = notify(session, call_id, cell_id, text, output_token_limit);
++                tokio::pin!(notification);
++                tokio::select! {
++                    biased;
++                    _ = receipt.closed.cancelled() => Err("code mode notification cancelled".to_string()),
++                    _ = request_cancellation.cancelled() => Err("code mode notification cancelled".to_string()),
++                    result = &mut notification => result,
+                 }
++            })?;
++            tokio::select! {
++                result = response => result.map_err(|_| "code mode notification dispatcher stopped".to_string())?,
++                _ = cancellation.cancelled() => Err("code mode notification cancelled".to_string()),
+             }
+         })
+     }
+-
+     fn cell_closed(&self, cell_id: &CellId) {
+-        self.broker.close_cell(cell_id);
++        let _ = self.broker.register_cell(cell_id, &self.receipt);
++        self.broker.retire_receipt(&self.receipt);
+     }
+ }
+-
+-enum DispatchMessage {
+-    InvokeTool {
+-        invocation: CodeModeNestedToolCall,
+-        // The delegate owns the step while the callback is live; stale queued work must not.
+-        step_context: Weak<StepContext>,
+-        dispatch_trace: Box<NestedToolDispatchTrace>,
+-        cancellation_token: CancellationToken,
+-        response_tx: oneshot::Sender<Result<JsonValue, String>>,
+-    },
+-    Notify {
+-        call_id: String,
+-        cell_id: CellId,
+-        text: String,
+-        output_token_limit: usize,
+-        cancellation_token: CancellationToken,
+-        response_tx: oneshot::Sender<Result<(), String>>,
+-    },
+-}
+-
+-pub(crate) struct CodeModeDispatchWorker {
+-    shutdown_tx: Option<oneshot::Sender<()>>,
+-}
+-
+-impl Drop for CodeModeDispatchWorker {
++impl Drop for CodeModeCellDelegate {
+     fn drop(&mut self) {
+-        if let Some(shutdown_tx) = self.shutdown_tx.take() {
+-            let _ = shutdown_tx.send(());
++        if !self.receipt.closed.is_cancelled() {
++            self.broker.close_receipt(&self.receipt);
+         }
+     }
+ }
+ 
+-struct CoreTurnHost {
++async fn notify(
+     session: Arc<Session>,
+-    tool_runtime: ToolCallRuntime,
+-}
+-
+-impl CoreTurnHost {
+-    fn submit_tool(
+-        &self,
+-        invocation: CodeModeNestedToolCall,
+-        step_context: Arc<StepContext>,
+-        call_id: String,
+-        cancellation_token: CancellationToken,
+-    ) -> impl std::future::Future<Output = Result<JsonValue, String>> + Send + 'static {
+-        let invocation = submit_nested_tool(
+-            Arc::clone(&self.session),
+-            step_context,
+-            self.tool_runtime.clone(),
+-            invocation,
+-            call_id,
+-            cancellation_token,
+-        )
+-        .map_err(|error| error.to_string());
+-        async move { invocation?.await.map_err(|error| error.to_string()) }
+-    }
+-
+-    async fn notify(
+-        &self,
+-        call_id: String,
+-        cell_id: CellId,
+-        text: String,
+-        output_token_limit: usize,
+-    ) -> Result<(), String> {
+-        if text.trim().is_empty() {
+-            return Ok(());
+-        }
+-        self.session
+-            .inject_if_running(vec![ResponseItemEnvelope {
+-                item: ResponseItem::CustomToolCallOutput {
+-                    id: None,
+-                    call_id,
+-                    name: Some(PUBLIC_TOOL_NAME.to_string()),
+-                    output: FunctionCallOutputPayload::from_text(text),
+-                    internal_chat_message_metadata_passthrough: None,
+-                },
+-                metadata: Some(CodexHarnessMetadata {
+-                    history_truncation_token_limit: Some(output_token_limit),
+-                    ..Default::default()
+-                }),
+-            }])
+-            .await
+-            .map_err(|_| {
+-                format!("failed to inject exec notify message for cell {cell_id}: no active turn")
+-            })
++    call_id: String,
++    cell_id: CellId,
++    text: String,
++    output_token_limit: usize,
++) -> Result<(), String> {
++    if text.trim().is_empty() {
++        return Ok(());
+     }
++    session
++        .inject_if_running(vec![ResponseItemEnvelope {
++            item: ResponseItem::CustomToolCallOutput {
++                id: None,
++                call_id,
++                name: Some(PUBLIC_TOOL_NAME.to_string()),
++                output: FunctionCallOutputPayload::from_text(text),
++                internal_chat_message_metadata_passthrough: None,
++            },
++            metadata: Some(CodexHarnessMetadata {
++                history_truncation_token_limit: Some(output_token_limit),
++                ..Default::default()
++            }),
++        }])
++        .await
++        .map_err(|_| {
++            format!("failed to inject exec notify message for cell {cell_id}: no active turn")
++        })
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/core/src/tools/code_mode/delegate_tests.rs b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+index afa7718b0100bbd140dd84737f12378c02d380f1..cea1c965f2bfab6b088200462b717723368a8f0e 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate_tests.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate_tests.rs
+@@ -20,9 +20,7 @@ use tracing_subscriber::layer::Context;
+ use tracing_subscriber::prelude::*;
+ use tracing_subscriber::registry::Registry;
+ 
+-use super::CodeModeCellDelegate;
+ use super::CodeModeDispatchBroker;
+-use super::DispatchMessage;
+ use crate::session::step_context::StepContext;
+ use crate::session::tests::make_session_and_context;
+ use crate::tools::context::FunctionToolOutput;
+@@ -106,6 +104,7 @@ impl CoreToolRuntime for TestHandler {}
+ #[tokio::test(flavor = "current_thread")]
+ async fn detached_code_mode_callback_keeps_thread_id_on_dispatch_span() -> anyhow::Result<()> {
+     let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
+     let thread_id = session.thread_id.to_string();
+     let turn = Arc::new(turn);
+     let registry = ToolRegistry::with_handler_for_test(Arc::new(TestHandler));
+@@ -122,20 +121,18 @@ async fn detached_code_mode_callback_keeps_thread_id_on_dispatch_span() -> anyho
+         /*executed_tool_calls*/ Default::default(),
+     ));
+     let cell_id = CellId::new("audit-cell".to_string());
+-    broker.mark_cell_ready_for_dispatch(&cell_id, /*originating_call*/ None);
+     let records = DispatchRecords::default();
+     let subscriber = tracing_subscriber::registry().with(DispatchCapture(Arc::clone(&records)));
+     let _untraced = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+     let _subscriber = tracing::subscriber::set_default(subscriber);
+-    let delegate = CodeModeCellDelegate {
+-        broker: Arc::clone(&broker),
+-        step_context: Arc::clone(&step),
+-    };
+-    let _worker = broker.start_turn_worker(
+-        Arc::new(session),
+-        step,
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
+         Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+     );
++    let delegate = broker.delegate(Arc::clone(&step)).unwrap();
++    broker.register_cell(&cell_id, &delegate.receipt).unwrap();
++    broker.mark_cell_ready_for_dispatch(&cell_id, /*originating_call*/ None);
+     // Process-owned code-mode callbacks run on a fresh task without a turn span.
+     let result = tokio::spawn(async move {
+         delegate
+@@ -181,55 +178,797 @@ async fn dropped_tool_callbacks_release_the_origin_before_dispatch() {
+     let turn = Arc::new(turn);
+     let broker = Arc::new(CodeModeDispatchBroker::new(
+         session.thread_id,
+-        /*executed_tool_calls*/ Default::default(),
++        Default::default(),
+     ));
+-    let delegate = CodeModeCellDelegate {
+-        broker: Arc::clone(&broker),
+-        step_context: StepContext::for_test(Arc::clone(&turn)),
+-    };
++    let step = StepContext::for_test(turn);
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let delegate = broker.delegate(step).unwrap();
+     let origin = Arc::downgrade(&delegate.step_context);
++    let receipt = Arc::clone(&delegate.receipt);
+     let cell_id = CellId::new("queued-cell".to_string());
+-    let cancellation_token = CancellationToken::new();
+     let mut callback = delegate.invoke_tool(
+         CodeModeNestedToolCall {
+-            cell_id: cell_id.clone(),
++            cell_id,
+             runtime_tool_call_id: "call-a".to_string(),
+-            tool_name: codex_tools::ToolName::plain("test-tool"),
+-            tool_kind: codex_code_mode::CodeModeToolKind::Function,
++            tool_name: ToolName::plain("test-tool"),
++            tool_kind: CodeModeToolKind::Function,
+             input: None,
+         },
+-        cancellation_token.clone(),
++        CancellationToken::new(),
+     );
+     assert!(futures::poll!(callback.as_mut()).is_pending());
+-    assert_eq!(broker.dispatch_rx.len(), 1);
++    assert!(!receipt.tasks.is_empty());
+     drop(callback);
+     drop(delegate);
+     assert!(
+         origin.upgrade().is_none(),
+-        "queued work must not own the step"
+-    );
+-
+-    // Observe the queued message's result after its original receiver was dropped.
+-    let mut message = broker.dispatch_rx.try_recv().unwrap();
+-    let (response_tx, response_rx) = oneshot::channel();
+-    let DispatchMessage::InvokeTool {
+-        response_tx: queued_response,
+-        ..
+-    } = &mut message
+-    else {
+-        panic!("expected tool invocation");
+-    };
+-    *queued_response = response_tx;
+-    broker.dispatch_tx.send(message).await.unwrap();
+-    broker.mark_cell_ready_for_dispatch(&cell_id, /*originating_call*/ None);
+-    let _worker = broker.start_turn_worker(
++        "pending work must not own the step"
++    );
++    receipt.join().await.unwrap();
++    assert!(receipt.tasks.is_empty());
++}
++
++#[tokio::test]
++async fn retained_cell_uses_original_router_after_successor_finishes() -> anyhow::Result<()> {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++    let router = Arc::new(ToolRouter::from_registry(
++        &turn,
++        turn.model_info(),
++        ToolRegistry::with_handler_for_test(Arc::new(TestHandler)),
++        Vec::new(),
++        &Default::default(),
++    ));
++    let step = StepContext::for_test(Arc::clone(&turn)).with_tool_router_for_test(router);
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let delegate = broker
++        .delegate(Arc::clone(&step))
++        .map_err(anyhow::Error::msg)?;
++    let origin = Arc::downgrade(&step);
++    let cell_id = CellId::new("original".into());
++    broker
++        .register_cell(&cell_id, &delegate.receipt)
++        .map_err(anyhow::Error::msg)?;
++    broker.mark_cell_ready_for_dispatch(&cell_id, None);
++    drop(step);
++
++    // A separate plan with no admitted audit_probe cannot replace the live cell's plan.
++    let successor = StepContext::for_test(turn);
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&successor),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let next = broker.delegate(successor).map_err(anyhow::Error::msg)?;
++    broker
++        .register_cell(&CellId::new("successor".into()), &next.receipt)
++        .map_err(anyhow::Error::msg)?;
++    broker.close_receipt(&next.receipt);
++    next.receipt.join().await.unwrap();
++    drop(next);
++    assert!(
++        origin.upgrade().is_some(),
++        "the live cell must keep its original step"
++    );
++    let result = delegate
++        .invoke_tool(
++            CodeModeNestedToolCall {
++                cell_id,
++                runtime_tool_call_id: "after-successor".into(),
++                tool_name: ToolName::plain("audit_probe"),
++                tool_kind: CodeModeToolKind::Function,
++                input: Some(serde_json::json!({})),
++            },
++            CancellationToken::new(),
++        )
++        .await
++        .map_err(anyhow::Error::msg)?;
++    assert!(result.to_string().contains("audit-probe-ok"));
++    broker.close_receipt(&delegate.receipt);
++    delegate.receipt.join().await.unwrap();
++    drop(delegate);
++    assert!(origin.upgrade().is_none());
++    Ok(())
++}
++
++#[tokio::test]
++async fn cell_cleanup_receipt_outlives_waiter_cancellation_and_rejects_late_work() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let step = StepContext::for_test(Arc::new(turn));
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let delegate = broker.delegate(step).unwrap();
++    let receipt = Arc::clone(&delegate.receipt);
++    let cell_id = CellId::new("held-cleanup".into());
++    let (entered_tx, entered_rx) = oneshot::channel();
++    let (release_tx, release_rx) = oneshot::channel();
++    let physical = Arc::clone(&receipt);
++    let response = broker
++        .spawn(&receipt, &cell_id, async move {
++            physical.closed.cancelled().await;
++            let _ = entered_tx.send(());
++            let _ = release_rx.await;
++        })
++        .unwrap();
++    broker.close_receipt(&receipt);
++    entered_rx.await.unwrap();
++    let mut first_join = Box::pin(receipt.join());
++    assert!(futures::poll!(first_join.as_mut()).is_pending());
++    drop(first_join);
++    drop(delegate);
++    assert!(
++        broker.receipt(&cell_id).is_some(),
++        "retired physical work must remain reachable"
++    );
++    let late_ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
++    let late_effect = Arc::clone(&late_ran);
++    assert!(
++        broker
++            .spawn(&receipt, &cell_id, async move {
++                late_effect.store(true, std::sync::atomic::Ordering::SeqCst);
++            })
++            .is_err()
++    );
++    let mut retry_join = Box::pin(receipt.join());
++    assert!(futures::poll!(retry_join.as_mut()).is_pending());
++    release_tx.send(()).unwrap();
++    retry_join.await.unwrap();
++    response.await.unwrap();
++    assert!(!late_ran.load(std::sync::atomic::Ordering::SeqCst));
++    assert!(receipt.tasks.is_empty());
++}
++
++#[tokio::test]
++async fn missing_or_nonmatching_step_snapshot_cannot_borrow_another_plan() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    let original = StepContext::for_test(Arc::clone(&turn));
++    assert!(broker.delegate(Arc::clone(&original)).is_err());
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&original),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let other = StepContext::for_test(turn);
++    let wrong = original
++        .extension_data
++        .get::<crate::tools::parallel::WeakToolCallRuntime>()
++        .unwrap();
++    other.extension_data.insert((*wrong).clone());
++    assert!(broker.delegate(other).is_err());
++}
++
++#[tokio::test]
++#[expect(
++    clippy::await_holding_invalid_type,
++    reason = "Hold the injection gate to prove cancellation does not wait for it"
++)]
++async fn cancelled_notification_retires_without_waiting_for_injection() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let step = StepContext::for_test(Arc::new(turn));
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let delegate = broker.delegate(step).unwrap();
++    let cell_id = CellId::new("notification".into());
++    broker.register_cell(&cell_id, &delegate.receipt).unwrap();
++    broker.mark_cell_ready_for_dispatch(&cell_id, None);
++    let injection_gate = session.active_turn.lock().await;
++    let mut callback = delegate.notify(
++        "notify".into(),
++        cell_id,
++        "accepted output".into(),
++        CancellationToken::new(),
++    );
++    assert!(futures::poll!(callback.as_mut()).is_pending());
++    tokio::task::yield_now().await;
++    broker.close_receipt(&delegate.receipt);
++    let result = tokio::time::timeout(std::time::Duration::from_secs(1), callback)
++        .await
++        .unwrap();
++    assert_eq!(result, Err("code mode notification cancelled".into()));
++    tokio::time::timeout(std::time::Duration::from_secs(1), delegate.receipt.join())
++        .await
++        .unwrap()
++        .unwrap();
++    // Retirement completed while injection was still unable to enter Session.
++    assert!(delegate.receipt.tasks.is_empty());
++    drop(injection_gate);
++}
++
++struct StartupBackend {
++    start_entered: CancellationToken,
++    start_release: CancellationToken,
++    initial_entered: CancellationToken,
++    initial_release: CancellationToken,
++    terminate_entered: CancellationToken,
++    terminate_release: CancellationToken,
++    terminated: Mutex<Vec<CellId>>,
++    delegate: Mutex<Option<Arc<dyn CodeModeSessionDelegate>>>,
++    fast_terminal: bool,
++    fail_terminate: bool,
++    wait_error: bool,
++    yielded: bool,
++}
++impl StartupBackend {
++    fn new(fast_terminal: bool) -> Self {
++        Self {
++            start_entered: CancellationToken::new(),
++            start_release: CancellationToken::new(),
++            initial_entered: CancellationToken::new(),
++            initial_release: CancellationToken::new(),
++            terminate_entered: CancellationToken::new(),
++            terminate_release: CancellationToken::new(),
++            terminated: Mutex::default(),
++            delegate: Mutex::default(),
++            fast_terminal,
++            fail_terminate: false,
++            wait_error: false,
++            yielded: false,
++        }
++    }
++}
++impl codex_code_mode::CodeModeSession for StartupBackend {
++    fn execute<'a>(
++        &'a self,
++        _: codex_code_mode::ExecuteRequest,
++        delegate: Arc<dyn CodeModeSessionDelegate>,
++        _: Option<CancellationToken>,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::StartedCell> {
++        Box::pin(async move {
++            self.start_entered.cancel();
++            self.start_release.cancelled().await;
++            let id = CellId::new("claimed-cell".into());
++            if self.fast_terminal {
++                delegate.cell_closed(&id);
++            }
++            *self.delegate.lock().unwrap() = Some(delegate);
++            let entered = self.initial_entered.clone();
++            let release = self.initial_release.clone();
++            let yielded = self.yielded;
++            Ok(codex_code_mode::StartedCell::from_future(
++                id.clone(),
++                async move {
++                    entered.cancel();
++                    release.cancelled().await;
++                    if yielded {
++                        return Ok(codex_code_mode::RuntimeResponse::Yielded {
++                            cell_id: id,
++                            content_items: Vec::new(),
++                            code_mode_host_duration: Some(std::time::Duration::ZERO),
++                        });
++                    }
++                    Ok(codex_code_mode::RuntimeResponse::Result {
++                        cell_id: id,
++                        content_items: Vec::new(),
++                        error_text: None,
++                        code_mode_host_duration: Some(std::time::Duration::ZERO),
++                    })
++                },
++            ))
++        })
++    }
++    fn wait<'a>(
++        &'a self,
++        _: codex_code_mode::WaitRequest,
++        _: Option<CancellationToken>,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
++        Box::pin(async move {
++            if self.wait_error {
++                Err("backend wait failed".into())
++            } else {
++                panic!("this test does not issue wait")
++            }
++        })
++    }
++    fn terminate<'a>(
++        &'a self,
++        cell_id: CellId,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
++        Box::pin(async move {
++            self.terminated.lock().unwrap().push(cell_id.clone());
++            self.terminate_entered.cancel();
++            self.terminate_release.cancelled().await;
++            if self.fail_terminate {
++                return Err("backend cleanup failed".into());
++            }
++            if let Some(delegate) = self.delegate.lock().unwrap().take() {
++                delegate.cell_closed(&cell_id);
++            }
++            Ok(codex_code_mode::WaitOutcome::MissingCell(
++                codex_code_mode::RuntimeResponse::Terminated {
++                    cell_id,
++                    content_items: Vec::new(),
++                    code_mode_host_duration: Some(std::time::Duration::ZERO),
++                },
++            ))
++        })
++    }
++    fn shutdown<'a>(&'a self) -> codex_code_mode::CodeModeSessionResultFuture<'a, ()> {
++        Box::pin(async { Ok(()) })
++    }
++}
++fn startup_request() -> codex_code_mode::ExecuteRequest {
++    codex_code_mode::ExecuteRequest {
++        tool_call_id: "start".into(),
++        enabled_tools: Vec::new(),
++        source: "text('done')".into(),
++        yield_time_ms: None,
++        max_output_tokens: None,
++    }
++}
++
++#[tokio::test]
++async fn interruption_before_cell_id_joins_exact_claimed_startup_cleanup() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let step = StepContext::for_test(Arc::new(turn));
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
+         Arc::clone(&session),
+-        StepContext::for_test(Arc::clone(&turn)),
++        Arc::clone(&step),
+         Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+     );
+-    let response = response_rx.await;
++    let delegate = broker.delegate(step).unwrap();
++    let receipt = Arc::clone(&delegate.receipt);
++    let backend = Arc::new(StartupBackend::new(false));
++    let mut execution =
++        Box::pin(broker.execute(backend.clone(), startup_request(), delegate, None));
++    assert!(futures::poll!(execution.as_mut()).is_pending());
++    backend.start_entered.cancelled().await;
++    assert!(receipt.cell_id().is_none());
++    assert!(broker.close_receipt(&receipt));
++    let mut interrupted = Box::pin(receipt.join());
++    assert!(futures::poll!(interrupted.as_mut()).is_pending());
++    backend.start_release.cancel();
++    backend.terminate_entered.cancelled().await;
+     assert_eq!(
+-        response.unwrap(),
+-        Err("code mode nested tool call cancelled".to_string()),
++        *backend.terminated.lock().unwrap(),
++        vec![CellId::new("claimed-cell".into())]
++    );
++    assert!(futures::poll!(interrupted.as_mut()).is_pending());
++    drop(execution);
++    drop(interrupted);
++    let mut retry = Box::pin(receipt.join());
++    assert!(futures::poll!(retry.as_mut()).is_pending());
++    backend.terminate_release.cancel();
++    retry.await.unwrap();
++    assert!(receipt.tasks.is_empty());
++}
++
++#[tokio::test]
++async fn dropping_unpolled_or_pending_initial_response_joins_claimed_cell() {
++    for (poll_initial, fail_terminate) in [(false, false), (true, false), (true, true)] {
++        let (session, turn) = make_session_and_context().await;
++        let session = Arc::new(session);
++        let step = StepContext::for_test(Arc::new(turn));
++        let broker = Arc::new(CodeModeDispatchBroker::new(
++            session.thread_id,
++            Default::default(),
++        ));
++        broker.bind_step_runtime(
++            Arc::clone(&session),
++            Arc::clone(&step),
++            Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++        );
++        let delegate = broker.delegate(step).unwrap();
++        let receipt = Arc::clone(&delegate.receipt);
++        let mut configured = StartupBackend::new(false);
++        configured.fail_terminate = fail_terminate;
++        let backend = Arc::new(configured);
++        backend.start_release.cancel();
++        let started = broker
++            .execute(backend.clone(), startup_request(), delegate, None)
++            .await
++            .unwrap();
++        backend.initial_entered.cancelled().await;
++        let mut initial = Box::pin(started.initial_response());
++        if poll_initial {
++            assert!(futures::poll!(initial.as_mut()).is_pending());
++        }
++        drop(initial);
++        backend.terminate_entered.cancelled().await;
++        let mut joining = Box::pin(receipt.join());
++        assert!(futures::poll!(joining.as_mut()).is_pending());
++        backend.terminate_release.cancel();
++        let cleanup = joining.await;
++        if fail_terminate {
++            assert_eq!(cleanup, Err("backend cleanup failed".into()));
++        } else {
++            cleanup.unwrap();
++        }
++        assert_eq!(
++            *backend.terminated.lock().unwrap(),
++            vec![CellId::new("claimed-cell".into())]
++        );
++    }
++}
++
++#[tokio::test]
++async fn fast_terminal_startup_preserves_result_without_forced_termination() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let step = StepContext::for_test(Arc::new(turn));
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let delegate = broker.delegate(step).unwrap();
++    let receipt = Arc::clone(&delegate.receipt);
++    let backend = Arc::new(StartupBackend::new(true));
++    backend.start_release.cancel();
++    backend.initial_release.cancel();
++    let started = broker
++        .execute(backend.clone(), startup_request(), delegate, None)
++        .await
++        .unwrap();
++    let response = started.initial_response().await.unwrap();
++    assert!(matches!(
++        response,
++        codex_code_mode::RuntimeResponse::Result { .. }
++    ));
++    receipt.join().await.unwrap();
++    assert!(backend.terminated.lock().unwrap().is_empty());
++}
++
++#[tokio::test]
++async fn returned_cell_identity_collision_joins_only_the_new_startup_cleanup() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let step = StepContext::for_test(Arc::new(turn));
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let old = broker.delegate(Arc::clone(&step)).unwrap();
++    let old_receipt = Arc::clone(&old.receipt);
++    let id = CellId::new("claimed-cell".into());
++    let (release_old, held_old) = oneshot::channel();
++    let old_work = broker
++        .spawn(&old_receipt, &id, async move {
++            let _ = held_old.await;
++        })
++        .unwrap();
++    old.cell_closed(&id);
++    let fresh = broker.delegate(step).unwrap();
++    let fresh_receipt = Arc::clone(&fresh.receipt);
++    let backend = Arc::new(StartupBackend::new(false));
++    backend.start_release.cancel();
++    let mut execution = Box::pin(broker.execute(backend.clone(), startup_request(), fresh, None));
++    assert!(futures::poll!(execution.as_mut()).is_pending());
++    backend.terminate_entered.cancelled().await;
++    assert_eq!(*backend.terminated.lock().unwrap(), vec![id.clone()]);
++    assert!(futures::poll!(execution.as_mut()).is_pending());
++    assert!(Arc::ptr_eq(&broker.receipt(&id).unwrap(), &old_receipt));
++    backend.terminate_release.cancel();
++    let result = execution.await;
++    assert!(matches!(result, Err(error) if error == "code mode cell identity is already owned"));
++    fresh_receipt.join().await.unwrap();
++    assert!(
++        !old_receipt.tasks.is_empty(),
++        "new cleanup must not join or replace old physical work"
++    );
++    release_old.send(()).unwrap();
++    old_work.await.unwrap();
++    old_receipt.join().await.unwrap();
++}
++
++#[tokio::test]
++async fn backend_wait_error_terminates_and_joins_the_captured_cell() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let step = StepContext::for_test(Arc::new(turn));
++    let service = &session.services.code_mode_service;
++    let broker = Arc::clone(&service.dispatch_broker);
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
+     );
++    let delegate = broker.delegate(step).unwrap();
++    let receipt = Arc::clone(&delegate.receipt);
++    let id = CellId::new("claimed-cell".into());
++    broker.register_cell(&id, &receipt).unwrap();
++    let mut configured = StartupBackend::new(false);
++    configured.wait_error = true;
++    let backend = Arc::new(configured);
++    *backend.delegate.lock().unwrap() = Some(delegate);
++    assert!(service.session.set(backend.clone()).is_ok());
++    let mut waiting = Box::pin(service.wait(
++        codex_code_mode::WaitRequest {
++            cell_id: id.clone(),
++            yield_time_ms: 1,
++        },
++        None,
++    ));
++    assert!(futures::poll!(waiting.as_mut()).is_pending());
++    backend.terminate_entered.cancelled().await;
++    assert!(futures::poll!(waiting.as_mut()).is_pending());
++    backend.terminate_release.cancel();
++    assert!(matches!(waiting.await, Err(error) if error == "backend wait failed"));
++    assert_eq!(*backend.terminated.lock().unwrap(), vec![id]);
++    receipt.join().await.unwrap();
++}
++
++#[tokio::test]
++async fn claimed_yielded_startup_releases_handoff_and_keeps_original_delegate_live() {
++    let (session, turn) = make_session_and_context().await;
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++    let router = Arc::new(ToolRouter::from_registry(
++        &turn,
++        turn.model_info(),
++        ToolRegistry::with_handler_for_test(Arc::new(TestHandler)),
++        Vec::new(),
++        &Default::default(),
++    ));
++    let step = StepContext::for_test(turn).with_tool_router_for_test(router);
++    let broker = Arc::new(CodeModeDispatchBroker::new(
++        session.thread_id,
++        Default::default(),
++    ));
++    broker.bind_step_runtime(
++        Arc::clone(&session),
++        Arc::clone(&step),
++        Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++    );
++    let delegate = broker.delegate(step).unwrap();
++    let receipt = Arc::clone(&delegate.receipt);
++    let mut configured = StartupBackend::new(false);
++    configured.yielded = true;
++    let backend = Arc::new(configured);
++    backend.start_release.cancel();
++    backend.initial_release.cancel();
++    let started = broker
++        .execute(backend.clone(), startup_request(), delegate, None)
++        .await
++        .unwrap();
++    let id = started.cell_id.clone();
++    broker.mark_cell_ready_for_dispatch(&id, None);
++    assert!(matches!(
++        started.initial_response().await.unwrap(),
++        codex_code_mode::RuntimeResponse::Yielded { .. }
++    ));
++    tokio::time::timeout(std::time::Duration::from_secs(1), async {
++        while receipt.startup.load(std::sync::atomic::Ordering::Acquire) {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
++    assert!(backend.terminated.lock().unwrap().is_empty());
++    assert!(!receipt.closed.is_cancelled());
++    let live = backend.delegate.lock().unwrap().clone().unwrap();
++    let invocation = || CodeModeNestedToolCall {
++        cell_id: id.clone(),
++        runtime_tool_call_id: "after-yield".into(),
++        tool_name: ToolName::plain("audit_probe"),
++        tool_kind: CodeModeToolKind::Function,
++        input: Some(serde_json::json!({})),
++    };
++    assert_eq!(
++        live.invoke_tool(invocation(), CancellationToken::new())
++            .await
++            .unwrap(),
++        serde_json::json!("audit-probe-ok")
++    );
++    assert!(
++        !broker.close_receipt(&receipt),
++        "the completed handoff no longer owns termination"
++    );
++    backend.terminate_release.cancel();
++    codex_code_mode::CodeModeSession::terminate(backend.as_ref(), id.clone())
++        .await
++        .unwrap();
++    receipt.join().await.unwrap();
++    assert!(
++        live.invoke_tool(invocation(), CancellationToken::new())
++            .await
++            .is_err()
++    );
++    assert_eq!(*backend.terminated.lock().unwrap(), vec![id]);
++}
++
++struct PreparedStartupCapture(Arc<std::sync::atomic::AtomicUsize>);
++impl Drop for PreparedStartupCapture {
++    fn drop(&mut self) {
++        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
++    }
++}
++
++struct PreparedStartupBackend {
++    inner: Arc<StartupBackend>,
++    issuing_tasks: Mutex<Vec<tokio::task::Id>>,
++    captures: Arc<std::sync::atomic::AtomicUsize>,
++    close_on_capture: Option<(Arc<CodeModeDispatchBroker>, Arc<super::CellDispatchReceipt>)>,
++}
++impl codex_code_mode::CodeModeSession for PreparedStartupBackend {
++    fn execute<'a>(
++        &'a self,
++        request: codex_code_mode::ExecuteRequest,
++        delegate: Arc<dyn CodeModeSessionDelegate>,
++        preempt: Option<CancellationToken>,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::StartedCell> {
++        codex_code_mode::CodeModeSession::execute(self.inner.as_ref(), request, delegate, preempt)
++    }
++    fn execute_owned(
++        self: Arc<Self>,
++        request: codex_code_mode::ExecuteRequest,
++        delegate: Arc<dyn CodeModeSessionDelegate>,
++        preempt: Option<CancellationToken>,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'static, codex_code_mode::StartedCell> {
++        self.issuing_tasks.lock().unwrap().push(tokio::task::id());
++        self.captures
++            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
++        let capture = PreparedStartupCapture(Arc::clone(&self.captures));
++        if let Some((broker, receipt)) = &self.close_on_capture {
++            broker.close_receipt(receipt);
++        }
++        Box::pin(async move {
++            let _capture = capture;
++            codex_code_mode::CodeModeSession::execute(
++                self.inner.as_ref(),
++                request,
++                delegate,
++                preempt,
++            )
++            .await
++        })
++    }
++    fn wait<'a>(
++        &'a self,
++        request: codex_code_mode::WaitRequest,
++        preempt: Option<CancellationToken>,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
++        codex_code_mode::CodeModeSession::wait(self.inner.as_ref(), request, preempt)
++    }
++    fn terminate<'a>(
++        &'a self,
++        cell_id: CellId,
++    ) -> codex_code_mode::CodeModeSessionResultFuture<'a, codex_code_mode::WaitOutcome> {
++        codex_code_mode::CodeModeSession::terminate(self.inner.as_ref(), cell_id)
++    }
++    fn shutdown<'a>(&'a self) -> codex_code_mode::CodeModeSessionResultFuture<'a, ()> {
++        codex_code_mode::CodeModeSession::shutdown(self.inner.as_ref())
++    }
++}
++
++#[tokio::test]
++async fn owned_startup_captures_issuing_task_before_tracked_backend_execution() {
++    tokio::spawn(async {
++        let (session, turn) = make_session_and_context().await;
++        let session = Arc::new(session);
++        let step = StepContext::for_test(Arc::new(turn));
++        let broker = Arc::new(CodeModeDispatchBroker::new(
++            session.thread_id,
++            Default::default(),
++        ));
++        broker.bind_step_runtime(
++            Arc::clone(&session),
++            Arc::clone(&step),
++            Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++        );
++        let delegate = broker.delegate(step).unwrap();
++        let receipt = Arc::clone(&delegate.receipt);
++        let inner = Arc::new(StartupBackend::new(true));
++        inner.start_release.cancel();
++        inner.initial_release.cancel();
++        let backend = Arc::new(PreparedStartupBackend {
++            inner,
++            issuing_tasks: Mutex::default(),
++            captures: Arc::default(),
++            close_on_capture: None,
++        });
++        let issuing_task = tokio::task::id();
++        let started = broker
++            .execute(backend.clone(), startup_request(), delegate, None)
++            .await
++            .unwrap();
++        assert_eq!(*backend.issuing_tasks.lock().unwrap(), vec![issuing_task]);
++        assert!(matches!(
++            started.initial_response().await.unwrap(),
++            codex_code_mode::RuntimeResponse::Result { .. }
++        ));
++        receipt.join().await.unwrap();
++        assert_eq!(
++            backend.captures.load(std::sync::atomic::Ordering::SeqCst),
++            0
++        );
++        assert!(backend.inner.terminated.lock().unwrap().is_empty());
++    })
++    .await
++    .unwrap();
++}
++
++#[tokio::test]
++async fn close_during_owned_capture_drops_unpolled_start_without_backend_effect() {
++    tokio::spawn(async {
++        let (session, turn) = make_session_and_context().await;
++        let session = Arc::new(session);
++        let step = StepContext::for_test(Arc::new(turn));
++        let broker = Arc::new(CodeModeDispatchBroker::new(
++            session.thread_id,
++            Default::default(),
++        ));
++        broker.bind_step_runtime(
++            Arc::clone(&session),
++            Arc::clone(&step),
++            Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
++        );
++        let delegate = broker.delegate(step).unwrap();
++        let receipt = Arc::clone(&delegate.receipt);
++        let backend = Arc::new(PreparedStartupBackend {
++            inner: Arc::new(StartupBackend::new(false)),
++            issuing_tasks: Mutex::default(),
++            captures: Arc::default(),
++            close_on_capture: Some((Arc::clone(&broker), Arc::clone(&receipt))),
++        });
++        let result = broker
++            .execute(backend.clone(), startup_request(), delegate, None)
++            .await;
++        assert_eq!(
++            result.err().as_deref(),
++            Some("code mode execution was interrupted before startup")
++        );
++        assert_eq!(
++            *backend.issuing_tasks.lock().unwrap(),
++            vec![tokio::task::id()]
++        );
++        assert!(!backend.inner.start_entered.is_cancelled());
++        assert!(backend.inner.terminated.lock().unwrap().is_empty());
++        assert_eq!(
++            backend.captures.load(std::sync::atomic::Ordering::SeqCst),
++            0
++        );
++        assert!(!receipt.startup.load(std::sync::atomic::Ordering::Acquire));
++        receipt.join().await.unwrap();
++    })
++    .await
++    .unwrap();
+ }
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+index 914f4daba42a3b0b52b3d8b5d7ef834773843228..2e634fe6a1a708e7c100a829ea43d3a838e63397 100644
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -48,9 +48,7 @@ use codex_utils_output_truncation::TruncationPolicy;
+ use codex_utils_output_truncation::formatted_truncate_text_content_items_with_policy;
+ use codex_utils_output_truncation::truncate_function_output_items_with_policy;
+ 
+-use delegate::CodeModeCellDelegate;
+ use delegate::CodeModeDispatchBroker;
+-use delegate::CodeModeDispatchWorker;
+ pub(crate) use execute_handler::CodeModeExecuteHandler;
+ use output::CodeModeToolOutput;
+ use response_adapter::into_function_call_output_content_items;
+@@ -136,13 +134,17 @@ impl CodeModeService {
+             .yield_time_ms
+             .get_or_insert(self.default_exec_yield_time_ms);
+         let preempt = step_context.preempt.clone();
+-        let delegate = Arc::new(CodeModeCellDelegate {
+-            broker: Arc::clone(&self.dispatch_broker),
+-            step_context,
+-        });
+-        self.session()
+-            .await?
+-            .execute(request, delegate, preempt)
++        let delegate = self.dispatch_broker.delegate(step_context)?;
++        let receipt = Arc::clone(&delegate.receipt);
++        let backend = match self.session().await {
++            Ok(backend) => backend,
++            Err(error) => {
++                self.dispatch_broker.close_receipt(&receipt);
++                return receipt.joined(Err(error)).await;
++            }
++        };
++        self.dispatch_broker
++            .execute(backend, request, delegate, preempt)
+             .await
+     }
+ 
+@@ -151,37 +153,86 @@ impl CodeModeService {
+         request: codex_code_mode::WaitRequest,
+         preempt: Option<CancellationToken>,
+     ) -> Result<codex_code_mode::WaitOutcome, String> {
+-        self.session().await?.wait(request, preempt).await
++        let cell_id = request.cell_id.clone();
++        let receipt = self.dispatch_broker.receipt(&cell_id);
++        let backend = self.session().await;
++        let result = match &backend {
++            Ok(backend) => backend.wait(request, preempt).await,
++            Err(error) => Err(error.clone()),
++        };
++        if !matches!(
++            &result,
++            Ok(codex_code_mode::WaitOutcome::LiveCell(
++                codex_code_mode::RuntimeResponse::Yielded { .. }
++            ))
++        ) && let Some(receipt) = receipt
++        {
++            if result.is_err() {
++                let starting = self.dispatch_broker.close_receipt(&receipt);
++                if !starting
++                    && let Ok(backend) = &backend
++                    && let Err(error) = backend.terminate(cell_id).await
++                {
++                    receipt.failed_cleanup(error);
++                }
++            } else {
++                self.dispatch_broker.retire_receipt(&receipt);
++            }
++            return receipt.joined(result).await;
++        }
++        result
+     }
+ 
+     pub(crate) async fn terminate(
+         &self,
+         cell_id: CellId,
+     ) -> Result<codex_code_mode::WaitOutcome, String> {
+-        self.session().await?.terminate(cell_id).await
++        let receipt = self.dispatch_broker.receipt(&cell_id);
++        let starting = receipt
++            .as_ref()
++            .is_some_and(|receipt| self.dispatch_broker.close_receipt(receipt));
++        if starting && let Some(receipt) = &receipt {
++            receipt.join().await?;
++        }
++        let result = match self.session().await {
++            Ok(backend) => backend.terminate(cell_id).await,
++            Err(error) => Err(error),
++        };
++        match receipt {
++            Some(receipt) => receipt.joined(result).await,
++            None => result,
++        }
+     }
+ 
+     pub(crate) async fn interrupt_active_cells(&self) {
+-        let Some(session) = self.session.get() else {
+-            return;
+-        };
+-        join_all(
+-            self.dispatch_broker
+-                .active_cell_ids()
+-                .into_iter()
+-                .map(|cell_id| async move {
+-                    if let Err(error) = session.terminate(cell_id.clone()).await {
+-                        tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell");
+-                    }
+-                }),
+-        )
++        let receipts = self
++            .dispatch_broker
++            .receipts()
++            .into_iter()
++            .map(|receipt| {
++                let starting = self.dispatch_broker.close_receipt(&receipt);
++                (receipt, starting)
++            })
++            .collect::<Vec<_>>();
++        join_all(receipts.into_iter().map(|(receipt, starting)| async move {
++            if !starting
++                && let (Some(session), Some(cell_id)) = (self.session.get(), receipt.cell_id())
++                && let Err(error) = session.terminate(cell_id.clone()).await
++            {
++                tracing::warn!(%cell_id, %error, "failed to terminate interrupted code-mode cell");
++            }
++            if let Err(error) = receipt.join().await {
++                tracing::warn!(%error, "failed to join interrupted code-mode cleanup");
++            }
++        }))
+         .await;
+     }
+ 
+     pub(crate) async fn shutdown(&self) -> Result<(), String> {
+         self.shutdown_token.cancel();
+         // Join any initialization already in progress without initializing an unused service.
+-        match self
++        let receipts = self.dispatch_broker.close_all();
++        let result = match self
+             .session
+             .get_or_try_init(|| async {
+                 Err::<Arc<dyn CodeModeSession>, String>(
+@@ -192,6 +243,17 @@ impl CodeModeService {
+         {
+             Ok(session) => session.shutdown().await,
+             Err(_) => Ok(()),
++        };
++        let cleanup = join_all(receipts.iter().map(|receipt| receipt.join()))
++            .await
++            .into_iter()
++            .collect::<Result<Vec<_>, _>>();
++        match (result, cleanup) {
++            (Err(error), Err(cleanup)) if error != cleanup => {
++                Err(format!("{error}; cleanup failed: {cleanup}"))
++            }
++            (_, Err(cleanup)) => Err(cleanup),
++            (result, Ok(_)) => result,
+         }
+     }
+ 
+@@ -212,23 +274,23 @@ impl CodeModeService {
+     }
+ 
+     pub(crate) fn finish_cell_dispatch(&self, cell_id: &CellId) {
+-        self.dispatch_broker.close_cell(cell_id);
++        // The captured receipt already closed and joined dispatch. Finish the
++        // recorder after the handler has registered its terminal observation.
++        self.dispatch_broker.finish_cell_recording(cell_id);
+     }
+ 
+-    pub(crate) fn start_turn_worker(
++    pub(crate) fn bind_step_runtime(
+         &self,
+         session: &Arc<Session>,
+         step_context: Arc<StepContext>,
+         tracker: SharedTurnDiffTracker,
+-    ) -> Option<CodeModeDispatchWorker> {
++    ) -> bool {
+         if !step_context.tool_router.requires_code_mode_worker() {
+-            return None;
++            return false;
+         }
+-
+-        Some(
+-            self.dispatch_broker
+-                .start_turn_worker(Arc::clone(session), step_context, tracker),
+-        )
++        self.dispatch_broker
++            .bind_step_runtime(Arc::clone(session), step_context, tracker);
++        true
+     }
+ 
+     pub(crate) async fn export_state(
+@@ -486,7 +548,7 @@ mod tests {
+     use serde_json::json;
+ 
+     #[tokio::test]
+-    async fn turn_worker_uses_step_router_mode_instead_of_admitted_turn() {
++    async fn cell_runtime_binding_uses_step_router_mode_instead_of_admitted_turn() {
+         let (session, turn) = make_session_and_context().await;
+         assert_eq!(
+             crate::tools::effective_tool_mode(&turn, turn.model_info()),
+@@ -505,13 +567,13 @@ mod tests {
+         let step_context = step_context.with_tool_router_for_test(router);
+         let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
+ 
+-        let worker =
++        let bound =
+             session
+                 .services
+                 .code_mode_service
+-                .start_turn_worker(&session, step_context, tracker);
++                .bind_step_runtime(&session, step_context, tracker);
+ 
+-        assert!(worker.is_some());
++        assert!(bound);
+     }
+ 
+     #[test]
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index 3daefd3925542942e6fce0db126093e8a57de8a1..fb26fd6e8fbd79257d90fc8ba6f298eb65fdfa85 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -50,7 +50,40 @@ pub(crate) struct ToolCallRuntime {
+     parallel_execution: Arc<RwLock<()>>,
+ }
+ 
++/// Idle cells retain the original tracker and parallel gate without retaining Session.
++#[derive(Clone)]
++pub(crate) struct WeakToolCallRuntime {
++    session: std::sync::Weak<Session>,
++    step_context: std::sync::Weak<StepContext>,
++    tracker: SharedTurnDiffTracker,
++    parallel_execution: Arc<RwLock<()>>,
++}
++impl WeakToolCallRuntime {
++    pub(crate) fn belongs_to(&self, step_context: &Arc<StepContext>) -> bool {
++        std::sync::Weak::ptr_eq(&self.step_context, &Arc::downgrade(step_context))
++    }
++    pub(crate) fn upgrade(&self) -> Option<(Arc<Session>, Arc<StepContext>, ToolCallRuntime)> {
++        let session = self.session.upgrade()?;
++        let step_context = self.step_context.upgrade()?;
++        let runtime = ToolCallRuntime {
++            session: Arc::clone(&session),
++            step_context: Arc::clone(&step_context),
++            tracker: Arc::clone(&self.tracker),
++            parallel_execution: Arc::clone(&self.parallel_execution),
++        };
++        Some((session, step_context, runtime))
++    }
++}
++
+ impl ToolCallRuntime {
++    pub(crate) fn downgrade(&self) -> WeakToolCallRuntime {
++        WeakToolCallRuntime {
++            session: Arc::downgrade(&self.session),
++            step_context: Arc::downgrade(&self.step_context),
++            tracker: Arc::clone(&self.tracker),
++            parallel_execution: Arc::clone(&self.parallel_execution),
++        }
++    }
+     pub(crate) fn new(
+         session: Arc<Session>,
+         step_context: Arc<StepContext>,

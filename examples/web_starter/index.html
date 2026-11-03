@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agents service starter</title>
+<style>body{max-width:48rem;margin:3rem auto;padding:1rem;font:1rem system-ui}button,input{font:inherit;padding:.5rem;margin:.3rem}section{padding:1rem;border:1px solid #bbb;margin:1rem 0}pre{white-space:pre-wrap}#error{color:#a20}</style>
+<h1>Agents service starter</h1><p id="mode">Default: scripted no-key mode. Choose a user to see the current mode.</p><p>Work continues after you disconnect. Use Stop to cancel a running request. Stopping may take time.</p>
+<label>Demo user <select id="user"><option>alice</option><option>bob</option></select></label><button id="login">Choose user</button>
+<form id="composer"><label>Request <input id="prompt" value="Create my synthetic report" maxlength="1000" required></label><button>Send</button></form>
+<button id="disconnect">Disconnect reader</button><button id="reconnect">Reconnect</button><button id="stop">Stop work</button>
+<p id="error" role="alert"></p><p id="status" aria-live="polite">Choose a demo user.</p>
+<section id="request"></section><section id="card"></section><section id="approval"></section><section id="final"></section>
+<script type="module" src="/client.js"></script></html>

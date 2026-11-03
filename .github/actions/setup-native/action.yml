@@ -1,0 +1,28 @@
+name: Native SDK build tools
+description: Install the toolchain and system dependencies for the embedded Codex build.
+runs:
+  using: composite
+  steps:
+    - name: Free space for native compilation
+      if: runner.os == 'Linux' && runner.environment == 'github-hosted'
+      shell: bash
+      run: |
+        sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+        df -h /
+    - name: Install Rust
+      shell: bash
+      run: rustup toolchain install 1.95.0 --profile minimal
+    - name: Linux build tools
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes clang cmake pkg-config protobuf-compiler libssl-dev
+    - name: macOS build tools
+      if: runner.os == 'macOS'
+      shell: bash
+      run: brew install cmake pkgconf protobuf openssl@3
+    - name: Windows build tools
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: choco install protoc --yes --no-progress

@@ -2,9 +2,9 @@ name: CodeQL
 
 on:
   push:
-    branches: [main]
+    branches: [main, feat/codex-harness]
   pull_request:
-    branches: [main]
+    branches: [main, feat/codex-harness]
   merge_group:
     types: [checks_requested]
   schedule:
@@ -14,8 +14,8 @@ permissions: {}
 
 jobs:
   analyze:
-    # Require both job names for analysis execution. Findings need the separate
-    # CodeQL code-scanning rule: Alerts = All, Security alerts = All on main.
+    # Require every language job for analysis execution. Findings need the separate
+    # CodeQL code-scanning rule: Alerts = All, Security alerts = All on each protected branch.
     # A successful analysis job does not mean that no alerts were found.
     name: CodeQL (${{ matrix.language }})
     runs-on: ubuntu-latest
@@ -26,12 +26,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        language: [python, actions]
+        language: [python, actions, rust, javascript-typescript]
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install the native Rust toolchain for analysis
+        if: matrix.language == 'rust'
+        run: |
+          rustup toolchain install 1.95.0 --profile minimal
+          echo "RUSTUP_TOOLCHAIN=1.95.0" >> "$GITHUB_ENV"
+
+      - name: Prepare verified native sources for Rust analysis
+        if: matrix.language == 'rust'
+        run: make native-prepare
 
       - name: Initialize CodeQL
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2

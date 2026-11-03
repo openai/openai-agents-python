@@ -1,3 +1,0 @@
-# `Testing`
-
-::: agents.testing

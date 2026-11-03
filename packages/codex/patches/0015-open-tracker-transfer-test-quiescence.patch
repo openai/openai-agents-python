@@ -1,0 +1,17 @@
+--- a/codex-rs/code-mode-runtime/src/session_runtime/tests.rs
++++ b/codex-rs/code-mode-runtime/src/session_runtime/tests.rs
+@@ -286,7 +286,13 @@
+             ..
+         }
+     ));
+-    source.inner.cell_tasks.wait().await;
++    tokio::time::timeout(Duration::from_secs(2), async {
++        while !source.inner.cell_tasks.is_empty() {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
+     let snapshot = source.export_state().await.unwrap();
+     assert_eq!(snapshot.next_cell_id, 2);
+     source.shutdown().await.unwrap();

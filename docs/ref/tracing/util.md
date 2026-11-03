@@ -1,3 +1,0 @@
-# `Util`
-
-::: agents.tracing.util

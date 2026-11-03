@@ -1,0 +1,13 @@
+{
+  "patches": [
+    {
+      "path": "0001-raw-standard-form-codec.patch",
+      "sha256": "74ede4fbd0311898bcf0c6becff40975b2bfa39cd12022b0a795b4dfcb1c5adb"
+    },
+    {
+      "path": "0002-local-request-context.patch",
+      "sha256": "f6582595e12496514ce40ffb88cacea9cebd0a7a01a6017a2c6d9aa21a3c6b0c"
+    }
+  ],
+  "result_tree": "7d2330f33105e93f96af50ba78b1f8c7da98df6c"
+}

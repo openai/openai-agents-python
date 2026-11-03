@@ -4,31 +4,21 @@ Use the release-mode, versioning, gate, documentation, and output policies in `.
 
 ## Establish the review inputs
 
-- Sync remote tags and resolve the latest matching release tag with `../scripts/find_latest_release_tag.sh origin 'v*'`.
-- Refresh the requested target, defaulting to `origin/main`, and record its exact commit.
+- Sync remote tags and resolve the latest matching release tag with `../scripts/find_latest_release_tag.sh origin 'v*-alpha.*' <target-sha>`.
+- Refresh the requested target, defaulting to `origin/feat/v1.0-release`, and record its exact commit.
 - When the caller provides a dedicated checkout or worktree, run every local inspection there and record its root, current branch, `HEAD`, and clean status as gate evidence. Do not substitute another checkout that shares the same Git objects.
 - Resolve review mode first, then release intent. Record the evidence for each decision separately.
 - Generate `git diff --stat BASE...TARGET`, `git diff --dirstat=files,0 BASE...TARGET`, `git log --oneline --reverse BASE..TARGET`, and `git diff --name-status BASE...TARGET`.
 - Inspect suspicious paths with `git diff --word-diff BASE...TARGET -- <path>`.
 - Keep working-tree changes and open documentation PR diffs outside the release comparison.
 
-## Determine the minimum release type
+## Check alpha version and compatibility
 
-Compare the diff with the released BASE contract. Use `minor` as the minimum for either of these conditions:
+Apply the alpha version rules in `../SKILL.md`. Verify that the previous tag belongs to a published reachable private alpha, not an inherited public release. Report version consistency separately from API and durable-state compatibility.
 
-- a breaking change to a non-beta public API, protocol, configuration, environment, or durable serialized boundary;
-- a major user-facing feature addition that warrants a minor release under repository policy.
+For a final candidate, inspect the actual checkout and five-file release commit. Require a new `X.Y.Z-alpha.N` version and matching branch, source, manifest, fallback, normalized lock version, snapshot baseline and source parent. Preserve the reviewed API surface. Reject uncommitted or unrelated paths. For planning, unchanged package metadata is expected.
 
-Use `patch` otherwise. For a final candidate, verify the intended version against the branch name, `pyproject.toml`, `uv.lock`, `.release-please-manifest.json`, the literal fallback in `src/agents/version.py`, and built package metadata when relevant. For planning mode, do not interpret unchanged version metadata as a declared patch candidate.
-
-Capture:
-
-- review mode and its evidence;
-- intended release type/version and its evidence, or `unspecified`;
-- minimum required release type and the contracts that establish it;
-- planning recommendation or final-candidate compatibility verdict.
-
-For a materialized final candidate, read the checked-out package metadata, lockfile, and released API contract before deciding compatibility. Require the candidate branch, `HEAD`, intended version, contract baseline, and contract base commit to agree. Treat uncommitted release-owned files or unrelated changed paths as an inconsistent candidate rather than reviewing only the commit object.
+Record the review mode, requested alpha version, previous published alpha, compatibility impact, exact target and evidence limits. Local review does not replace candidate CI, merged-source artifact qualification or published-wheel installation checks.
 
 ## Audit runtime and package contracts
 
@@ -49,10 +39,10 @@ For each candidate:
 | Changed surface | BASE-versus-TARGET audit |
 |---|---|
 | Public API | Exports, import identity, signatures, positional order, defaults, enums, and documented behavior |
-| Runner and run items | Provider output, result items, stream events, session history, replay, handoffs, and `RunState` |
+| Agent | Shared invocation behavior, structured results, stream events, and cancellation |
 | Tool execution | Planning, approvals, guardrails, invocation, hooks, output conversion, persistence, cancellation, and cleanup |
-| Conversation and sessions | First turn, follow-up, retry, filtering, handoff, compaction, interruption, and resume |
-| Model/provider adapters | Settings resolution, request conversion, streaming terminals, provider data, errors, retries, and transport ownership |
+| Conversation and sessions | Native event reader, submission handles, first turn, follow-up, compaction, save/restore, interruption, and cleanup |
+| Native engine boundary | Settings, callback lifetimes, native MCP, approvals, Codex pin, extension imports, errors, and transport ownership |
 | Persisted schemas/config | Serialized shape, supported versions, backward reads, usable migrations, defaults, env vars, and wire compatibility |
 | Package boundary | Python support, dependencies, extras, version metadata, distribution contents, public imports, and wheel/sdist behavior |
 
@@ -94,7 +84,7 @@ Include breaking behavior, major features, public API additions, defaults, provi
 
 ### Discover current open docs PRs
 
-- Use approved read-only GitHub access; never use `gh` or mutate GitHub in this repository.
+- Use approved read-only GitHub access; prefer the connector and use an existing authorized read-only CLI or REST route only when needed. Never mutate GitHub.
 - Refresh current open PR state for each review. Historical local refs, cached task context, and prior reports are not evidence of current coverage.
 - Search with the intended or recommended version, release label, feature names, implementation PR links, branch names, and changed docs paths.
 - Inspect candidate file lists, the complete latest PR diff, and current review discussion when it materially affects a coverage claim. Titles and descriptions are discovery hints only.
@@ -115,7 +105,7 @@ If GitHub access is unavailable, make the follow-up suggestions provisional and 
 
 ## Build the conditional Key Changes draft
 
-When `../SKILL.md` requires the minor-release draft:
+When `../SKILL.md` requires the alpha-release draft:
 
 - derive three to seven highlights from verified user-visible themes rather than commits;
 - state breaking status explicitly and put migration or fallback guidance first;
@@ -127,10 +117,10 @@ When `../SKILL.md` requires the minor-release draft:
 ## Final evidence inventory
 
 - BASE tag, TARGET commit, and confirmation that remote tags and target were refreshed.
-- Review mode, intended release type, minimum required type, and versioning verdict.
+- Review mode, intended alpha version, compatibility impact, and versioning verdict.
 - High-level diff stats and key directories.
 - Concrete findings and verified release considerations with Evidence, Impact, Files, and Action.
 - Documentation-obligation inventory, current docs PR source and head SHA or search limitation, aggregate coverage, and exact post-release suggestions.
-- Conditional copy-ready Key Changes draft for minor releases.
-- Explicit ship/block call and an unblock checklist only when blocked.
+- Copy-ready Key Changes draft for user-facing alpha changes.
+- Explicit local pass/block call and an unblock checklist only when blocked.
 - For a dedicated final-candidate checkout, confirmation that the exact checked-out `HEAD` and release-owned file contents were inspected and were clean. Keep the local checkout path out of copy-ready report text.
