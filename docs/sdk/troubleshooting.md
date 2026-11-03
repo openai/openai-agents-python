@@ -1,13 +1,11 @@
 # Troubleshoot and operate an agent
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
 Start with the symptom below. Preserve the original exception and inspect the failed operation before retrying. A failed request or timeout does not prove that earlier tools had no effects.
 
 | Symptom | What to check |
 | --- | --- |
-| Installation fails, a wheel is unsupported, or GitHub returns 404 | Follow the [installation checks](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/installation.md#if-setup-fails). Confirm the guide and installed wheel describe the same version. |
-| `get_result` or another documented method is missing | Check the [version guide](versions.md) and use the v1 source-built wheel. The [private alpha.5 migration table](index.md#migrate-from-alpha5) applies only to users of that historical preview. Check the installed distribution with `python -m pip show openai-agents` using your application's interpreter. |
+| Installation fails, a wheel is unsupported, or GitHub returns 404 | Follow the [installation checks](installation.md#if-installation-fails). Confirm the guide and installed wheel describe the same version. |
+| `get_result` or another documented method is missing | Check the [installation guide](installation.md) and use documentation for your installed preview release. Run `python -m pip show openai-agents` with your application's interpreter to check its version. |
 | A notebook reports that an event loop is already running | Use `await agent.run(...)`. Reserve `run_sync()` and the scripts' `asyncio.run(main())` entry point for code outside an existing event loop. |
 | A new prompt raises `SessionBusyError` | Await the current Turn, or deliberately [queue or steer](sessions.md#conversations-events-and-state). Retrying `submit()` blindly can duplicate input. |
 | A one-shot run raises `InteractionRequired` | Inspect its optional checkpoint and follow [manual continuation](tools.md#continue-a-one-shot-manual-request). Do not submit the original prompt again as a substitute for the pending reply. |

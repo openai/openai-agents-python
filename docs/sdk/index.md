@@ -1,18 +1,14 @@
 # Build agents with Codex
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
 The Agents SDK runs agents from Python using Codex. Give an Agent instructions and tools, then call it to get a result.
 
-See [Choose how to run your agent](choosing.md) for deployment choices and guidance on existing integrations.
+See [Choose how to run your agent](choosing.md) for deployment choices and supported feature combinations.
 
 Start with an Agent and `@function_tool`. Use `await agent.run(input)` for one answer. Use `agent.session()` when you need more turns, streamed observations or a saved conversation.
 
-Use the [version selector and machine-readable topic index](versions.md) to keep installation, guides, examples and reference on the same interface. For an existing v0 application, start with the [migration cookbook](migration.md).
-
 ## Before you begin
 
-Use the Python environment containing a wheel built from this source revision. The [source-build guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/MAINTAINING.md#build-from-this-source) supplies the build and installation steps. Keep v0 and v1 in separate environments, and use examples from the commit you built.
+Follow the [installation guide](installation.md) to install a preview wheel and activate your Python environment.
 
 The live example needs an OpenAI API key and makes model requests. For a deterministic check without a model service or real API key, use the [testing guide](testing.md).
 
@@ -49,10 +45,10 @@ Set an OpenAI API key in your environment before running the script:
 
 ```sh
 export OPENAI_API_KEY="your-key"
-.venv/bin/python agent.py
+python agent.py
 ```
 
-On Windows PowerShell, use `$env:OPENAI_API_KEY = "your-key"`, then `.\.venv\Scripts\python.exe agent.py`. In a synchronous application, use `agent.run_sync` outside an existing event loop. The [basic example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/basic.py) shows the same complete pattern.
+On Windows PowerShell, use `$env:OPENAI_API_KEY = "your-key"`, then `python agent.py`. In a synchronous application, use `agent.run_sync` outside an existing event loop. The [basic example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/basic.py) shows the same complete pattern.
 
 The script prints a greeting for Ada, such as `Hello, Ada!`. The model chooses the final wording, so it can vary. The model can request a call to the `greeting` tool. The SDK calls your Python function and returns its result to the model.
 
@@ -76,21 +72,6 @@ Find worked examples for [images, retrieval, application memory, approvals, tool
 ## How the runtime fits
 
 The [core concepts guide](concepts.md#how-the-runtime-fits) shows how your Python application, embedded Codex, model provider and tools fit together. Start there before configuring native children or remote execution.
-
-## Migrate from alpha.5
-
-The historical private preview v0.24.0-alpha.5 predates this public source branch. If you used that preview, replace `Runner`, `Turn.wait()`, `Session.wait()` and `Session.interrupt()` as shown below. This table does not describe migration from public v0; use the [v0 migration guide](migration.md) for that path.
-
-| Private alpha.5 call or pattern | V1 source branch |
-| --- | --- |
-| `Runner.run(agent, input)` or `Runner.run_sync(agent, input)` | `agent.run(input)` or `agent.run_sync(input)`. These Agent methods already exist in alpha.5. |
-| `await turn.wait()` | `await turn.get_result()`. For a root Turn, this also follows its accepted steering continuations. |
-| `await session.wait()` | Retain the Turn returned by `session.submit(...)`, then await `turn.get_result()`. |
-| `await session.interrupt(scope="root", mode=...)` | `await turn.cancel(mode=...)` for the captured root. |
-| `await session.interrupt(scope="all", mode=...)` | `await session.cancel_all(mode=...)`. |
-| Assigning Agent declaration fields | Construct a new Agent or use supported [Session configuration](configuration.md) overrides. Declaration fields are now immutable. |
-
-The cancellation methods join the work they stop. A captured root cannot cancel a later independent submission; root cancellation also leaves independent children running. See [interruption](sessions.md#interrupt-work) for graceful stops and child controls. For streaming, use [the Turn observer pattern](sessions.md#stream-observations) alongside `get_result()`: a `TurnFinished` observation describes a native step and does not prove that all of a root's continuations have completed.
 
 ## Test without a model service
 

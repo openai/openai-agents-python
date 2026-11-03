@@ -1,7 +1,5 @@
 # Tools
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
 Put the tools an agent can use in its `tools` list. Codex admits calls and drives the model loop. A Python tool runs application code with the application's permissions. Codex owns native MCP connections and sends tool calls to the selected MCP server. That server executes the operation in its own process or service.
 
 Examples with `await` or `async with` are fragments for an async function. Configure the native provider and its credentials before opening a session; see [Configure an agent](configuration.md).
@@ -48,7 +46,7 @@ async def greeting(name: str) -> str:
 
 Each model argument must have a type annotation and accept a keyword argument. Positional-only parameters, `*args` and `**kwargs` are unsupported. If an existing function uses them, wrap it in a tool function with named, annotated parameters.
 
-A return annotation is optional. On this branch, a supplied annotation validates the returned value. A synchronous function may return an `Awaitable[T]` or `Coroutine[Any, Any, T]`; the SDK awaits it and validates the resolved value as `T`. Without a return annotation, supported result formats and safety checks still apply. The historical private preview `v0.24.0-alpha.5` does not validate return values against their annotations.
+A return annotation is optional. On this branch, a supplied annotation validates the returned value. A synchronous function may return an `Awaitable[T]` or `Coroutine[Any, Any, T]`; the SDK awaits it and validates the resolved value as `T`. Without a return annotation, supported result formats and safety checks still apply.
 
 Parameter names cannot start with `_`. For a JSON argument such as `_id`, use `record_id: Annotated[str, Field(alias="_id")]` with `Annotated` from `typing` and `Field` from `pydantic`.
 
@@ -170,7 +168,7 @@ agent = Agent(
 )
 ```
 
-Read the token in application code and pass its value as `bearer_token`. Alpha.5 no longer accepts `bearer_token_env_var`. The descriptor keeps the token value supplied at construction; restore uses the application's current descriptors. A fresh or idle-restored Session captures MCP declarations at opening. The SDK checks an MCP server's native tool roster when a turn or idle update selects its tools. Handle startup or missing-tool errors from `turn.get_result()` if a turn selects them, or from `session.update()` if an idle update selects them. A pending manual restore readies its selected MCP resources before exposing fresh manual requests to the application; those errors can prevent the Session from opening. MCP credentials come from the current configuration. Model-visible namespace normalization follows Codex, so conflicting names fail before those tools become available to the model. Use an explicit `list[Tool[Application]]` or `Agent[Application, Answer]` annotation when MyPy needs it for lists that mix context-aware Python tools with MCP declarations.
+Read the token in application code and pass its value as `bearer_token`. The descriptor keeps the token value supplied at construction; restore uses the application's current descriptors. A fresh or idle-restored Session captures MCP declarations at opening. The SDK checks an MCP server's native tool roster when a turn or idle update selects its tools. Handle startup or missing-tool errors from `turn.get_result()` if a turn selects them, or from `session.update()` if an idle update selects them. A pending manual restore readies its selected MCP resources before exposing fresh manual requests to the application; those errors can prevent the Session from opening. MCP credentials come from the current configuration. Model-visible namespace normalization follows Codex, so conflicting names fail before those tools become available to the model. Use an explicit `list[Tool[Application]]` or `Agent[Application, Answer]` annotation when MyPy needs it for lists that mix context-aware Python tools with MCP declarations.
 
 MCP selection and approval are separate. The default `approval_mode="auto"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a one-shot handler. A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
 
@@ -483,7 +481,7 @@ Pass this environment to `agent.session(environment=environment)` or `agent.run(
 
 For a hard offline boundary, your backend must isolate the commands, exec-server, managed proxy and DNS resolver together. Keep host and other jobs' service sockets out of the job's mounts and socket namespace. Close inherited connections before starting the executor. The managed proxy can look up a hostname before denying a request, even with an empty destination list. On Linux, a process can bind a local IP socket inside its isolated namespace. On macOS, the all-sockets grant lets the proxy forward HTTP to any Unix socket it can reach. Use an independently isolated macOS VM or equivalent backend so Codex can apply its command sandbox once. A second outer Seatbelt profile is unsupported.
 
-The backend supplies and verifies the offline boundary; the SDK cannot infer it from a URL. Restore requires the same normalized network policy from current application code. The checkpoint's policy field stores only a digest. The SDK uses the digest to compare policies. The digest grants no access and provides no encryption. Native debug logs and command history can still contain policy details. To change the policy, start a new Session. An existing Python callback that runs a fixed operation in the application's worker needs no migration. [Restore an Environment](sessions.md#compact-save-and-restore)
+The backend supplies and verifies the offline boundary; the SDK cannot infer it from a URL. Restore requires the same normalized network policy from current application code. The checkpoint's policy field stores only a digest. The SDK uses the digest to compare policies. The digest grants no access and provides no encryption. Native debug logs and command history can still contain policy details. To change the policy, start a new Session. Python callbacks can run fixed operations directly in the application's worker. [Restore an Environment](sessions.md#compact-save-and-restore)
 
 #### Docker creation and restore checks
 

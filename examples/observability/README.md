@@ -1,9 +1,9 @@
 # Debug one synthetic run
 
-These examples require an SDK wheel built from this source revision. The published alpha.5 wheel does not provide all these APIs. Run from the matching source checkout. The receiver uses the Python standard library; it needs no additional packages or API key.
+Install the [SDK preview wheel](../../docs/sdk/installation.md), activate your Python environment, and use the example files from the same release. Run the commands below from the root of that release's source archive. The receiver uses the Python standard library; it needs no additional packages or API key.
 
 ```sh
-uv run --no-sync python -m examples.observability.trace_walkthrough --scenario tool-error --view --output synthetic-trace.json
+python -m examples.observability.trace_walkthrough --scenario tool-error --view --output synthetic-trace.json
 ```
 
 The command starts a loopback OTLP HTTP JSON receiver, configures native traces and logs, runs the synthetic task, closes its Session, and flushes telemetry. Open the printed viewer URL while the command waits for Enter. The page shows the actual received payloads. The JSON file also includes the application receipt. Keep these files local: native telemetry may include paths, tool metadata and other details even with prompt and response text switches off. This receiver has no authentication, storage service or production hardening. Use synthetic data only.
@@ -13,9 +13,9 @@ Search the viewer for the printed `run_id`. In `resourceSpans[].scopeSpans[].spa
 Run each scenario in a **new process**. Configure native telemetry only once per process. These commands require no provider credentials:
 
 ```sh
-uv run --no-sync python -m examples.observability.trace_walkthrough --scenario tool --output raised.json
-uv run --no-sync python -m examples.observability.trace_walkthrough --scenario validation --output validation.json
-uv run --no-sync python -m examples.observability.trace_walkthrough --scenario provider --output provider.json
+python -m examples.observability.trace_walkthrough --scenario tool --output raised.json
+python -m examples.observability.trace_walkthrough --scenario validation --output validation.json
+python -m examples.observability.trace_walkthrough --scenario provider --output provider.json
 ```
 
 | Scenario | Application receipt | What the received records establish |

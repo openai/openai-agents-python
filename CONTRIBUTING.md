@@ -20,6 +20,28 @@ Install Git with your operating system's package manager and ensure the `git` ex
 
 Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [tests/README.md](tests/README.md) for test execution. Run focused checks while developing, then the applicable final checks described in [AGENTS.md](AGENTS.md#testing--automated-checks). Use the [pull request template](.github/PULL_REQUEST_TEMPLATE/pull_request_template.md) to explain the problem, change, and validation. Documentation changes follow the repository's verification tiers and release-timing rules.
 
+## Build the SDK from source
+
+Source builds are for SDK development. Users install prebuilt wheels as described in the [installation guide](docs/sdk/installation.md).
+
+Install standard CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and the [platform-specific native build tools](packages/codex/MAINTAINING.md#build-from-this-source), including a compiler and Protocol Buffers. The build downloads pinned public Codex and RMCP sources. Python package installers do not install these system tools.
+
+Clone the development branch and record the source commit:
+
+```sh
+git clone --branch feat/codex-harness https://github.com/openai/openai-agents-python.git
+cd openai-agents-python
+git rev-parse HEAD
+python3 packages/codex/scripts/prepare_codex.py
+uv build --wheel
+```
+
+On Windows, use `py -3` instead of `python3`. For source preparation with Python 3.10, install `tomli==2.2.1` in that interpreter's environment first. The wheel build installs its declared Python build dependencies in an isolated environment.
+
+Preparation verifies the pinned native sources. The wheel build compiles the native extension and matching execution helpers, then writes a wheel under `dist/`. Keep the wheel and its build records with the source commit. See the [maintenance guide](packages/codex/MAINTAINING.md) for native build details and troubleshooting.
+
+To check the resulting package, create a fresh virtual environment outside the SDK checkout and install the exact wheel from `dist/` with `python -m pip install` followed by its absolute path. Use that environment to run the [installation check](docs/sdk/installation.md#install-a-preview-wheel). A matching package version alone does not identify a development commit.
+
 ## Security checklist
 
 ### Credentials and sensitive data

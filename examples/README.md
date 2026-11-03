@@ -1,6 +1,6 @@
 # Examples
 
-These examples use the public **v1 source branch**. [Build and install a wheel from the same commit](../docs/installation.md) before running them. The published v0 package and historical private-preview wheels use different APIs.
+These examples use the SDK preview. Follow the [installation guide](../docs/sdk/installation.md) and use example files from the same release as your installed wheel.
 
 | File | What it shows |
 | --- | --- |
@@ -9,9 +9,9 @@ These examples use the public **v1 source branch**. [Build and install a wheel f
 | [conversation.py](conversation.py) | Two turns, streamed observations and a saved conversation. |
 | [validated_artifact.py](validated_artifact.py) | Application memory and an XML result policy that validates an artifact before writing it. |
 
-## Current source examples
+## More examples
 
-For the recipes below that import `agents`, install an SDK wheel built from this source revision using the [source-build steps](../packages/codex/MAINTAINING.md#build-from-this-source). Use the same source commit for the wheel and examples. The [SDK guide](../docs/sdk/index.md) describes the current source. The Docker provisioning helper uses only the Python standard library and Docker.
+For recipes that import `agents`, install the matching preview wheel and any extra dependencies listed in the example's README. The [SDK guide](../docs/sdk/index.md) explains the APIs. The Docker provisioning helper uses only the Python standard library and Docker.
 
 | Entry point | What it shows | Prerequisites |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ For the recipes below that import `agents`, install an SDK wheel built from this
 
 ## Workflow recipes
 
-These recipes also require the matching v1 source-built wheel.
+These recipes use the same preview wheel and may need extra dependencies.
 
 - [Task recipe chooser](../docs/sdk/recipes.md): typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval and application memory. Each entry identifies synthetic or live execution and its limits.
 - [Complete service and browser](web_starter/README.md): request ownership, approvals, bounded admission, typed final results and authorized artifact downloads with a pinned browser client.

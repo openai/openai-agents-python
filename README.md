@@ -8,15 +8,11 @@ Start with Agents SDK for a new Python agent application. Connect your existing 
 
 Use [Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview) when you want OpenAI to run the agent and manage sessions and recovery.
 
-## V1 source preview
-
-This branch contains the native Codex-based Agents SDK v1. The initial public v1 preview requires a source build; there are no public v1 wheels or release tags for this snapshot. `pip install openai-agents` installs the published v0 SDK, which has a different API.
-
-Existing v0 applications can keep using [v0.24.0](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0) and the [v0 documentation](https://openai.github.io/openai-agents-python/). Read the [migration guide](docs/sdk/migration.md) before porting. V1 does not convert v0 saved state, handoffs, guardrails, or tracing integrations automatically.
-
 ## Install
 
-Follow the [source installation guide](docs/installation.md). You need CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and your platform's native build tools. The guide links the exact system prerequisites and commands. Build from the public `feat/codex-harness` branch, record the commit, and use documentation and examples from that same commit.
+Install the SDK preview from a prebuilt Python wheel. The wheel includes the native runtime, so you do not need a compiler or Rust toolchain. See the [installation guide](docs/sdk/installation.md) for Python requirements, downloads, and setup.
+
+**Preview wheels are not available yet.** We are preparing the first public preview release. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API shown here.
 
 ## Example
 
@@ -49,13 +45,13 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
-Set an [OpenAI API key](docs/published.md#set-an-openai-api-key), then run the file with `.venv/bin/python agent.py` on Linux/macOS or `.\.venv\Scripts\python.exe agent.py` on Windows.
+Set an [OpenAI API key](docs/published.md#set-an-openai-api-key), then run `python agent.py` in your activated environment.
 
 The script prints a greeting for Ada, such as `Hello, Ada!`. The model chooses the final wording, so it can vary. This example makes live model requests. The SDK calls your Python `greeting` function when the model requests that tool, then sends the tool's result back to the model.
 
 ## SDK guides
 
-Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These guides describe this source branch.
+Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These guides describe the SDK preview.
 
 | Guide | What you can do |
 | --- | --- |
@@ -68,7 +64,7 @@ Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These
 
 ## More examples
 
-[Activate your installed environment](docs/installation.md#activate-the-environment), then run examples from the matching source checkout, for example `python examples/basic.py`. These examples call a model and need an [OpenAI API key](docs/published.md#set-an-openai-api-key).
+[Activate your Python environment](docs/sdk/installation.md#create-a-python-environment), then run examples from the same release as your installed wheel, for example `python examples/basic.py`. These examples call a model and need an [OpenAI API key](docs/published.md#set-an-openai-api-key).
 
 - [Function tools](examples/basic.py): Call a Python greeting tool.
 - [Typed application context](examples/typed_context.py): Return structured output using application context.
@@ -79,3 +75,7 @@ Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These
 ## Get help
 
 Use [GitHub issues](https://github.com/openai/openai-agents-python/issues) for questions, bug reports, and feedback.
+
+## Contributing
+
+For local SDK development, source builds, and tests, see [CONTRIBUTING.md](CONTRIBUTING.md).

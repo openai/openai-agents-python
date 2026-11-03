@@ -2,15 +2,14 @@
 
 This starter runs real native SDK tools behind an HTTP service. Its browser uses `ai@6.0.315`. A Python tool reads 10,000 synthetic rows and returns a bounded summary to the model. The model asks for approval and returns a validated `Final` object. The application publishes validated XML only after the original native request accepts the approval decision. No provider key is required.
 
-Use an SDK wheel built from this source revision, following the [source-build steps](../../packages/codex/MAINTAINING.md#build-from-this-source). This example targets the SDK revision in this repository; the public package can contain a different API. The example supports a private local POSIX host. It does not supply production authentication or a distributed worker service.
+Install the [SDK preview wheel](../../docs/sdk/installation.md) and use the example files from the same release. The example supports a private local POSIX host. It does not supply production authentication or a distributed worker service.
 
 ## Run
 
 Use Linux or macOS, Python 3.10 or later, Node 22 or later, and npm.
-The SDK wheel must support the host platform and Python version. This example requires POSIX file locks and directory permissions, so it does not support Windows. Set `OPENAI_AGENTS_WHEEL` to the absolute path of the matching wheel. Run these commands from the repository root:
+The SDK wheel must support the host platform and Python version. This example requires POSIX file locks and directory permissions, so it does not support Windows. With the SDK installed and your Python environment activated, run these commands from the root of the release's source archive:
 
 ```sh
-python -m pip install "$OPENAI_AGENTS_WHEEL"
 python -m pip install -r examples/web_starter/requirements.txt
 npm --prefix examples/web_starter ci
 npm --prefix examples/web_starter run build

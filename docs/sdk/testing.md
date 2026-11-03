@@ -1,7 +1,5 @@
 # Test an agent without a model service
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
 Use deterministic tests to check Python tools, application state and the requests your agent sends. Test model quality separately with a live model and representative inputs.
 
 `agents.testing.ScriptedResponses` starts a local HTTP server that supplies scripted model responses. The real native Session and Python tools still run. Configure a direct connection or proxy bypass for `127.0.0.1`, including applicable operating-system proxy settings. Keep that configuration for the full server and Session lifetime. The server follows current proxy configuration; it is not a network isolation boundary.

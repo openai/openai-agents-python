@@ -1,7 +1,5 @@
 # API reference
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
 These signatures show the supported calls and defaults. `*` marks keyword-only arguments. Type parameters describe application context and final output. Follow each guide link for behavior and limits.
 
 ## Agent and one-shot runs
@@ -229,8 +227,6 @@ Supplies application context, native submission identity, `call_id`, `server_nam
 Connects the Session to an application-owned executor. Pass it to `agent.session()` or a one-shot run, outside the Agent's tools.
 
 These calls accept an `EnvironmentSource`: either a borrowed `Environment` descriptor or an async context manager that yields one. See [managed executor lifetimes](tools.md#manage-the-executor-lifetime) for acquisition, cleanup and restore rules.
-
-The `network` argument shown below requires the matching v1 source build. The historical private alpha.5 wheel does not support it.
 
 ```text
 Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,

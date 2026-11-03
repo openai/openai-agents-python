@@ -1,8 +1,6 @@
 # Find a recipe by task
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
-Run these recipes from a checkout with the SDK built from the same source revision. Most recipes use local scripted model responses and need no real model key. They test application behavior rather than live model quality.
+Install the [SDK preview wheel](installation.md), then run these recipes from the matching release's example files. Most recipes use local scripted model responses and need no real model key. They test application behavior rather than live model quality.
 
 ## Find the rule before changing code
 
@@ -18,7 +16,7 @@ Use the recipes below for conversation memory, parallel tools and concurrency, i
 | MCP on my machine | [Native MCP](tools.md#native-mcp). Tool selection does not sandbox server startup. |
 | RAG, PDF, citations, document search | Extract text in application code and retrieve authorized excerpts. There is no first-class PDF/file input or authoritative native citation-span API in this interface. |
 | Memory, forget a fact, retention | [History and compaction](sessions.md#compact-and-inspect-history). Application memory has separate ownership and deletion rules; deleting a fact does not delete it from old checkpoints or telemetry. |
-| Multi-agent, handoff, specialist | [Native children](tools.md#native-children) share tools/context. [V0 migration](migration.md#decide-what-must-stay-on-v0) explains why children are not drop-in handoffs. |
+| Multi-agent, handoff, specialist | [Native children](tools.md#native-children) share tools and context. Use separately configured Agents when tasks need different tool access. |
 
 ## Human in the loop: approve the exact request
 
@@ -49,7 +47,7 @@ For example, `python -m examples.recipes.concurrent_tools` prints `Two Sessions 
 
 ## Start a local browser application
 
-The [complete service/browser starter](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/web_starter/README.md) combines native tools, human approval, a settled typed result and an authorized artifact download. Install an SDK wheel built from the same source revision and the example's pinned dependencies, then build its browser client as that README describes. Run from the repository root:
+The [complete service/browser starter](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/web_starter/README.md) combines native tools, human approval, a settled typed result and an authorized artifact download. Install the matching preview wheel and the example's pinned dependencies, then build its browser client as that README describes. Run from the repository root:
 
 ```sh
 python -m examples.web_starter --directory /tmp/agents-web-state --port 8080
@@ -64,7 +62,7 @@ Disconnect stops the browser reader; Stop asks the owner to cancel and join work
 | Store | Owner and lifetime | Deletion or resume limit |
 | --- | --- | --- |
 | Model conversation context | The native Session; compaction changes model context | `compact(summary=...)` uses a supplied summary and preserves prior canonical history. `compact()` asks the model for a summary and follows native history-replacement behavior. Neither offers selective fact deletion. See [compaction](sessions.md#compact-and-inspect-history). |
-| Public projected history | A view of native stored history, read through SDK iterators | This view has no independent retention policy. It is not a complete UI transcript and exposes no general selective-history deletion or v0 migration. See [history and context](sessions.md#compact-and-inspect-history). |
+| Public projected history | A view of native stored history, read through SDK iterators | This view has no independent retention policy. It is not a complete UI transcript and exposes no general selective-history deletion. See [history and context](sessions.md#compact-and-inspect-history). |
 | Portable checkpoint | Trusted application storage | Can retain old facts independently of application memory. Restore requires current configuration; deleting a database fact does not rewrite saved checkpoints. |
 | Application memory | Application database and authenticated user scope | The application defines storage, expiry, deletion and access. The recipe keeps one fact per user and has no identity provider or automatic expiry. |
 | Workspace artifacts | Application/executor storage | Checkpoints do not copy or delete files. Export and retention need separate controls. |

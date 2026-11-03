@@ -9,12 +9,20 @@
   "published_guide": null,
   "topics": [
     {
-      "id": "versions",
-      "path": "versions.md",
+      "id": "installation",
+      "path": "installation.md",
       "aliases": [
         "install",
         "wheel",
+        "Python requirements"
+      ]
+    },
+    {
+      "id": "versions",
+      "path": "versions.md",
+      "aliases": [
         "SDK version",
+        "release",
         "coding agent docs"
       ]
     },
@@ -24,17 +32,6 @@
       "aliases": [
         "quickstart",
         "first agent"
-      ]
-    },
-    {
-      "id": "migrate-v0",
-      "path": "migration.md",
-      "aliases": [
-        "Runner",
-        "handoff",
-        "guardrails",
-        "RunState",
-        "migration"
       ]
     },
     {

@@ -1,6 +1,6 @@
 # Build your first v1 agent
 
-This page describes the v1 source preview. [Build and install from source](installation.md), then follow the [Agent and Session guide](sdk/index.md) and [matching examples](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/README.md). There is no public v1 wheel for this snapshot. For the published v0 SDK, use the [v0 documentation](https://openai.github.io/openai-agents-python/).
+Follow the [installation guide](sdk/installation.md) to set up the SDK preview. Then use the [quickstart](sdk/index.md) and [examples](../examples/README.md) to build your application.
 
 Define an `Agent`, then call `await agent.run(input)` for one answer. Use `async with agent.session() as session` for a conversation. Retain the Turn returned by `session.submit(...)` and await `turn.get_result()` to read its settled result. See [sessions and streaming](sdk/sessions.md) for the complete pattern.
 

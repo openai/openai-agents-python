@@ -33,11 +33,10 @@ markdown_extensions:
           format: !!python/name:pymdownx.superfences.fence_code_format
 nav:
   - Get started:
-      - Select your SDK version: versions.md
+      - Installation: installation.md
       - Quickstart: index.md
       - Core concepts: concepts.md
       - Choose how to run your agent: choosing.md
-      - Migrate from v0: migration.md
   - Build:
       - Task recipes: recipes.md
       - Tools: tools.md
@@ -47,4 +46,5 @@ nav:
   - Test and operate:
       - Testing: testing.md
       - Troubleshooting and usage: troubleshooting.md
+      - Releases and documentation: versions.md
   - API reference: reference.md

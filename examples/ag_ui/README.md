@@ -2,7 +2,7 @@
 
 This is application example code, not an SDK integration or namespace. It targets the Python event/SSE contract in `ag-ui-protocol==0.1.9`, using its real `ag_ui.core.Event` models and `ag_ui.encoder.EventEncoder`. It is not a claim of compatibility with later AG-UI versions, every browser client, or the entire protocol.
 
-This example requires the SDK from this source revision. It uses `Turn.get_result()`, which the `v0.24.0-alpha.5` wheel linked for the older examples does not provide. Install an SDK wheel built from this revision, then install the example dependency in the application's environment:
+Install the [SDK preview wheel](../../docs/sdk/installation.md) and use example files from the same release. Then install the example dependency in your activated Python environment:
 
 ```sh
 python -m pip install -r examples/ag_ui/requirements.txt

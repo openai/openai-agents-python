@@ -1,7 +1,5 @@
 # Check a custom Responses endpoint
 
-> **Version:** These guides describe the v1 SDK on `feat/codex-harness`. Build the SDK from the same commit as these guides. See [installation and version compatibility](versions.md) for v0 and v1.
-
 A custom endpoint must implement the required Responses behavior; a Chat Completions-compatible route alone is insufficient.
 
 Test each feature your application uses against the actual endpoint and model. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support. `session.capabilities` describes SDK configuration support; it does not probe a remote service.
