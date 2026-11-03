@@ -12,16 +12,23 @@ Use a current patch release of CPython 3.10–3.14, `uv`, Git and Make. Install 
 
 The [native setup action](../../.github/actions/setup-native/action.yml) owns the CI toolchain and system-package setup. Python build isolation does not install these system tools. Preparation uses the standard library on Python 3.11 and later; Python 3.10 also needs the existing build dependency `tomli==2.2.1`. `uv build` installs its declared Python build dependencies separately, including `tomli` on Python 3.10. The build also needs access to the pinned Codex and RMCP sources and package registries.
 
-From the repository root, run:
+On Python 3.11 or later, run these commands from the repository root:
 
 ```sh
 make native-prepare
 make build
 ```
 
-`make native-prepare` verifies the pinned source. If you already have an authorized Codex checkout, pass its path with `make native-prepare CODEX_SOURCE=/path/to/codex`. `make build` runs `uv build --wheel` directly from this prepared checkout. It creates one root SDK wheel in `dist/`, with its required native extension and helpers. Building the wheel directly avoids preparing another source tree from an intermediate source distribution. You do not need to run `make sync` first; that command installs the SDK for contributor work and can trigger its own native build.
+On Python 3.10, use this preparation command instead of `make native-prepare`. It supplies `tomli` to the preparation process without installing the SDK or building an editable checkout:
 
-The same route without Make is `python3 packages/codex/scripts/prepare_codex.py`, followed by `uv build --wheel`. If you need a source distribution for release qualification, build it explicitly with `uv build --sdist`.
+```sh
+uv run --no-project --python 3.10 --with tomli==2.2.1 python packages/codex/scripts/prepare_codex.py
+make build
+```
+
+Preparation verifies the pinned source. If you already have an authorized Codex checkout, use `make native-prepare CODEX_SOURCE=/path/to/codex` on Python 3.11 or later. On Python 3.10, append `--source /path/to/codex` to the uv preparation command above. `make build` runs `uv build --wheel` directly from this prepared checkout. It creates one root SDK wheel in `dist/`, with its required native extension and helpers. Building the wheel directly avoids preparing another source tree from an intermediate source distribution. You do not need to run `make sync` first; that command installs the SDK for contributor work and can trigger its own native build.
+
+On Python 3.11 or later, the same route without Make is `python3 packages/codex/scripts/prepare_codex.py`, followed by `uv build --wheel`. On Python 3.10, use the uv preparation command above, followed by `uv build --wheel`. If you need a source distribution for release qualification, build it explicitly with `uv build --sdist`.
 
 Install the wheel in a fresh virtual environment outside the source checkout. The commands below start from the repository root after `make build`. Choose the exact wheel produced by this build; do not select an older wheel from `dist/`.
 
@@ -66,7 +73,7 @@ The source receipt retains the authenticated base commit and file map, reviewed 
 
 RMCP keeps the Git URL, revision and exact version already declared in `Cargo.toml`. `rmcp-patches/series.json` uses the same strict manifest schema as the Codex series. Preparation writes the complete verified rust-sdk workspace to `.upstream/rust-sdk`; the two root Cargo overrides select its `rmcp` and `rmcp-macros` crates. No source tree is committed or included in the source distribution. The source distribution includes both patch directories and the preparation scripts. Builds copy the pinned RMCP license into the wheel and verify both source results before and after compilation.
 
-Run `python3 packages/codex/scripts/prepare_codex.py --source /path/to/codex --rmcp-source /path/to/rust-sdk` to use existing authorized Git repositories. Omit either source argument to fetch that source from its fixed Git origin. Preparation authenticates the declared commit rather than trusting the supplied repository's current checkout. Reusing an existing Codex archive still prepares and verifies RMCP. A source-free wheel receipt carries the two source identities separately; a Codex-only receipt cannot qualify this build.
+To use existing authorized Git repositories on Python 3.11 or later, run `python3 packages/codex/scripts/prepare_codex.py --source /path/to/codex --rmcp-source /path/to/rust-sdk`. On Python 3.10, append the same `--source` and `--rmcp-source` arguments to the uv preparation command above. Omit either source argument to fetch that source from its fixed Git origin. Preparation authenticates the declared commit rather than trusting the supplied repository's current checkout. Reusing an existing Codex archive still prepares and verifies RMCP. A source-free wheel receipt carries the two source identities separately; a Codex-only receipt cannot qualify this build.
 
 The RMCP codec patch preserves general form JSON on `elicitation/create` for the SDK's bounded validator. Treat this as an SDK capability; MCP schema conformance needs separate verification. Primitive validation and supported general-schema limits remain defined by `ElicitationRequest`.
 

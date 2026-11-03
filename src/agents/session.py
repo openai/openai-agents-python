@@ -5573,6 +5573,10 @@ class Session(Generic[ContextT, OutputT]):
         self._observe_mcp(event, state)
         self._observe_progress(event, state.handle, event["subagent_id"])
         if kind in {"task_complete", "turn_complete", "turn_aborted"}:
+            policy_failure = message.get("_sdk_policy_failure")
+            if policy_failure is not None and not state.failure.done():
+                state.policy_stop = "expired"
+                state.failure.set_result(NativeError(policy_failure))
             if kind == "turn_aborted":
                 state.stopping = True
                 for task in state.callbacks:

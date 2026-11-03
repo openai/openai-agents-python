@@ -53,10 +53,10 @@ def main():
         with log.open("a") as stream:
             stream.write(json.dumps({"event": event, "pid": os.getpid(), **values}) + "\n")
 
-    def emit(value):
-        print(json.dumps({"jsonrpc": "2.0", **value}), flush=True)
+    def emit(value, *, output=None):
+        print(json.dumps({"jsonrpc": "2.0", **value}), file=output, flush=True)
 
-    def form(reason):
+    def form(reason, *, output=None):
         emit(
             {
                 "id": 873,
@@ -73,7 +73,8 @@ def main():
                     "message": f"{reason}:{os.getpid()}",
                     "requestedSchema": schema,
                 },
-            }
+            },
+            output=output,
         )
         record("question", reason=reason)
         if options.url_flow and options.url_early:
@@ -81,7 +82,8 @@ def main():
                 {
                     "method": "notifications/elicitation/complete",
                     "params": {"elicitationId": "owned-child-url-A"},
-                }
+                },
+                output=output,
             )
             record("early_url_complete")
 
@@ -90,7 +92,10 @@ def main():
         if calls and options.stop_release is not None:
             # This is old buffered/background stdout emitted after retirement began.
             try:
-                form("retired-stdout")
+                # SIGTERM can interrupt a normal reply while its buffered stream
+                # is locked. Keep the real retired frame on an independent stream.
+                with os.fdopen(os.dup(sys.stdout.fileno()), "w") as retired_stdout:
+                    form("retired-stdout", output=retired_stdout)
             except BrokenPipeError:
                 # Native transport close may already have retired its stdout reader.
                 sys.stdout = open(os.devnull, "w")

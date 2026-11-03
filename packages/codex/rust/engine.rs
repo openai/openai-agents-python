@@ -1528,6 +1528,9 @@ impl ThreadState {
             // A newer child turn can replace admission before an older event
             // is read. Missing metadata must never borrow the newer receipt.
             receipt.attach_provider_error(&mut event);
+            if turn_failed == Some(true) {
+                receipt.attach_policy_failure(&mut event);
+            }
         }
         if let Some(incarnation) = source.2 {
             event["subagent_incarnation"] = serde_json::json!(incarnation);

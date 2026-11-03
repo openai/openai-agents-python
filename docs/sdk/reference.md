@@ -238,7 +238,7 @@ Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,
             policy_timeout=30, capability_directories=None, network=None)
 ```
 
-It selects `exec_command`, `write_stdin` and/or `apply_patch`; `write_stdin` requires `exec_command`. The default selects none. `approval` returns a bool or `StopTurn` and has no transform deadline. Approval sees original arguments before `transform_arguments`; denial never invokes the transform. `policy_timeout` bounds only transforms. A result transform requires programmatic tool calling; direct executor calls then reject. See [remote execution](tools.md#remote-execution) and [executor policies](tools.md#executor-policies).
+It selects `exec_command`, `write_stdin` and/or `apply_patch`; `write_stdin` requires `exec_command`. The default selects none. `approval` returns a bool or `StopTurn` and has no transform deadline. Approval sees original arguments before `transform_arguments`; denial never invokes the transform. `policy_timeout` bounds only transforms. Result transforms support direct executor calls in the default mode and calls from generated code with `Agent(programmatic_tool_calling=True)`. See [remote execution](tools.md#remote-execution) and [executor policies](tools.md#executor-policies).
 
 `capability_directories` accepts absolute paths or `file:` URIs on the remote executor, not the Python controller. `None` keeps the native discovery defaults; an empty sequence selects no discovery roots.
 

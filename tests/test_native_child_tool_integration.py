@@ -420,8 +420,9 @@ async def test_filtered_child_streams_finish_with_their_own_real_text_and_usage(
             assert sum(isinstance(event, TurnFinished) for event in selected) == 1
 
 
+@pytest.mark.parametrize("terminal_only", [False, True])
 async def test_child_native_mcp_timeout_before_python_handoff_finishes_failed(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, terminal_only: bool
 ) -> None:
     from agents import _native
 
@@ -429,6 +430,7 @@ async def test_child_native_mcp_timeout_before_python_handoff_finishes_failed(
     vault = Peer(names=("find-record",), label="mcp-private-f126")
     before_handoff, release_handoff = asyncio.Event(), asyncio.Event()
     original_next = _native.NativeThread._next_native_mcp_result
+    original_event = _native.NativeThread._next_session_event
     async with (
         timeout(30),
         family_peer(programmatic_tool_calling=False) as peer,
@@ -452,6 +454,24 @@ async def test_child_native_mcp_timeout_before_python_handoff_finishes_failed(
             return raw
 
         monkeypatch.setattr(_native.NativeThread, "_next_native_mcp_result", delay_original_notice)
+        if terminal_only:
+
+            async def skip_early_policy_notice(thread):
+                while True:
+                    raw = await original_event(thread)
+                    event = json.loads(raw)
+                    if not (
+                        event["msg"]["type"] == "_sdk_model_generation_failed"
+                        and event.get("subagent_id") == peer.child_metadata["alpha"][0]["thread_id"]
+                        and event["msg"].get("policy_stop") is True
+                    ):
+                        return raw
+
+            # Exercise settlement with the real terminal event alone. The
+            # earlier notice may be delayed or retired by native completion.
+            monkeypatch.setattr(
+                _native.NativeThread, "_next_session_event", skip_early_policy_notice
+            )
         agent = family_agent(peer, executor, url, memory)
         # Keep the family's installed result transformer when changing its deadline.
         for tool in agent.tools:

@@ -217,6 +217,7 @@ pub(crate) struct TurnAdmission {
     steering_namespace: String,
     steering_tail: AtomicBool,
     provider_error: Mutex<Option<(Value, Value)>>,
+    policy_failure: OnceLock<&'static str>,
 }
 
 tokio::task_local! {
@@ -255,6 +256,18 @@ impl TurnAdmission {
         }
     }
 
+    pub(crate) fn attach_policy_failure(&self, event: &mut Value) {
+        if event["id"].as_str() == Some(self.turn_id.as_str())
+            && matches!(
+                event["msg"]["type"].as_str(),
+                Some("task_complete" | "turn_complete")
+            )
+            && let Some(message) = self.policy_failure.get()
+        {
+            event["msg"]["_sdk_policy_failure"] = json!(message);
+        }
+    }
+
     pub(crate) fn reject_model(self: &Arc<Self>, thread: &str) {
         if let Some(owner) = self.owner.upgrade() {
             // Core drains tool futures before reporting the model error. Wake
@@ -270,6 +283,9 @@ impl TurnAdmission {
     }
 
     pub(crate) fn reject_policy(self: &Arc<Self>, thread: &str, message: &'static str) {
+        // The early notice can race terminal delivery. Retain its reason on
+        // this admission so that the owning child can report it either way.
+        let message = *self.policy_failure.get_or_init(|| message);
         if let Some(owner) = self.owner.upgrade() {
             let _ = owner.family.requests.send(QueuedRequest::ModelFailure {
                 owner: Arc::downgrade(&owner),
@@ -2175,6 +2191,7 @@ impl TurnLifecycleContributor for PythonContributor {
                     ),
                     steering_tail: AtomicBool::new(false),
                     provider_error: Mutex::default(),
+                    policy_failure: OnceLock::new(),
                 });
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
