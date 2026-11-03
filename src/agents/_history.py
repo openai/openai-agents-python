@@ -181,7 +181,7 @@ def project_history(
             receipt = _project_turn_receipt(payload)
             if receipt is not None:
                 receipt_turn_id = receipt["turn_id"]
-                turn = turns.get(receipt_turn_id)
+                turn: RecordedTurn | None = turns.get(receipt_turn_id)
                 if turn is None:
                     turn = {
                         "id": receipt_turn_id,
