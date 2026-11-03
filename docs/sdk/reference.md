@@ -26,58 +26,87 @@ agent.session(*, context=None, state=None, storage=None, resume=None, provider=N
               -> async context manager[Session]
 ```
 
-`instructions` and `input` are required. Use `input=None` only to resume a supported pending manual checkpoint with a handler. `on_interaction` returns the exact request's `reply(value)`, directly or through an awaitable. The handler must not send the reply itself and return `None`. `return_state=True` captures state after successful completion. `return_state` must be a bool. By default, `Completed.state` is `None`. A capture failure fails the run. See [manual requests](tools.md#answer-interactions-during-a-one-shot-run).
+The call options follow these rules:
 
-`validate()` checks the declaration without opening a Session, reading credentials or connecting to services. It returns `None` on success and raises the first `TypeError` or `ValueError` for an invalid declaration. Context, environment, overrides and native model support still require checks when a Session opens. There is no validation report to inspect.
+- `instructions` and `input` are required. `input=None` is allowed only when a handler resumes a supported pending manual checkpoint.
+- `on_interaction` returns the exact request's `reply(value)`, directly or through an awaitable. Sending the reply itself and returning `None` is invalid. See [manual requests](tools.md#answer-interactions-during-a-one-shot-run).
+- `return_state` must be a bool. `True` captures state after successful completion. A capture failure fails the run. Otherwise, `Completed.state` defaults to `None`.
+- `output_type=None` or bare `str` returns text. `with_output_type(...)` creates a variant. There is no one-shot `output_type` argument. See [structured output](configuration.md#structured-output) for formats, validation and restore limits.
 
-`output_type=None` or bare `str` returns text. For native and prompted structured output, including `OutputValidationError` handling and restore limits, see [configuration](configuration.md#structured-output). Use `with_output_type(...)` to create an Agent variant for a different output type. There is no one-shot `output_type` argument.
+`validate()` returns `None` for a valid declaration or raises its first `TypeError` or `ValueError`. It opens no Session, reads no credentials and connects to no services. Context, environment, overrides and native model support still require opening-time checks. It produces no validation report.
 
-When restoring `state`, the SDK uses the checkpoint's model and model settings instead of the Agent declaration. A non-`None` opening `model` or `model_settings`, including an empty settings dictionary, raises `ValueError`. Restore first, then update an idle Session where supported. Sessions opened with `NativeAgents` keep their model settings fixed. See [save and restore](sessions.md#compact-save-and-restore).
+Restore uses the checkpoint's model and settings. Any non-`None` opening `model` or `model_settings`, including `{}`, raises `ValueError`. Idle updates can change them after restore, except with `NativeAgents`. See [save and restore](sessions.md#compact-save-and-restore).
 
 ## Sessions and turns
 
 ### Session
 
-A Session owns a native conversation. Open it with `agent.session()` in an async context. See [conversations and state](sessions.md).
+A Session owns a native conversation, opened with `agent.session()` in an async context. See [conversations and state](sessions.md).
+
+#### Submission and control
 
 | Call | Result |
 | --- | --- |
-| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject")` | Return a root Turn before it completes. By default, a busy Session rejects new input. `"queue"` adds work in first-in, first-out order. `"steer"` steers the captured root when busy and starts a new root when idle. Use `Turn.steer()` to target only a specific Turn. Steering does not allow overrides. |
-| `session.events(*, after=0)` | Observe the whole Session until it ends. |
+| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject")` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. `Turn.steer()` targets one specific Turn. |
+| `session.events(*, after=0)` | Observe the Session until it ends, using the retained global observation sequence. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
-| `await session.cancel_all(*, mode="force")` | Stop and join root and descendant work, including queued work. See [interruption](sessions.md#interrupt-work). |
+| `await session.pending_interactions()` | Snapshot tuple of pending live requests. Inspection leaves them available for reply. |
+| `await session.cancel_all(*, mode="force")` | Stop and join roots, descendants and queued work. See [interruption](sessions.md#interrupt-work). |
+| `await session.update(*, model=None, model_settings=None, instructions=None, tools=None)` | Change one idle category. Tool updates replace admitted Python or manual names or MCP server/raw-tool pairs and set defaults. Temporary selections use the last accepted bindings. See [Session updates](sessions.md#update-tools-instructions-and-model-settings). |
+
+`session.active_turn` is the current root `Turn[Any]`, or `None`. `session.restored_turn` retains a root restored at a pending manual boundary, even after later submissions. It is `None` for a new Session or idle restore. Both use `Any` because roots can override the Session's output type.
+
+#### History and saved state
+
+| Call | Result |
+| --- | --- |
 | `await session.compact(*, summary=None)` | Compact an idle Session. A nonempty supplied summary replaces model context without a model request and preserves canonical history. See [compaction limits](sessions.md#compact-and-inspect-history). |
 | `await session.save_state()` | Capture an idle conversation without retiring it. |
-| `await session.fork()` | Return `SessionState` for an independent conversation; the source remains usable. This does not copy workspace files. See [save and restore](sessions.md#compact-save-and-restore) for storage, descendant and programmatic-state limits. |
-| `await session.suspend()` | Capture a supported manual boundary and retire this Session. |
-| `await session.update(*, model=None, model_settings=None, instructions=None, tools=None)` | Change one idle category per call. Tool updates can replace admitted Python/manual names or MCP server/raw-tool pairs and set the default. Temporary turn selections use the last accepted bindings. See [Session updates](sessions.md#update-tools-instructions-and-model-settings). |
+| `await session.fork()` | Return independent `SessionState`, leaving the source usable. Workspace files are not copied. See [save and restore](sessions.md#compact-save-and-restore) for storage, descendant and programmatic-state limits. |
+| `await session.suspend()` | Capture a supported manual boundary and retire the Session. See [manual suspension](sessions.md#saving-a-settled-manual-request). |
+| `await session.checkpoint_status(*, kind)` | Return `CheckpointStatus` with `status` (`"ready"`, `"not_ready"`, or `"unknown"`) and `reasons` for `kind="idle"` or `"manual_wait"`. It reserves nothing. Capture checks readiness again. |
 | `session.items(*, subagent_id=None)` | Async iterator over a snapshot of recorded items. |
 | `session.turns(*, subagent_id=None)` | Async iterator over a snapshot of recorded turns. |
 | `session.subagents()` | Async iterator over captured Subagent records. |
-| `await session.checklist(*, subagent_id=None)` | Read the root or a descendant's latest `ChecklistState`, or `None` before an update. Reading the state does not grant planning tools. |
-| `await session.goal()` | Read the actual `NativeGoal` data, or `None`, on a local Session opened with `NativeGoals`. Codex owns its status and accounting. |
-| `await session.pending_interactions()` | Return a snapshot tuple of currently pending live requests. Inspecting it does not prevent you from replying to those requests. |
-| `await session.checkpoint_status(*, kind)` | Inspect current capture readiness for `kind="idle"` or `"manual_wait"`. Returns `CheckpointStatus` with `status` (`"ready"`, `"not_ready"`, or `"unknown"`) and `reasons`. It does not reserve a checkpoint. Capture checks readiness again. |
 
-`events(after=...)` uses a retained global observation sequence. History and descendant iterators have no pagination arguments. See [streaming](sessions.md#stream-observations) and [manual suspension](sessions.md#saving-a-settled-manual-request).
+History and descendant iterators have no pagination arguments.
 
-`session.active_turn` is the current root `Turn[Any]`, or `None` when there is no active root. `session.restored_turn` retains the root restored at a pending manual boundary, even after another turn starts. It is `None` for a new Session or an idle restore. Both properties use `Any` for the output type because a root can override the Session's output type.
+#### Planning and capabilities
 
-`session.capabilities.get(feature)` returns `FeatureSupport` with `status` (`"supported"`, `"limited"`, or `"unsupported"`), `reason` and `scope`. `session.capabilities.require(feature, allow_limited=False)` raises `CapabilityError` for unsupported or, by default, limited coverage. `session.capabilities.websockets_allowed` reports provider permission to use WebSockets, not the negotiated transport. These reports describe configuration support. They do not grant permissions or establish checkpoint readiness. See [conversations and state](sessions.md).
+| Call | Result |
+| --- | --- |
+| `await session.checklist(*, subagent_id=None)` | Latest root or descendant `ChecklistState`, or `None` before an update. Readback grants no planning tools. |
+| `await session.goal()` | Actual `NativeGoal` data, or `None`, on a local Session opened with `NativeGoals`. Codex owns status and accounting. |
+| `session.capabilities.get(feature)` | `FeatureSupport` with `status` (`"supported"`, `"limited"`, or `"unsupported"`), `reason` and `scope`. |
+| `session.capabilities.require(feature, allow_limited=False)` | Raise `CapabilityError` for unsupported or, by default, limited coverage. |
+
+`session.capabilities.websockets_allowed` reports provider permission, not negotiated transport. Capability reports describe configuration support. They grant no permissions and do not establish checkpoint readiness. See [conversations and state](sessions.md).
 
 ### before_step
 
-The callback receives the root `Turn` as a positional argument and `step_index` as a keyword-only argument. It can be synchronous or asynchronous. Return `None` to keep that turn's tool selection, or a sequence of selectors for this preparation. The counter starts at zero and counts preparations. A preparation can be cancelled before a model request occurs. Selectors must obey the [tool-selection limits](tools.md#idle-replacement). For programmatic tool calling, the native entry points are `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")`. See the [per-step example](sessions.md#update-tools-instructions-and-model-settings).
+The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, or a sequence of selectors for that preparation.
+
+`step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#idle-replacement). Programmatic entry points are `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")`. See the [per-step example](sessions.md#update-tools-instructions-and-model-settings).
 
 ### Turn
 
-`await turn.get_result()` follows an issued root Turn through its accepted continuations. A captured child Turn instead represents one exact native turn; its result does not follow later child turns. Observe child events or fetch a new Subagent snapshot to find a successor. Use the event loop where the Session opened. The captured result remains stable after later submissions and Session closure. After `run_sync()`, use `Completed` directly; its event loop has closed. Cancelling a wait for the result leaves work running.
+A root Turn's `get_result()` follows accepted continuations. A captured child Turn represents one exact native turn and does not follow later child turns. Child events or a new Subagent snapshot can identify a successor.
 
-`turn.events(*, after=0)` observes that Turn. `await turn.wait_for_request_or_result()` returns `Completed` or `PendingRequests`, whose `requests` tuple contains this Turn's live requests. The call does not claim ownership of the requests. See the [reply loop](sessions.md#observation-details). `await turn.steer(prompt)` targets the captured active root or the captured active child turn; it cannot retarget another turn or revive a closed child. `await turn.cancel(*, mode="force")` stops that root or withdraws it if queued. Child cancellation uses `Subagent.try_cancel`; see [interruption](sessions.md#interrupt-work) for its boolean result and cleanup limits. An ID alone never grants control. See [Turn lifetime](sessions.md#conversations-events-and-state).
+| Call | Result |
+| --- | --- |
+| `await turn.get_result()` | Stable result, unchanged by later submissions or Session closure. Cancelling the wait leaves work running. |
+| `turn.events(*, after=0)` | Observations for this Turn. |
+| `await turn.wait_for_request_or_result()` | `Completed` or `PendingRequests`. Its `requests` tuple contains this Turn's live requests without claiming ownership. See the [reply loop](sessions.md#observation-details). |
+| `await turn.steer(prompt)` | Steer the captured active root or child turn. It cannot target another turn or revive a closed child. |
+| `await turn.cancel(*, mode="force")` | Stop the root or withdraw it from the queue. Children use `Subagent.try_cancel`. See [interruption](sessions.md#interrupt-work) for its boolean result and cleanup limits. |
+
+Turn calls use the Session's opening event loop. After `run_sync()`, that loop has closed, so use `Completed` directly. IDs alone grant no control. See [Turn lifetime](sessions.md#conversations-events-and-state).
 
 ### Completed
 
-A `Completed` result contains `turn`, `final_output`, `usage`, optional `state` and `repair_attempts`. `turn` is the exact root or child `Turn` that produced the result. Usage is a cumulative thread snapshot or `None`, not a per-turn cost; root usage does not aggregate child usage. `state` is populated only when a one-shot run requests `return_state=True`.
+A `Completed` result contains `turn`, `final_output`, `usage`, optional `state` and `repair_attempts`. `turn` is the exact root or child `Turn` that produced the result. `state` is populated only when a one-shot run requests `return_state=True`.
+
+Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage excludes children.
 
 `repair_attempts` is a tuple of `RecordedTurn` receipts for opted-in prompted-output corrections; it is empty when no repair ran. Their per-turn usage is separate from `Completed.usage`, which still describes the original thread. Missing usage remains `None`. The final output may come from a repair without rewriting the original native history. See [structured output configuration](configuration.md).
 
@@ -89,7 +118,9 @@ Import these immutable data classes from `agents.usage`. `Completed.usage` is a 
 
 ### Subagent
 
-A `Subagent` record contains a captured descendant's identity, status, `is_live` and optional observed `turn`. A snapshot can become stale. `await child.start(input)` checks that the child is still the same live instance and returns a `Turn[str]` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](tools.md#native-children).
+A `Subagent` record contains a captured descendant's identity, status, `is_live` and optional observed `turn`. A snapshot can become stale.
+
+`await child.start(input)` checks that the child is still the same live instance and returns a `Turn[str]` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](tools.md#native-children).
 
 ### InteractionRequired
 
@@ -125,7 +156,9 @@ Import from `agents.state`. Serialize with `to_json()` and load with `SessionSta
 
 ### LocalStorage
 
-Import `LocalStorage` from `agents` and construct it with a `pathlib.Path`, for example `LocalStorage(Path("conversations"))`. Pass the profile as `agent.session(storage=profile)`. Keep `session.id` in application storage. After closing the Session, reopen the conversation with `agent.session(storage=profile, resume=saved_id)` using the original profile directory and current tools, context and provider. Only one native writer can own the conversation at a time.
+Import `LocalStorage` from `agents` and construct it with a `pathlib.Path`, for example `LocalStorage(Path("conversations"))`. Pass the profile as `agent.session(storage=profile)`. Keep `session.id` in application storage.
+
+After closing the Session, reopen the conversation with `agent.session(storage=profile, resume=saved_id)` using the original profile directory and current tools, context and provider. Only one native writer can own the conversation at a time.
 
 `resume` requires `storage`. Neither can be used with portable `state`. A Session using local storage cannot export portable state through `save_state()`, `suspend()` or `fork()`. Reopening fails if saved history contains a function call with an unknown outcome or an active child whose runtime cannot be restored. It does not retry those tools automatically. See [local recovery limits](sessions.md#reopen-a-conversation-from-local-storage).
 
@@ -185,7 +218,9 @@ The one-shot handler returns the matching request's candidate reply. The SDK che
 
 Both types carry a native request's `description`. For `ApprovalRequest`, return `request.reply("allow_once")` or `request.reply("deny")` from a one-shot handler, or call `await request.respond(decision)` in an explicit Session.
 
-For an `ElicitationRequest` form, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively. A URL request has an empty schema and supports only refusal through these APIs. A Session-scoped URL request has no turn or submission ID; the SDK never visits its URL. A native reply confirms only that the SDK queued it. It does not confirm acceptance or completion. See [native interactions and their limits](tools.md#answer-interactions-during-a-one-shot-run).
+For an `ElicitationRequest` form, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
+
+A URL request has an empty schema and supports only refusal through these APIs. A Session-scoped URL request has no turn or submission ID; the SDK never visits its URL. A native reply confirms only that the SDK queued it. It does not confirm acceptance or completion. See [native interactions and their limits](tools.md#answer-interactions-during-a-one-shot-run).
 
 ### HttpMCP
 
@@ -234,13 +269,15 @@ Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,
             policy_timeout=30, capability_directories=None, network=None)
 ```
 
-An Environment selects any combination of `exec_command`, `write_stdin` and `apply_patch`. `write_stdin` requires `exec_command`. The default selects none. `approval` returns a bool or `StopTurn` and has no transform deadline. Approval sees original arguments before `transform_arguments`; denial never invokes the transform. `policy_timeout` bounds only transforms. Result transforms support direct executor calls in the default mode and calls from generated code with `Agent(programmatic_tool_calling=True)`. See [remote execution](tools.md#remote-execution) and [executor policies](tools.md#executor-policies).
+Environment options have these limits:
 
-`capability_directories` accepts absolute paths or `file:` URIs on the remote executor, not the Python controller. `None` keeps the native discovery defaults. An empty sequence selects no discovery roots.
+- `tools` selects any combination of `exec_command`, `write_stdin` and `apply_patch`, defaulting to none. `write_stdin` requires `exec_command`.
+- `approval` returns bool or `StopTurn`, without a transform deadline. It sees original arguments. Denial skips `transform_arguments`. `policy_timeout` bounds only transforms.
+- Result transforms support default-mode direct calls and generated calls with `Agent(programmatic_tool_calling=True)`. See [executor policies](tools.md#executor-policies).
+- `capability_directories` contains absolute paths or `file:` URIs on the remote executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots.
+- `network` accepts immutable `NetworkPolicy` or a same-field dictionary. Explicit policies require `"exec_command"` and a compatible Linux or macOS managed-proxy executor. Windows rejects them in this revision. The Python controller may run on another OS. See [network and local socket access](tools.md#network-and-local-socket-access).
 
-`network` accepts an immutable `NetworkPolicy` or a dictionary with the same fields. An explicit policy requires `"exec_command"` in `tools` and a compatible Linux or macOS managed-proxy executor. Windows executors reject explicit policies in this revision. The Python controller can run on a different OS. See [network and local socket access](tools.md#network-and-local-socket-access).
-
-On a Windows x64 executor, a job-local named pipe uses `network=None`. Pass the canonical workspace path supplied by the Windows provisioner as `cwd`. [Windows named pipes in an offline job](tools.md#windows-named-pipes-in-an-offline-job)
+For a Windows x64 job-local named pipe, `network=None` and `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](tools.md#windows-named-pipes-in-an-offline-job) and [remote execution](tools.md#remote-execution).
 
 ### NetworkPolicy
 
@@ -270,7 +307,7 @@ NativeProvider(*, base_url=None, api_key=None, supports_websockets=None)
 await provider.aclose() -> None
 ```
 
-An omitted `base_url` uses `https://api.openai.com/v1`; `OPENAI_BASE_URL` is not read automatically. Custom endpoints must support the Responses protocol. An omitted key reads `OPENAI_API_KEY` when the Session opens. With `supports_websockets=None`, an explicit `base_url` defaults to HTTP; `base_url=None` permits WebSockets. Set `True` to permit WebSockets for a compatible custom provider or `False` to require HTTP. The native runtime selects the final transport when WebSockets are enabled. Close every Session using a custom provider before closing that provider. See [configuration](configuration.md).
+Connection defaults, WebSocket selection and provider lifetime follow [provider configuration](configuration.md#provider-connection). Custom endpoints require Responses support. `aclose()` runs after every Session using the provider closes.
 
 ### ModelSettings
 

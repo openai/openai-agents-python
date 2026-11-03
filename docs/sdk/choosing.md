@@ -24,16 +24,34 @@ Choose where commands run separately: an OpenAI-hosted environment, a self-hoste
 
 ## Choose feature combinations
 
-Start with the smallest configuration that meets your needs. The table shows what each choice can save and what access it grants:
+Start with the smallest configuration that meets your needs. Check the limits below before combining features.
 
-| Need | Choose | Limit and alternative |
+### Choose output and storage
+
+| Need | Choose | Limits |
 | --- | --- | --- |
-| A typed answer from one task | `output_type=Answer` and `agent.run` | Native strict schemas have [restrictions](configuration.md#structured-output). Use `PromptedOutput` to request JSON in the prompt and validate it in Python. The provider does not enforce that schema. |
-| Continue on one machine | `LocalStorage` and the same profile | Only one native writer can use the stored conversation at a time. Portable `save_state`, `suspend`, and `fork` are unavailable. Set `max_retries=0` for prompted output. Use a portable checkpoint when moving between workers. |
-| Resume a conversation on another worker | An idle `SessionState` checkpoint in trusted application storage | Supply current tools, credentials, and context when restoring. Copy workspace artifacts separately. Check whether the Session is ready before saving. |
-| Pause for human approval across worker lifetimes | A pending manual request in the root thread, with plain text or matching prompted output, after policy and preparation work finishes | Native strict output and requests from child threads cannot use this suspension. It is also unavailable if the root or a child has executed a code cell, even if the cell has finished. Keep the Session open for those cases. |
-| Aggregate tool results in generated code | `programmatic_tool_calling=True` | Codex runs generated JavaScript in V8. It cannot run arbitrary Python this way. Idle checkpoints save conversation history but cannot save the JavaScript runtime state. To suspend a manual request, the history must show that neither the root nor a child has executed a code cell. See [capture limits](sessions.md#saving-a-settled-manual-request). Use direct function tools for simple calls. |
-| Delegate with the same authority | Explicit `NativeAgents` | Children share the selected tools, context, and policies and return text. Model metadata and the nesting depth limit which children can start. Use separately configured Agents when tasks need different tool access. |
-| Check a custom Responses endpoint | Separate [text, tools, strict-output and WebSocket checks](providers.md) | A successful text request and `websockets_allowed` do not prove that the endpoint supports the full protocol. |
+| A typed answer | `output_type=Answer` and `agent.run` | Native strict schemas have [restrictions](configuration.md#structured-output). `PromptedOutput` requests JSON and validates it in Python without provider schema enforcement. |
+| Continue on one machine | `LocalStorage` and the same profile | One native writer at a time. No portable `save_state`, `suspend`, or `fork`. Prompted output requires `max_retries=0`. |
+| Move to another worker | An idle `SessionState` checkpoint in trusted application storage | Supply current tools, credentials, and context when restoring. Copy workspace artifacts separately. Check readiness before saving. |
 
-In an open Session, `session.capabilities.get(feature)` reports whether the configuration supports a feature. Call `await session.checkpoint_status(kind="idle")` or use `kind="manual_wait"` to check whether the Session is ready to save. This check does not reserve the state. The SDK checks again when saving. See [support and readiness](sessions.md#check-support-and-capture-readiness). Independent children can still be running when the root result arrives.
+### Combine approvals, generated code, and delegation
+
+To pause for human approval across worker lifetimes, the root must have a pending manual request with plain text or matching prompted output. Policy and preparation work must finish before capture.
+
+Keep the Session open instead when any of these limits applies:
+
+- Native strict output is active.
+- The pending request belongs to a child thread.
+- The root or a child has executed a code cell, even if the cell has finished.
+
+Set `programmatic_tool_calling=True` to aggregate tool results with generated JavaScript in V8. It cannot run arbitrary Python this way. Idle checkpoints preserve conversation history but not the JavaScript runtime state. Manual suspension requires history proving that neither the root nor a child has executed a code cell. See [capture limits](sessions.md#saving-a-settled-manual-request). Use direct function tools for simple calls.
+
+Declare `NativeAgents` to delegate with the same permissions. Children share selected tools, context, and policies and return text. Model metadata and nesting depth limit which children can start. Use separately configured Agents when tasks need different tool access.
+
+### Check endpoint support and capture readiness
+
+For a custom Responses endpoint, run separate [text, tools, strict-output, and WebSocket checks](providers.md). A text response and `websockets_allowed` do not prove full protocol support.
+
+In an open Session, `session.capabilities.get(feature)` reports configuration support. To check whether the Session is ready to save, call `await session.checkpoint_status(kind="idle")` or use `kind="manual_wait"`.
+
+A readiness check reserves no state. The SDK checks again when saving, and independent children can still be running when the root result arrives. See [support and readiness](sessions.md#check-support-and-capture-readiness).

@@ -1,32 +1,50 @@
 # Configure an agent
 
-Construct an Agent with instructions, tools and an optional output type. The constructor records these settings. Opening a Session captures them and starts native resources. Agent.name is a diagnostic label and does not change instructions or permissions.
+Construct an Agent with instructions, tools and an optional output type. Construction records settings. Opening a Session captures them and starts native resources. Agent.name is a diagnostic label, not an instruction or permission.
 
-Agent declaration fields are immutable. Construct a new Agent to change defaults for future Sessions. Use `agent.with_output_type(...)` to create a variant with a different output type.
+Agent fields are immutable. Construct a new Agent to change defaults for future Sessions, or use `agent.with_output_type(...)` to change the output type. Unknown constructor options and Python model objects fail before native resources open.
 
-Pass an `Environment` to `agent.session(environment=...)` when this conversation needs a remote workspace. One Agent can open separate Sessions in different environments. One-shot Agent methods accept the same `environment` argument. See [remote execution](tools.md#remote-execution).
+Pass `environment=...` to `agent.session()` or a one-shot method for a [remote workspace](tools.md#remote-execution). One Agent can open Sessions in different environments. Use `ToolContext[Application]` for callback application state, separate from model input and tool arguments.
 
-Set `model` to a native model identifier to choose a model. If you omit it, the pinned runtime uses its default. `ModelSettings` supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted settings keep native defaults. `service_tier=None` clears that override. These settings describe model behavior and grant no tool or workspace access. When opening a new Session, `agent.session(model=...)` overrides the Agent model. Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults. Restoring a portable checkpoint keeps the saved model and settings. See [restore precedence](sessions.md#compact-save-and-restore).
+## Model and Session settings
 
-An open Session captures its own configuration. Use the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings) to change its instructions or native model settings. Constructing another Agent does not alter a Session that is already open. A Session opened with `NativeAgents` keeps its instructions and model settings fixed.
+Set `model` to a native model identifier, or omit it for the pinned runtime's default. `ModelSettings` supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted settings keep native defaults. `service_tier=None` clears that override. These settings grant no tool or workspace access.
 
-For a native Responses connection, pass `NativeProvider(base_url=..., api_key=...)`. The SDK uses Codex's built-in model client; `provider` does not accept an `openai.OpenAI` or `openai.AsyncOpenAI` instance. A custom endpoint must support the Responses protocol. Chat Completions compatibility alone is insufficient.
+When opening a Session:
 
-With `base_url=None`, model requests go to `https://api.openai.com/v1`. The SDK does not read `OPENAI_BASE_URL` automatically. To use that environment variable, import `os` and pass `base_url=os.environ["OPENAI_BASE_URL"]` explicitly. An omitted API key is read from `OPENAI_API_KEY` when the Session opens. Keep credentials in current application configuration rather than saved conversation state.
+- `agent.session(model=...)` overrides the Agent model.
+- Supplied `model_settings` keys override Agent settings. Omitted keys keep the Agent or native defaults.
+- [Portable restore](sessions.md#compact-save-and-restore) keeps the saved model and settings instead.
 
-With `supports_websockets=None`, the SDK enables WebSockets when `base_url=None` and disables them for any explicitly supplied `base_url`. Set `supports_websockets=True` for a compatible custom provider, or `False` to require HTTP. When WebSockets are enabled, the native runtime selects the final transport for the provider and model.
+An open Session keeps its captured configuration. Change instructions or native model settings with the idle [Session update methods](sessions.md#update-tools-instructions-and-model-settings). Another Agent cannot change it. Sessions opened with `NativeAgents` keep these settings fixed.
 
-Each Session captures current provider settings and owns its native connections. After all Sessions using a custom provider have closed, call `await provider.aclose()` to finish cleanup. Calling it while a Session is open or opening raises an error. A successful close prevents further use; create a new provider for later Sessions.
+The Session records Python and manual tool names and pairs of MCP server names and raw tool names when it opens. These names limit later updates and turn selections. [Idle updates](tools.md#idle-replacement) can replace bindings, including MCP endpoints and credentials. Temporary selections cannot redefine them. Environment settings and saved state cannot add names.
 
-The pinned Codex bypasses HTTP proxies when the process sets `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup in that mode if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms have a nonempty value. The check also applies when `NO_PROXY` would exempt the destination or the provider enables WebSockets. Run outside that sandboxed environment, or remove proxy settings you do not need.
+## Provider connection
 
-When neither the Agent nor the Session supplies a `provider`, each Session creates its own default provider and attempts to close it automatically. Reusing an Agent does not share that provider across its Sessions. To share an explicit provider, pass the same `NativeProvider` to the Agents or Sessions that need it. Close all Sessions using it before `provider.aclose()`.
+Pass `NativeProvider(base_url=..., api_key=...)` for a native Responses connection. The SDK uses Codex's built-in model client, not an `openai.OpenAI` or `openai.AsyncOpenAI` instance. Custom endpoints must support Responses. Chat Completions compatibility alone is insufficient.
+
+Connection defaults are:
+
+- `base_url=None` sends model requests to `https://api.openai.com/v1`. The SDK does not read `OPENAI_BASE_URL`. To use it, import `os` and pass `base_url=os.environ["OPENAI_BASE_URL"]`.
+- An omitted key reads `OPENAI_API_KEY` when the Session opens. Keep credentials in current application configuration, outside saved conversation state.
+- `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
+
+The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
+
+### Provider lifetime
+
+Each Session captures provider settings and owns its native connections. If neither the Agent nor the Session supplies a provider, the Session creates its own and attempts to close it automatically. Reusing an Agent does not share default providers.
+
+To share a provider, pass the same `NativeProvider` to the Agents or Sessions. After all its Sessions close, call `await provider.aclose()`. Closing while a Session is open or opening raises an error. A successful close prevents reuse. Create a new provider for later Sessions.
 
 ### Recover a failed managed-environment opening
 
-If opening with a [managed Environment](tools.md#manage-the-executor-lifetime) fails and automatic cleanup cannot finish, the exception can carry the implicit provider in `error.provider`. The provider may still own an executor manager or native resources. Inspect this optional attribute and retry `aclose()` before discarding the owning event loop. This applies to `agent.session()`, `agent.run()` and `agent.run_sync()` opening failures; it is not a general attribute of every SDK error.
+If opening a [managed Environment](tools.md#manage-the-executor-lifetime) fails and automatic cleanup cannot finish, the exception can carry the implicit provider in `error.provider`. It may still own an executor manager or native resources. Check this optional attribute and retry `aclose()` before discarding the owning event loop.
 
-This async fragment uses your `agent` and the `executor_lease()` manager from the linked example:
+This applies only to opening failures from `agent.session()`, `agent.run()` and `agent.run_sync()`. An explicit provider remains application-owned and is not attached to the error. Close it after its other Sessions close.
+
+This fragment uses your `agent` and the linked example's `executor_lease()` manager:
 
 ```python
 from agents import NativeProvider
@@ -43,11 +61,13 @@ except BaseException as error:
     raise
 ```
 
-Run async cleanup on the same event loop as the failed opening. If the retry fails, this handler preserves the opening error and its `provider` attribute, with the cleanup failure as its cause. The caller must retain that provider and retry cleanup before discarding the owning event loop. After a synchronous `run_sync()` failure, a caller outside an event loop can use `asyncio.run(recovery.aclose())`; the provider routes cleanup to the retained run loop. Your application still owns an explicit provider, and the SDK does not attach it to this opening error. Close it after its other Sessions have closed.
+Run async cleanup on the failed opening's event loop. If cleanup fails again, this handler keeps the opening error and its provider, with the cleanup error as its cause. Retain the provider and retry cleanup before discarding the loop.
+
+After `run_sync()` fails, a caller outside an event loop can use `asyncio.run(recovery.aclose())`. The provider routes cleanup to the retained run loop.
 
 ## Structured output
 
-Set `output_type=Answer` to request a structured object and validate the returned value in Python. The Agent preserves the output type:
+Set `output_type=Answer` to request a structured object and validate it in Python. This example runs inside an async application:
 
 ```python
 from pydantic import BaseModel
@@ -65,13 +85,30 @@ result = await agent.run("Greet Ada about astronomy.")
 print(result.final_output.greeting)
 ```
 
-This code runs inside an async application. Native structured output supports objects with declared fields and non-object roots such as `int` and `list[int]`. Plain text remains the default when `output_type` is omitted or is `str`. To return a typed union or nullable root, use a Pydantic `RootModel`, such as `RootModel[int | str]` or `RootModel[int | None]`. The current static `Agent` constructor does not accept a bare union such as `int | str`. Use `type(None)` when the output must be `null`.
+### Choose an output type
 
-A bare structured type or `NativeOutput(Answer)` uses a native strict schema. `NativeOutput(str)` explicitly requests a native response object, while bare `str` returns plain text. `PromptedOutput(Answer)` asks for JSON in the prompt and validates text in Python; the provider does not enforce a native schema. Its default `max_retries=0` fails on invalid output. With nonzero retries, the SDK requests separate corrections without tools. It does not replay the task. LocalStorage supports only `max_retries=0`.
+- Omit `output_type` or pass bare `str` for plain text.
+- Pass a structured type or `NativeOutput(Answer)` for a native strict schema. `NativeOutput(str)` requests a native response object rather than plain text.
+- Use native objects with declared fields or non-object roots such as `int` and `list[int]`. For a union or nullable root, use `RootModel[int | str]` or `RootModel[int | None]`. The static `Agent` constructor rejects bare unions such as `int | str`. Use `type(None)` for output that must be `null`.
+- `PromptedOutput(Answer)` asks for JSON in the prompt and validates text in Python. The provider does not enforce a native schema. Its default `max_retries=0` fails on invalid output. Nonzero retries request separate corrections without tools, not a task replay. `LocalStorage` supports only `max_retries=0`.
 
-Invalid final output raises `OutputValidationError` from `agents`, including when prompted corrections exhaust their retry budget. Catch it around `agent.run()` or `turn.get_result()`. The exception's `raw_output` contains the rejected text and may contain private data. Keep that text out of routine logs. The exception message omits the rejected text.
+For a native non-object root, the model returns an object with a required `response` field. The SDK unwraps that field. With `output_type=list[int]`, model output `{"response": [1, 2]}` becomes `result.final_output == [1, 2]`. A `RootModel` result keeps its class. Native history and observations retain the JSON object. Object outputs with their own `response` field remain unchanged.
 
-This fragment reuses the typed `agent` above and reports a fixed message on validation failure:
+### Native schema limits
+
+These limits also apply inside non-object roots and `RootModel` types:
+
+- Every nested object must reject extra fields. Open maps such as `dict[str, str]`, including maps inside Pydantic models, and models allowing extra fields are rejected.
+- `Any`, sets, fixed-length tuples, and schemas using `oneOf`, `allOf`, `prefixItems` or `uniqueItems` are unsupported. The SDK rejects unsupported schemas when the Session opens.
+- Every declared field is required, even with a Python default. The SDK removes defaults from the model request. Use nullable fields for explicit `null` values. A nullable `response` field is still required.
+
+These restrictions do not automatically apply to prompted output or Python function parameters.
+
+### Handle validation failures
+
+Invalid final output raises `OutputValidationError`, including after prompted corrections exhaust their retries. Catch it around `agent.run()` or `turn.get_result()`. Its message omits the rejected text. Its `raw_output` contains that text and may contain private data, so keep it out of routine logs.
+
+This fragment reuses the typed `agent` above:
 
 ```python
 from agents import OutputValidationError
@@ -84,36 +121,30 @@ else:
     print(result.final_output.greeting)
 ```
 
-Validation failure does not undo completed tools or replay the task. Waiting on the same Turn again raises the same failure. An explicit Session can accept a new turn after this failure. Inspect its history and application effect records before submitting input that could repeat a tool effect.
+Validation does not undo completed tools or replay the task. Waiting on the same Turn raises the same failure. An explicit Session can accept a new turn, but inspect history and application effect records before submitting input that could repeat an effect.
 
-A successful result records each correction in `Completed.repair_attempts`. Each record is a `RecordedTurn` with its own native session and turn IDs. Its `parent_session_id` and `parent_turn_id` identify the original task. Its `usage` covers that correction turn. `Completed.usage` remains a cumulative snapshot of the original thread and excludes these correction threads. Do not add cumulative snapshots from successive original turns as if each were a separate cost. Missing usage is `None`, not zero.
+### Inspect corrections and saved state
+
+On a successful run, `Completed.repair_attempts` records each correction attempt as a `RecordedTurn` value. Each has native session and turn IDs, `parent_session_id` and `parent_turn_id` for the original task, and usage for that correction turn:
 
 ```python
 for repair in result.repair_attempts:
     print(repair["id"], repair["parent_turn_id"], repair["usage"])
 ```
 
-The correction turn receives the invalid output, schema and effective model connection. It does not receive the original tools, application context or instructions. `final_output` may come from a correction, while the original native task history stays intact. `session.turns()` and `session.items()` include the retained correction receipts beside their original parent.
+`Completed.usage` is cumulative for the original thread and excludes correction threads. Missing usage is `None`, not zero. Follow the [usage accounting limits](troubleshooting.md#read-usage-without-double-counting) when comparing successive snapshots.
 
-Live manual replies and idle checkpoint restore work with structured output. Settled manual turns can also be suspended with matching `PromptedOutput`. Pending `NativeOutput` or bare structured output cannot. See [saving a settled manual request](sessions.md#saving-a-settled-manual-request) for fingerprint, active repair and `before_step` limits.
+Corrections receive the invalid output, schema and effective model connection, without original tools, application context or instructions. `final_output` may come from a correction. Original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
-For a native non-object root, the SDK asks the model for an object with one required `response` field. It validates the response and returns the field as `result.final_output`. For example, the model returns `{"response": [1, 2]}` for `output_type=list[int]`, and the application receives `[1, 2]`. A `RootModel` result keeps its declared class. Native history and output observations retain the actual JSON object. An object output that declares its own `response` field keeps that field and is not unwrapped.
-
-For native output, all nested objects must reject extra fields. Open maps such as `dict[str, str]`, including maps inside a Pydantic model, and models that allow extra fields are rejected. Unconstrained values such as `Any`, sets and fixed-length tuples are also outside this contract. Schemas using `oneOf`, `allOf`, `prefixItems` or `uniqueItems` are rejected when the Session opens. These restrictions also apply inside non-object roots and `RootModel` types.
-
-The native strict schema requires every declared field, even when the Python model gives a field a default. It removes defaults from the model request; a default does not let the model omit that field. Use a nullable field when the model must explicitly return `null`. The `response` field is also required when its value can be `null`. These native restrictions do not apply automatically to prompted output or Python function parameters.
-
-Use `ToolContext[Application]` for application state in callbacks. This state is separate from model input and tool arguments.
-
-The `Agent` constructor accepts the listed options directly. Unknown options and Python model objects fail before opening native resources.
-
-The Session records Python and manual tool names and pairs of MCP server names and raw tool names when it opens. These names limit later updates and turn selections. Idle updates can replace those bindings, including MCP endpoints and credentials. Temporary selections cannot redefine them. Environment settings and saved state cannot add names. See [idle replacement](tools.md#idle-replacement).
+Live manual replies and idle restore support structured output. Settled manual turns can be suspended with matching `PromptedOutput`, but pending `NativeOutput` or bare structured output cannot. See [saving a settled manual request](sessions.md#saving-a-settled-manual-request) for fingerprint, active repair and `before_step` limits.
 
 ## Telemetry
 
-Import telemetry settings from `agents.telemetry`. Call `await configure(...)` once per process before opening the first Session. Close all Sessions before `await shutdown()`, which flushes and shuts down native telemetry. Shutdown does not close Sessions or application-owned Python OpenTelemetry exporters. If native initialization fails after claiming the tracing subscriber, start a fresh process. Retrying configuration in that process is unsupported.
+Import settings from `agents.telemetry`. Call `await configure(...)` once per process before the first Session opens. After all Sessions close, `await shutdown()` flushes and shuts down native telemetry. It does not close Sessions or application-owned Python OpenTelemetry exporters.
 
-This fragment belongs inside an async application, before any Session opens. Replace the exporter endpoint with your collector's trace endpoint and configure `agent` as described above:
+If native initialization fails after claiming the tracing subscriber, start a fresh process. Retrying configuration in that process is unsupported.
+
+Place this fragment before any Session opens. Replace the endpoint with your collector's trace endpoint and configure `agent` as above:
 
 ```python
 from agents import telemetry
@@ -128,16 +159,26 @@ finally:
     await telemetry.shutdown()
 ```
 
-`traces`, `logs` and `metrics` each accept `OtlpHttp(...)`, `OtlpGrpc(...)` or `None`. Each defaults to `None`, which disables that signal. This includes native metrics. `OtlpHttp` uses `protocol="binary"` by default and also accepts `"json"`. Supply the collector endpoint and an optional string-to-string `headers` mapping. Both exporters accept `tls=OtelTlsConfig(...)` with `ca_certificate`, `client_certificate` and `client_private_key` paths. Relative certificate paths resolve against the application's current directory. `span_attributes` adds application-selected string attributes.
+Exporter settings are:
 
-`log_user_prompt=False`, `log_agent_responses=False` and `tool_result_max_bytes=0` are the defaults. The text switches control only the named native records; they do not sanitize all telemetry. The byte limit bounds result text only. Select exporters and data controls for the information your application permits the collector to receive.
+- `traces`, `logs` and `metrics` accept `OtlpHttp(...)`, `OtlpGrpc(...)` or `None`. Each defaults to `None`, disabling that signal, including native metrics.
+- `OtlpHttp` defaults to `protocol="binary"` and also accepts `"json"`. Supply a collector endpoint and optional string-to-string `headers` mapping.
+- Both exporters accept `tls=OtelTlsConfig(...)` with `ca_certificate`, `client_certificate` and `client_private_key` paths. Relative paths resolve against the application's current directory.
+- `span_attributes` adds application-selected string attributes.
+
+Content defaults are `log_user_prompt=False`, `log_agent_responses=False` and `tool_result_max_bytes=0`. The switches control only the named native records. They do not sanitize all telemetry. The byte limit bounds only result text. Select exporters and controls for the data your collector may receive.
 
 ## Programmatic tool calling
 
-Programmatic tool calling is optional and off by default. Ordinary tool calls do not require JavaScript. Set `programmatic_tool_calling=True` on `Agent` to let the model generate JavaScript code cells that call declared Python, manual and MCP tools. These cells can combine tool calls with loops, conditions and result processing. You write your application and Python function tools in Python. The model writes the JavaScript.
+Set `programmatic_tool_calling=True` on `Agent` to let the model generate JavaScript cells that call declared Python, manual and MCP tools. Cells can combine calls with loops, conditions and result processing. Ordinary tool calls do not require this option, which defaults to off.
 
-The cells run in the SDK's bundled Codex Code Mode host, which embeds the V8 JavaScript engine. JavaScript is the execution language for these cells; the SDK does not provide a Python-language option for them.
+You write the application and function tools in Python. Model-generated cells run in the SDK's bundled Codex Code Mode host, which embeds V8. The cells have no Python-language option.
 
-Python functions handle their arguments and results. MCP result policies run before the cells receive MCP results. The bundled host grants no shell tools or local workspace. Pass `Environment` to the Session or one-shot run for remote execution. A manual call waits for an application reply in the live Session. You cannot save a pending code cell as a portable checkpoint. The function names `exec` and `wait` are reserved.
+These limits apply:
 
-A restored Session uses the current Agent's declaration, so set `programmatic_tool_calling=True` again when restoring a conversation that needs it. [Executor result transforms](tools.md#executor-policies) require this option. An executor argument transform also supports direct calls.
+- Python functions handle arguments and results. MCP result policies run before cells receive results.
+- The host grants no shell tools or local workspace. Pass `Environment` to the Session or one-shot run for remote execution.
+- A manual call waits for an application reply in the live Session. Pending code cells cannot be saved as portable checkpoints.
+- `exec` and `wait` are reserved function names.
+
+Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor result transforms](tools.md#executor-policies) require this option. An executor argument transform also supports direct calls.

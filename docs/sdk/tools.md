@@ -19,7 +19,14 @@ Examples with `await` or `async with` are fragments for an async function. Confi
 
 ## Native web search
 
-To enable native search, include `WebSearch` when opening the Session. Without it, neither the standalone nor the provider-hosted route is available. The default `mode="cached"` uses indexed content. Set `mode="live"` to let Codex request external web access. The default `route="standalone"` uses the native standalone search protocol. Set `route="hosted"` to use the provider's hosted web-search protocol. Both routes require a compatible Responses provider. Selecting a route does not add provider support, and Codex does not fall back to the other route.
+To enable native search, include `WebSearch` when opening the Session. Without it, neither search route is available.
+
+Choose the content and protocol separately:
+
+- `mode="cached"` (default) uses indexed content. `mode="live"` lets Codex request external web access.
+- `route="standalone"` (default) uses the native search protocol. `route="hosted"` uses the provider's hosted web-search protocol.
+
+Both routes require a compatible Responses provider. Selecting a route does not add provider support or enable fallback to the other route.
 
 ```python
 from agents import Agent, WebSearch
@@ -28,7 +35,9 @@ search = WebSearch(mode="cached", route="standalone")
 agent = Agent(instructions="Research the user's question.", tools=[search])
 ```
 
-Keep the original `search` declaration in every explicit turn or step selection, such as `tools=[search]`. Turns, steps, and idle updates cannot add search or change its mode or route. To change the declaration, open a new Session. Saved history retains completed search results but does not enable search. If restored work needs search, declare `WebSearch` again in the current Agent or when opening the Session. `Environment.network` controls native executor commands, not web search.
+Keep the original `search` declaration in every explicit turn or step selection, such as `tools=[search]`. Turns, steps, and idle updates cannot add search or change its mode or route. Open a new Session to change the declaration.
+
+Saved history retains search results but does not enable search. To search after restore, declare `WebSearch` again in the current Agent or opening Session tools. `Environment.network` controls executor commands, not web search.
 
 ## Python functions
 
@@ -44,6 +53,8 @@ async def greeting(name: str) -> str:
     return f"Hello, {name}!"
 ```
 
+### Declare arguments and return types
+
 Each model argument must have a type annotation and accept a keyword argument. Positional-only parameters, `*args` and `**kwargs` are unsupported. If an existing function uses them, wrap it in a tool function with named, annotated parameters.
 
 A return annotation is optional. On this branch, the SDK validates the returned value against that annotation when present. If a synchronous function returns an `Awaitable[T]` or `Coroutine[Any, Any, T]`, the SDK awaits it and validates the resolved value as `T`. Supported result formats and safety checks still apply without a return annotation.
@@ -52,12 +63,13 @@ Parameter names cannot start with `_`. For a JSON argument such as `_id`, use `r
 
 Python preserves `Annotated` metadata and validates the full declaration before calling the function. Codex includes only the JSON Schema features that the pinned runtime supports in model requests. Python enforces constraints such as `minLength` even when the provider does not receive them. Do not rely on the provider to enforce every Python constraint. On every supported platform, Python rejects invalid arguments before the tool body runs.
 
+### Execution and cancellation
+
 Codex can dispatch a valid tool call while the model response is still streaming. A later stream error or content filter does not undo an effect that has already completed. Codex retains accepted results when it continues the conversation.
 
 The SDK converts Python return values before the native runtime accepts the reply.
 
 The decorator accepts synchronous and asynchronous functions. The SDK runs synchronous functions in a worker with copied context variables. The application context remains the same object. On cancellation, the SDK waits for a running worker before the submission finishes. Use async functions when the body needs cooperative cancellation.
-
 
 Set `before` and `after` directly on `@function_tool(...)` to control Python callback tools. `before(context)` receives the validated arguments and returns `Allow`, `Deny`, or `ReplaceArguments`. After execution, `after(context, output)` receives and returns a `ToolOutput`. It cannot undo the tool's effects. Set the function body's deadline with `callback_timeout`. See [callback deadlines](#callback-deadlines). A `FunctionTool` without a callback cannot use callback or policy settings.
 
@@ -102,7 +114,9 @@ def preview() -> ToolOutput:
     return ToolOutput([ToolOutputText("A one-pixel preview."), ToolOutputImage(image_url)])
 ```
 
-The return value must match a supplied return annotation. Annotate a function that returns these objects with `ToolOutput`, as above. Images require an inline base64 image data URL; remote URLs, file IDs and local paths are unsupported. An explicit `ToolOutput.error(...)` delivers a failed tool reply that the model can handle. Raising an exception can instead fail the owning turn after cleanup. Neither choice undoes earlier effects. Manual tools can also declare `output_type=ToolOutput` and submit these values through a live request.
+Annotate functions that return these objects with `ToolOutput`, as above. Images require inline base64 image data URLs. Remote URLs, file IDs, and local paths are unsupported.
+
+`ToolOutput.error(...)` returns a failed tool reply that the model can handle. Raising an exception can instead fail the owning turn after cleanup. Neither choice undoes earlier effects. Manual tools can declare `output_type=ToolOutput` and submit these values through a live request.
 
 ## Application context
 
@@ -168,7 +182,21 @@ agent = Agent(
 )
 ```
 
-Read the token in application code and pass its value as `bearer_token`. The declaration keeps that token value. Restore uses the application's current declarations and credentials. A fresh or idle-restored Session captures MCP declarations when it opens. When a turn or idle update selects MCP tools, the SDK checks that the server provides them. Handle startup or missing-tool errors from `turn.get_result()` for turn selections, or from `session.update()` for idle selections. When restoring a pending manual request, the SDK prepares selected MCP resources before exposing fresh requests to the application. Startup or missing-tool errors can then prevent the Session from opening. Codex normalizes the tool namespaces the model sees. Conflicting names fail before the model can use the tools. For lists that mix context-aware Python tools and MCP declarations, MyPy may need an explicit `list[Tool[Application]]` or `Agent[Application, Answer]` annotation.
+Read the token in application code and pass its value as `bearer_token`. The declaration keeps that value. Restore uses the application's current declarations and credentials.
+
+### Handle MCP startup errors
+
+A fresh or idle-restored Session captures MCP declarations when it opens. The SDK checks that the server provides selected tools at these points:
+
+- For a turn selection, handle startup or missing-tool errors from `turn.get_result()`.
+- For an idle selection, handle those errors from `session.update()`.
+- When restoring a pending manual request, the SDK prepares selected MCP resources before exposing fresh requests. Errors can prevent the Session from opening.
+
+Codex normalizes the tool namespaces the model sees. Conflicting names fail before the model can use the tools.
+
+For lists that mix context-aware Python tools and MCP declarations, MyPy may need an explicit `list[Tool[Application]]` or `Agent[Application, Answer]` annotation.
+
+### Configure MCP approval
 
 MCP selection and approval are separate. The default `approval_mode="auto"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a one-shot handler. A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
 
@@ -186,6 +214,8 @@ writer = HttpMCP(
 Codex applies that setting only to the selected raw tool names. Native constraints and strict review still apply. The setting does not answer a server's own requests for interactive input, sandbox server startup, or limit effects the server does not disclose. Result policies still run after execution and cannot undo those effects. Do not change a tool's read-only annotation to obtain approval.
 
 Approval settings follow the current descriptor during idle replacement and restore. Restoring with the default `auto` does not inherit an explicit approval from the saved Session.
+
+### Start a stdio server
 
 For a trusted stdio server, use `StdioMCP` and supply its command:
 
@@ -206,13 +236,27 @@ By default, `location="host"` starts the server on the application host. Set `lo
 
 Codex manages the process and its standard input and output connection until the Session closes. Supply a trusted command because the process uses the selected machine's permissions. Tool selection and approval do not sandbox server startup. Codex passes arguments as separate values without shell expansion.
 
-Use an absolute `cwd` to set the working directory. If you omit it, host servers use Codex's runtime directory and remote servers use the Environment's working directory. `env_vars` selects variables from the machine that runs the server. The declaration captures the arguments and variable names. Codex reads the variables' current values when the server starts. Restore uses the application's current server declarations and Environment.
+Configure the server's process environment as follows:
+
+- Use an absolute `cwd`. If omitted, host servers use Codex's runtime directory and remote servers use the Environment's working directory.
+- Use `env_vars` to select variables from the machine that runs the server. Codex reads their values at startup.
+- Pass arguments as separate values. The declaration captures the arguments and variable names.
+
+Restore uses the application's current server declarations and Environment.
 
 ## Idle replacement
 
-While the Session is idle, call `await session.update(tools=new_tools)` to replace tool definitions. Python and manual replacements must use names selected when the Session opened. MCP replacements must use the same opening server and raw-tool pairs. Later turns use the updated definitions, including the replacement MCP endpoint and credentials. Each server's `defer_loading` value must match its opening value. Updates cannot add names or MCP pairs, or change discovery mode.
+While idle, call `await session.update(tools=new_tools)` to replace tool definitions. Later turns use the updated definitions, including replacement MCP endpoints and credentials.
 
-To add tool names or MCP server and tool pairs, open a new Session. Await a successful update before submitting work. If an update fails without confirming which definitions are active, close the Session and open a new one.
+Replacements must stay within the tools declared when the Session opened:
+
+- Python and manual tools must use opening tool names.
+- MCP declarations must use opening server and raw-tool pairs.
+- Each MCP server must retain its opening `defer_loading` value.
+
+To add names or MCP pairs, or change discovery mode, open a new Session. Await a successful update before submitting work. If an update fails without confirming which definitions are active, close the Session and open a new one.
+
+### Change tools between turns
 
 For a conversation that uses different tools at each stage, declare all the tools when opening the Session. Select a smaller set before the first model turn:
 
@@ -247,11 +291,15 @@ async with agent.session() as session:
 
 Here `lookup` selects the last accepted definition, `current_lookup`. It does not restore the original callback. Temporary `submit(tools=...)` and `before_step` selections cannot replace tools or MCP connections, even with the same names. Use an idle update for those changes. An explicit turn selection can choose a tool omitted from the current default. That selection uses the last accepted definition, including its MCP credentials.
 
-In a fresh or idle-restored Session, selecting fewer tools before the first turn can leave omitted MCP servers unstarted. A later explicit selection can still use those servers. To exclude a tool for the whole Session, leave it out when opening. To add new names, open a new Session. When restoring an idle checkpoint, Python and manual definitions must still match the saved definitions. The restored Session uses MCP declarations supplied when opening it, through `tools=` if provided or otherwise `Agent.tools`. Storage does not supply credentials or callbacks. See [save and restore](sessions.md#compact-save-and-restore).
+### MCP startup and restore limits
 
-If the Session opened with `NativeAgents`, retain that fixed grant in every explicit selection, even when removing Python, manual or MCP tools. Update tools only after all native children have closed. See [Session updates](sessions.md#update-tools-instructions-and-model-settings).
+Selecting fewer tools before the first turn can leave omitted MCP servers unstarted. A later explicit selection can still use them. To exclude a tool for the whole Session, leave it out when opening.
 
-To use host stdio after tool replacement, include at least one `StdioMCP(location="host")` declaration when opening the Session. A Session opened with only HTTP or environment stdio cannot later start a host process. Environment stdio requires the Session's current Environment. Both locations can use only server and tool-name pairs allowed when the Session opened.
+For an idle checkpoint restore, supply matching saved Python and manual definitions. MCP declarations come from the opening `tools=` override, or otherwise `Agent.tools`. Storage does not supply credentials or callbacks. See [save and restore](sessions.md#compact-save-and-restore).
+
+If the Session opened with `NativeAgents`, retain that declaration in every explicit selection. Update tools only after all native children close. See [Session updates](sessions.md#update-tools-instructions-and-model-settings).
+
+To use host stdio after replacement, open with at least one `StdioMCP(location="host")` declaration. A Session opened with only HTTP or environment stdio cannot later start a host process. Environment stdio requires the Session's current Environment. Both locations remain limited to opening server and tool-name pairs.
 
 With the pinned native revision, host stdio initialization rejects incompatible `CODEX_EXEC_SERVER_NOISE_*` settings from the environment. It does not silently select the remote executor those settings describe. HTTP-only Sessions do not require a local executor.
 
@@ -272,7 +320,7 @@ async with agent.session() as session:
 assert lookup.ref == ToolRef("lookup")
 ```
 
-Passing a new MCP declaration with fewer tools to `submit(tools=...)` does not replace the accepted declaration. To change definitions, use `session.update(tools=...)` while idle. The replacement can use only server and tool-name pairs allowed when the Session opened.
+To replace an MCP declaration rather than select its tools, use an [idle update](#idle-replacement). Passing a new declaration to `submit(tools=...)` does not replace the accepted definition.
 
 ### Schema discovery
 
@@ -290,7 +338,9 @@ def invoice_status(invoice_id: str) -> str:
 agent = Agent(instructions="Find the requested invoice status.", tools=[invoice_status])
 ```
 
-Declare the intended tools before opening the Session. Temporary turn or step selections use accepted definitions. Passing a fresh declaration cannot enable discovery or replace a schema. MCP idle replacements must retain the server's opening `defer_loading` value. Discovery does not delay connections or startup for selected MCP resources. The model can discover schemas only for selected tools.
+Declare discovery settings at opening. Temporary selections cannot change schemas or enable discovery, and MCP idle replacements must retain opening `defer_loading` values.
+
+Discovery does not delay selected MCP connections or startup. The model can discover only selected tools.
 
 ## Callback deadlines
 
@@ -355,7 +405,11 @@ server = HttpMCP(
 )
 ```
 
-MCP result transforms run after the server tool executes and before native events, history, the model, or code cells receive its result. They support direct calls, programmatic calls, and declared native children. Child callbacks receive the child's call identity. Set `transform_result_timeout` to limit the callback separately from server execution. If a decision is invalid, late, or fails, the SDK withholds the original result and fails the submission. A transform cannot turn a server error into success, undo server effects, or reveal effects the server did not report. Checkpoints do not store transform callbacks. Restore uses the current Agent's declarations and credentials.
+MCP result transforms run after server execution and before native events, history, the model, or code cells receive the result. They cover direct calls, programmatic calls, and declared native children. Child callbacks receive the child's call identity.
+
+Invalid, late, or failed decisions withhold the original result and fail the submission. A transform cannot turn a server error into success, undo server effects, or reveal unreported effects.
+
+Checkpoints store no transform callbacks. Restore uses the current Agent's declarations and credentials.
 
 ## Tool notifications
 
@@ -391,25 +445,58 @@ async with agent.session(environment=environment) as session:
 
 `agent.run(..., environment=environment)` and `agent.run_sync(..., environment=environment)` accept the same connection data. `Environment.tools` defaults to an empty tuple, so process and file tools must be selected explicitly. The SDK does not fall back to running these tools on the application host.
 
-`cwd` is an absolute executor path or `file:` URI. The selected native model and runtime must support the tools. `exec_command` starts a command, `write_stdin` polls it or writes to a TTY, and `apply_patch` edits files. `write_stdin` requires `exec_command`. Ordinary pipe-mode stdin is not supported. There is no separate Python process or file client.
+### Select executor tools
 
-For the pinned native runtime, `exec_command` and `write_stdin` arguments must match their advertised object schemas before dispatch. The SDK rejects malformed JSON, missing required fields, unknown keys, wrong types, and invalid enum values. Omitting an optional field is different from passing `null`. A rejection fails the current turn without an automatic retry. Earlier calls may already have effects or may be cancelled; later calls are not admitted. The rejected call does not enter accepted conversation history. Its error names the tool and includes a SHA-256 digest of the call ID for correlation with an application-owned provider record. This check covers these two pinned schemas, not arbitrary JSON Schema or the freeform `apply_patch` grammar. It does not promise rollback.
+Set `cwd` to an absolute executor path or `file:` URI. The selected native model and runtime must support the tools:
+
+- `exec_command` starts commands.
+- `write_stdin` polls commands or writes to a TTY. It requires `exec_command`; ordinary pipe-mode stdin is unsupported.
+- `apply_patch` edits files.
+
+There is no separate Python process or file client.
+
+### Argument validation
+
+Before dispatch, the SDK checks `exec_command` and `write_stdin` arguments against their pinned object schemas. It rejects malformed JSON, missing fields, unknown keys, wrong types, and invalid enum values. Omitting an optional field differs from passing `null`.
+
+A rejection fails the turn without automatic retry. Earlier calls may have effects or be cancelled; later calls are not admitted. The rejected call does not enter accepted history. Its error names the tool and includes a SHA-256 digest of the call ID to match an application-owned provider record.
+
+These checks cover the two pinned schemas, not arbitrary JSON Schema or the freeform `apply_patch` grammar. They do not guarantee rollback.
 
 The schemas currently advertise `number` for numeric fields. Codex applies narrower integer and range requirements, with unsigned values for time and token budgets. A schema-valid number can therefore pass admission and still fail native parsing. The SDK passes accepted arguments unchanged; it does not round values or insert defaults.
 
-Selected process and file tools can modify the assigned remote workspace. The SDK requests native write access only to `cwd`, retains native protection for metadata directories, and requests restricted networking. Changing a command's `workdir` does not grant another writable workspace. These requests do not guarantee OS-level enforcement. The application must isolate remote workspaces and tenants, and choose an executor that enforces the required limits. Selecting tools does not approve permission escalation. An Environment has no `sandbox_mode` option.
+### Workspace and connection limits
 
-Supply current application-owned credentials in `headers`. Header values and the URL are omitted from the declaration's representation. WSS uses the native system trust store; there is no TLS-verification bypass. `connect_timeout` is a positive finite number of seconds, or `None` for the native default. URLs cannot contain userinfo, query parameters or fragments.
+Selected tools can modify the assigned remote workspace. The SDK requests write access only to `cwd`, protects metadata directories natively, and requests restricted networking. Changing a command's `workdir` grants no additional writable workspace.
+
+The application must isolate workspaces and tenants and choose an executor that enforces the required OS limits. Selecting tools does not approve permission escalation. `Environment` has no `sandbox_mode` option.
+
+Configure the connection with current application-owned credentials:
+
+- Supply credentials in `headers`. The declaration's representation omits header values and the URL.
+- Use WSS with the native system trust store. TLS verification cannot be bypassed.
+- Set `connect_timeout` to positive finite seconds, or `None` for the native default.
+- Omit userinfo, query parameters, and fragments from URLs.
+
+### Replace or restore an Environment
 
 A Session captures one Environment. Tool replacement cannot change the Environment, and it does not belong in `update(tools=...)`. To change the connection or selected executor tools, open a new Session. The same Agent can serve Sessions with different Environments. Restore uses the current Environment you supply. Saved history does not supply credentials or permission to start processes. Live processes do not transfer to a restored Session.
 
 Python, manual, HTTP MCP and stdio MCP tools can coexist with an Environment. A `StdioMCP` server runs on the host by default, or on the executor with `location="environment"`.
 
-On cancellation, the SDK waits for native work to settle and for its callbacks to finish. On closing, it also asks the native owner to terminate known background processes. A successful acknowledgment means the executor accepted the termination attempt. It does not prove that processes exited, all output was read, or effects were rolled back. A rejected or timed-out termination attempt raises an error while the Session closes. If a process-start acknowledgment is lost, the command may already have caused an effect and native cleanup may still be pending. Do not retry a consequential command merely because its result is missing.
+### Cancel remote work
+
+On cancellation, the SDK waits for native work to settle and its callbacks to finish. Closing also asks the native owner to terminate known background processes.
+
+An acknowledgment confirms only that the executor accepted the termination attempt. It does not prove process exit, complete output collection, or rollback. Rejected or timed-out termination attempts raise an error while the Session closes.
+
+A lost process-start acknowledgment can leave earlier effects and pending cleanup. Do not retry a consequential command merely because its result is missing.
 
 ### Manage the executor lifetime
 
-The SDK uses a supplied `Environment` to connect to the executor. Closing the Session closes that connection. The application still owns the executor service and workspace. You can also pass an async context manager that yields an `Environment`. The SDK enters the manager when opening the Session and exits after releasing native resources, including after opening fails or is cancelled. The manager can then release the application-owned executor.
+Closing the Session closes the SDK's connection. Your application still owns the executor service and workspace.
+
+To manage provisioning and release, pass an async context manager that yields an `Environment`. The SDK enters it when opening the Session and exits after releasing native resources, including after opening fails or is cancelled. The manager can then release the executor.
 
 If opening fails and automatic cleanup cannot finish, follow the [provider recovery procedure](configuration.md#recover-a-failed-managed-environment-opening).
 
@@ -441,23 +528,43 @@ async with agent.session(environment=executor_lease()) as session:
     result = await turn.get_result()
 ```
 
-Create a fresh manager for each opening, including restore: use `environment=executor_lease()` alongside `state=saved_state` when restoring a portable checkpoint. The yielded descriptor supplies current credentials and must match any saved network-policy digest. Retain the workspace separately if later work needs its files; a checkpoint does not recreate them.
+For each opening, including restore:
 
-The SDK enters and exits the manager in one lease task. `ContextVar` changes inside the manager stay in that task. Pass application data through `context=`. The manager cannot suppress exceptions from the separate Session body. Close the Session on the event loop where it opened, and handle release failures from Session exit. The SDK keeps the lease until it finishes releasing native resources. Session exit does not guarantee that the backend shut down successfully.
+1. Create a fresh manager. To restore, pass `environment=executor_lease()` with `state=saved_state`.
+2. Supply current credentials and a policy matching any saved network-policy digest.
+3. Retain the workspace separately if later work needs its files. Checkpoints do not recreate files.
+
+The SDK enters and exits the manager in one lease task. `ContextVar` changes stay in that task, so pass application data through `context=`. The manager cannot suppress exceptions from the separate Session body.
+
+Close the Session on its opening event loop and handle release failures from Session exit. The SDK keeps the lease until native resource release finishes. Session exit does not guarantee successful backend shutdown.
 
 ### Network and local socket access
 
 **Unreleased.** Set `Environment.network` to a `NetworkPolicy` to configure network destinations and local socket access for native commands. These settings do not control the model connection, Python functions, or MCP clients. Omitting `network` preserves the default executor behavior.
 
-On a macOS executor, `NetworkPolicy()` grants no network destinations or Unix sockets. A Linux executor cannot enforce Unix-socket denial with an explicit policy. If `allow_all_unix_sockets` is `False` (the default), the SDK rejects the policy before a Linux command starts, even when the policy specifies domain rules.
+#### Platform requirements
+
+Explicit policies have platform limits:
+
+- On macOS, `NetworkPolicy()` grants no network destinations or Unix sockets.
+- Linux cannot enforce Unix-socket denial. The SDK rejects an explicit policy before commands start unless `allow_all_unix_sockets=True`, even with domain rules.
+- Windows rejects every explicit network policy in this revision. Its default named-pipe path remains available.
+
+#### Domain and local access rules
 
 The policy accepts `allowed_domains` and `denied_domains`. A denial takes precedence over an allowance. On a macOS executor, `NetworkPolicy(allowed_domains=("api.example.com",))` permits that host through the managed proxy without granting Unix socket access. Rules cover hosts across all ports. Supply hostnames or supported host patterns without a scheme or port. The proxy checks hostnames and cannot inspect the contents of encrypted traffic. The policy never permits an upstream proxy or an unsandboxed fallback.
 
 On Linux and macOS executors, `allow_all_unix_sockets=True` grants access to every reachable Unix socket. Use this grant only on an executor private to the job. Keep every socket the job does not need out of reach. The SDK rejects grants for individual socket paths.
 
-`allow_local_binding=True` allows local listeners where the executor supports them. It also adds loopback and private IPv4 ranges to the proxy bypass rules. The managed proxy checks domain rules only for traffic that passes through it. On a macOS executor, local binding can also allow direct traffic to any reachable IP address on destination port 53, including non-DNS traffic. This direct traffic bypasses the domain rules. If the job needs stricter limits, the application must enforce them with network isolation outside the executor. Leave `allow_local_binding` at its default of `False` when the job only needs Unix sockets. An empty domain list does not cancel an explicit local-access or Unix-socket grant.
+`allow_local_binding=True` allows local listeners where supported and adds loopback and private IPv4 ranges to proxy bypass rules. Domain rules apply only to traffic through the managed proxy.
 
-The SDK captures the policy when the Environment is created. It checks the executor's reported OS and managed-proxy capability before commands run. Windows executors reject every explicit network policy in this revision; their default named-pipe path remains available. An unsupported setting or incompatible configuration fails rather than silently granting broader access. Every explicit network policy disables sandbox escalation while retaining native workspace limits and the configured command approval callbacks. A command with `sandbox_permissions="require_escalated"` is denied before it starts, although the Session can open successfully.
+On macOS, local binding can also allow direct traffic to any reachable IP address on port 53, including non-DNS traffic. To enforce stricter limits, the application needs network isolation outside the executor.
+
+Leave `allow_local_binding=False` when the job only needs Unix sockets. An empty domain list does not cancel explicit local-access or Unix-socket grants.
+
+The SDK captures the policy when creating the Environment and checks the reported executor OS and managed-proxy support before commands run. Unsupported settings fail rather than grant broader access.
+
+Every explicit network policy disables sandbox escalation while retaining native workspace limits and command approval callbacks. Calls with `sandbox_permissions="require_escalated"` fail before starting, even if the Session opened successfully.
 
 #### Unix sockets in an offline job
 
@@ -479,13 +586,27 @@ environment = Environment(
 
 Pass this environment to `agent.session(environment=environment)` or `agent.run(..., environment=environment)`. The command can bind, listen and connect to **every Unix socket the job can reach**. On Linux this includes abstract sockets, which have no filesystem path. The grant excludes VSOCK sockets. Native workspace write limits still apply. A reachable service can have more access than the command. Even a read-only socket mount allows requests.
 
-For a hard offline boundary, your backend must isolate the commands, exec-server, managed proxy and DNS resolver together. Keep host and other jobs' service sockets out of the job's mounts and socket namespace. Close inherited connections before starting the executor. The managed proxy can look up a hostname before denying a request, even with an empty destination list. On Linux, a process can bind a local IP socket inside its isolated namespace. On macOS, the all-sockets grant lets the proxy forward HTTP to any Unix socket it can reach. Use an independently isolated macOS VM or equivalent backend so Codex can apply its command sandbox once. A second outer Seatbelt profile is unsupported.
+The backend must enforce the offline boundary:
 
-The backend supplies and verifies the offline boundary; the SDK cannot infer it from a URL. Restore requires the same normalized network policy from current application code. The checkpoint's policy field stores only a digest. The SDK uses the digest to compare policies. The digest grants no access and provides no encryption. Native debug logs and command history can still contain policy details. To change the policy, start a new Session. Python callbacks can run fixed operations directly in the application's worker. [Restore an Environment](sessions.md#compact-save-and-restore)
+- Isolate commands, exec-server, managed proxy, and DNS resolver together.
+- Exclude host and other jobs' service sockets from mounts and the socket namespace.
+- Close inherited connections before starting the executor.
+
+An empty destination list does not prevent proxy hostname lookups before denial. Linux processes can bind local IP sockets inside their isolated namespace. On macOS, the all-sockets grant lets the proxy forward HTTP to any reachable Unix socket. Use an independently isolated macOS VM or equivalent backend so Codex can apply its command sandbox once. A second outer Seatbelt profile is unsupported.
+
+The SDK cannot infer an offline boundary from a URL. The backend must verify it.
+
+Restore requires the same normalized network policy from current application code. The checkpoint stores only a comparison digest, which grants no access or encryption. Debug logs and command history can still contain policy details. To change the policy, open a new Session.
+
+Python callbacks can run fixed operations directly in the application's worker. See [Restore an Environment](sessions.md#compact-save-and-restore).
 
 #### Docker creation and restore checks
 
-For a Linux Docker executor, the reusable `examples/offline_docker.py` example checks the container's network configuration at creation and attachment. `create_offline_job` starts a private container with `--network none`. `open_exec_stdio` inspects the same full container ID that it passes to `docker exec -i`. Use that function on every authenticated gateway attachment, including an attachment that restores a saved Session. The check rejects a container with the wrong network mode, an external attached network, missing inspection data, or a stopped container before starting the exec-server.
+The reusable `examples/offline_docker.py` checks Linux Docker networking at creation and attachment:
+
+1. `create_offline_job` starts a private container with `--network none`.
+2. On every authenticated gateway attachment, use `open_exec_stdio`, including for restore. It inspects the same full container ID passed to `docker exec -i`.
+3. Before starting exec-server, the check rejects a wrong network mode, external attached network, missing inspection data, or a stopped container.
 
 The application owns the Docker daemon, image, container ID and authenticated gateway route. Keep that job record outside conversation checkpoints. The gateway stays outside the offline container and sends the exec-server protocol through standard input and output; the example publishes no container port. Closing a gateway attachment does not end the job. Keep the container for restore and remove it when the job finishes.
 
@@ -493,7 +614,13 @@ The image and host must support the native executor and its Linux sandbox. Docke
 
 ### Windows named pipes in an offline job
 
-**Unreleased.** For a job-local named pipe on a Windows x64 executor, select `tools=["exec_command"]` and omit `network`. Unix socket grants do not apply to Windows named pipes. Have the provisioner resolve the assigned workspace on the Windows executor and pass that canonical path as `Environment.cwd`. The executor account needs read and write access to its private workspace. The native command sandbox still applies. The Python controller cannot resolve a remote path locally. The executor's handshake reports its own working directory, which can differ from the job's workspace.
+**Unreleased.** For a job-local named pipe on Windows x64:
+
+1. Select `tools=["exec_command"]` and omit `network`. Unix socket grants do not apply.
+2. Have the provisioner resolve the workspace on the Windows executor and pass its canonical path as `Environment.cwd`.
+3. Give the executor account read and write access to its private workspace. The native command sandbox still applies.
+
+The Python controller cannot resolve remote paths locally. The executor handshake reports its own working directory, which can differ from the job's workspace.
 
 The pipe must allow the restricted job process to connect, read and write. A server that creates additional pipe instances needs permission to create them (`FILE_CREATE_PIPE_INSTANCE`).
 
@@ -503,7 +630,9 @@ Your backend must keep the command, executor and any proxy and DNS resolver insi
 
 ### Executor policies
 
-Use `Environment.approval(context, arguments)` to let the application decide whether an executor call can run. Return a bool or `StopTurn`, directly or through an awaitable. The callback receives the original arguments before transformation. It has no transform deadline and may wait for a person. If approval denies the call, returns `StopTurn`, raises an error, or is cancelled, the SDK does not invoke `transform_arguments`. Approval cannot grant extra host or native permissions. It controls selected executor calls, not MCP server startup.
+Use `Environment.approval(context, arguments)` to let the application decide whether an executor call can run. Return a bool or `StopTurn`, directly or through an awaitable. The callback receives the original arguments before transformation. It has no transform deadline and may wait for a person.
+
+If approval denies the call, returns `StopTurn`, raises an error, or is cancelled, the SDK does not invoke `transform_arguments`. Approval cannot grant extra host or native permissions. It controls selected executor calls, not MCP server startup.
 
 The effect of a denial depends on the tool and how the model calls it:
 
@@ -519,9 +648,17 @@ After a direct root-call denial, submit a new turn to continue.
 
 Import `StopTurn` and `TurnStoppedError` from `agents`. Once a stopped root's work and cleanup finish, `await turn.get_result()` raises `TurnStoppedError("Turn stopped by policy")`. A captured child Turn that was stopped can report `NativeError` instead. Stopping one child does not stop the root, other children, or later turns. The stopped call does not run, but earlier effects remain.
 
+#### Transform executor arguments and results
+
 `transform_arguments(context, value)` accepts or transforms arguments before direct or programmatic calls. It can return raw arguments, `Allow`, `ReplaceArguments` or `StopTurn`. A raw dictionary with an `action` key stays argument data; only SDK decision objects control the call. `transform_result(context, value)` transforms the executor result before the model or generated code receives it. Use it for direct executor calls in the default mode and for calls from generated code with `Agent(programmatic_tool_calling=True)`.
 
-Both transforms can be synchronous or asynchronous. `ExecutorContext` supplies the application context, owning Python Session and Agent, and actual root or child call identity. Use `agent_role` for the native child role and `model` for the executing model when Codex supplies them. A root call has no native child role; a child call does not create another Python Agent. Direct calls set `call_id`; programmatic calls set `outer_call_id`, `cell_id` and `runtime_tool_call_id`. These identities cannot be replaced.
+Both transforms can be synchronous or asynchronous. `ExecutorContext` supplies application context, the owning Python Session and Agent, and root or child call identity:
+
+- `agent_role` and `model` identify the native child role and executing model when Codex supplies them. Root calls have no child role, and child calls do not create Python Agents.
+- Direct calls set `call_id`.
+- Programmatic calls set `outer_call_id`, `cell_id`, and `runtime_tool_call_id`.
+
+Callbacks cannot replace these identities.
 
 An executor approval or transform callback cannot observe its own Session, submit work to it, update it, interrupt it, checkpoint it, or close it. Start any event observer in an application task outside the callback. Use application context for data needed to make a decision.
 
@@ -531,7 +668,7 @@ See [programmatic tool calling](configuration.md#programmatic-tool-calling). Sav
 
 ## Native children
 
-Add `NativeAgents()` to the Agent's `tools`, or pass it in `agent.session(tools=[...])` to choose tools for that Session. Pass an Environment selecting all three executor tools to the Session so the model can delegate work to subagents. Children share the executor connection, workspace policy, provider and credentials. They inherit the parent's model and reasoning effort unless an application-declared role supplies its own compatible settings.
+Add `NativeAgents()` to `Agent.tools` or opening `agent.session(tools=[...])`. Supply an Environment with `exec_command`, `write_stdin`, and `apply_patch`. Children share its connection and workspace policy, plus the parent's provider and credentials.
 
 ```python
 from agents import Agent, NativeAgents
@@ -546,19 +683,35 @@ async with agent.session(environment=environment) as session:
     result = await turn.get_result()
 ```
 
-Codex's `default`, `explorer` and `worker` roles are available without custom roles. Built-in roles inherit `Agent.instructions`. If a distinct task needs its own developer instructions, pass `additional_roles=[NativeRole(name=..., description=..., instructions=...)]` to `NativeAgents`. Import `NativeRole` from `agents`. An additional role cannot replace a built-in role. Native full-history forks inherit the parent's role; selecting a different role requires `fork_turns="none"`.
+### Configure roles and delegation limits
 
-The root model receives the native `collaboration` tools: `spawn_agent`, `wait_agent`, `send_message`, `followup_task`, `interrupt_agent`, and `list_agents`. Children share the selected executor tools, Python and manual tools, application context, HTTP or local stdio MCP tools, and policies. The default `max_depth=1` permits direct children only. A larger positive value lets descendants delegate within that depth. Before dispatch, the native runtime rejects unknown roles, override arguments selected by the model, and calls to unselected tools. The executor's permission policy applies at every depth.
+Built-in `default`, `explorer`, and `worker` roles inherit `Agent.instructions`. For separate developer instructions, import `NativeRole` from `agents` and pass `additional_roles=[NativeRole(name=..., description=..., instructions=...)]`. Additional roles cannot replace built-in roles. Full-history forks inherit the parent's role. To select another role, use `fork_turns="none"`.
 
-`NativeAgents` sets native approval policy to `never` for the root and its children. Codex can return permission denials to the model, but cannot ask the application to approve native permission escalation. The application's `Environment.approval` callback still applies to selected executor calls on root and child turns. That callback cannot grant extra native permissions. Sessions without `NativeAgents` keep their existing native approval behavior when `Environment.network` is omitted. An explicit [network policy](#network-and-local-socket-access) disables sandbox escalation.
+Children inherit the parent's model and reasoning effort unless a role supplies compatible settings. Model selection has these limits:
 
-This feature requires an explicit model that supports all three native executor tools. A `NativeRole` can specify `model` and `model_settings={"reasoning_effort": ...}`. Other role model settings are unsupported. Before opening an executor connection, the SDK validates every declared model with its selected or inherited reasoning effort. If the Agent enables programmatic tool calling, a role's selected model must support it. Some compatible models can run as children with programmatic tool calling disabled but cannot delegate further. `max_depth` limits delegation depth without adding model capabilities. Unknown or incompatible metadata fails without a fallback. `max_children=None` uses Codex's native limit. A positive value limits concurrent children across the tree, not the total number created.
+- Native children require an explicit model that supports all three native executor tools. The SDK validates each declared model and reasoning effort before connecting to the executor.
+- A role can set `model` and `model_settings={"reasoning_effort": ...}`. Other role model settings are unsupported.
+- If the Agent enables programmatic tool calling, each selected role model must support it. Some models can run as children with programmatic tool calling disabled but cannot delegate further.
+- Unknown or incompatible model metadata fails without fallback.
 
-The root can use a structured `output_type`. Child results remain text. Manual tools work through `on_interaction` during a one-shot run or through `session.interactions()`; pending child manual requests cannot be checkpointed. Model settings, instructions and the `NativeAgents` declaration remain fixed for the Session. Use [idle tool replacement](#idle-replacement) after all native children have closed. There is no programmatic child-creation method.
+Set delegation limits on `NativeAgents`:
 
-After all work and callbacks finish, idle checkpoints can retain child conversations, task history, and older goal and checklist data. Restore requires a current `NativeAgents` declaration and matching Python and manual tool definitions. It creates fresh runtime resources and uses MCP declarations from the current Agent. Saved goals and checklists do not grant tools. Live child Turns do not transfer, and restore does not automatically resume interrupted child work. See [save and restore](sessions.md#compact-save-and-restore).
+- `max_depth=1` (default) permits direct children only. Larger positive values allow further delegation but do not add model capabilities.
+- `max_children=None` uses Codex's native limit. A positive value limits concurrent children across the tree, not the total created.
 
-Read descendants with `async for child in session.subagents()`. Each immutable `Subagent` snapshot contains its identity, `status`, and current or last observed `turn`. The turn is `None` until observed. `Subagent.status` describes the child's lifecycle. An `active` child can be idle or unloaded. `is_live` reports whether the snapshot captured a loaded active instance. A close or reload can make the snapshot stale, so `start()` checks that the captured instance is still current.
+### Shared tools and permissions
+
+The root receives `spawn_agent`, `wait_agent`, `send_message`, `followup_task`, `interrupt_agent`, and `list_agents` in the native `collaboration` namespace. There is no programmatic child-creation method.
+
+Children share selected executor, Python, manual, HTTP MCP, and local stdio MCP tools, application context, and policies. Before dispatch, the runtime rejects unknown roles, model-selected override arguments, and unselected calls. Executor permissions apply at every depth.
+
+`NativeAgents` sets native approval policy to `never` for root and child turns. Codex can return permission denials but cannot ask the application to approve escalation. `Environment.approval` still controls selected executor calls but cannot grant extra native permissions. Without `NativeAgents`, existing native approval behavior remains when `Environment.network` is omitted. An explicit [network policy](#network-and-local-socket-access) disables escalation.
+
+The root can use structured `output_type`; children return text. Answer manual calls through `on_interaction` or `session.interactions()`. Pending child manual requests cannot be checkpointed.
+
+### Observe child results
+
+Read descendants with `async for child in session.subagents()`. Each immutable `Subagent` snapshot contains identity, `status`, and the current or last observed `turn`. The turn is `None` until observed.
 
 ```python
 async for child in session.subagents():
@@ -567,13 +720,33 @@ async for child in session.subagents():
         print(child.id, result.final_output)
 ```
 
-`Turn.get_result()` returns that child's `Completed[str]`, preserving its text and latest reported thread usage even after later turns. Missing usage is `None`. Root results do not include child usage. Native child failures and interruptions raise `NativeError`. If a Python tool function fails, the result can instead raise that function's exception after cleanup. Cancelling a reader leaves native work running. Use `await session.cancel_all()` for the tree or `await child.try_cancel(child.turn)` for the captured child turn. See [interruption](sessions.md#interrupt-work) for the boolean result and cleanup limits of child cancellation.
+An `active` child can be idle or unloaded. `is_live` reports whether the snapshot captured a loaded active instance. Close or reload can make a snapshot stale; `start()` checks that the captured instance remains current.
 
-`await child.start(message)` starts work on the captured live child when it is idle and returns that work's `Turn[str]`. To steer an observed active child turn, use `await child.turn.steer(message)`. These calls cannot create a child or resume a child instance that has closed or reloaded. Reading descendants starts no work, and these methods have no pagination arguments.
+`Turn.get_result()` returns the child's `Completed[str]`, retaining its text and latest reported thread usage after later turns. Missing usage is `None`; root results exclude child usage. Native failures and interruptions raise `NativeError`. Python tool failures can raise the function's exception after cleanup.
 
-While a stop of all work is in progress, the SDK rejects new child input but still allows replies to pending manual requests. After the stop finishes, validated explicit input to a still-live child can lift the stop. Automatic wake-ups from the queue cannot. If steering arrives late, the child may start a follow-up turn after the observed native turn finishes. The captured child Turn still returns the result for its original native turn. Follow the new turn through `session.events()` or a fresh `session.subagents()` snapshot.
+A child's callback `submission` is a `ChildInvocation` in `ToolContext`, `MCPResultContext`, and `ExecutorContext`. This identity cannot wait for or cancel work. Wait through `Subagent.turn` in application code. `session.events()` covers root and child work.
 
-In a child's `ToolContext`, `MCPResultContext`, or `ExecutorContext`, `submission` is a `ChildInvocation`. That object identifies the callback's child invocation but cannot wait for or cancel work. Read a `Subagent.turn` in application code to wait for observed work. Closing the Session shuts down its native tree; root completion alone does not imply child completion. `session.events()` spans both root and child work.
+### Start, steer, and cancel child work
+
+Use the captured child and turn handles:
+
+- `await child.start(message)` starts work on an idle, live child and returns its `Turn[str]`.
+- `await child.turn.steer(message)` steers the observed active turn.
+- `await child.try_cancel(child.turn)` cancels the captured child turn. `await session.cancel_all()` cancels the tree. See [interruption](sessions.md#interrupt-work) for return values and cleanup limits.
+
+These methods cannot create children or resume closed or reloaded instances. Reading descendants starts no work. The methods have no pagination arguments. Cancelling a result reader leaves native work running.
+
+During a stop of all work, new child input is rejected but pending manual replies remain allowed. Afterward, validated explicit input to a live child can lift the stop; queued automatic wake-ups cannot.
+
+Late steering may start a follow-up turn after the observed turn finishes. The captured Turn still returns its original result. Follow successors through `session.events()` or a fresh descendant snapshot.
+
+### Close, update, and restore
+
+Root completion does not imply child completion. Closing the Session shuts down the native tree.
+
+Model settings, instructions, and `NativeAgents` remain fixed for the Session. Use [idle tool replacement](#idle-replacement) only after all children close.
+
+Once work and callbacks finish, idle checkpoints can retain child conversations, task history, and older goals and checklists. Restore requires current `NativeAgents` and matching Python and manual definitions, uses the current Agent's MCP declarations, and creates fresh runtime resources. Saved goals and checklists grant no tools. Live child Turns do not transfer, and interrupted child work does not resume automatically. See [save and restore](sessions.md#compact-save-and-restore).
 
 ## Manual tool results
 
@@ -612,6 +785,8 @@ async def answer(event):
 result = await agent.run("Find the label for record-a.", on_interaction=answer)
 ```
 
+### Reply to live manual requests
+
 `match()` accepts only requests issued for that exact declaration object. It also preserves the request's input and output types for static checking. Manual calls can wait concurrently. Reply to each request separately. Answering one request does not consume another.
 
 A live manual request is limited to 65,536 bytes of UTF-8 encoded request data, including its arguments and request metadata. An oversized request fails its owning submission with `NativeError` before argument validation or delivery to a handler. Keep manual-tool payloads within this limit.
@@ -622,11 +797,15 @@ A live manual request is limited to 65,536 bytes of UTF-8 encoded request data, 
 
 `ActionRequested` contains sensitive typed arguments and lets the application reply to a live request. Avoid logging or storing it. Passive events do not let the application reply. A new interaction cursor receives still-pending requests without replay sequence numbers.
 
+### Expire pending requests
+
 To expire pending root requests, use `await turn.cancel(mode="force")`. To include children and the queue, use `await session.cancel_all(mode="force")`. Session exit also expires pending requests. Cancelling a `turn.get_result()` task or closing an observation cursor leaves them live. See [interrupt work](sessions.md#interrupt-work).
 
 ### Answer interactions during a one-shot run
 
 Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the preceding `answer` example. The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
+
+#### Handle native approvals and forms
 
 The handler can receive supported native root requests too. Approval requests use `request.reply("allow_once")` or `request.reply("deny")`. Form requests use `request.reply(values)`; `request.reply(None)` declines a form or URL request. Native acknowledgement means the reply was enqueued, not that an external approval or URL verification succeeded. Supported manual child requests remain distinct from native child prompts.
 
@@ -654,6 +833,8 @@ async def answer_native(request):
         return request.reply(values)
     raise TypeError("Unexpected interaction")
 ```
+
+#### Form schemas and handler lifetime
 
 `ElicitationRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints. URL requests support decline only; the SDK does not visit or verify the URL in `description`. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
 
@@ -684,9 +865,23 @@ except InteractionRequired as exc:
     completed = await agent.run(None, state=exc.state, on_interaction=answer)
 ```
 
-This fragment uses `agent` and `answer` from [Manual tool results](#manual-tool-results). Always check `exc.state`. Without `before_step`, automatic saving for selected manual tools without a handler is unavailable with programmatic tool calling, non-plain Agent output (including `PromptedOutput`), selected MCP tools, local storage, an Environment, or `NativeAgents`. A `WebSearch` declaration on the opening Agent also prevents automatic saving. The SDK rejects these combinations without a checkpoint. It checks visible declarations before opening. It may check saved selections or changed Session definitions after opening, before submitting work.
+This fragment uses `agent` and `answer` from [Manual tool results](#manual-tool-results). Always check `exc.state`.
 
-With `before_step`, the SDK opens the Session and checks each step's selected tools. Steps without selected manual tools can complete normally. If the model calls a selected manual tool without a handler, the run raises `InteractionRequired` with `state=None` after opening and inference. Earlier tool effects may already have occurred. Other native questions and late undeclared manual calls do not produce portable checkpoints. For supported live interactions, use a handler. You can also open an explicit Session and use `suspend()` when the pending manual request supports suspension.
+#### Automatic checkpoint limits
+
+Without `before_step`, selected manual tools without a handler cannot save automatically with any of these features:
+
+- Programmatic tool calling or non-plain Agent output, including `PromptedOutput`.
+- Selected MCP tools, local storage, an Environment, or `NativeAgents`.
+- A `WebSearch` declaration on the opening Agent.
+
+The SDK rejects these combinations without a checkpoint. It checks visible declarations before opening and may check saved selections or changed Session definitions afterward, before submitting work.
+
+With `before_step`, the SDK opens the Session and checks each step's selected tools. Steps without selected manual tools can complete normally. If the model calls a selected manual tool without a handler, the run raises `InteractionRequired` with `state=None` after opening and inference. Earlier tool effects may already have occurred. Other native questions and late undeclared manual calls do not produce portable checkpoints.
+
+For supported live interactions, use a handler. You can also open an explicit Session and use `suspend()` when the pending manual request supports suspension.
+
+#### Resume a saved manual request
 
 `input=None` resumes the existing turn. Ordinary input cannot replace a pending turn. A pending restore without a handler raises `InteractionRequired` with the supplied checkpoint still in `state`. Tools and `before_step` cannot be changed on an already admitted turn. Restore uses fresh requests for the current declarations; old handles do not transfer. Completed results are not called again.
 
@@ -698,11 +893,21 @@ An explicit Session supports more manual suspension cases, including matching `P
 
 `DeferredTools` connects a manual `FunctionTool` to an external job managed by your application. The host can then resume work after its process restarts. The host manages the durable journal, current permissions, provider configuration, and wake-up schedule. This helper does not let arbitrary tool calls survive a restart. Import it from `agents.experimental.deferred`.
 
-Declare the tool separately, then register the exact object used by the Session. Registration returns `None` and rejects decorated callbacks. Both input and result types must be strict Pydantic models with `extra="forbid"`. Make every public result field required. Supply generated request IDs in the original input so restore does not create new IDs.
+### Declare and register a recoverable tool
 
-Job recovery supports fewer features than Pydantic itself. Use JSON strings, booleans, integers, finite floats, nulls, ordered lists and nested strict models with `extra="forbid"`. Registration rejects custom validators, serializers, default factories, computed fields, custom initialization and rich field types such as `datetime` or `set`. Check custom inputs in host or provider code before causing an external effect. Convert richer result types to the supported public model. Use live manual replies when custom serialization is required.
+Declare the tool, then register the exact object used by the Session. Registration returns `None` and rejects decorated callbacks.
 
-Inputs can also use JSON scalar defaults, `Literal` values and supported unions. Input aliases must identify provider fields unambiguously. Results require every public field and preserve the declared order of fields and lists. Result declarations cannot use defaults, `Literal`, or general union fields, even though input declarations can. Nullable result fields remain supported. Required request IDs belong in the supplied input, never in a default factory.
+Recovery declarations must meet these requirements:
+
+- Input and result types are strict Pydantic models with `extra="forbid"`.
+- Supported values are JSON strings, booleans, integers, finite floats, nulls, ordered lists, and nested strict models.
+- Inputs can use JSON scalar defaults, `Literal`, and supported unions. Aliases must identify provider fields unambiguously.
+- Results require every public field and preserve field and list order. Nullable fields are supported, but defaults, `Literal`, and general unions are not.
+- Generated request IDs belong in the original input, never in default factories. Restore must not create new IDs.
+
+Registration rejects custom validators, serializers, default factories, computed fields, custom initialization, and rich types such as `datetime` or `set`. Check custom inputs in host or provider code before external effects, and convert richer results to supported public models. Use live manual replies for custom serialization or scalar results.
+
+
 
 ```python
 from pydantic import BaseModel, ConfigDict
@@ -741,19 +946,40 @@ jobs.register(
 )
 ```
 
-The host's `project` function selects the result fields the model may receive. `max_output_bytes` limits the public result's JSON size and defaults to 16,384. Keep provider receipts and private values in the host journal. Use a live manual reply for custom serialization or a scalar result.
+The host's `project` function selects fields the model may receive. `max_output_bytes` limits public result JSON to 16,384 bytes by default. Keep provider receipts and private values in the host journal.
 
-From host code outside `on_interaction`, call `await jobs.prepare(session, request)` for a live root request matched by `report.match(request)`. Preparation suspends the Session and expires its live requests without calling the job provider. Before preparation returns, the journal must atomically save the checkpoint and all registered pending bindings. If a journal write fails or is interrupted, inspect the journal before deciding what work remains.
+### Prepare, restore, and advance
 
-Restore the prepared checkpoint with a matching Agent, obtain a fresh request from `restored.interactions()`, then call `await jobs.advance(restored, request)`. A returned `Turn` represents resumed model work; await its `get_result()`. A string such as `"pending"`, `"input_required"` or `"unknown"` is a host-only status. Keep the original prepared checkpoint while sibling calls remain outstanding. The journal can retain completed public results for delivery on later restores without restarting the external job.
+Run recovery from host code outside `on_interaction`:
 
-With the default `wait_seconds=0.0`, `advance()` starts the job once without polling. The host schedules later observations. A positive wait allows one additional bounded observation after creation. `timeout_seconds` defaults to 10 seconds and covers authorization, provider I/O, persistence and delivery. A timeout does not authorize another creation. The helper joins cooperative cleanup and leaves no poller running.
+1. Match a live root request with `report.match(request)`.
+2. Call `await jobs.prepare(session, request)`. Preparation suspends the Session and expires live requests without calling the provider. The journal must atomically save the checkpoint and all registered pending bindings before preparation returns. If writing fails or is interrupted, inspect the journal before continuing.
+3. Restore the prepared checkpoint with a matching Agent and obtain a fresh request from `restored.interactions()`.
+4. Call `await jobs.advance(restored, request)`. If it returns a `Turn`, await `get_result()` for resumed model work. Strings such as `"pending"`, `"input_required"`, and `"unknown"` are host-only statuses.
 
-Alternatively, `async with jobs.start(session, request) as (restored, outcome)` prepares, restores, and advances one call. The context manages the restored Session. This shortcut uses the declarations and resolved model credentials captured when the original Session opened. If credentials, tool definitions, or instructions have changed, prepare and restore explicitly with the current configuration. The shortcut rejects unsupported changes before suspending the Session.
+Keep the original prepared checkpoint while sibling calls remain outstanding. Later restores can deliver public results retained in the journal without restarting jobs.
 
-Prepare a root request before its first restore. Plain-text and supported `PromptedOutput` roots can use recovery; pending native-schema output cannot. This helper cannot prepare requests that use an Environment, native agents, programmatic tool calling, or child requests. Use live replies for those cases. See [saving a settled manual request](sessions.md#saving-a-settled-manual-request) for the underlying checkpoint limits.
 
-The journal must allow only one worker to claim creation and must check current permissions and the exact binding and generation on every operation. By default, registration requires `provider.reconcile_creation()` and a target that prevents duplicate creation for an immutable job key. If the host loses the creation acknowledgment, reconciliation must determine whether the external job started before the host can proceed. This acknowledgment identifies the job; it is not the final job result. Set `require_reconciliation=False` only for approved, low-impact work that may remain `"unknown"`. An unknown outcome gives no permission to repeat an external effect.
+
+`advance()` has no background poller:
+
+- `wait_seconds=0.0` (default) starts once without polling. The host schedules later observations.
+- A positive wait permits one additional bounded observation after creation.
+- `timeout_seconds=10` (default) covers authorization, provider I/O, persistence, and delivery. Cleanup is cooperative. A timeout does not authorize another creation.
+
+For a single call, `async with jobs.start(session, request) as (restored, outcome)` prepares, restores, and advances while managing the restored Session. It uses declarations and resolved model credentials captured at opening and rejects unsupported changes before suspension.
+
+If credentials, definitions, or instructions changed, prepare and restore explicitly with current configuration.
+
+### Recovery limits and duplicate prevention
+
+Prepare a root request before its first restore. Recovery supports plain-text and supported `PromptedOutput` roots. It cannot prepare pending native-schema output, requests using an Environment, native agents, programmatic tool calling, or child requests. Use live replies for those cases. See [saving a settled manual request](sessions.md#saving-a-settled-manual-request).
+
+The journal must let only one worker claim creation and must check current permissions, exact binding, and generation on every operation.
+
+By default, registration requires `provider.reconcile_creation()` and target-side duplicate prevention for an immutable job key. If a creation acknowledgment is lost, reconciliation must establish whether the job started before the host proceeds. The acknowledgment identifies the job, not its final result.
+
+Set `require_reconciliation=False` only for approved, low-impact work that can remain `"unknown"`. An unknown outcome gives no permission to repeat an external effect.
 
 Automatic delivery rejects public results that contain the current model API key, job key, or provider receipt, even as an incidental substring. Do not start the job again after this rejection. The host can review the result and use `await request.respond(safe_value)` on the fresh live request. The host must record that completion itself.
 
@@ -761,19 +987,42 @@ Automatic delivery rejects public results that contain the current model API key
 
 `MCPTasksProvider` is an optional experimental adapter for one host-selected remote MCP tool. It does not change [native MCP](#native-mcp) execution. Install exactly `mcp==2.0.0` and `mcp-types==2.0.0` in the host environment, then import `MCPTasksProvider` and `MCPInputReply` from `agents.experimental.mcp_tasks`. Normal SDK imports do not require these packages.
 
+#### Configure the remote tool
+
 Construct `MCPTasksProvider(endpoint=..., tool=..., authorize=..., admit_pending=..., admit_result=...)` with trusted host configuration. Tool arguments cannot select the endpoint or tool. `authorize(claim, operation)` checks current permissions and returns a bearer token without its prefix for each HTTP request. The adapter refuses redirects. HTTPS uses the host's proxy and CA settings. Construct a fresh provider after changing the host's outbound network settings.
 
 This adapter cannot reconcile lost creation receipts. Register it with `require_reconciliation=False` only for approved, low-impact work that can remain `"unknown"`. Before creation, the adapter reads at most 32 pages of tool declarations. If page 32 still has a continuation cursor, the adapter refuses the listing before sending `tools/call`.
 
-Supply a fast synchronous `admit_pending(claim, task_id, requests_json)` callback. At creation, `requests_json` is `None`. For a form, it contains the complete request mapping as compact JSON with sorted keys. Return exactly `True` only when trusted data for `claim.binding` confirms the task ID and every form key, prompt and schema. Treat these values as private even when refusing them. A peer can copy an earlier credential into them. Missing or refused admission leaves a new creation `"unknown"` without a receipt. A refused form remains `"unknown"` with its accepted receipt. Neither result permits another creation.
+#### Admit pending requests and results
 
-Completed updates omit peer text, structured fields and metadata by default. To admit selected data, supply a fast synchronous `admit_result(claim, result)` callback. The callback must return JSON data with finite numbers. The adapter stores that data under `structuredContent` for the registered projection function. The update also retains the peer's `isError` flag. Check fields against trusted per-job data when independent verification matters. Restore the admission policy with the job. Verify or quarantine older journal rows before use because cached updates and public results can return without another admission callback.
+Supply a fast synchronous `admit_pending(claim, task_id, requests_json)` callback. At creation, `requests_json` is `None`. For a form, it holds the complete request mapping as compact JSON with sorted keys.
+
+Return exactly `True` only when trusted data for `claim.binding` confirms the task ID and every form key, prompt, and schema. Treat these values as private even on refusal; a peer can copy earlier credentials into them.
+
+Missing or refused admission leaves new creation `"unknown"` without a receipt. A refused form remains `"unknown"` with its accepted receipt. Neither permits another creation.
+
+Completed updates omit peer text, structured fields, and metadata by default. To admit data, supply a fast synchronous `admit_result(claim, result)` callback returning JSON with finite numbers. The adapter stores that data under `structuredContent` for the projection function and retains the peer's `isError` flag.
+
+Check fields against trusted per-job data when independent verification matters. Restore the admission policy with the job. Verify or quarantine older journal rows because cached results can return without another admission callback.
+
+#### Reply to forms or cancel a task
 
 Form replies require `allow_input_replies=True` and a vetted target that binds each request key to one immutable request for the task's lifetime. The target must reject retired or satisfied keys. Changed requests need new keys and fresh approval. Standard `tasks/update` cannot require a matching revision before applying an update. Supported forms contain flat strings, booleans, numbers and string lists, including choices. Other validation constraints are refused.
 
-For a form reply, call `advance(..., operation="respond", response=MCPInputReply(challenge=..., responses=...))` with host-approved `ElicitResult` values from `mcp_types`. For cancellation, use `operation="cancel"`. Both operations re-read the task before dispatch, even before its next poll time. Supply `reserve_mutation(claim, reply)` for either operation. Cancellation passes `None` as the reply. Immediately before sending, the host must atomically check current permissions, binding, generation, receipt, and approval, then reserve all selected form keys or the task's single cancellation. Return exactly `True` only after a new reservation commits. Keep reservations spent after retries or lost acknowledgments. After a crash, observe the task before deciding what remains unknown.
+Use `advance()` for approved mutations:
 
-Initial authorization and each network exchange have separate timeout budgets. The adapter waits for cooperative host callback cleanup, which can exceed a timeout. Authorization and admission callbacks run on the caller's loop. Each HTTP request uses a separate copy of the operation's context; rebinding a `ContextVar` there does not change later requests. Mutable context values remain shared. Keep callbacks short and reset a context token in the callback that created it.
+- For a form reply, pass `operation="respond"` and `response=MCPInputReply(challenge=..., responses=...)` with host-approved `ElicitResult` values from `mcp_types`.
+- For cancellation, pass `operation="cancel"`.
+
+Both operations re-read the task before dispatch, even before its next poll time. Supply `reserve_mutation(claim, reply)` for either operation; cancellation passes `None`.
+
+Immediately before sending, the host must atomically check current permissions, binding, generation, receipt, and approval, then reserve all selected form keys or the task's single cancellation. Return exactly `True` only after a new reservation commits. Keep reservations spent after retries or lost acknowledgments. After a crash, observe the task before deciding what remains unknown.
+
+#### Callback timeouts and context
+
+Initial authorization and each network exchange have separate timeout budgets. Cooperative host callback cleanup can exceed them. Authorization and admission callbacks run on the caller's loop, so keep callbacks short.
+
+Each HTTP request uses a separate copy of the operation's context. Rebinding a `ContextVar` does not affect later requests, but mutable context values remain shared. Reset context tokens in the callback that created them.
 
 ## Native tool decisions
 

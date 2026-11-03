@@ -4,13 +4,19 @@ The build produces one wheel for the root `openai-agents` distribution. Its publ
 
 ## Build from this source
 
+### Install build requirements
+
 Use a current patch release of CPython 3.10–3.14, `uv`, Git and Make. Install Rust 1.95.0 and make `cargo` and `rustc` available. The native build selects that toolchain by default. Install the system tools for your platform before building:
 
 - **Linux:** A C/C++ compiler toolchain with Clang, CMake, `pkg-config`, Protocol Buffers (`protoc`) and OpenSSL development headers. Ubuntu CI installs `clang cmake pkg-config protobuf-compiler libssl-dev`.
 - **macOS:** Xcode Command Line Tools for the compiler/linker, plus CMake, `pkgconf`, Protocol Buffers and OpenSSL. CI installs these packages with `brew install cmake pkgconf protobuf openssl@3`.
 - **Windows:** MSVC C++ Build Tools and the Windows SDK for the compiler/linker, plus Protocol Buffers (`protoc`). The prepared Windows CI runner already has the compiler tools; the setup action adds `protoc` with Chocolatey.
 
-The [native setup action](../../.github/actions/setup-native/action.yml) owns the CI toolchain and system-package setup. Python build isolation does not install these system tools. Preparation uses the standard library on Python 3.11 and later; Python 3.10 also needs the existing build dependency `tomli==2.2.1`. `uv build` installs its declared Python build dependencies separately, including `tomli` on Python 3.10. The build also needs access to the pinned Codex and RMCP sources and package registries.
+The [native setup action](../../.github/actions/setup-native/action.yml) owns the CI toolchain and system-package setup. Python build isolation does not install these system tools.
+
+Preparation uses the standard library on Python 3.11 and later. Python 3.10 also needs `tomli==2.2.1`. `uv build` installs its declared Python build dependencies separately, including `tomli` on Python 3.10. The build needs access to the pinned Codex and RMCP sources and package registries.
+
+### Prepare and build
 
 On Python 3.11 or later, run these commands from the repository root:
 
@@ -26,9 +32,16 @@ uv run --no-project --python 3.10 --with tomli==2.2.1 python packages/codex/scri
 make build
 ```
 
-Preparation verifies the pinned source. If you already have an authorized Codex checkout, use `make native-prepare CODEX_SOURCE=/path/to/codex` on Python 3.11 or later. On Python 3.10, append `--source /path/to/codex` to the uv preparation command above. `make build` runs `uv build --wheel` directly from this prepared checkout. It creates one root SDK wheel in `dist/`, with its required native extension and helpers. Building the wheel directly avoids preparing another source tree from an intermediate source distribution. You do not need to run `make sync` first; that command installs the SDK for contributor work and can trigger its own native build.
+Preparation verifies the pinned source. To use an authorized Codex checkout:
+
+- On Python 3.11 or later, use `make native-prepare CODEX_SOURCE=/path/to/codex`.
+- On Python 3.10, append `--source /path/to/codex` to the preparation command above.
+
+`make build` runs `uv build --wheel` directly from the prepared checkout. It creates one root SDK wheel in `dist/`, including the native extension and helpers. This avoids preparing another tree from an intermediate source distribution. You do not need `make sync` first. It installs the SDK for contributor work and can trigger another native build.
 
 On Python 3.11 or later, the same route without Make is `python3 packages/codex/scripts/prepare_codex.py`, followed by `uv build --wheel`. On Python 3.10, use the uv preparation command above, followed by `uv build --wheel`. If you need a source distribution for release qualification, build it explicitly with `uv build --sdist`.
+
+### Install outside the checkout
 
 Install the wheel in a fresh virtual environment outside the source checkout. The commands below start from the repository root after `make build`. Choose the exact wheel produced by this build; do not select an older wheel from `dist/`.
 
@@ -65,27 +78,65 @@ Edits under `src/agents` take effect on the next Python invocation. After changi
 
 ## Keep the pin and source verifiable
 
-Use the existing source preparation and build tools. Keep `CODEX_REVISION` and the upstream repository fixed. Store reviewed SDK-local changes as ordinary Git diffs under `patches/`. Never edit `.upstream/codex` directly or add executable patch hooks. Preparation authenticates the complete canonical base archive and applies the ordered patches in private Git storage. The result must match the tree recorded in the committed manifest. Fresh builds and source audits verify every resulting file, directory, symlink and Git mode. An empty series must reproduce the pristine pinned tree.
+Use the existing source preparation and build tools. Keep `CODEX_REVISION` and the upstream repository fixed.
 
-`patches/series.json` has exactly two fields: `patches`, an ordered list of `{"path": "0001-topic.patch", "sha256": "<64 lowercase hex characters>"}` entries, and `result_tree`, the full 40-character resulting Git tree ID. Patch paths are unique sibling `.patch` filenames. Keep only that manifest and its listed regular patch files in the directory. Generate each patch with `git diff --full-index --binary` between the previous reviewed tree and the next tree in a disposable checkout of the pin; additions and deletions are supported. Hash the exact patch bytes with SHA-256. After staging the complete ordered result in that disposable checkout, use `git write-tree` for `result_tree`. Review the patch bytes, their order and the expected tree together. Updating a patch requires updating its hash and the expected tree, then preparing a fresh source directory.
+### Maintain the patch manifest
 
-The source receipt retains the authenticated base commit and file map, reviewed patch identity and resulting file map. The adjacent receipt keeps the `.whl.pristine.json` suffix for compatibility. A patched result is not pristine upstream source. Build receipts use `reviewed-codex-rmcp-v4` and bind both base commits, both ordered patch series, both result trees, current native/build inputs and the exact wheel hash. Reusing a wheel without prepared source requires that trusted receipt and matching current manifest and patch bytes. When prepared source exists, reuse also verifies its full result tree. Old receipts or any changed, missing, extra or unlisted patch input require a fresh build. The source distribution and native cache keys include the manifest and patch files. This policy authorizes only reviewed SDK-local patches. It does not authorize changing the pin, upstream repository, or public Agents API.
+Store reviewed SDK-local changes as ordinary Git diffs under `patches/`. Never edit `.upstream/codex` directly or add executable patch hooks. Preparation authenticates the complete canonical base archive and applies the ordered patches in private Git storage. The result must match the tree recorded in the committed manifest. Fresh builds and source audits verify every resulting file, directory, symlink and Git mode. An empty series must reproduce the pristine pinned tree.
 
-RMCP keeps the Git URL, revision and exact version already declared in `Cargo.toml`. `rmcp-patches/series.json` uses the same strict manifest schema as the Codex series. Preparation writes the complete verified rust-sdk workspace to `.upstream/rust-sdk`. The two root Cargo overrides select its `rmcp` and `rmcp-macros` crates. No source tree is committed or included in the source distribution. The source distribution includes both patch directories and the preparation scripts. Builds copy the pinned RMCP license into the wheel and verify both source results before and after compilation.
+`patches/series.json` has exactly two fields:
 
-To use existing authorized Git repositories on Python 3.11 or later, run `python3 packages/codex/scripts/prepare_codex.py --source /path/to/codex --rmcp-source /path/to/rust-sdk`. On Python 3.10, append the same `--source` and `--rmcp-source` arguments to the uv preparation command above. Omit either source argument to fetch that source from its fixed Git origin. Preparation authenticates the declared commit rather than trusting the supplied repository's current checkout. Reusing an existing Codex archive still prepares and verifies RMCP. A wheel receipt for reuse without prepared source records the two source identities separately. A Codex-only receipt cannot qualify this build.
+- `patches`: an ordered list of `{"path": "0001-topic.patch", "sha256": "<64 lowercase hex characters>"}` entries. Paths must be unique sibling `.patch` filenames.
+- `result_tree`: the full 40-character resulting Git tree ID.
+
+Keep only the manifest and its listed regular patch files in the directory. To create or update the series:
+
+1. In a disposable checkout of the pin, generate each patch with `git diff --full-index --binary` between the previous reviewed tree and the next tree. Additions and deletions are supported.
+2. Hash the exact patch bytes with SHA-256.
+3. Stage the complete ordered result in that checkout, then use `git write-tree` for `result_tree`.
+4. Review the patch bytes, order, and expected tree together.
+
+After updating a patch, update its hash and the expected tree, then prepare a fresh source directory.
+
+### Verify receipts before reuse
+
+The source receipt retains the authenticated base commit and file map, reviewed patch identity, and resulting file map. Wheel receipts keep the `.whl.pristine.json` suffix for compatibility. A patched result is not pristine upstream source.
+
+Build receipts use `reviewed-codex-rmcp-v4` and bind both base commits, both ordered patch series, both result trees, current native/build inputs, and the exact wheel hash. Reuse always requires a trusted receipt and matching current manifest and patch bytes. When prepared source exists, reuse also verifies its full result tree. Old receipts or changed, missing, extra, or unlisted patch inputs require a fresh build.
+
+The source distribution and native cache keys include the manifest and patch files. Patch approval does not authorize changes to the pin, upstream repository, or public Agents API.
+
+### Prepare and verify RMCP
+
+RMCP keeps the Git URL, revision and exact version already declared in `Cargo.toml`. `rmcp-patches/series.json` uses the same strict manifest schema as the Codex series.
+
+Preparation writes the complete verified rust-sdk workspace to `.upstream/rust-sdk`. The two root Cargo overrides select its `rmcp` and `rmcp-macros` crates. No source tree is committed or included in the source distribution. The source distribution includes both patch directories and the preparation scripts. Builds copy the pinned RMCP license into the wheel and verify both source results before and after compilation.
+
+To use existing authorized Git repositories:
+
+- On Python 3.11 or later, run `python3 packages/codex/scripts/prepare_codex.py --source /path/to/codex --rmcp-source /path/to/rust-sdk`.
+- On Python 3.10, append the same `--source` and `--rmcp-source` arguments to the preparation command above.
+- Omit either source argument to fetch that source from its fixed Git origin.
+
+Preparation authenticates the declared commit rather than trusting the supplied checkout. Reusing a Codex archive still prepares and verifies RMCP. Receipts for reuse without prepared source record both source identities. A Codex-only receipt cannot qualify this build.
 
 The RMCP codec patch preserves general form JSON on `elicitation/create` for the SDK's bounded validator. This patch supports an SDK capability. Verify MCP schema conformance separately. `ElicitationRequest` defines primitive validation and the supported general-schema limits.
 
+### Preserve native context and identity
+
 The response-stream patch carries selected local context through HTTP response streams and reconnects without serializing it. Codex uses this context to reject requests that arrive after their original child tool call has ended.
 
-Record exact SDK/native revisions, compiled input hashes, prepared source identity and platform when qualifying a native artifact. Changing Python module names requires matching PyO3/import paths and a built extension. Copying an old binary to a new path does not establish that match.
+Record exact SDK/native revisions, compiled input hashes, prepared source identity, and platform for each qualified artifact. Changing Python module names requires matching PyO3/import paths and a built extension. Copying an old binary to a new path does not establish that match.
 
 ## Verify the delivered wheel
 
 Run focused public native workflows and typing checks first. Complete the required independent review before the final SDK verification command. Use the root commands and repository skills; do not start a second build system or SDK distribution.
 
-Verify the installed wheel outside the checkout with only its declared runtime dependencies. Check its Python files, native extension, platform helpers, shared libraries, required notices, RECORD entries and executable bits against the build receipt. Exercise a real native provider request, admitted Python callback and final result. Recheck Python 3.10 cancellation and joined cleanup when those boundaries change.
+Install the wheel outside the checkout with only its declared runtime dependencies, then:
+
+1. Check Python files, the native extension, platform helpers, shared libraries, required notices, RECORD entries, and executable bits against the build receipt.
+2. Exercise a real native provider request, an admitted Python callback, and a final result.
+3. Recheck Python 3.10 cancellation and joined cleanup when those boundaries change.
 
 Keep source tests, installed native tests, synthetic provider tests, hosted CI, platform qualification and package publication separate. A passing synthetic workflow on Linux does not verify another platform or a live provider. Retain failed receipts and document their causes. Later fixes do not rewrite them.
 

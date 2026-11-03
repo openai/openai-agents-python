@@ -65,14 +65,25 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-Passing the tools check proves that the selected model requested the Python function and the loop completed. Passing the strict check shows that the SDK can request native schema output and validate the returned object for this small schema. It does not independently prove the service enforces the schema for every generation. Neither check covers every allowed tool or schema shape. The model can also make a wrong choice and fail a check. Inspect the service request and error before attributing a failure to protocol support. Keep prompts and results synthetic and avoid logging headers or credentials.
+The checks cover only their selected cases:
 
-The provider context closes after the one-shot run closes its Session. When sharing a provider, close all Sessions before closing the provider.
+| Check | What a pass establishes | Limit |
+| --- | --- | --- |
+| Tools | The model requested the Python function and the loop completed. | It does not cover every tool shape. |
+| Strict output | The SDK requested native schema output and validated this object. | It does not prove server enforcement for every generation or support for every schema. |
+
+A model's wrong choice can also fail a check. Inspect the service request and error before blaming protocol support. Keep data synthetic and do not log headers or credentials.
+
+The provider context closes after the one-shot Session. Shared providers follow the same rule: close all their Sessions first.
 
 ## Check WebSockets independently
 
-The script forces HTTP. After the required HTTP checks pass, run the same selected cases with `supports_websockets=True` against an endpoint that declares WebSocket support. The runtime still selects the final transport. Verify an actual WebSocket upgrade and response in the endpoint's trusted server logs or with your approved transport monitoring tools. A successful Agent run or `websockets_allowed=True` alone does not prove WebSocket negotiation.
+The script forces HTTP. To check WebSockets:
 
-Record the SDK source revision, wheel version, endpoint and model configuration, transport evidence and each case outcome. Do not put secrets in that record. Repeat the relevant cases after changing the endpoint, model, SDK revision, native revision or feature set. Test WebSockets, images and additional tool combinations with representative cases of their own. This script cannot establish compatibility for features it does not test.
+1. Pass the required HTTP cases first.
+2. Set `supports_websockets=True` and repeat selected cases against an endpoint that declares support.
+3. Verify the actual upgrade and response in trusted server logs or approved transport monitoring tools. The runtime selects the final transport. A successful run or `websockets_allowed=True` does not prove negotiation.
+
+Record the SDK source revision, wheel version, endpoint and model settings, transport evidence and case outcomes without secrets. Repeat affected cases after changing the endpoint, model, SDK or native revision, or features. Images and additional tool combinations also need representative checks.
 
 See [provider configuration](configuration.md), [structured output limits](configuration.md#structured-output) and [feature combinations](choosing.md#choose-feature-combinations).

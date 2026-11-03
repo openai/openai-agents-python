@@ -28,9 +28,25 @@ Run `.venv/bin/python conversation.py` on Linux/macOS or `.\.venv\Scripts\python
 
 Later examples with `await` or `async with` are fragments for an async function unless marked as complete scripts. Use the same installed SDK and credentials, and follow the version notices when opening other pages.
 
-`submit()` returns a handle to the root `Turn`. Use `await turn.get_result()` in the event loop where you opened the Session. The call waits for that root's accepted work and native continuations, including accepted steering. A later independent submission cannot change the result. You can read the result again after later work starts or the Session closes. A Turn cannot move to another event loop. Cancelling a reader leaves the root running. Closing the Session waits for cleanup.
+## Submit and wait for work
 
-Submitting a new prompt while root work is active raises `SessionBusyError` by default. Use `await session.submit(prompt, if_busy="queue")` to queue work in the order submitted. Use `if_busy="steer"` to steer the active root. This call returns the same Turn after native acceptance. If native code refuses the steering request, the call does not queue it. You can also use `await turn.steer(prompt)` for a captured root. Accepted steering may start a native continuation after a model step ends. `await turn.get_result()` waits for that continuation too. Do not resubmit input the root has retained.
+`submit()` returns a handle to the root `Turn`. Use `await turn.get_result()` in the event loop where you opened the Session. The call waits for that root's accepted work and native continuations, including accepted steering.
+
+The handle has these lifetime rules:
+
+- A later independent submission cannot change its result. You can read the result again after later work starts or the Session closes.
+- A Turn cannot move to another event loop.
+- Cancelling a reader leaves the root running. Closing the Session waits for cleanup.
+
+### Queue or steer active work
+
+If root work is active, choose how to submit a new prompt:
+
+- The default raises `SessionBusyError`.
+- `await session.submit(prompt, if_busy="queue")` queues work in the order submitted.
+- `if_busy="steer"` steers the active root and returns the same Turn after native acceptance. Refused steering is not queued.
+
+You can also use `await turn.steer(prompt)` for a captured root. Accepted steering may start a native continuation after a model step ends. `await turn.get_result()` waits for that continuation too. Do not resubmit input the root has retained.
 
 For conversations that delegate work, see [native child turns](#native-child-turns).
 
@@ -73,13 +89,21 @@ if __name__ == "__main__":
 
 The script prints text deltas as they arrive, then prints the final answer after the turn finishes. The final answer can repeat text already printed from deltas.
 
-Use `session.events()` to observe the whole Session. The stream remains open until the Session ends. Session-wide lifecycle and gap records do not identify a submission. Observations are passive, and the SDK retains a limited number. A slow reader can receive `EventGap` after the SDK drops records. Text deltas can differ from final output. Use the completed result and canonical history as the source of truth. Use `Turn.get_result()` to detect completion even if the SDK dropped an observation.
+### Read observations safely
+
+Use `session.events()` to observe the whole Session until it ends. Session-wide lifecycle and gap records do not identify a submission.
+
+Observations are passive, and the SDK retains a limited number. A slow reader can receive `EventGap` after the SDK drops records. Text deltas can differ from final output. Use the completed result and canonical history as the source of truth, and `Turn.get_result()` to detect completion despite dropped observations.
 
 ## Interrupt work
+
+### Stop a root or child
 
 To stop a captured root, use `await turn.cancel(mode="force")`. The call stops that root's callbacks and cells and waits for their cleanup. If the root has already finished or a later root has replaced it, the call does nothing. It cannot stop a later root. Native children can continue independently.
 
 A child Turn cannot use this root method. Use `await child.try_cancel(turn)` with the captured child Turn. A return value of `True` confirms that the native turn has ended. It does not guarantee that Python callbacks or background cells have finished cleanup. A return value of `False` means the SDK could not confirm native interruption. To wait for cleanup, cancel or close the whole Session when you own that scope.
+
+### Stop the whole Session
 
 If you own the whole Session, use `await session.cancel_all(mode="force")` to stop root and descendant work and wait for cleanup. Use `mode="graceful"` on either `turn.cancel()` or `session.cancel_all()` to let accepted work reach its next boundary. A pending manual request may still need a reply. Force cancellation or Session closure can end that wait.
 
@@ -95,7 +119,12 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 | Save a portable snapshot and restore it in a new Session | `SessionState` from `await session.save_state()` | The checkpoint in trusted storage, serialized with `state.to_json()` when needed. |
 | Reopen a native conversation from a local profile directory | [`LocalStorage`](reference.md#localstorage) | The profile directory and `session.id`; reopen with the same profile and `resume=saved_id`. |
 
-Portable checkpoints do not copy workspace files or live processes. A `LocalStorage` Session has one native writer at a time. It cannot export portable state with `save_state()`, `suspend()`, or `fork()`. Do not combine `storage` or `resume` with portable `state`. Both restore methods require current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
+The storage choices have these limits:
+
+- Portable checkpoints do not copy workspace files or live processes.
+- A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`.
+- Do not combine `storage` or `resume` with portable `state`.
+- Both restore methods require current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [compact, save and restore](#compact-save-and-restore).
 
@@ -134,6 +163,8 @@ Run `.venv/bin/python local_conversation.py` on Linux/macOS or `.\.venv\Scripts\
 
 This script demonstrates closing and reopening within one application process. To reopen after a process restart, store `saved_id` in trusted application storage and retain the profile directory. Supply the same directory and current application configuration when reopening. See the [LocalStorage reference](reference.md#localstorage) for configuration, writer and portability constraints.
 
+### Recover after interruption
+
 Local storage retains history, but it cannot recover every interrupted conversation. Reopening fails with `RuntimeError` if the saved history contains a function call with an unknown outcome. For example, the process may have crashed after an external effect but before recording its result. Reopening also fails if a saved active child's runtime cannot be restored. No new model request starts in either case.
 
 Before starting another conversation, preserve the profile and check your application's records to find which external effects occurred. Repeating `resume` does not resolve an unknown outcome. The SDK provides no public operation to repair that saved history, and checking external effects does not repair it.
@@ -154,9 +185,23 @@ async with agent.session(state=state) as restored:
     result = await handle.get_result()
 ```
 
-Save ordinary conversation checkpoints after the Session becomes idle. A checkpoint preserves native history and turn identity. Restore uses isolated storage and the callbacks, application context, and provider credentials supplied when you open the new Session. The Python and manual tool definitions and latest accepted application instructions must match the saved values. MCP servers, credentials, and selected tools come from the new Session's `tools=` declarations, which default to the Agent's tools when omitted. These declarations can omit an old MCP server or narrow its tool selection. They also set the new Session's tool-name limit. Handles and workspace files do not move to the restored Session. `save_state()` requires an idle Session. Use `suspend()` for the limited manual-request case described below.
+### Supply restore configuration
 
-Portable restore retains the saved model and accepted model settings for both idle and pending manual checkpoints. A different model or setting on the new Agent does not replace the saved values. When opening a Session with `state`, omit `model` and `model_settings` or set them to `None`. The SDK rejects any other value, including `model_settings={}`. To change the model or settings, restore first, wait until the Session is idle, then use an update:
+`save_state()` requires an idle Session and preserves native history and turn identity. Use [`suspend()`](#saving-a-settled-manual-request) for supported pending manual requests.
+
+Open each restore with a fresh Agent and isolated storage. Supply configuration as follows:
+
+- Match the saved Python and manual tool definitions, latest accepted application instructions, and typed output type when present.
+- Supply current callbacks and provider credentials. Pass application context through `agent.session(state=state, context=...)`. Saved text never selects credentials, callbacks, or permissions.
+- Select current MCP declarations with `tools=`, or omit it to use the Agent's tools. These declarations provide MCP servers, credentials, and selected tools. They can omit an old server or narrow its tool selection, and they set the new Session's tool-name limit.
+
+Restore creates fresh handles. Handles and workspace files do not transfer.
+
+#### Retain or update the saved model
+
+Portable restore retains the saved model and accepted model settings for both idle and pending manual checkpoints. A different model or setting on the new Agent does not replace the saved values. When opening a Session with `state`, omit `model` and `model_settings` or set them to `None`. The SDK rejects any other value, including `model_settings={}`.
+
+To change the model or settings, restore first, wait until the Session is idle, then use an update:
 
 ```python
 async with agent.session(state=state) as restored:
@@ -167,17 +212,37 @@ async with agent.session(state=state) as restored:
 
 This example assumes an idle checkpoint. Resume a pending manual turn before updating. A Session opened with `NativeAgents` cannot change its model or model settings.
 
-`Agent.run()` and `Agent.run_sync()` also accept `state`. Pass ordinary input for an idle checkpoint. To resume a supported pending manual checkpoint, pass `None` and an `on_interaction` handler. Set `return_state=True` to save a checkpoint after successful completion in `Completed.state`. `return_state` must be a bool. By default, `Completed.state` is `None`. If saving fails, the run fails. Unfinished child work can prevent saving. Live processes do not transfer, and saving does not undo completed effects.
+#### Use one-shot runs
+
+`Agent.run()` and `Agent.run_sync()` also accept `state`:
+
+- For an idle checkpoint, pass ordinary input.
+- For a supported pending manual checkpoint, pass `None` and an `on_interaction` handler.
+- To save after successful completion, set `return_state=True`. The checkpoint appears in `Completed.state`, which is `None` by default. `return_state` must be a bool.
+
+If saving fails, the run fails. Unfinished child work can prevent saving. Live processes do not transfer, and saving does not undo completed effects.
 
 ### Network policy and offline executors (unreleased)
 
-Restore matches the normalized `Environment.network` policy even if no command used the network. The checkpoint's policy field stores only a digest of the policy. The current application must supply the matching policy. Saved data cannot grant access. A missing digest matches an omitted Environment or `network=None`, preserving older checkpoints. An explicit empty `NetworkPolicy()` is distinct from no policy. The SDK rejects a mismatch before connecting to the executor. To change the policy, open a new Session without the checkpoint. [Network and local socket access](tools.md#network-and-local-socket-access)
+Restore requires the current application to supply the saved normalized `Environment.network` policy, even if no command used the network. The checkpoint stores only a policy digest and cannot grant access.
 
-For the Docker example, the authenticated gateway calls `open_exec_stdio` again before attaching to the retained job. That function checks the actual Docker network mode and attached networks before launching the exec-server in the same container. Keep the trusted Docker job record separate from the Session checkpoint. The checkpoint cannot choose the Docker daemon or container. [Docker creation and restore checks](tools.md#docker-creation-and-restore-checks)
+- A missing digest matches an omitted Environment or `network=None`, preserving older checkpoints.
+- An explicit empty `NetworkPolicy()` differs from no policy.
+- The SDK rejects a mismatch before connecting to the executor. To change the policy, open a new Session without the checkpoint.
+
+See [network and local socket access](tools.md#network-and-local-socket-access).
+
+For the [Docker example](tools.md#docker-creation-and-restore-checks), the authenticated gateway calls `open_exec_stdio` before reattaching to the retained job. The function checks Docker network mode and attached networks before launching the exec-server in the same container.
+
+Keep the trusted Docker job record separate from the checkpoint, which cannot choose the Docker daemon or container.
 
 To run a Windows named-pipe command after restore, supply the current `Environment` with `network` omitted. A checkpoint does not carry open pipe handles. [Windows named pipes in an offline job](tools.md#windows-named-pipes-in-an-offline-job)
 
-To store a checkpoint across processes, serialize it with `state.to_json()` and load it with `SessionState.from_json()` from `agents.state`. The read-only `state.instructions` accessor returns the latest accepted instructions from the checkpoint and validates the stored history. Use it only when your application trusts checkpoint storage as its instruction source. Construct a fresh Agent for each restore so one conversation cannot change a declaration shared by others.
+### Store and trust checkpoint data
+
+To store a checkpoint across processes, serialize it with `state.to_json()` and load it with `SessionState.from_json()` from `agents.state`. Construct a fresh Agent for each restore so one conversation cannot change a declaration shared by others.
+
+The read-only `state.instructions` accessor returns the latest accepted instructions and validates stored history. Use it only when your application trusts checkpoint storage as its instruction source:
 
 ```python
 from pathlib import Path
@@ -205,15 +270,22 @@ async def continue_conversation(path: Path) -> str:
     return result.final_output
 ```
 
-Choose `path` in trusted application storage. Using `state.instructions` trusts the checkpoint as the source for application instructions. It does not confirm that current application policy still permits those instructions. If your application requires current policy, supply its independently configured instructions and accept an error if they do not match. Restore always requires an exact match. Do not edit native history or `agent_options` to supply instructions or credentials.
+Choose `path` in trusted application storage. Using `state.instructions` trusts the saved instructions without confirming that current application policy still permits them.
 
-When restoring an idle checkpoint, use a fresh Agent with matching Python and manual tool definitions. If the original Agent uses typed output, match its output type too. Select its current MCP declarations and provider, then pass application context to `agent.session(state=state, context=...)`. Saved text never selects those credentials, callbacks, or permissions. A pending manual turn has a narrower capture rule: see [saving a settled manual request](#saving-a-settled-manual-request).
+If your application requires current policy, supply its independently configured instructions. Restore requires an exact match and rejects a mismatch. Do not edit native history or `agent_options` to supply instructions or credentials.
 
-Keep checkpoints in trusted application storage because their history contains instructions and may contain private application data. Compacted checkpoints require native replacement history with verifiable application instructions. Except for the settled manual case below, restore does not support active histories or histories the native runtime cannot verify. Idle checkpoints can include native child histories. Restoring those histories requires current `NativeAgents` and matching Python and manual tool definitions. Older goal and checklist data does not start work or grant tools. Restore creates fresh handles and does not resume interrupted child work automatically. Checkpoints do not back up workspace files.
+Checkpoint history contains instructions and may contain private application data. Keep it in trusted application storage. Compacted checkpoints require native replacement history with verifiable application instructions. Except for [settled manual requests](#saving-a-settled-manual-request), restore does not support active histories or histories the native runtime cannot verify.
+
+Idle checkpoints can include native child histories. Restoring them requires current `NativeAgents` and matching Python and manual tool definitions. Restore does not resume interrupted child work automatically. [Retained planning data](#retained-checkpoint-data) does not start work or grant tools.
 
 ### Check support and capture readiness
 
-`session.capabilities` describes support in the current accepted configuration. `get(feature)` returns `FeatureSupport` with `status`, `reason` and `scope`. Status is `"supported"`, `"limited"` or `"unsupported"`. `require(feature)` raises `CapabilityError` for unsupported or limited support; pass `allow_limited=True` to accept a limited contract. These checks perform no discovery or model work and grant no permissions.
+`session.capabilities` describes support in the current accepted configuration:
+
+- `get(feature)` returns `FeatureSupport` with `status`, `reason`, and `scope`. Status is `"supported"`, `"limited"`, or `"unsupported"`.
+- `require(feature)` raises `CapabilityError` for unsupported or limited support. Pass `allow_limited=True` to accept a limited contract.
+
+These checks perform no discovery or model work and grant no permissions.
 
 ```python
 support = session.capabilities.get("manual_suspend")
@@ -225,11 +297,19 @@ readiness = await session.checkpoint_status(kind="idle")
 print(readiness.status, readiness.reasons)
 ```
 
-`websockets_allowed` reports whether the provider permits WebSockets. It does not report the negotiated transport. `checkpoint_status(kind="idle")` checks whether the Session can save an idle checkpoint now. Use `kind="manual_wait"` to check whether it can save a settled manual request. The returned status is `"ready"`, `"not_ready"`, or `"unknown"`, with reasons. A capability report does not prove that the Session can save a checkpoint now. A readiness check reserves nothing. `save_state()` and `suspend()` check again.
+`websockets_allowed` reports provider permission, not the negotiated transport.
+
+To check whether the Session is ready to save, use `checkpoint_status(kind="idle")` for an idle checkpoint or `kind="manual_wait"` for a settled manual request. The returned status is `"ready"`, `"not_ready"`, or `"unknown"`, with reasons.
+
+Capability support does not prove readiness. A readiness check reserves nothing, and `save_state()` and `suspend()` check again.
 
 ### Compact and inspect history
 
-While the Session is idle, use `await session.compact()` to ask Codex to compact its conversation context. The call returns `None` after native work finishes. Codex generates the summary and replaces the history. The Agent's output schema does not apply to this summary. Cancelling the call stops its native work and waits for cleanup. Closing the Session waits for the same cleanup. Submission, tool replacement, and checkpoint operations cannot run during compaction. Cancellation does not undo history changes that Codex has already committed.
+While the Session is idle, use `await session.compact()` to ask Codex to compact its conversation context. The call returns `None` after native work finishes. Codex generates the summary and replaces the history. The Agent's output schema does not apply to this summary.
+
+Cancelling the call stops its native work and waits for cleanup. Closing the Session waits for the same cleanup. Submission, tool replacement, and checkpoint operations cannot run during compaction. Cancellation does not undo history changes that Codex has already committed.
+
+#### Supply a trusted summary
 
 If the application already has a trusted summary, pass it explicitly:
 
@@ -237,9 +317,21 @@ If the application already has a trusted summary, pass it explicitly:
 await session.compact(summary="The user chose the label atlas. No tool work remains.")
 ```
 
-A supplied summary must be nonempty. Codex uses it to replace model context without calling a model or creating a Turn. The operation preserves canonical history, including audit history, and current application instructions. It requires an idle root that supports portable checkpoints and has no native descendants, background work, or unresolved tool effects. `LocalStorage` does not support this operation. With programmatic tool calling, complete history must prove that no code VM has run. If the programmatic history records code VM execution or has already been compacted, use model-generated `compact()` instead. If you cancel the call, it waits until the summary update finishes. An accepted summary remains applied.
+A supplied summary must be nonempty. Codex uses it to replace model context without calling a model or creating a Turn. The operation preserves canonical history, including audit history, and current application instructions.
 
-Session observations include `ContextCompacted` from `agents.observation`, with the native item and turn IDs. The pinned Codex history format retains the summary, completed turn, and compacted replacement history. It does not retain the observation's compaction item ID. Use `session.items()` to iterate over recorded summary messages and `session.turns()` to iterate over the completed compaction turn. The observation also reports native automatic compaction during a submitted turn.
+This operation has stricter limits than model-generated compaction:
+
+- The root must be idle and support portable checkpoints. `LocalStorage` does not support this operation.
+- No native descendants, background work, or unresolved tool effects may remain.
+- With programmatic tool calling, complete history must prove that no code VM has run. If the history records code VM execution or has already been compacted, use model-generated `compact()` instead.
+
+Cancelling the call waits for the summary update to finish. An accepted summary remains applied.
+
+#### Read compaction and history records
+
+`ContextCompacted` from `agents.observation` reports explicit or native automatic compaction, with native item and turn IDs. The pinned history format retains the summary, completed turn, and replacement history, but not the observation's compaction item ID.
+
+Use `session.items()` to read recorded summary messages and `session.turns()` to read the completed compaction turn.
 
 Both history methods return async iterators over a snapshot. They have no pagination arguments:
 
@@ -263,23 +355,45 @@ async with agent.session(state=forked) as branch:
     result = await turn.get_result()
 ```
 
-The source must be idle and support portable checkpoints, with no native descendants, unfinished work, or background processes. `LocalStorage` cannot be forked. Use `save_state()` for an idle snapshot that includes descendants. Later source turns do not enter the fork. Neither a fork nor a checkpoint copies workspace files, live handles, or credentials. The destination supplies its current bindings, which must pass the normal restore checks.
+The source must meet these conditions:
+
+- It is idle and supports portable checkpoints. `LocalStorage` cannot be forked.
+- It has no native descendants, unfinished work, or background processes. Use `save_state()` for an idle snapshot that includes descendants.
+
+Later source turns do not enter the fork. Like a checkpoint, a fork does not copy workspace files, live handles, or credentials. The destination supplies its current bindings under the [normal restore checks](#supply-restore-configuration).
 
 ## Native child turns
 
-A completed root does not imply that native children have finished. Read descendants with `async for child in session.subagents()`, then use `await child.turn.get_result()` when `child.turn` is present. This child handle cannot control the root. Use `Subagent.start()` only when the child is idle. To steer an active child turn, use `await child.turn.steer(...)`. Child controls are separate from Session root controls.
+A completed root does not imply that native children have finished. Read descendants with `async for child in session.subagents()`, then use `await child.turn.get_result()` when `child.turn` is present. This child handle cannot control the root.
 
-A captured child Turn waits only for its exact native turn. Accepted child steering can create a separate successor turn. The original handle does not wait for that successor. Observe `session.events()` or read a fresh `session.subagents()` snapshot to find the child's new Turn. Waiting on the original Turn or rereading an old Subagent snapshot starts no work. Interruption preserves recorded history, but may discard input that has not yet been recorded. Read [interrupt work](#interrupt-work) before deciding how to continue after a stop.
+Use `Subagent.start()` only when the child is idle. To steer an active child turn, use `await child.turn.steer(...)`. Child controls are separate from Session root controls.
+
+A captured child Turn waits only for its exact native turn. Accepted child steering can create a separate successor turn. The original handle does not wait for that successor. Observe `session.events()` or read a fresh `session.subagents()` snapshot to find the child's new Turn. Waiting on the original Turn or rereading an old Subagent snapshot starts no work.
+
+Interruption preserves recorded history, but may discard input that has not yet been recorded. Read [interrupt work](#interrupt-work) before deciding how to continue after a stop.
 
 See [native children](tools.md#native-children) for declarations and delegation tools.
 
 ## Observation details
 
-Codex parses the provider stream before the SDK receives events. Codex can discard malformed frames, and its text events do not retain the provider's wire item ID. `OutputTextDelta.item_id` identifies Codex's active native item. It does not authenticate the wire item ID. You cannot use the observation stream to validate raw frames. Providers must send each text delta before its output item closes. Codex handles provider events that arrive out of order.
+### Provider frames and text identity
 
-To supply tool results manually, declare a `FunctionTool` without a callback. `session.interactions()` delivers live `ActionRequested` and supported native request values. These requests let you reply while they remain live. They are separate from passive events and have no replay sequence. Answer an `ActionRequested` with `await request.respond(value)`. You can also use `await turn.wait_for_request_or_result()` to wait for that Turn's pending requests or completion.
+Codex parses the provider stream before the SDK receives events and can discard malformed frames. Its text events do not retain the provider's wire item ID. `OutputTextDelta.item_id` identifies Codex's active native item but does not authenticate the wire ID. You cannot use observations to validate raw frames.
 
-`Turn.wait_for_request_or_result()` returns either `Completed` or `PendingRequests`, both public imports from `agents`. A `PendingRequests` value contains the captured `turn` and a tuple of live `requests`. This snapshot does not reserve the requests. Another consumer can answer a request before your application does. After answering the current batch, wait again to receive later requests or completion.
+Providers must send each text delta before its output item closes. Codex handles provider events that arrive out of order.
+
+### Reply to live requests
+
+To supply tool results manually, declare a `FunctionTool` without a callback. `session.interactions()` delivers live `ActionRequested` and supported native request values. Unlike passive events, these requests allow replies and have no replay sequence. Answer a live `ActionRequested` with `await request.respond(value)`.
+
+To wait for one Turn's requests or completion, use `await turn.wait_for_request_or_result()`.
+
+The method returns one of two public types from `agents`:
+
+- `Completed` contains the result.
+- `PendingRequests` contains the captured `turn` and a tuple of live `requests`. The snapshot reserves nothing, so another consumer can answer first.
+
+After answering a batch, wait again for later requests or completion.
 
 This async fragment declares one manual tool, matches each request to that declaration and supplies a string result:
 
@@ -324,19 +438,31 @@ async with agent.session() as session:
                 continue
 ```
 
-The root Turn's wait includes requests from its continuations, but excludes child requests. Use `session.interactions()` or `session.pending_interactions()` to handle requests across the Session and its children. Match manual requests with their `FunctionTool.match()` method. Other native request types need their own reply handling. Closing the Session prevents replies to outstanding requests. Cancelling a waiter leaves the Turn running.
+Choose the request scope you need:
 
-`ToolStarted` and `ToolFinished` cover declared Python tools and HTTP or stdio MCP tools on the root and its descendants. `session.events()` includes root and child work. Filter observations using their submission identity.
+- On a root Turn, `wait_for_request_or_result()` includes its continuations but excludes child requests.
+- `session.interactions()` and `session.pending_interactions()` cover the Session and its children.
+
+Match manual requests with `FunctionTool.match()`. Other native request types need their own reply handling. Closing the Session prevents outstanding replies. Cancelling a waiter leaves the Turn running.
+
+### Identify child lifecycle records
 
 For `SubagentLifecycle`, `kind="created"` identifies a newly spawned child. The other kinds are `"active"`, `"closed"`, and `"snapshot"`. A snapshot can describe restored history, and its `status` can describe a restored child that is not running. Before interacting with a child, read a fresh `session.subagents()` snapshot and inspect `is_live`. These Session-wide records do not identify a submission.
 
-`ToolStarted` and `ToolFinished` carry `"function"` or `"mcp"` as `family`, plus submission identity, native turn and call IDs, and the model-visible name and namespace. These tool records omit arguments, results and private error text.
+### Interpret tool events
 
-For a Python function, `ToolStarted` means native code accepted the call, before argument validation. `ToolFinished` follows native reply acceptance or local cleanup. For MCP, `ToolStarted` means native handling began, possibly before approval or server execution. `ToolFinished` reports Codex's result with `"completed"` for success or `"failed"` for an error, including a result with `isError: true`. Result policies run before this end event.
+`ToolStarted` and `ToolFinished` cover declared Python tools and HTTP or stdio MCP tools on the root and its descendants. They do not cover native built-in tools. `session.events()` includes root and child work. Filter tool records by submission identity.
+
+The records contain `family` (`"function"` or `"mcp"`), submission identity, native turn and call IDs, and the model-visible name and namespace. They omit arguments, results, and private error text.
+
+Event timing depends on the tool family:
+
+- For a Python function, `ToolStarted` means native code accepted the call, before argument validation. `ToolFinished` follows native reply acceptance or local cleanup.
+- For MCP, `ToolStarted` means native handling began, possibly before approval or server execution. `ToolFinished` reports `"completed"` for success or `"failed"` for an error, including `isError: true`. Result policies run before this end event.
 
 An MCP result policy can edit the output body, but cannot clear a server's `isError: true` flag. The model receives the accepted body, but `ToolFinished` still reports the failure. A failed tool can still lead to a successful final answer. Check the tool status and submission outcome separately.
 
-Cancelling an observer does not cancel the tool call. Native cancellation may produce no MCP end event. Use `await turn.get_result()` for the exact turn's final outcome. An error or cancellation does not prove that no external effect occurred or that an effect was undone. These tool records do not cover native built-in tools.
+Cancelling an observer does not cancel the tool call. Native cancellation may produce no MCP end event. Use `await turn.get_result()` for the exact turn's final outcome. An error or cancellation does not prove that no external effect occurred or that an effect was undone.
 
 ## Failures and recovery
 
@@ -374,7 +500,16 @@ Do not pass manual results to `Session.submit()`. Reply to the exact live `Actio
 
 Declare the available tools when you open the Session. By default, the Session uses the Agent's tools. `agent.session(tools=[...])` replaces that opening tool list for this Session. Include `NativeAgents()` in the list if this Session needs subagents.
 
-While the Session is idle, use `await session.update(tools=[...])` to set the default tools for later turns. You can also redefine Python or manual tools with names declared at opening, or replace MCP declarations for server and raw-tool pairs declared at opening. `submit(prompt)` and `submit(prompt, tools=None)` use the last accepted default. An explicit `submit(prompt, tools=[...])` can select tools admitted at opening even if they are absent from that default. The call uses their last accepted bindings and does not change the next turn's default. For example, after opening with `[lookup, summarize]`:
+### Update default tools
+
+While the Session is idle, use `await session.update(tools=[...])` to set the default tools for later turns. You can also redefine Python or manual tools with opening names, or replace MCP declarations for opening server and raw-tool pairs.
+
+Later submissions select tools as follows:
+
+- `submit(prompt)` and `submit(prompt, tools=None)` use the last accepted default.
+- `submit(prompt, tools=[...])` can select tools admitted at opening even if absent from that default. It uses their last accepted bindings and does not change the next turn's default.
+
+For example, after opening with `[lookup, summarize]`:
 
 ```python
 await session.update(tools=[lookup])
@@ -384,15 +519,32 @@ second = await session.submit("Look up its source.")
 result = await second.get_result()
 ```
 
-Updates cannot add new names or MCP pairs. Open a new Session for those. Temporary tool selections for a turn or `before_step` cannot install new bindings. Selecting an original descriptor uses its last accepted replacement. See [idle replacement](tools.md#idle-replacement) for an example. Explicit selections must retain fixed native capabilities. `tools=[]` fails if it would remove one. `before_step` can change the Python tool selection but must retain the operation's individual MCP tools and fixed native capabilities. An operation with `before_step` cannot be suspended.
+Updates cannot add new names or MCP pairs. Open a new Session for those. Temporary turn selections cannot install bindings. Selecting an original descriptor uses its last accepted replacement. See [idle replacement](tools.md#idle-replacement).
 
-While the Session is idle, use `await session.update(instructions="Answer in Spanish.")` to change application instructions. An empty string clears them. Use `await session.update(model=..., model_settings=...)` to change the model or settings. Use separate calls to update tools, instructions, and the model or its settings. `None` leaves a category unchanged. These changes apply only to this Session. Sessions opened with `NativeAgents` cannot change instructions or model settings. All children must be closed before you update tools.
+Explicit selections must retain fixed native capabilities. `tools=[]` fails if it would remove one. [Per-step selection](#select-tools-before-each-model-step) has additional limits.
+
+### Update instructions or model settings
+
+While idle, use separate calls for each category:
+
+- `await session.update(instructions="Answer in Spanish.")` changes application instructions. An empty string clears them.
+- `await session.update(model=..., model_settings=...)` changes the model or settings.
+- `await session.update(tools=[...])` changes tools. All children must be closed first.
+
+`None` leaves a category unchanged. Updates apply only to this Session. Sessions opened with `NativeAgents` cannot change instructions or model settings.
 
 The update waits for native acceptance. If you cancel the call, it waits until the update finishes. An accepted change remains applied. If the SDK cannot confirm whether the update took effect, the Session rejects further work. Exit its async context to finish cleanup, then open a new Session.
 
-When restoring, the current Agent's instructions must match the latest accepted instructions. Use `state.instructions` only when trusted checkpoint storage is your application's instruction source. Otherwise, supply current application instructions. The SDK rejects a mismatch.
+For instruction matching and trust during restore, see [store and trust checkpoint data](#store-and-trust-checkpoint-data).
 
-To select tools before each model step, pass `before_step` to `submit()`, `agent.run()`, or `agent.run_sync()`. The callback receives the root `Turn` as its positional argument and `step_index` as a keyword argument. The callback may be synchronous or asynchronous. Return `None` to use the operation's tool selection, or return a sequence that narrows the admitted tools. The index starts at zero and counts preparations in that Turn. Cancellation can stop a preparation before it sends a model request.
+### Select tools before each model step
+
+To select tools before each model step, pass `before_step` to `submit()`, `agent.run()`, or `agent.run_sync()`. The callback receives the root `Turn` as its positional argument and `step_index` as a keyword argument. The callback may be synchronous or asynchronous.
+
+- Return `None` to use the operation's tool selection.
+- Return a sequence to narrow the admitted tools.
+
+`step_index` starts at zero and counts preparations in that Turn. Cancellation can stop a preparation before it sends a model request.
 
 This example opens a Session with only one Python tool. It permits that tool for the first preparation and no tools for later preparations:
 
@@ -415,7 +567,13 @@ async with agent.session() as session:
     result = await turn.get_result()
 ```
 
-A selector cannot add tools excluded from the operation, replace bindings, or change its individual MCP tools. The selector must retain each fixed native capability. When programmatic tool calling is enabled, include `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")` from `agents` in each explicit selection. Keep the opening Environment, `NativeAgents`, `Checklist`, `NativeGoals`, and other fixed declarations when present. An operation with `before_step` cannot be suspended because portable state does not retain its callback.
+A selector has these limits:
+
+- It cannot add excluded tools, install or replace bindings, or change the operation's individual MCP tools.
+- It must retain each fixed native capability, including the opening Environment, `NativeAgents`, `Checklist`, `NativeGoals`, and other fixed declarations when present.
+- With programmatic tool calling, each explicit selection must include `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")` from `agents`.
+
+An operation with `before_step` cannot be suspended because portable state does not retain its callback.
 
 ## Current checklists and goals
 
@@ -457,26 +615,48 @@ The checkpoint value types live in `agents.state`. Keep the checkpoint in truste
 
 ## Saving a settled manual request
 
-Use `await session.suspend()` when all remaining work consists of validated manual requests. These requests are settled when automatic operations and callbacks have finished, even though the requests still need replies. A callback or cleanup failure prevents the checkpoint. A successful suspend retires the original Session and expires its live requests. Repeating `suspend()` returns the same state. `save_state()` requires an idle Session. Restore with `agent.session(state=state)` and reply to the fresh live requests from that Session.
+Use `await session.suspend()` when only validated manual requests remain. Here, settled means that all automatic operations and callbacks have finished, even though manual requests still need replies. A callback or cleanup failure prevents saving. Use `save_state()` only for an idle Session.
 
-After restoring a pending manual request, use `restored.restored_turn` to obtain the initially restored root. This accessor returns `None` for fresh Sessions and idle restores. After a pending manual restore, it keeps returning the same initial handle even when later work starts. `session.active_turn` returns the current root or `None`. Neither accessor preserves the output type because individual turns may override it.
+### Check manual checkpoint support
 
-`await session.pending_interactions()` returns a fresh snapshot of live requests from the root and its children. The snapshot does not reserve a request. Another consumer can answer first. Reply through the exact fresh request. Handle expiry if another consumer has answered or the Session has closed.
+Manual checkpoints support HTTP and WebSocket inference with plain-text or supported `PromptedOutput` Agent output. An explicit Session can also declare MCP tools, executor tools, and native agents. Completed tool results survive restore, including typed data, inline images, and file patch results.
 
-Manual checkpoints support HTTP and WebSocket inference with plain-text or supported `PromptedOutput` Agent output. They retain completed tool results, including typed data, inline images, and file patch results. An explicit Session can also declare MCP tools, executor tools, and native agents. A completed executor call must leave no live background terminal. Pending approvals, unanswered MCP questions, and unfinished result policies prevent saving.
+Before suspending, check these limits:
 
-Children must have finished their turns and have no live processes or pending decisions. Saving stops any remaining idle child runtimes. It retains their histories, planning data, and active or closed status. Restore does not load those child runtimes. The model can resume them later through `followup_task` without replaying their completed work.
+- Executor calls must leave no live background terminal. Pending approvals, unanswered MCP questions, and unfinished result policies prevent saving.
+- Children must have finished their turns, with no live processes or pending decisions.
+- An operation with `before_step` cannot be suspended.
+- An output repair still in progress prevents saving.
+- Programmatic tool calling may remain enabled only if complete history proves that no code cell has run in the root or any child. Otherwise, saving fails before retiring the Session because a checkpoint cannot restore retained JavaScript state.
 
-A settled manual turn with `PromptedOutput(Model)` can be suspended and restored when its output contract matches. Restore with the same mode, schema, and retry setting. For a per-turn output override, use `agent.with_output_type(...)` with the saved turn's output type. Old checkpoints without an output fingerprint cannot be restored as prompted output. A turn with `before_step` cannot be suspended because its callback is not saved. An output repair still in progress also prevents saving.
+For typed output, apply these additional rules:
 
-A pending turn with `NativeOutput(Model)`, or a bare structured type such as `output_type=Model`, cannot be suspended or restored. The pinned runtime cannot resume that turn with its native schema. Keep the Session open and reply there, or save after completion. Idle restore and live typed manual replies remain supported. The Agent's final output limit does not prohibit typed results from manual tools.
+- `PromptedOutput(Model)` requires the same mode, schema, and retry setting on restore. For a per-turn output override, use `agent.with_output_type(...)` with the saved turn's output type. Old checkpoints without an output fingerprint cannot restore prompted output.
+- A pending `NativeOutput(Model)` turn, including a bare structured type such as `output_type=Model`, cannot be suspended or restored. The pinned runtime cannot resume its native schema. Keep the Session open and reply there, or save after completion. Idle restore and live typed manual replies remain supported.
+- The Agent's final output limit does not prohibit typed manual tool results.
 
-Programmatic tool calling may stay enabled if no code cell has run in the root or any child. The history must be complete enough to prove that condition. Otherwise, saving the manual checkpoint fails before the original Session is retired. Code cells can retain JavaScript state that a checkpoint cannot restore.
+### Suspend and restore
 
-An ordinary one-shot run with only Python or manual tools and plain-text output can raise `InteractionRequired` with a saved manual checkpoint even without a handler. That automatic save supports fewer combinations than an explicit Session. See [one-shot manual continuation](tools.md#continue-a-one-shot-manual-request). Resume either supported checkpoint with `agent.run(None, state=state, on_interaction=answer)`. Restoring a pending checkpoint without a handler retains the supplied state in `InteractionRequired`. New tools or `before_step` cannot replace an already admitted turn. Calling `turn.get_result()` waits for the result but does not save state.
+Follow this sequence:
 
-Restore retains the saved model and accepted model settings, the original turn and call IDs, and the order of accepted results. Restore does not call completed tools again. It uses the current credentials, transport choice, tool declarations, reply types, and permissions, including current `NativeAgents` when descendants are present. You can switch between HTTP and WebSockets. The Agent's instructions must match the latest accepted instructions. Restore gives the new Session fresh requests. Saved handles and live replies do not transfer.
+1. Call `await session.suspend()`. Success retires the original Session and expires its live requests. Repeated calls return the same state.
+2. Restore with `agent.session(state=state)` under the [restore configuration rules](#supply-restore-configuration). The saved model, accepted model settings, original turn and call IDs, and order of accepted results remain. Current credentials, transport, declarations, reply types, and permissions apply. You can switch between HTTP and WebSockets.
+3. Get fresh requests with `await session.pending_interactions()` and reply through those requests. The snapshot covers the root and children but reserves nothing. Handle expiry if another consumer answers first or the Session closes.
 
-Saving again retains the checkpoint's goals, checklists and native history. Inspect planning data through the saved state.
+Restore does not call completed tools again. Saved handles and live replies do not transfer.
 
-Manual checkpoints can contain tool arguments, accepted results, and other private application data. Store them with the same controls as ordinary checkpoints. A checkpoint lets another Session continue from accepted history. It does not coordinate concurrent processes or guarantee durable execution. If an effect occurred but its result was never accepted, a retry may repeat that effect.
+To find the restored root, use `restored.restored_turn`. It keeps returning that initial handle after later work starts, and returns `None` for fresh Sessions and idle restores. `session.active_turn` returns the current root or `None`. Neither accessor preserves the output type because individual turns may override it.
+
+### Resume children and one-shot runs
+
+Saving stops idle child runtimes but retains their histories, planning data, and active or closed status. Restore leaves the runtimes unloaded and requires current `NativeAgents` when descendants are present. The model can resume children through `followup_task` without replaying completed work.
+
+An ordinary one-shot run with only Python or manual tools and plain-text output can raise `InteractionRequired` with a saved manual checkpoint without a handler. This automatic save supports fewer combinations than an explicit Session. See [one-shot manual continuation](tools.md#continue-a-one-shot-manual-request).
+
+Resume either supported checkpoint with `agent.run(None, state=state, on_interaction=answer)`. Without a handler, the SDK retains the supplied state in `InteractionRequired`. New tools or `before_step` cannot replace an admitted turn. `turn.get_result()` waits but does not save state.
+
+### Protect saved data and effects
+
+Saving again retains goals, checklists, and native history. Inspect planning data through the saved state.
+
+Manual checkpoints may contain tool arguments, accepted results, and private application data. Apply the [same storage controls as ordinary checkpoints](#store-and-trust-checkpoint-data). A checkpoint supports continuation from accepted history. It does not coordinate concurrent processes or guarantee durable execution. If an effect occurred but its result was never accepted, a retry may repeat it.
