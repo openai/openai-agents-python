@@ -2673,11 +2673,13 @@ class Session(Generic[ContextT, OutputT]):
     async def _executor_policy_digest(self) -> str | None:
         if self._executor is None:
             return None
-        policy = await self._native._executor_policies()
-        # Strict writes also disable escalation and permission requests. The
-        # native write paths can match a default WSS profile even in that mode.
         if self._strict_executor_writes:
-            policy = "strict-writes:" + policy
+            # The mode also disables escalation and permission requests.
+            policy = "strict-writes:" + await self._native._executor_policies()
+        else:
+            # An implicit WSS workspace can move on restore. Keep the write
+            # mode, and let the separate network digest check network authority.
+            policy = "implicit-remote-workspace"
         return hashlib.sha256(policy.encode("utf-8")).hexdigest()
 
     @property

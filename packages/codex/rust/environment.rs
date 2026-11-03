@@ -648,6 +648,12 @@ async fn probe_local_sandbox(
 ) -> Result<()> {
     // The direct local backend has no transport handshake. A fixed command
     // verifies that this process can launch the requested sandbox.
+    // The Linux helper needs PATH to locate system bubblewrap. Keep other host
+    // environment variables, including model credentials, out of the probe.
+    let env = match std::env::var("PATH") {
+        Ok(path) if cfg!(target_os = "linux") => HashMap::from([("PATH".to_owned(), path)]),
+        _ => HashMap::new(),
+    };
     let params = ExecParams {
         process_id: ProcessId::new("sdk-local-sandbox-readiness"),
         metadata: None,
@@ -655,7 +661,7 @@ async fn probe_local_sandbox(
         cwd: cwd.clone(),
         env_policy: None,
         shell_snapshot: None,
-        env: HashMap::new(),
+        env,
         tty: false,
         pipe_stdin: false,
         arg0: None,
