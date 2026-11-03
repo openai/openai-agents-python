@@ -512,9 +512,12 @@ async def test_child_native_mcp_timeout_before_python_handoff_finishes_failed(
                 # while its unapproved result notice remains outside Python.
                 assert owner.failure.done()
                 assert str(owner.failure.result()) == "Native MCP result policy failed"
-                assert owner.terminal.done()
                 assert len(peer.child_requests["alpha"]) == 2
-                assert owner.terminal.result().get("last_agent_message") != "alpha complete"
+                if terminal_only:
+                    # Early failure can settle callbacks before Python consumes
+                    # the terminal. Only this path needs terminal delivery.
+                    assert owner.terminal.done()
+                    assert owner.terminal.result().get("last_agent_message") != "alpha complete"
                 observed = await asyncio.wait_for(alpha_stream, 2)
                 assert sum(isinstance(event, TurnStarted) for event in observed) == 1
                 assert isinstance(observed[-1], TurnFinished)

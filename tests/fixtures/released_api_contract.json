@@ -1,6 +1,6 @@
 {
-  "baseline": "v0.24.0-alpha.5",
-  "baseline_commit": "a604645b4a28c10d7b6ea803c6e90293004352a2",
+  "baseline": "v0.24.0-alpha.6",
+  "baseline_commit": "2841fd8a251ffe79f098894703b8e7efc8c12c2b",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
