@@ -6,7 +6,7 @@ python-multipart>=0.0.32
 urllib3>=2.8.0
 fastapi
 starlette>=1.7.0; python_version < "3.11"
-starlette>=1.9.0; python_version >= "3.11"
+starlette>=1.10.0; python_version >= "3.11"
 uvicorn[standard]
 websockets
 python-dotenv>=1.2.4
