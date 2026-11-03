@@ -1,16 +1,16 @@
 # Install the SDK
 
-The SDK preview installs from a Python wheel. Each wheel includes the Python package and its compiled native runtime. You only need a supported Python installation and a package installer such as pip.
+Install the SDK preview from a Python wheel, which includes the Python package and compiled native runtime. You need a supported Python installation and a package installer such as pip.
 
 ## Preview availability
 
-The first public preview wheels are being prepared and are not available yet. This page describes how to install them once published. Preview downloads will be attached to versioned [GitHub releases](https://github.com/openai/openai-agents-python/releases).
+The first public preview wheels are not available yet. Follow these steps once they are published. Preview downloads will be attached to versioned [GitHub releases](https://github.com/openai/openai-agents-python/releases).
 
 The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides.
 
 ## Requirements
 
-Use standard CPython 3.10–3.14. Each release will list the operating systems and architectures covered by its wheels. Choose a wheel that matches your computer and Python version. PyPy and free-threaded Python are not supported by these wheels.
+Use standard CPython 3.10 through 3.14. Each release will list the operating systems and architectures covered by its wheels. Choose a wheel that matches your computer and Python version. PyPy and free-threaded Python are not supported by these wheels.
 
 ## Create a Python environment
 
@@ -38,7 +38,7 @@ Run the remaining commands in this activated environment.
 
 ## Install a preview wheel
 
-Once a preview release is available, download the wheel for your platform from that release. Use the release's installation command, or run the command below with the downloaded file's full path. Replace `WHEEL_FILE.whl` with its actual filename; do not rename the wheel.
+Once a preview release is available, download the wheel for your platform from that release. Use the release's installation command, or pass the downloaded file's full path to the command below. Replace `WHEEL_FILE.whl` with the actual filename. Do not rename the wheel.
 
 ```sh
 python -m pip install "/path/to/WHEEL_FILE.whl"
@@ -52,7 +52,7 @@ Check the installed version and native module:
 python -c "from importlib.metadata import version; import agents._native; print(version('openai-agents'))"
 ```
 
-The version should match the release you downloaded. Continue with the [quickstart](index.md) to set your API key and run your first agent.
+Check that the printed version matches the release you downloaded. Continue with the [quickstart](index.md) to set your API key and run your first agent.
 
 ## Examples and upgrades
 

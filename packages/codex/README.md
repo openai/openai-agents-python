@@ -17,4 +17,4 @@ Use the [Agent and Session guide](https://github.com/openai/openai-agents-python
 | [Tools](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/tools.md) | Declare Python, manual, MCP and executor tools. |
 | [API reference](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/reference.md) | Find supported calls and defaults. |
 
-For SDK development and source builds, see [CONTRIBUTING.md](../../CONTRIBUTING.md). Native build and artifact checks are in the [maintenance guide](MAINTAINING.md).
+For SDK development and source builds, see [CONTRIBUTING.md](../../CONTRIBUTING.md). See the [maintenance guide](MAINTAINING.md) for native builds and artifact checks.

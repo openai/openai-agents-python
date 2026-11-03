@@ -1,20 +1,20 @@
 # Build agents with Codex
 
-The Agents SDK runs agents from Python using Codex. Give an Agent instructions and tools, then call it to get a result.
+Build an agent that calls a Python function and returns a greeting. The Agents SDK uses Codex to run the agent in your application.
 
 See [Choose how to run your agent](choosing.md) for deployment choices and supported feature combinations.
 
-Start with an Agent and `@function_tool`. Use `await agent.run(input)` for one answer. Use `agent.session()` when you need more turns, streamed observations or a saved conversation.
+Define an `Agent` and a tool with `@function_tool`. Use `await agent.run(input)` for one answer. Use `agent.session()` to continue a conversation, stream events, or save the conversation.
 
 ## Before you begin
 
 Follow the [installation guide](installation.md) to install a preview wheel and activate your Python environment.
 
-The live example needs an OpenAI API key and makes model requests. For a deterministic check without a model service or real API key, use the [testing guide](testing.md).
+The example below needs an OpenAI API key and makes live model requests. To test with scripted responses and no API key, use the [testing guide](testing.md).
 
 ## Run your first agent
 
-Importing `agents` and declaring agents or tools perform no I/O. Save this complete script as `agent.py` in your project directory:
+Importing `agents` or declaring agents and tools does not start a model request or execute a tool. Save this script as `agent.py` in your project directory:
 
 ```python
 import asyncio
@@ -67,7 +67,7 @@ Continue with [Python functions](tools.md#python-functions), [application contex
 | Diagnose failures or set a timeout | [Troubleshooting](troubleshooting.md) |
 | Inspect usage and export telemetry | [Usage](troubleshooting.md#read-usage-without-double-counting) and [telemetry](configuration.md#telemetry) |
 
-Find worked examples for [images, retrieval, application memory, approvals, tools and specialist Agents](recipes.md). The [feature decision table](choosing.md#choose-feature-combinations) explains combinations that limit save/restore or delegation.
+Find worked examples for [images, retrieval, application memory, approvals, tools, and specialist Agents](recipes.md). Before combining features, check the [limits on saving, restoring, and delegation](choosing.md#choose-feature-combinations).
 
 ## How the runtime fits
 
@@ -75,7 +75,7 @@ The [core concepts guide](concepts.md#how-the-runtime-fits) shows how your Pytho
 
 ## Test without a model service
 
-The [testing guide](testing.md) runs real Python tools and the native Session against scripted model responses. It includes a complete no-key script, expected output and a pytest entry point.
+The [testing guide](testing.md) runs real Python tools and the native Session against scripted model responses. It includes a complete script that needs no API key, its expected output, and a pytest command.
 
 ## More reference
 

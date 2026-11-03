@@ -1,8 +1,8 @@
 # Check a custom Responses endpoint
 
-A custom endpoint must implement the required Responses behavior; a Chat Completions-compatible route alone is insufficient.
+A custom endpoint must implement the required Responses behavior. A Chat Completions-compatible route alone is insufficient.
 
-Test each feature your application uses against the actual endpoint and model. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support. `session.capabilities` describes SDK configuration support; it does not probe a remote service.
+Test each feature your application uses against the actual endpoint and model. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support. `session.capabilities` describes SDK configuration support. It does not test a remote service.
 
 ## Run text, Python tools and strict output separately
 
@@ -65,14 +65,14 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-A tools pass proves that the selected model requested the Python function and the loop completed. A strict pass checks that the SDK can request native schema output and validate the returned object for this small schema. It does not independently prove the service enforces the schema for every generation. Neither pass covers every allowed tool/schema shape. Model choice failures can also fail these checks; inspect the service request/error before attributing a failure to protocol support. Keep prompts and results synthetic and avoid logging headers or credentials.
+Passing the tools check proves that the selected model requested the Python function and the loop completed. Passing the strict check shows that the SDK can request native schema output and validate the returned object for this small schema. It does not independently prove the service enforces the schema for every generation. Neither check covers every allowed tool or schema shape. The model can also make a wrong choice and fail a check. Inspect the service request and error before attributing a failure to protocol support. Keep prompts and results synthetic and avoid logging headers or credentials.
 
 The provider context closes after the one-shot run closes its Session. When sharing a provider, close all Sessions before closing the provider.
 
 ## Check WebSockets independently
 
-The script forces HTTP. After the required HTTP checks pass, run the same selected cases with `supports_websockets=True` against an endpoint that declares WebSocket support. The runtime still selects the final transport. Verify an actual WebSocket upgrade and response in the endpoint's trusted server logs or your approved transport instrumentation. A successful Agent run or `websockets_allowed=True` alone does not prove WebSocket negotiation.
+The script forces HTTP. After the required HTTP checks pass, run the same selected cases with `supports_websockets=True` against an endpoint that declares WebSocket support. The runtime still selects the final transport. Verify an actual WebSocket upgrade and response in the endpoint's trusted server logs or with your approved transport monitoring tools. A successful Agent run or `websockets_allowed=True` alone does not prove WebSocket negotiation.
 
-Record the SDK source revision, wheel version, endpoint/model configuration, transport evidence and each case outcome. Do not put secrets in that record. Repeat the relevant cases after changing the endpoint, model, SDK/native revision or feature set. WebSockets, images and additional tool combinations need their own representative checks; this script makes no blanket compatibility guarantee.
+Record the SDK source revision, wheel version, endpoint and model configuration, transport evidence and each case outcome. Do not put secrets in that record. Repeat the relevant cases after changing the endpoint, model, SDK revision, native revision or feature set. Test WebSockets, images and additional tool combinations with representative cases of their own. This script cannot establish compatibility for features it does not test.
 
 See [provider configuration](configuration.md), [structured output limits](configuration.md#structured-output) and [feature combinations](choosing.md#choose-feature-combinations).

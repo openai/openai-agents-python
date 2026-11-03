@@ -4,19 +4,17 @@
 
 We welcome bug reports, questions, feature requests, minimal reproductions, and root-cause analysis through [GitHub issues](https://github.com/openai/openai-agents-python/issues).
 
-**Pull requests are limited to repository collaborators. We do not accept pull requests from non-collaborators**, including documentation or example changes. If you are not a collaborator, please open an issue instead of preparing a pull request. Include the affected version, expected and actual behavior, and a small, sanitized reproduction when applicable.
+**Pull requests are limited to repository collaborators. We do not accept pull requests from non-collaborators**, including documentation or example changes. If you are not a collaborator, open an issue. Include the affected version, expected and actual behavior, and a small, sanitized reproduction when applicable.
 
-Report suspected security vulnerabilities privately as described in [SECURITY.md](SECURITY.md), rather than in issues or pull requests.
+Report suspected security vulnerabilities privately through [SECURITY.md](SECURITY.md). Keep undisclosed reports and fixes out of public issues, discussions, and pull requests until disclosure is coordinated.
 
 The development and pull request instructions below are for maintainers and repository collaborators.
-
-For suspected vulnerabilities, follow [SECURITY.md](SECURITY.md). Keep undisclosed security reports and fixes out of public issues, discussions, and pull requests until disclosure is coordinated.
 
 ## Development workflow
 
 Read [AGENTS.md](AGENTS.md) for the repository's scope, compatibility, review, and verification requirements. Install Make and the [native build prerequisites](packages/codex/MAINTAINING.md#build-from-this-source), including a supported CPython version, `uv`, Git, and Rust, before running `make sync`. That command installs the SDK for contributor work and can compile its native extension. Run Python commands through `uv run`.
 
-Install Git with your operating system's package manager and ensure the `git` executable is on `PATH` before running the test suite. The release-provenance and change-detection tests invoke Git to create and inspect temporary repositories. Git is a system dependency; `make sync` and Python package installers do not install it.
+Before running the test suite, install Git with your operating system's package manager and check that `git` is on `PATH`. Tests use Git to create temporary repositories, verify release sources, and detect changes. Neither `make sync` nor Python package installers install Git.
 
 Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [tests/README.md](tests/README.md) for test execution. Run focused checks while developing, then the applicable final checks described in [AGENTS.md](AGENTS.md#testing--automated-checks). Use the [pull request template](.github/PULL_REQUEST_TEMPLATE/pull_request_template.md) to explain the problem, change, and validation. Documentation changes follow the repository's verification tiers and release-timing rules.
 
@@ -40,7 +38,7 @@ On Windows, use `py -3` instead of `python3`. For source preparation with Python
 
 Preparation verifies the pinned native sources. The wheel build compiles the native extension and matching execution helpers, then writes a wheel under `dist/`. Keep the wheel and its build records with the source commit. See the [maintenance guide](packages/codex/MAINTAINING.md) for native build details and troubleshooting.
 
-To check the resulting package, create a fresh virtual environment outside the SDK checkout and install the exact wheel from `dist/` with `python -m pip install` followed by its absolute path. Use that environment to run the [installation check](docs/sdk/installation.md#install-a-preview-wheel). A matching package version alone does not identify a development commit.
+To check the built package, create a fresh virtual environment outside the SDK checkout. Install the exact wheel from `dist/` with `python -m pip install` followed by its absolute path. Use that environment to run the [installation check](docs/sdk/installation.md#install-a-preview-wheel). A matching package version alone does not identify a development commit.
 
 ## Security checklist
 

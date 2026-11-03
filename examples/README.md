@@ -11,7 +11,7 @@ These examples use the SDK preview. Follow the [installation guide](../docs/sdk/
 
 ## More examples
 
-For recipes that import `agents`, install the matching preview wheel and any extra dependencies listed in the example's README. The [SDK guide](../docs/sdk/index.md) explains the APIs. The Docker provisioning helper uses only the Python standard library and Docker.
+If an example imports `agents`, install the matching preview wheel and any extra dependencies listed in its README. The [SDK guide](../docs/sdk/index.md) explains the APIs. The Docker provisioning helper uses only the Python standard library and Docker.
 
 | Entry point | What it shows | Prerequisites |
 | --- | --- | --- |
@@ -23,7 +23,7 @@ For recipes that import `agents`, install the matching preview wheel and any ext
 | [remote_executor.py](remote_executor.py) | Commands and checklists on a pre-provisioned executor. | Current SDK, an authenticated WSS exec-server, assigned workspace and model credentials. |
 | [offline_unix_sockets.py](offline_unix_sockets.py) | Unix-socket access inside an independently offline job. | Current SDK, an isolated Linux or macOS executor, gateway credentials and a local synthetic Responses peer. |
 | [offline_docker.py](offline_docker.py) | Application helpers that create and inspect an offline Docker job. | Docker and a prepared image; the application supplies the gateway and executor configuration. |
-| [External jobs](external_job/README.md) | A journal, separate thumbnail worker and deferred tool result. | Current SDK, the source checkout, private POSIX storage and a local Responses peer. |
+| [External jobs](external_job/README.md) | A journal, a separate thumbnail worker, and a deferred tool result. | Current SDK, the source checkout, private POSIX storage and a local Responses peer. |
 
 ## Workflow recipes
 
@@ -32,6 +32,6 @@ These recipes use the same preview wheel and may need extra dependencies.
 - [Task recipe chooser](../docs/sdk/recipes.md): typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval and application memory. Each entry identifies synthetic or live execution and its limits.
 - [Complete service and browser](web_starter/README.md): request ownership, approvals, bounded admission, typed final results and authorized artifact downloads with a pinned browser client.
 - [Trace walkthrough](observability/README.md): a local collector/viewer and worked history reader for tool, validation and provider failures.
-- [Evaluation runner](evaluation/README.md): repeatable cases, recorded configurations, baseline comparison and failure artifacts; synthetic harness checks remain separate from live model quality.
+- [Evaluation runner](evaluation/README.md): repeatable cases, recorded configurations, baseline comparisons, and failure artifacts. Synthetic checks do not measure live model quality.
 
 The [tool guide](../docs/sdk/tools.md) covers Python functions and native MCP tools.

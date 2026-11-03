@@ -1,10 +1,10 @@
 # OpenAI Agents SDK
 
-Build agents with the power and flexibility of the Codex harness. Define instructions, connect Python functions and MCP tools, and manage conversations in your application. Codex runs model turns and keeps conversation history. Python supplies typed tools, callbacks and application context.
+Build Python agents that use Codex to run model turns and keep conversation history. Define instructions, connect Python functions and MCP tools, and manage conversations in your application. Your Python code supplies typed tools, callbacks, and application data.
 
 ## Build agents in Python
 
-Start with Agents SDK for a new Python agent application. Connect your existing functions and application data. The SDK handles tool argument validation, function calls and typed result parsing.
+Use Agents SDK to connect your Python functions and application data to an agent. The SDK validates tool arguments, calls your functions, and parses typed results.
 
 Use [Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview) when you want OpenAI to run the agent and manage sessions and recovery.
 
@@ -47,7 +47,7 @@ asyncio.run(main())
 
 Set an [OpenAI API key](docs/published.md#set-an-openai-api-key), then run `python agent.py` in your activated environment.
 
-The script prints a greeting for Ada, such as `Hello, Ada!`. The model chooses the final wording, so it can vary. This example makes live model requests. The SDK calls your Python `greeting` function when the model requests that tool, then sends the tool's result back to the model.
+This example makes live model requests and prints a greeting for Ada, such as `Hello, Ada!`. The wording can vary. When the model requests the `greeting` tool, the SDK calls your Python function and sends its result back to the model.
 
 ## SDK guides
 
@@ -55,10 +55,10 @@ Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These
 
 | Guide | What you can do |
 | --- | --- |
-| [Agent configuration](docs/sdk/configuration.md) | Configure instructions, model, provider and typed output. |
+| [Agent configuration](docs/sdk/configuration.md) | Set instructions, the model, the provider, and the output type. |
 | [Function tools](docs/sdk/tools.md#python-functions) | Make Python functions available with `function_tool`. |
 | [MCP tools](docs/sdk/tools.md#native-mcp) | Connect an agent to tools from MCP servers. |
-| [Sessions and state](docs/sdk/sessions.md) | Continue conversations and save settled state. |
+| [Sessions and state](docs/sdk/sessions.md) | Continue conversations and save checkpoints. |
 | [Streaming](docs/sdk/sessions.md#stream-observations) | Show text and tool events as they arrive. |
 | [API reference](docs/sdk/reference.md) | Find supported calls and defaults. |
 

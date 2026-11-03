@@ -2,11 +2,11 @@
 
 Follow the [installation guide](sdk/installation.md) to set up the SDK preview. Then use the [quickstart](sdk/index.md) and [examples](../examples/README.md) to build your application.
 
-Define an `Agent`, then call `await agent.run(input)` for one answer. Use `async with agent.session() as session` for a conversation. Retain the Turn returned by `session.submit(...)` and await `turn.get_result()` to read its settled result. See [sessions and streaming](sdk/sessions.md) for the complete pattern.
+Define an `Agent`, then call `await agent.run(input)` for one answer. Use `async with agent.session() as session` for a conversation. Keep the `Turn` returned by `session.submit(...)`. Await `turn.get_result()` to read the completed result. See [sessions and streaming](sdk/sessions.md) for the complete pattern.
 
 ## Set an OpenAI API key
 
-Set your API key in the shell where you will run your agent.
+Set your API key in the shell where you run your agent.
 
 On Linux or macOS:
 
