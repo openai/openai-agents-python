@@ -256,7 +256,8 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
         for host in ("blocked.example.invalid", "unlisted.example.invalid"):
             parts.append(
                 'test "$(curl --silent --show-error --max-time 3 --proxy "$HTTP_PROXY" '
-                f"--noproxy '' --output /dev/null --write-out '%{{http_code}}' http://{host}/)\" = 403"
+                "--noproxy '' --output /dev/null --write-out '%{http_code}' "
+                f'http://{host}/)" = 403'
             )
         for directory in allow:
             parts.append(f"printf allowed >> {shlex.quote(str(directory / 'marker'))}")
