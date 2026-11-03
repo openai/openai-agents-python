@@ -1,0 +1,2 @@
+# Optional service dependency; install the matching SDK wheel separately.
+aiohttp==3.14.3

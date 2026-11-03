@@ -1,0 +1,481 @@
+diff --git a/codex-rs/core/src/mcp_tool_exposure.rs b/codex-rs/core/src/mcp_tool_exposure.rs
+index fa9b6eb61b51321c3fe97c45e50de27d57e4e1cf..2b273076d6e63b8bcb252d590cf79d378d2f1321 100644
+--- a/codex-rs/core/src/mcp_tool_exposure.rs
++++ b/codex-rs/core/src/mcp_tool_exposure.rs
+@@ -40,7 +40,6 @@ impl McpHandlerCache {
+         binding: &Arc<McpBinding>,
+         config: &Config,
+         apps_enabled: bool,
+-        mcp_server_catalog: &codex_mcp::ResolvedMcpCatalog,
+         search_tool_enabled: bool,
+         registry: &mut ToolRegistry,
+     ) -> HashSet<ToolName> {
+@@ -52,7 +51,7 @@ impl McpHandlerCache {
+             binding.tools(),
+             config,
+             apps_enabled,
+-            mcp_server_catalog,
++            binding.config(),
+             search_tool_enabled,
+             &mut handlers,
+             registry,
+@@ -65,7 +64,7 @@ fn append_mcp_tools(
+     all_mcp_tools: &[McpToolInfo],
+     config: &Config,
+     apps_enabled: bool,
+-    mcp_server_catalog: &codex_mcp::ResolvedMcpCatalog,
++    mcp_config: &codex_mcp::McpConfig,
+     search_tool_enabled: bool,
+     handlers: &mut HashMap<ToolName, CachedMcpHandler>,
+     registry: &mut ToolRegistry,
+@@ -76,10 +75,14 @@ fn append_mcp_tools(
+         .collect();
+     handlers.retain(|name, _| current_tools.contains(name));
+ 
+-    // Keep regular MCP tools first; Apps tools also require connector and policy checks.
++    let mcp_server_catalog = &mcp_config.mcp_server_catalog;
++    let application_apps_enabled = mcp_config.application_apps.is_some()
++        && codex_mcp::host_owned_codex_apps_enabled(mcp_config, None);
++    // Explicit applications use their admitted binding and separate principal.
++    // Generic Apps keep the caller's existing model-auth and feature gate.
+     let non_app_tools = filter_non_codex_apps_mcp_tools_only(all_mcp_tools);
+-    let app_tools = apps_enabled
+-        .then(|| filter_codex_apps_mcp_tools(all_mcp_tools, config))
++    let app_tools = (apps_enabled || application_apps_enabled)
++        .then(|| filter_codex_apps_mcp_tools(all_mcp_tools, config, application_apps_enabled))
+         .into_iter()
+         .flatten();
+     let exposure = if search_tool_enabled {
+@@ -171,6 +174,7 @@ fn filter_non_codex_apps_mcp_tools_only(
+ fn filter_codex_apps_mcp_tools<'a>(
+     mcp_tools: &'a [McpToolInfo],
+     config: &'a Config,
++    application_apps_enabled: bool,
+ ) -> impl Iterator<Item = &'a McpToolInfo> + 'a {
+     let app_tool_policy = AppToolPolicyEvaluator::new(&config.config_layer_stack);
+ 
+@@ -181,13 +185,14 @@ fn filter_codex_apps_mcp_tools<'a>(
+         if !tool_is_model_visible(tool) {
+             return false;
+         }
+-        let Some(connector_id) = tool.connector_id.as_deref() else {
++        let connector_id = tool.connector_id.as_deref();
++        if connector_id.is_none() && !application_apps_enabled {
+             return false;
+-        };
++        }
+         let annotations = tool.tool.annotations.as_ref();
+         app_tool_policy
+             .policy(AppToolPolicyInput {
+-                connector_id: Some(connector_id),
++                connector_id,
+                 link_id: None,
+                 tool_name: &tool.tool.name,
+                 tool_title: tool.tool.title.as_deref(),
+diff --git a/codex-rs/core/src/mcp_tool_exposure_test.rs b/codex-rs/core/src/mcp_tool_exposure_test.rs
+index c94be8ce55f016f63babadbf8572cb1a94e69e26..80710f0e68d89452c71d66d9a7d1c6e7c4ebd65c 100644
+--- a/codex-rs/core/src/mcp_tool_exposure_test.rs
++++ b/codex-rs/core/src/mcp_tool_exposure_test.rs
+@@ -73,6 +73,26 @@ fn expected_runtimes(
+         .collect()
+ }
+ 
++fn mcp_config_with_catalog(config: &Config, catalog: ResolvedMcpCatalog) -> codex_mcp::McpConfig {
++    let mut runtime = config.to_mcp_config_with_loaded_plugins(&Default::default(), []);
++    runtime.mcp_server_catalog = catalog;
++    runtime
++}
++
++fn application_runtime_config(config: &Config) -> codex_mcp::McpConfig {
++    let server = codex_mcp::codex_apps_mcp_server_config("https://example.invalid", None, None);
++    let mut catalog = ResolvedMcpCatalog::builder();
++    catalog.register(McpServerRegistration::from_hosted_apps(
++        codex_mcp::APPLICATION_APPS_CONTRIBUTOR_ID,
++        0,
++        server.clone(),
++    ));
++    let mut runtime = mcp_config_with_catalog(config, catalog.build());
++    runtime.apps_enabled = false;
++    runtime.application_apps = Some(Arc::new(codex_mcp::ApplicationApps::verification(server)));
++    runtime
++}
++
+ fn runtimes_by_name(
+     tools: &[ToolInfo],
+     config: &Config,
+@@ -97,11 +117,12 @@ fn runtimes_by_name_with_catalog(
+ ) -> HashMap<ToolName, ToolExposure> {
+     let mut handlers = HashMap::new();
+     let mut registry = ToolRegistry::default();
++    let runtime = mcp_config_with_catalog(config, mcp_server_catalog.clone());
+     append_mcp_tools(
+         tools,
+         config,
+         apps_enabled,
+-        mcp_server_catalog,
++        &runtime,
+         search_tool_enabled,
+         &mut handlers,
+         &mut registry,
+@@ -245,13 +266,13 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
+         Some("Calendar"),
+     )];
+     let mut handlers = HashMap::new();
+-    let catalog = ResolvedMcpCatalog::default();
++    let runtime = mcp_config_with_catalog(&config, ResolvedMcpCatalog::default());
+     let mut allowed_registry = ToolRegistry::default();
+     let allowed = append_mcp_tools(
+         &tools,
+         &config,
+         /*apps_enabled*/ true,
+-        &catalog,
++        &runtime,
+         /*search_tool_enabled*/ false,
+         &mut handlers,
+         &mut allowed_registry,
+@@ -267,7 +288,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
+         &tools,
+         &config,
+         /*apps_enabled*/ false,
+-        &catalog,
++        &runtime,
+         /*search_tool_enabled*/ false,
+         &mut handlers,
+         &mut disabled_registry,
+@@ -277,7 +298,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
+         &tools,
+         &restricted_config,
+         /*apps_enabled*/ true,
+-        &catalog,
++        &runtime,
+         /*search_tool_enabled*/ false,
+         &mut handlers,
+         &mut restricted_registry,
+@@ -287,7 +308,7 @@ async fn cached_app_handlers_still_obey_current_apps_enablement_and_tool_policy(
+         &tools,
+         &config,
+         /*apps_enabled*/ true,
+-        &catalog,
++        &runtime,
+         /*search_tool_enabled*/ true,
+         &mut handlers,
+         &mut restored_registry,
+@@ -431,7 +452,7 @@ async fn app_tool_registration_uses_trusted_catalog_metadata_and_preserves_sourc
+         &mcp_tools,
+         &config,
+         /*apps_enabled*/ true,
+-        &ResolvedMcpCatalog::default(),
++        &mcp_config_with_catalog(&config, ResolvedMcpCatalog::default()),
+         /*search_tool_enabled*/ false,
+         &mut handlers,
+         &mut registry,
+@@ -548,3 +569,297 @@ async fn defers_apps_and_non_app_mcp_tools() {
+         expected_runtimes(&mcp_tools, ToolExposure::Deferred)
+     );
+ }
++
++#[tokio::test]
++async fn application_proof_exposure_follows_current_binding_and_visibility() {
++    let config = test_config().await;
++    let runtime = application_runtime_config(&config);
++    let proof = make_mcp_tool(
++        CODEX_APPS_MCP_SERVER_NAME,
++        "search",
++        "mcp__codex_apps",
++        "search",
++        None,
++        None,
++    );
++    let hidden = with_visibility(
++        make_mcp_tool(
++            CODEX_APPS_MCP_SERVER_NAME,
++            "hidden",
++            "mcp__codex_apps",
++            "hidden",
++            None,
++            None,
++        ),
++        &["app"],
++    );
++    let tools = [proof.clone(), hidden];
++    let mut handlers = HashMap::new();
++    let mut registry = ToolRegistry::default();
++    let selected = append_mcp_tools(
++        &tools,
++        &config,
++        false,
++        &runtime,
++        false,
++        &mut handlers,
++        &mut registry,
++    );
++    assert_eq!(selected, HashSet::from([proof.canonical_tool_name()]));
++    assert_eq!(registry.entries().count(), 1);
++
++    // Cached metadata cannot preserve exposure after the capability is removed.
++    let mut unadmitted = runtime.clone();
++    unadmitted.application_apps = None;
++    let mut next = ToolRegistry::default();
++    assert!(
++        append_mcp_tools(
++            &tools,
++            &config,
++            false,
++            &unadmitted,
++            false,
++            &mut handlers,
++            &mut next,
++        )
++        .is_empty()
++    );
++    assert_eq!(next.entries().count(), 0);
++
++    let mut empty = ToolRegistry::default();
++    assert!(
++        append_mcp_tools(
++            &[],
++            &config,
++            false,
++            &runtime,
++            false,
++            &mut handlers,
++            &mut empty,
++        )
++        .is_empty()
++    );
++    assert_eq!(empty.entries().count(), 0);
++
++    let mut restored = ToolRegistry::default();
++    assert_eq!(
++        append_mcp_tools(
++            &tools,
++            &config,
++            false,
++            &runtime,
++            true,
++            &mut handlers,
++            &mut restored,
++        ),
++        selected
++    );
++    assert_eq!(
++        restored.entries().next().expect("proof tool").exposure,
++        ToolExposure::Deferred
++    );
++}
++
++#[tokio::test]
++async fn application_proof_exposure_rejects_changed_source_and_registration() {
++    let config = test_config().await;
++    let runtime = application_runtime_config(&config);
++    let original = runtime
++        .application_apps
++        .as_ref()
++        .expect("application")
++        .registration()
++        .clone();
++    let tool = make_mcp_tool(
++        CODEX_APPS_MCP_SERVER_NAME,
++        "search",
++        "mcp__codex_apps",
++        "search",
++        None,
++        None,
++    );
++    for mismatch in [
++        "ordinary",
++        "ordinary-extension",
++        "contributor",
++        "transport",
++        "auth",
++        "environment",
++    ] {
++        let mut server = original.clone();
++        if mismatch == "transport" {
++            server.transport =
++                codex_mcp::codex_apps_mcp_server_config("https://different.invalid", None, None)
++                    .transport;
++        } else if mismatch == "auth" {
++            server.auth = codex_config::McpServerAuth::OAuth;
++        } else if mismatch == "environment" {
++            server.environment_id = "unrelated-environment".to_string();
++        }
++        let mut catalog = ResolvedMcpCatalog::builder();
++        catalog.register(if mismatch == "ordinary" {
++            McpServerRegistration::from_config(CODEX_APPS_MCP_SERVER_NAME.to_string(), server)
++        } else if mismatch == "ordinary-extension" {
++            McpServerRegistration::from_extension(
++                CODEX_APPS_MCP_SERVER_NAME.to_string(),
++                codex_mcp::APPLICATION_APPS_CONTRIBUTOR_ID,
++                0,
++                server,
++            )
++        } else {
++            McpServerRegistration::from_hosted_apps(
++                if mismatch == "contributor" {
++                    "unrelated-extension"
++                } else {
++                    codex_mcp::APPLICATION_APPS_CONTRIBUTOR_ID
++                },
++                0,
++                server,
++            )
++        });
++        let mut changed = runtime.clone();
++        changed.mcp_server_catalog = catalog.build();
++        let mut handlers = HashMap::new();
++        let mut registry = ToolRegistry::default();
++        assert!(
++            append_mcp_tools(
++                std::slice::from_ref(&tool),
++                &config,
++                false,
++                &changed,
++                false,
++                &mut handlers,
++                &mut registry,
++            )
++            .is_empty(),
++            "{mismatch}"
++        );
++        assert_eq!(registry.entries().count(), 0, "{mismatch}");
++    }
++}
++
++#[tokio::test]
++async fn application_exposure_keeps_default_and_connector_tool_policy() {
++    let config = test_config().await;
++    let runtime = application_runtime_config(&config);
++    let proof = make_mcp_tool(
++        CODEX_APPS_MCP_SERVER_NAME,
++        "search",
++        "mcp__codex_apps",
++        "search",
++        None,
++        None,
++    );
++    let calendar = make_mcp_tool(
++        CODEX_APPS_MCP_SERVER_NAME,
++        "calendar_search",
++        "mcp__codex_apps",
++        "calendar_search",
++        Some("calendar"),
++        Some("Calendar"),
++    );
++    let tools = [proof.clone(), calendar.clone()];
++    for (policy, expected) in [
++        ("[apps._default]\nenabled = false\n", HashSet::new()),
++        (
++            "[apps.calendar]\ndefault_tools_enabled = false\n",
++            HashSet::from([proof.canonical_tool_name()]),
++        ),
++    ] {
++        let home = tempdir().expect("policy directory");
++        std::fs::write(home.path().join(CONFIG_TOML_FILE), policy).expect("write app policy");
++        let restricted = ConfigBuilder::without_managed_config_for_tests()
++            .codex_home(home.path().to_path_buf())
++            .build()
++            .await
++            .expect("app policy");
++        let mut handlers = HashMap::new();
++        let mut registry = ToolRegistry::default();
++        assert_eq!(
++            append_mcp_tools(
++                &tools,
++                &restricted,
++                false,
++                &runtime,
++                false,
++                &mut handlers,
++                &mut registry,
++            ),
++            expected
++        );
++    }
++    let generic = mcp_config_with_catalog(&config, ResolvedMcpCatalog::default());
++    let mut handlers = HashMap::new();
++    let mut registry = ToolRegistry::default();
++    assert!(
++        append_mcp_tools(
++            &tools,
++            &config,
++            false,
++            &generic,
++            false,
++            &mut handlers,
++            &mut registry,
++        )
++        .is_empty()
++    );
++    assert_eq!(
++        append_mcp_tools(
++            &tools,
++            &config,
++            true,
++            &generic,
++            false,
++            &mut handlers,
++            &mut registry,
++        ),
++        HashSet::from([calendar.canonical_tool_name()])
++    );
++}
++
++#[tokio::test]
++async fn personal_application_exposure_requires_its_own_backend_principal() {
++    let config = test_config().await;
++    let mut runtime = application_runtime_config(&config);
++    let server = runtime
++        .application_apps
++        .as_ref()
++        .expect("application")
++        .registration()
++        .clone();
++    let proof = make_mcp_tool(
++        CODEX_APPS_MCP_SERVER_NAME,
++        "search",
++        "mcp__codex_apps",
++        "search",
++        None,
++        None,
++    );
++    for (auth, expected) in [
++        (
++            codex_login::CodexAuth::from_api_key("model-only-key"),
++            false,
++        ),
++        (
++            codex_login::CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++            true,
++        ),
++    ] {
++        runtime.application_apps = Some(Arc::new(codex_mcp::ApplicationApps::chatgpt(
++            server.clone(),
++            codex_login::AuthManager::from_auth_for_testing(auth),
++        )));
++        let mut handlers = HashMap::new();
++        let mut registry = ToolRegistry::default();
++        let names = append_mcp_tools(
++            std::slice::from_ref(&proof),
++            &config,
++            false,
++            &runtime,
++            false,
++            &mut handlers,
++            &mut registry,
++        );
++        assert_eq!(names.contains(&proof.canonical_tool_name()), expected);
++    }
++}
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 95c339c24ccc299aae7440a97992d3dbce768746..7f38777d3771a00f4098297bfd96fbbb60c90446 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -154,7 +154,6 @@ pub(crate) async fn build_tool_router(
+         mcp,
+         &turn_context.config,
+         apps_enabled,
+-        &mcp.config().mcp_server_catalog,
+         model_info.supports_search_tool,
+         &mut registry,
+     );

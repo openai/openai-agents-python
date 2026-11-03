@@ -11,6 +11,7 @@ concurrency:
 jobs:
   readiness:
     name: Release readiness
+    if: github.repository == 'openai/openai-agents-python'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

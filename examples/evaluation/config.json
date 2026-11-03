@@ -1,0 +1,6 @@
+{
+  "model": "gpt-5.1",
+  "instructions": "Use lookup exactly once for the code in the user's request. Reply with only the returned catalog value, including UNKNOWN for missing codes.",
+  "reasoning_effort": "low",
+  "timeout_seconds": 60
+}

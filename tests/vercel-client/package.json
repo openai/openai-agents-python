@@ -1,0 +1,12 @@
+{
+  "name": "agents-sdk-vercel-client-tests",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "ai": "6.0.315",
+    "zod": "4.6.7"
+  }
+}

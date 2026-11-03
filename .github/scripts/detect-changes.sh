@@ -10,6 +10,12 @@ if [ -z "${GITHUB_OUTPUT:-}" ]; then
   exit 1
 fi
 
+# A manual verification run checks the complete tree without authorizing deployment.
+if [[ "${GITHUB_EVENT_NAME:-}" = workflow_dispatch && ( "$mode" = code || "$mode" = docs ) ]]; then
+  echo "run=true" >> "$GITHUB_OUTPUT"
+  exit 0
+fi
+
 # Unknown changes require checks, but cannot authorize deployment.
 unknown_changes() {
   echo "Unable to determine changed files." >&2
@@ -23,6 +29,43 @@ unknown_changes() {
 
 if [[ "$mode" = docs-only || "$mode" = docs-deploy ]] && { [ -z "$base_sha" ] || [ -z "$head_sha" ]; }; then
   unknown_changes
+fi
+
+# Reuse the same immutable-object fetch in both full and shallow checkouts.
+ensure_commit() {
+  local sha="$1"
+  if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+    git fetch --no-tags --depth=1 origin "$sha" || true
+  fi
+  if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
+    unknown_changes
+  fi
+}
+
+# GitHub can update a PR merge ref after the event's base SHA was captured.
+# Count changes against the target used by that exact merge, including resolution
+# edits. Push, merge-group, local calls and deployment modes keep their event range.
+if [[ ( "$mode" = code || "$mode" = docs ) &&
+      "${GITHUB_EVENT_NAME:-}" = pull_request &&
+      "${GITHUB_REF:-}" =~ ^refs/pull/[0-9]+/merge$ &&
+      "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ &&
+      "$head_sha" = "$GITHUB_SHA" ]]; then
+  ensure_commit "$head_sha"
+  # Raw headers retain parents even when rev-parse HEAD^1 is hidden by depth=1.
+  if ! commit="$(git cat-file commit "$head_sha")"; then
+    unknown_changes
+  fi
+  parents=()
+  while IFS= read -r line; do
+    [ -n "$line" ] || break
+    if [[ "$line" = "parent "* ]]; then
+      parents+=("${line#parent }")
+    fi
+  done <<< "$commit"
+  if [ "${#parents[@]}" -ne 2 ]; then
+    unknown_changes
+  fi
+  base_sha="${parents[0]}"
 fi
 
 if [ -z "$head_sha" ]; then
@@ -47,12 +90,7 @@ if [ "$base_sha" = "0000000000000000000000000000000000000000" ]; then
 fi
 
 for sha in "$base_sha" "$head_sha"; do
-  if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
-    git fetch --no-tags --depth=1 origin "$sha" || true
-  fi
-  if ! git cat-file -e "$sha^{commit}" 2>/dev/null; then
-    unknown_changes
-  fi
+  ensure_commit "$sha"
 done
 
 changed_files=$(mktemp)
@@ -76,10 +114,10 @@ fi
 
 case "$mode" in
   code)
-    pattern='^(\.github/release/|src/|tests/|integration_tests/|examples/|docs/scripts/|\.agents/skills/(code-change-verification|examples-auto-run|examples-run-analysis|integration-tests)/|\.github/scripts/|\.github/workflows/(tests|docs|publish|repo-skills|release-please|release-candidate|release-readiness|release-readiness-refresh)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
+    pattern='^(docs/(.*\.md|sdk/topics\.json)$|README\.md$|mkdocs\.yml$|\.github/release/|src/|tests/|integration_tests/|examples/|packages/codex/|\.github/actions/|\.agents/skills/code-change-verification/|\.github/scripts/|\.github/workflows/(tests|codex-python|docs|publish|repo-skills|release-please|release-candidate|release-readiness|release-readiness-refresh)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
   docs)
-    pattern='^(docs/|mkdocs\.yml$|uv\.lock$|\.github/workflows/docs\.yml$)'
+    pattern='^(docs/|mkdocs\.yml$|uv\.lock$|\.github/workflows/(docs|tests)\.yml$)'
     ;;
   docs-only)
     pattern="$docs_pattern"

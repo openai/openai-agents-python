@@ -1,1194 +1,938 @@
+"""Native agent declarations and one-shot convenience methods."""
+
 from __future__ import annotations
 
 import asyncio
-import contextvars
-import copy
-import dataclasses
-import inspect
-from collections.abc import AsyncGenerator, Awaitable, Callable, Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass, field
-from functools import wraps
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, cast
+import importlib
+import json
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextvars import ContextVar
+from copy import copy
+from dataclasses import FrozenInstanceError, dataclass, field, replace
+from threading import RLock
+from types import MappingProxyType, TracebackType
+from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
 
-from openai.types.responses.response_prompt_param import ResponsePromptParam
-from pydantic import BaseModel, TypeAdapter, ValidationError
-from typing_extensions import NotRequired, TypedDict
-
-from . import _debug
-from ._tool_identity import get_tool_approval_item_call_id
-from .agent_output import AgentOutputSchemaBase
-from .agent_tool_input import (
-    AgentAsToolInput,
-    StructuredToolInputBuilder,
-    build_structured_input_schema_info,
-    resolve_agent_tool_input,
-)
-from .agent_tool_state import (
-    get_agent_tool_resume_state,
-    get_agent_tool_state_scope,
-    peek_agent_tool_run_result,
-    record_agent_tool_resume_state,
-    record_agent_tool_run_result,
-    set_agent_tool_state_scope,
-)
-from .exceptions import ModelBehaviorError, UserError
-from .guardrail import InputGuardrail, OutputGuardrail
-from .handoffs import Handoff
-from .logger import log_model_and_tool_action_error, logger
-from .mcp import MCPUtil
-from .model_settings import ModelSettings, _coerce_model_settings, _declared_model_settings_type
-from .models.default_models import (
-    get_default_model_settings,
-)
-from .models.interface import Model
-from .prompts import DynamicPromptFunction, Prompt, PromptUtil
-from .run_context import RunContextWrapper, TContext
-from .strict_schema import ensure_strict_json_schema
-from .tool import (
-    FunctionTool,
-    FunctionToolResult,
-    Tool,
-    ToolErrorFunction,
-    ToolOrigin,
-    ToolOriginType,
-    _build_handled_function_tool_error_handler,
-    _build_wrapped_function_tool,
-    _log_function_tool_invocation,
-    _parse_function_tool_json_input,
-    default_tool_error_function,
-    prune_orphaned_tool_search_tools,
-)
-from .tool_context import ToolContext
-from .util import _transforms
-from .util._asyncio_tasks import gather_with_cancel, run_producer_consumer
-from .util._types import MaybeAwaitable
+from typing_extensions import TypedDict, TypeVar
 
 if TYPE_CHECKING:
-    from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
-
-    from .lifecycle import AgentHooks, RunHooks
-    from .mcp import MCPServer
-    from .memory.session import Session
-    from .result import RunResult, RunResultStreaming
-    from .run import RunConfig
-    from .run_state import RunState
-    from .stream_events import StreamEvent
-
-
-class _AgentToolStreamOverflow(UserError):
-    """The agent tool callback queue exceeded its configured backlog limit."""
-
-
-@dataclass
-class ToolsToFinalOutputResult:
-    is_final_output: bool
-    """Whether this is the final output. If False, the LLM will run again and receive the tool call
-    output.
-    """
-
-    final_output: Any | None = None
-    """The final output. Can be None if `is_final_output` is False, otherwise must match the
-    `output_type` of the agent.
-    """
-
-
-ToolsToFinalOutputFunction: TypeAlias = Callable[
-    [RunContextWrapper[TContext], list[FunctionToolResult]],
-    MaybeAwaitable[ToolsToFinalOutputResult],
-]
-"""A function that takes a run context and a list of tool results, and returns a
-`ToolsToFinalOutputResult`.
-"""
-
-
-_mcp_handoff_snapshot: contextvars.ContextVar[
-    tuple[object, tuple[Handoff[Any, Any], ...]] | None
-] = contextvars.ContextVar("mcp_handoff_snapshot", default=None)
-
-
-def _validate_codex_tool_name_collisions(tools: list[Tool]) -> None:
-    codex_tool_names = {
-        tool.name
-        for tool in tools
-        if isinstance(tool, FunctionTool) and bool(getattr(tool, "_is_codex_tool", False))
-    }
-    if not codex_tool_names:
-        return
-
-    name_counts: dict[str, int] = {}
-    for tool in tools:
-        tool_name = getattr(tool, "name", None)
-        if isinstance(tool_name, str) and tool_name:
-            name_counts[tool_name] = name_counts.get(tool_name, 0) + 1
-
-    duplicate_codex_names = sorted(
-        name for name in codex_tool_names if name_counts.get(name, 0) > 1
+    from ._function_tools import Tool
+    from .executor import Environment, EnvironmentSource
+    from .input import UserInput
+    from .native_agents import NativeAgents
+    from .schema import OutputSpec
+    from .session import (
+        Completed,
+        Session,
+        _BeforeStep,
+        _EnvironmentLease,
+        _InteractionHandler,
+        _OpeningOwner,
     )
-    if duplicate_codex_names:
-        raise UserError(
-            "Duplicate Codex tool names found: "
-            + ", ".join(duplicate_codex_names)
-            + ". Provide a unique codex_tool(name=...) per tool instance."
-        )
+    from .state import LocalStorage, SessionState
+    from .tools import ToolRef
+    from .turn import Turn
+
+ContextT = TypeVar("ContextT", default=None)
+OutputT = TypeVar("OutputT", default=str)
+SessionContextT = TypeVar("SessionContextT")
+NewOutputT = TypeVar("NewOutputT")
+TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
+TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
+_ResultT = TypeVar("_ResultT")
 
 
-class AgentToolStreamEvent(TypedDict):
-    """Streaming event emitted when an agent is invoked as a tool."""
+class _SyncRun:
+    """Own a sync loop until its last deferred Environment can retire."""
 
-    event: StreamEvent
-    """The streaming event from the nested agent run."""
+    def __init__(self) -> None:
+        self.loop = asyncio.new_event_loop()
+        self.deferred = 0
+        self.lock = RLock()
 
-    agent: Agent[Any]
-    """The nested agent emitting the event."""
-
-    tool_call: ResponseFunctionToolCall | None
-    """The originating tool call, if available."""
-
-
-class StopAtTools(TypedDict):
-    stop_at_tool_names: list[str]
-    """A list of tool names, any of which will stop the agent from running further."""
-
-
-class MCPConfig(TypedDict):
-    """Configuration for MCP servers."""
-
-    convert_schemas_to_strict: NotRequired[bool]
-    """If True, we will attempt to convert the MCP schemas to strict-mode schemas. This is a
-    best-effort conversion, so some schemas may not be convertible. Defaults to False.
-    """
-
-    failure_error_function: NotRequired[ToolErrorFunction | None]
-    """Optional function to convert MCP tool failures into model-visible messages. If explicitly
-    set to None, tool errors will be raised instead. If unset, defaults to
-    default_tool_error_function.
-    """
-
-    include_server_in_tool_names: NotRequired[bool]
-    """If True, local MCP tools are exposed with server-prefixed public names to avoid name
-    collisions across multiple MCP servers. Defaults to False.
-    """
-
-
-def _initial_model_settings_for_model(model: str | Model | None) -> ModelSettings:
-    if model is None:
-        return get_default_model_settings()
-    if isinstance(model, str):
-        return get_default_model_settings(model)
-    return ModelSettings()
-
-
-@wraps(get_default_model_settings)
-def _default_agent_model_settings(model: str | None = None) -> ModelSettings:
-    """Preserve the default factory's value and signature while recording SDK-owned defaults."""
-    settings = get_default_model_settings(model)
-    settings.__dict__["_agent_default_settings"] = True
-    return settings
-
-
-@dataclass
-class AgentBase(Generic[TContext]):
-    """Base class for `Agent` and `RealtimeAgent`."""
-
-    name: str
-    """The name of the agent."""
-
-    handoff_description: str | None = None
-    """A description of the agent. This is used when the agent is used as a handoff, so that an
-    LLM knows what it does and when to invoke it.
-    """
-
-    tools: list[Tool] = field(default_factory=list)
-    """A list of tools that the agent can use."""
-
-    mcp_servers: list[MCPServer] = field(default_factory=list)
-    """A list of [Model Context Protocol](https://modelcontextprotocol.io/) servers that
-    the agent can use. Every time the agent runs, it will include tools from these servers in the
-    list of available tools.
-
-    NOTE: You are expected to manage the lifecycle of these servers. Specifically, you must call
-    `server.connect()` before passing it to the agent, and `server.cleanup()` when the server is no
-    longer needed. Consider using `MCPServerManager` from `agents.mcp` to keep connect/cleanup
-    in the same task.
-    """
-
-    mcp_config: MCPConfig = field(default_factory=lambda: MCPConfig())
-    """Configuration for MCP servers."""
-
-    def __setattr__(self, name: str, value: Any) -> None:
-        if name == "tools":
-            from .run_internal.agent_tool_configuration import assign_agent_tools
-
-            assign_agent_tools(self, value)
-        else:
-            object.__setattr__(self, name, value)
-
-    async def _get_mcp_tool_reserved_names(
-        self, run_context: RunContextWrapper[TContext]
-    ) -> set[str]:
-        reserved_tool_names = {tool.name for tool in self.tools if isinstance(tool, FunctionTool)}
-
-        snapshot = _mcp_handoff_snapshot.get()
-        if snapshot is not None and snapshot[0] is self:
-            reserved_tool_names.update(handoff.tool_name for handoff in snapshot[1])
-            return reserved_tool_names
-
-        async def _check_handoff_enabled(handoff_obj: Handoff[Any, Any]) -> bool:
-            attr = handoff_obj.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(run_context, self)
-            if inspect.isawaitable(res):
-                return bool(await res)
-            return bool(res)
-
-        for handoff_item in getattr(self, "handoffs", ()):
-            if isinstance(handoff_item, Handoff):
-                if await _check_handoff_enabled(handoff_item):
-                    reserved_tool_names.add(handoff_item.tool_name)
-            elif isinstance(handoff_item, AgentBase):
-                reserved_tool_names.add(Handoff.default_tool_name(handoff_item))
-        return reserved_tool_names
-
-    @contextmanager
-    def _use_mcp_handoff_snapshot(
-        self,
-        enabled_handoffs: Sequence[Handoff[Any, Any]],
-    ) -> Iterator[None]:
-        """Keep MCP reserved-name generation on one enabled-handoff snapshot."""
-        token = _mcp_handoff_snapshot.set((self, tuple(enabled_handoffs)))
+    def _close_if_idle(self) -> None:
+        if self.deferred:
+            return
         try:
-            yield
+            # Match asyncio.run's task, async generator and executor shutdown.
+            pending = asyncio.all_tasks(self.loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                for task in pending:
+                    if not task.cancelled() and task.exception() is not None:
+                        self.loop.call_exception_handler(
+                            {
+                                "message": "unhandled exception during run_sync shutdown",
+                                "exception": task.exception(),
+                                "task": task,
+                            }
+                        )
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.run_until_complete(self.loop.shutdown_default_executor())
         finally:
-            _mcp_handoff_snapshot.reset(token)
+            self.loop.close()
 
-    async def get_mcp_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
-        """Fetches the available tools from the MCP servers."""
-        from ._public_agent import get_public_agent
+    def run(self, operation: Awaitable[_ResultT]) -> _ResultT:
+        # Other providers from this sync call may be closed on another thread.
+        # Their on-demand recovery must wait until this call stops driving its loop.
+        with self.lock:
+            token = _sync_run.set(self)
+            try:
+                asyncio.set_event_loop(self.loop)
+                return self.loop.run_until_complete(operation)
+            finally:
+                _sync_run.reset(token)
+                try:
+                    self._close_if_idle()
+                finally:
+                    asyncio.set_event_loop(None)
 
-        convert_schemas_to_strict = self.mcp_config.get("convert_schemas_to_strict", False)
-        failure_error_function = self.mcp_config.get(
-            "failure_error_function", default_tool_error_function
+    def recover(self, operation: Callable[[], Awaitable[None]]) -> None:
+        with self.lock:
+            # Concurrent closes may already have joined every deferred manager.
+            if self.loop.is_closed():
+                return
+            try:
+                asyncio.set_event_loop(self.loop)
+                self.loop.run_until_complete(operation())
+            finally:
+                try:
+                    self._close_if_idle()
+                finally:
+                    asyncio.set_event_loop(None)
+
+
+_sync_run: ContextVar[_SyncRun | None] = ContextVar("agents_sync_run", default=None)
+
+
+class ModelSettings(TypedDict, total=False, closed=True):
+    """Native model overrides. Omission preserves the native default.
+
+    ``service_tier=None`` clears the override. These settings select model
+    behavior; they do not grant tools, filesystem access, or network access.
+    """
+
+    reasoning_effort: str
+    reasoning_summary: str
+    service_tier: str | None
+
+
+def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
+    if settings is None:
+        return {}
+    unknown = settings.keys() - ModelSettings.__annotations__.keys()
+    if unknown:
+        raise ValueError(f"Unsupported model setting(s): {sorted(unknown)}")
+    return settings.copy()
+
+
+@dataclass(frozen=True, kw_only=True)
+class NativeProvider:
+    """A native Responses connection. Construction performs no I/O.
+
+    An omitted key uses ``OPENAI_API_KEY`` when the session opens. Credentials
+    and connection URLs are excluded from the descriptor's representation.
+    With ``supports_websockets=None``, the SDK permits WebSockets only when
+    ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
+    to permit WebSockets for a compatible custom provider, or ``False`` to use
+    HTTP. The native runtime selects the final transport when WebSockets are
+    enabled and owns retries.
+
+    Explicit providers are borrowed by Sessions. Close those Sessions before
+    leaving the provider's async context or awaiting ``aclose()``.
+    """
+
+    base_url: str | None = field(default=None, repr=False)
+    api_key: str | None = field(default=None, repr=False)
+    supports_websockets: bool | None = None
+
+    def __post_init__(self) -> None:
+        for name in ("base_url", "api_key"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"{name} must be a non-empty string when provided")
+        if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
+            raise ValueError("supports_websockets must be a bool or None")
+
+    @property
+    def _websockets_enabled(self) -> bool:
+        return (
+            self.supports_websockets
+            if self.supports_websockets is not None
+            else self.base_url is None
         )
-        include_server_in_tool_names = self.mcp_config.get("include_server_in_tool_names", False)
-        reserved_tool_names = (
-            await self._get_mcp_tool_reserved_names(run_context)
-            if include_server_in_tool_names
-            else None
-        )
-        return await MCPUtil.get_all_function_tools(
-            self.mcp_servers,
-            convert_schemas_to_strict,
-            run_context,
-            get_public_agent(self),
-            failure_error_function=failure_error_function,
-            include_server_in_tool_names=include_server_in_tool_names,
-            reserved_tool_names=reserved_tool_names,
-        )
 
-    async def get_all_tools(self, run_context: RunContextWrapper[TContext]) -> list[Tool]:
-        """All agent tools, including MCP tools and function tools."""
-        from ._public_agent import get_public_agent
-        from .run_internal.agent_tool_configuration import (
-            register_agent_tool_configuration,
-            snapshot_agent_tools,
-        )
+    def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
+        reduction = super().__reduce_ex__(protocol)
+        if not isinstance(reduction, tuple) or len(reduction) < 3:
+            return reduction
+        state = reduction[2]
+        dictionary = state[0] if isinstance(state, tuple) and state else state
+        if not isinstance(dictionary, dict):
+            return reduction
+        # Copy settings and the closed fence, never another descriptor's resource.
+        dictionary = dictionary.copy()
+        dictionary.pop("_transport", None)
+        dictionary.pop("_deferred_openings", None)
+        state = (dictionary, *state[1:]) if isinstance(state, tuple) else dictionary
+        return (*reduction[:2], state, *reduction[3:])
 
-        register_agent_tool_configuration(get_public_agent(self))
-        tools = snapshot_agent_tools(self)
-        mcp_tools = await self.get_mcp_tools(run_context)
+    def _acquire_lease(self) -> tuple[Any, Any, Any]:
+        # This lock guards only synchronous publication. It is never held across
+        # an await and carries no event-loop affinity.
+        with _PROVIDER_LOCK:
+            if vars(self).get("_closed", False):
+                raise RuntimeError("NativeProvider is closed")
+            native = importlib.import_module("agents._native")
+            transport = vars(self).get("_transport")
+            if transport is None:
+                transport = native.NativeProviderOwner()
+                object.__setattr__(self, "_transport", transport)
+            return native, transport, transport.acquire()
 
-        async def _check_tool_enabled(tool: Tool) -> bool:
-            if not isinstance(tool, FunctionTool):
-                return True
+    def _defer_opening(self, opening: _OpeningOwner, environment: _EnvironmentLease) -> None:
+        # Failed publication is no longer an opening Session. Both its native
+        # reservations and its Python manager now belong to provider recovery.
+        with _PROVIDER_LOCK:
+            opening.defer_environment(environment)
+            pending = vars(self).get("_deferred_openings")
+            if pending is None:
+                pending = {}
+                object.__setattr__(self, "_deferred_openings", pending)
+            if opening not in pending:
+                environment._sync_run = _sync_run.get()
+                if environment._sync_run is not None:
+                    environment._sync_run.deferred += 1
+            pending[opening] = environment
 
-            attr = tool.is_enabled
-            if isinstance(attr, bool):
-                return attr
-            res = attr(run_context, get_public_agent(self))
-            if inspect.isawaitable(res):
-                return bool(await res)
-            return bool(res)
+    async def aclose(self) -> None:
+        """Release remaining acquisitions and fence this Provider permanently.
 
-        results = await gather_with_cancel(*(_check_tool_enabled(t) for t in tools))
-        enabled: list[Tool] = [t for t, ok in zip(tools, results, strict=False) if ok]
-        all_tools: list[Tool] = prune_orphaned_tool_search_tools([*mcp_tools, *enabled])
-        _validate_codex_tool_name_collisions(all_tools)
-        snapshot_agent_tools(get_public_agent(self))
-        return all_tools
+        Open or opening Sessions cause an immediate error. Close them first.
+        Closing an explicitly shared provider fences every Agent that uses it.
+        Cancellation joins the same native retirement before it propagates.
+        This also recovers a managed Environment retained after a failed
+        run_sync opening, in the task that originally entered its manager.
+        """
+        from .session import _close_after_error, _join
+
+        with _PROVIDER_LOCK:
+            if vars(self).get("_closed", False):
+                return
+            transport = vars(self).get("_transport")
+            if transport is None:
+                object.__setattr__(self, "_closed", True)
+                return
+            deferred = tuple(vars(self).get("_deferred_openings", {}).items())
+            # Admission and the close fence happen before any application exit.
+            # Deferred reservations are native orphans; other openings stay live.
+            native_closing = transport.close()
+            if deferred:
+
+                async def release_openings() -> None:
+                    for opening, environment in deferred:
+
+                        async def release(
+                            opening: _OpeningOwner = opening,
+                            environment: _EnvironmentLease = environment,
+                        ) -> None:
+                            try:
+                                await opening.fail_environment(environment)
+                            finally:
+                                # Native retirement permits exit; only the owner
+                                # task proves that manager cleanup has completed.
+                                if environment._owner.done():
+                                    with _PROVIDER_LOCK:
+                                        removed = (
+                                            vars(self)
+                                            .get("_deferred_openings", {})
+                                            .pop(opening, None)
+                                        )
+                                        if removed is not None and removed._sync_run is not None:
+                                            removed._sync_run.deferred -= 1
+
+                        owner = environment._sync_run
+                        if owner is not None and owner.loop is not asyncio.get_running_loop():
+                            await _join(
+                                asyncio.create_task(asyncio.to_thread(owner.recover, release))
+                            )
+                        else:
+                            await release()
+
+                async def close_with_openings() -> None:
+                    try:
+                        await native_closing
+                    except BaseException as error:
+                        # A home removal error alone must not strand a manager.
+                        # fail_environment separately proves its resource join.
+                        await _close_after_error(error, release_openings)
+                        raise
+                    await release_openings()
+
+                operation = close_with_openings()
+            else:
+                operation = native_closing
+
+        pending = asyncio.ensure_future(operation)
+        try:
+            await _join(pending)
+        finally:
+            if pending.done() and not pending.cancelled() and pending.exception() is None:
+                with _PROVIDER_LOCK:
+                    object.__setattr__(self, "_closed", True)
+                    object.__setattr__(self, "_transport", None)
+
+    async def __aenter__(self) -> NativeProvider:
+        with _PROVIDER_LOCK:
+            if vars(self).get("_closed", False):
+                raise RuntimeError("NativeProvider is closed")
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        if exc is None:
+            await self.aclose()
+        else:
+            from .session import _close_after_error
+
+            await _close_after_error(exc, self.aclose)
 
 
-@dataclass
-class Agent(AgentBase, Generic[TContext]):
-    """An agent is an AI model configured with instructions, tools, guardrails, handoffs and more.
+_PROVIDER_LOCK = RLock()
 
-    We strongly recommend passing `instructions`, which is the "system prompt" for the agent. In
-    addition, you can pass `handoff_description`, which is a human-readable description of the
-    agent, used when the agent is used inside tools/handoffs.
 
-    Agents are generic on the context type. The context is a (mutable) object you create. It is
-    passed to tool functions, handoffs, guardrails, etc.
+@dataclass(init=False, eq=False, repr=False)
+class Agent(Generic[ContextT, OutputT]):
+    """Declare a native agent without starting a runtime or connection.
 
-    See `AgentBase` for base parameters that are shared with `RealtimeAgent`s.
+    Declaration fields are immutable. Construct a new Agent to change defaults;
+    tools and model settings are captured at construction. A session captures
+    effective overrides when it opens. The native runtime owns
+    provider requests, the model loop, admitted calls, and conversation history.
+    Python functions execute in the application and use its own authority.
+    Include NativeAgents in tools to grant native child agents at opening.
+
+    ``programmatic_tool_calling=True`` also permits native JavaScript cells to call the declared
+    function and MCP tools. MCP result transforms run before those cells
+    receive results. The cells use the SDK's bundled host and do not grant
+    shell tools or a local workspace. Pass Environment to session() for
+    remote execution. Use on_interaction or a Session to answer manual requests made by code cells.
     """
 
-    instructions: (
-        str
-        | Callable[
-            [RunContextWrapper[TContext], Agent[TContext]],
-            MaybeAwaitable[str],
-        ]
-        | None
-    ) = None
-    """The instructions for the agent. Will be used as the "system prompt" when this agent is
-    invoked. Describes what the agent should do, and how it responds.
+    instructions: str
+    name: str | None
+    tools: tuple[Tool[ContextT], ...]
+    model: str | None
+    model_settings: ModelSettings
+    provider: NativeProvider | None
+    output_type: OutputSpec[OutputT] | None
+    programmatic_tool_calling: bool
 
-    Can either be a string, or a function that dynamically generates instructions for the agent. If
-    you provide a function, it will be called with the context and the agent instance. It must
-    return a string.
-    """
+    def __setattr__(self, name: str, value: object) -> None:
+        # Freeze declared behavior while retaining application-owned method hooks.
+        if name in self.__dataclass_fields__:
+            raise FrozenInstanceError(f"cannot assign to field {name!r}")
+        object.__setattr__(self, name, value)
 
-    prompt: Prompt | DynamicPromptFunction | None = None
-    """A prompt object (or a function that returns a Prompt). Prompts allow you to dynamically
-    configure the instructions, tools and other config for an agent outside of your code. Only
-    usable with OpenAI models, using the Responses API.
-    """
-
-    handoffs: list[Agent[Any] | Handoff[TContext, Any]] = field(default_factory=list)
-    """Handoffs are sub-agents that the agent can delegate to. You can provide a list of handoffs,
-    and the agent can choose to delegate to them if relevant. Allows for separation of concerns and
-    modularity.
-    """
-
-    model: str | Model | None = None
-    """The model implementation to use when invoking the LLM.
-
-    By default, if not set, the agent will use the default model configured in
-    `agents.models.get_default_model()` (currently "gpt-5.6-luna").
-    """
-
-    model_settings: ModelSettings = field(default_factory=_default_agent_model_settings)
-    """Configures model-specific tuning parameters (e.g. temperature, top_p).
-
-    Accepts a ``ModelSettings`` instance or a dictionary containing its fields.
-    """
-
-    input_guardrails: list[InputGuardrail[TContext]] = field(default_factory=list)
-    """A list of checks that run in parallel to the agent's execution, before generating a
-    response. Runs only if the agent is the first agent in the chain.
-    """
-
-    output_guardrails: list[OutputGuardrail[TContext]] = field(default_factory=list)
-    """A list of checks that run on the final output of the agent, after generating a response.
-    Runs only if the agent produces a final output.
-    """
-
-    output_type: type[Any] | AgentOutputSchemaBase | None = None
-    """The type of the output object. If not provided, the output will be `str`. In most cases,
-    you should pass a regular Python type (e.g. a dataclass, Pydantic model, TypedDict, etc).
-    You can customize this in two ways:
-    1. If you want non-strict schemas, pass `AgentOutputSchema(MyClass, strict_json_schema=False)`.
-    2. If you want to use a custom JSON schema (i.e. without using the SDK's automatic schema)
-       creation, subclass and pass an `AgentOutputSchemaBase` subclass.
-    """
-
-    hooks: AgentHooks[TContext] | None = None
-    """A class that receives callbacks on various lifecycle events for this agent.
-    """
-
-    tool_use_behavior: (
-        Literal["run_llm_again", "stop_on_first_tool"] | StopAtTools | ToolsToFinalOutputFunction
-    ) = "run_llm_again"
-    """
-    This lets you configure how tool use is handled.
-    - "run_llm_again": The default behavior. Tools are run, and then the LLM receives the results
-        and gets to respond.
-    - "stop_on_first_tool": The output from the first tool call is treated as the final result.
-        In other words, it isn’t sent back to the LLM for further processing but is used directly
-        as the final output.
-    - A StopAtTools object: The agent will stop running if any of the tools listed in
-        `stop_at_tool_names` is called.
-        The final output will be the output of the first matching tool call.
-        The LLM does not process the result of the tool call.
-    - A function: If you pass a function, it will be called with the run context and the list of
-      tool results. It must return a `ToolsToFinalOutputResult`, which determines whether the tool
-      calls result in a final output.
-
-      NOTE: This configuration is specific to FunctionTools. Hosted tools, such as file search,
-      web search, etc. are always processed by the LLM.
-    """
-
-    reset_tool_choice: bool = True
-    """Whether to reset the tool choice to the default value after a tool has been called. Defaults
-    to True. This ensures that the agent doesn't enter an infinite loop of tool usage."""
+    def __delattr__(self, name: str) -> None:
+        if name in self.__dataclass_fields__:
+            raise FrozenInstanceError(f"cannot delete field {name!r}")
+        object.__delattr__(self, name)
 
     if TYPE_CHECKING:
+        # Pyright uses these allocation types to retain defaults and subclasses.
+        # The initializer checks the full call; runtime allocation stays ordinary.
+        @overload
+        def __new__(
+            cls: type[TextAgentT],
+            *args: Any,
+            tools: Sequence[Tool[ContextT]] | None = None,
+            output_type: None = None,
+            **kwargs: Any,
+        ) -> TextAgentT: ...
 
-        def __init__(
-            self,
-            name: str,
-            handoff_description: str | None = None,
-            tools: list[Tool] = ...,
-            mcp_servers: list[MCPServer] = ...,
-            mcp_config: MCPConfig = ...,
-            instructions: (
-                str
-                | Callable[
-                    [RunContextWrapper[TContext], Agent[TContext]],
-                    MaybeAwaitable[str],
-                ]
-                | None
-            ) = None,
-            prompt: Prompt | DynamicPromptFunction | None = None,
-            handoffs: list[Agent[Any] | Handoff[TContext, Any]] = ...,
-            model: str | Model | None = None,
-            model_settings: ModelSettings | dict[str, Any] = ...,
-            input_guardrails: list[InputGuardrail[TContext]] = ...,
-            output_guardrails: list[OutputGuardrail[TContext]] = ...,
-            output_type: type[Any] | AgentOutputSchemaBase | None = None,
-            hooks: AgentHooks[TContext] | None = None,
-            tool_use_behavior: (
-                Literal["run_llm_again", "stop_on_first_tool"]
-                | StopAtTools
-                | ToolsToFinalOutputFunction
-            ) = "run_llm_again",
-            reset_tool_choice: bool = True,
-        ) -> None: ...
+        @overload
+        def __new__(
+            cls: type[TypedAgentT],
+            *args: Any,
+            output_type: OutputSpec[OutputT],
+            tools: Sequence[Tool[ContextT]] | None = None,
+            **kwargs: Any,
+        ) -> TypedAgentT: ...
 
-    def __post_init__(self):
-        from typing import get_origin
+        # Subclasses may supply output_type inside their own initializer.
+        @overload
+        def __new__(cls: type[TypedAgentT], *args: Any, **kwargs: Any) -> TypedAgentT: ...
 
-        if not isinstance(self.name, str):
-            raise TypeError(f"Agent name must be a string, got {type(self.name).__name__}")
+        def __new__(cls, *args: Any, **kwargs: Any) -> Agent[Any, Any]:
+            return object.__new__(cls)
 
-        if self.handoff_description is not None and not isinstance(self.handoff_description, str):
-            raise TypeError(
-                f"Agent handoff_description must be a string or None, "
-                f"got {type(self.handoff_description).__name__}"
-            )
+    @overload
+    def __init__(
+        # Mypy 1.17 needs the class context here to preserve explicit generics
+        # while specializing the default output. Pyright rejects this form.
+        self: Agent[ContextT, str],  # pyright: ignore[reportInvalidTypeVarUse]
+        *,
+        instructions: str,
+        name: str | None = None,
+        tools: Sequence[Tool[ContextT]] | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        provider: NativeProvider | None = None,
+        output_type: None = None,
+        programmatic_tool_calling: bool = False,
+    ) -> None: ...
 
-        if not isinstance(self.tools, list):
-            raise TypeError(f"Agent tools must be a list, got {type(self.tools).__name__}")
-
-        if not isinstance(self.mcp_servers, list):
-            raise TypeError(
-                f"Agent mcp_servers must be a list, got {type(self.mcp_servers).__name__}"
-            )
-
-        if not isinstance(self.mcp_config, dict):
-            raise TypeError(
-                f"Agent mcp_config must be a dict, got {type(self.mcp_config).__name__}"
-            )
-
-        if (
-            self.instructions is not None
-            and not isinstance(self.instructions, str)
-            and not callable(self.instructions)
-        ):
-            raise TypeError(
-                f"Agent instructions must be a string, callable, or None, "
-                f"got {type(self.instructions).__name__}"
-            )
-
-        if (
-            self.prompt is not None
-            and not callable(self.prompt)
-            and not hasattr(self.prompt, "get")
-        ):
-            raise TypeError(
-                f"Agent prompt must be a Prompt, DynamicPromptFunction, or None, "
-                f"got {type(self.prompt).__name__}"
-            )
-
-        if not isinstance(self.handoffs, list):
-            raise TypeError(f"Agent handoffs must be a list, got {type(self.handoffs).__name__}")
-
-        if self.model is not None and not isinstance(self.model, str):
-            from .models.interface import Model
-
-            if not isinstance(self.model, Model):
-                raise TypeError(
-                    f"Agent model must be a string, Model, or None, got {type(self.model).__name__}"
-                )
-
-        self.model_settings = _coerce_model_settings(
-            self.model_settings,
-            parameter_name="Agent model_settings",
-            model_settings_type=_declared_model_settings_type(type(self), "model_settings"),
-        )
-        settings_omitted = self.model_settings.__dict__.get("_agent_default_settings") is True
-        if settings_omitted:
-            self.model_settings = _initial_model_settings_for_model(self.model)
-            self.model_settings.__dict__["_agent_defaults_untouched"] = True
-        # Keep caller assignment and in-place edits from being treated as implicit defaults.
-        self._implicit_model_settings: tuple[ModelSettings, ModelSettings] | None = (
-            (self.model_settings, copy.deepcopy(self.model_settings)) if settings_omitted else None
-        )
-
-        if not isinstance(self.input_guardrails, list):
-            raise TypeError(
-                f"Agent input_guardrails must be a list, got {type(self.input_guardrails).__name__}"
-            )
-
-        if not isinstance(self.output_guardrails, list):
-            raise TypeError(
-                f"Agent output_guardrails must be a list, "
-                f"got {type(self.output_guardrails).__name__}"
-            )
-
-        if self.output_type is not None:
-            from .agent_output import AgentOutputSchemaBase
-
-            if not (
-                isinstance(self.output_type, type | AgentOutputSchemaBase)
-                or get_origin(self.output_type) is not None
-            ):
-                raise TypeError(
-                    f"Agent output_type must be a type, AgentOutputSchemaBase, or None, "
-                    f"got {type(self.output_type).__name__}"
-                )
-
-        if self.hooks is not None:
-            from .lifecycle import AgentHooksBase
-
-            if not isinstance(self.hooks, AgentHooksBase):
-                raise TypeError(
-                    f"Agent hooks must be an AgentHooks instance or None, "
-                    f"got {type(self.hooks).__name__}"
-                )
-
-        if (
-            not (
-                isinstance(self.tool_use_behavior, str)
-                and self.tool_use_behavior in ["run_llm_again", "stop_on_first_tool"]
-            )
-            and not isinstance(self.tool_use_behavior, dict)
-            and not callable(self.tool_use_behavior)
-        ):
-            raise TypeError(
-                f"Agent tool_use_behavior must be 'run_llm_again', 'stop_on_first_tool', "
-                f"StopAtTools dict, or callable, got {type(self.tool_use_behavior).__name__}"
-            )
-
-        if not isinstance(self.reset_tool_choice, bool):
-            raise TypeError(
-                f"Agent reset_tool_choice must be a boolean, "
-                f"got {type(self.reset_tool_choice).__name__}"
-            )
-
-    def clone(self, **kwargs: Any) -> Agent[TContext]:
-        """Make a copy of the agent, with the given arguments changed.
-        Notes:
-            - Uses `dataclasses.replace`, which performs a **shallow copy** and never copies a
-              list attribute such as `tools`, `handoffs`, `mcp_servers`, `input_guardrails`, or
-              `output_guardrails`. Each of those attributes is whatever the merged arguments hold.
-            - An attribute you do not pass arrives as the original agent's own list, so both
-              agents hold that one list and its entries. Appending through either agent, for
-              example `cloned.tools.append(extra_tool)`, therefore also changes the other.
-            - An attribute you do pass is used exactly as given, so it shares a list or an entry
-              with the original agent only where you reused one. `agent.clone(tools=agent.tools)`
-              still shares that list, while `agent.clone(tools=[other_tool])` shares nothing.
-            - To give the clone a list that no other agent holds, pass a new one, for example
-              `agent.clone(tools=[*agent.tools, extra_tool])`. The entries copied into it remain
-              the same objects the original agent holds.
-        Example:
-            ```python
-            new_agent = agent.clone(instructions="New instructions")
-            ```
-        """
-        inherit_implicit_settings = (
-            "model_settings" not in kwargs and self._uses_implicit_model_settings()
-        )
-        if inherit_implicit_settings and "model" in kwargs:
-            kwargs["model_settings"] = _initial_model_settings_for_model(kwargs["model"])
-        if "model_settings" in kwargs:
-            kwargs["model_settings"] = _coerce_model_settings(
-                kwargs["model_settings"],
-                parameter_name="Agent model_settings",
-                model_settings_type=type(self.model_settings),
-                inherited_model_settings=self.model_settings,
-            )
-        cloned = dataclasses.replace(self, **kwargs)
-        if inherit_implicit_settings:
-            cloned.model_settings.__dict__["_agent_defaults_untouched"] = True
-            cloned._implicit_model_settings = (
-                cloned.model_settings,
-                copy.deepcopy(cloned.model_settings),
-            )
-        return cloned
-
-    def _uses_implicit_model_settings(self) -> bool:
-        defaults = self._implicit_model_settings
-        return (
-            defaults is not None
-            and self.model_settings is defaults[0]
-            and self.model_settings.__dict__.get("_agent_defaults_untouched") is True
-            and self.model_settings == defaults[1]
-        )
-
-    def as_tool(
+    @overload
+    def __init__(
         self,
-        tool_name: str | None,
-        tool_description: str | None,
-        custom_output_extractor: (
-            Callable[[RunResult | RunResultStreaming], Awaitable[str]] | None
-        ) = None,
-        is_enabled: bool
-        | Callable[[RunContextWrapper[Any], AgentBase[Any]], MaybeAwaitable[bool]] = True,
-        on_stream: Callable[[AgentToolStreamEvent], MaybeAwaitable[None]] | None = None,
-        run_config: RunConfig | dict[str, Any] | None = None,
-        max_turns: int | None = None,
-        hooks: RunHooks[TContext] | None = None,
-        previous_response_id: str | None = None,
-        conversation_id: str | None = None,
-        session: Session | None = None,
-        failure_error_function: ToolErrorFunction | None = default_tool_error_function,
-        needs_approval: bool
-        | Callable[[RunContextWrapper[Any], dict[str, Any], str], Awaitable[bool]] = False,
-        parameters: type[Any] | None = None,
-        input_builder: StructuredToolInputBuilder | None = None,
-        include_input_schema: bool = False,
-        on_stream_max_pending_events: int | None = 1024,
-    ) -> FunctionTool:
-        """Transform this agent into a tool, callable by other agents.
+        *,
+        instructions: str,
+        name: str | None = None,
+        output_type: OutputSpec[OutputT],
+        tools: Sequence[Tool[ContextT]] | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        provider: NativeProvider | None = None,
+        programmatic_tool_calling: bool = False,
+    ) -> None: ...
 
-        This is different from handoffs in two ways:
-        1. In handoffs, the new agent receives the conversation history. In this tool, the new agent
-           receives generated input.
-        2. In handoffs, the new agent takes over the conversation. In this tool, the new agent is
-           called as a tool, and the conversation is continued by the original agent.
+    def __init__(
+        self,
+        *,
+        instructions: str,
+        name: str | None = None,
+        tools: Sequence[Tool[ContextT]] | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        provider: NativeProvider | None = None,
+        output_type: OutputSpec[OutputT] | None = None,
+        programmatic_tool_calling: bool = False,
+    ) -> None:
+        if not isinstance(instructions, str):
+            raise TypeError("instructions must be a string")
+        if name is not None and not isinstance(name, str):
+            raise TypeError("name must be a string or None")
+        if not isinstance(programmatic_tool_calling, bool):
+            raise TypeError("programmatic_tool_calling must be a bool")
+        if model is not None and not isinstance(model, str):
+            raise TypeError("model must be a string or None")
+        if provider is not None and not isinstance(provider, NativeProvider):
+            raise TypeError("provider must be a NativeProvider or None")
+        object.__setattr__(self, "instructions", instructions)
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "tools", tuple(tools or ()))
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "provider", provider)
+        object.__setattr__(
+            self, "model_settings", MappingProxyType(_copy_model_settings(model_settings))
+        )
+        object.__setattr__(self, "output_type", output_type)
+        object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
 
-        Args:
-            tool_name: The name of the tool. If not provided, the agent's name will be used.
-            tool_description: The description of the tool, which should indicate what it does and
-                when to use it.
-            custom_output_extractor: A function that extracts the output from the agent. If not
-                provided, the final output is used. When output guardrails ran, empty final
-                outputs are preserved; otherwise, empty final outputs fall back to the latest
-                nonempty message or tool output from the nested run. Nested run results expose
-                `agent_tool_invocation` metadata when this agent is invoked via `as_tool()`.
-            is_enabled: Whether the tool is enabled. Can be a bool or a callable that takes the run
-                context and agent and returns whether the tool is enabled. Disabled tools are hidden
-                from the LLM at runtime.
-            on_stream: Optional callback (sync or async) to receive streaming events from the nested
-                agent run. The callback receives an `AgentToolStreamEvent` containing the nested
-                agent, the originating tool call (when available), and each stream event. When
-                provided, the nested agent is executed in streaming mode.
-            on_stream_max_pending_events: Maximum number of events waiting for `on_stream`,
-                excluding the event currently being handled. Defaults to 1024. Use a positive
-                integer to change the limit or None to allow an unlimited backlog. If the queue
-                remains full after giving the handler an opportunity to run, the nested run and
-                callback dispatch are cancelled and the tool fails through `failure_error_function`.
-                This limits pending event count, not event sizes or total run memory. Has no effect
-                when `on_stream` is not provided.
-            failure_error_function: If provided, generate an error message when the tool (agent) run
-                fails. The message is sent to the LLM. If None, the exception is raised instead.
-            needs_approval: Bool or callable to decide if this agent tool should pause for approval.
-            parameters: Structured input type for the tool arguments (dataclass or Pydantic model).
-            input_builder: Optional function to build the nested agent input from structured data.
-            include_input_schema: Whether to include the full JSON schema in structured input.
+    def validate(self) -> None:
+        """Check the declaration without opening a Session.
+
+        Return None on success, or raise the first TypeError or ValueError.
+        Uses the opening checks for tool admission, MCP names and output schema.
+        Context, Environment, effective overrides and native model support can
+        only be checked when a Session opens. This never reads credentials or
+        connects to a provider, executor or MCP server.
         """
+        from .mcp import _tool_names
+        from .schema import _prepare_spec
+        from .session import _split_tools
 
-        if on_stream is not None and not callable(on_stream):
-            raise UserError(
-                "on_stream must be callable or None. Pass run configuration with run_config=... "
-                "instead of as the fifth positional argument."
-            )
-
-        if on_stream_max_pending_events is not None and on_stream_max_pending_events <= 0:
-            raise UserError("on_stream_max_pending_events must be a positive integer or None")
-
-        if run_config is not None:
-            from .run_config import _coerce_run_config
-
-            run_config = _coerce_run_config(run_config)
-
-        def _is_supported_parameters(value: Any) -> bool:
-            if not isinstance(value, type):
-                return False
-            if dataclasses.is_dataclass(value):
-                return True
-            return issubclass(value, BaseModel)
-
-        tool_name_resolved = tool_name or _transforms.transform_string_function_style(self.name)
-        tool_description_resolved = tool_description or ""
-        has_custom_parameters = parameters is not None
-        include_schema = bool(include_input_schema and has_custom_parameters)
-        should_capture_tool_input = bool(
-            has_custom_parameters or include_schema or input_builder is not None
+        python_tools, mcp_tools, _ = _split_tools(self.tools, self.programmatic_tool_calling)
+        _tool_names(mcp_tools)
+        native = importlib.import_module("agents._native")
+        native._validate_python_tool_declarations(
+            json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
         )
+        _prepare_spec(self.output_type)
 
-        if parameters is None:
-            params_adapter = TypeAdapter(AgentAsToolInput)
-            params_schema = ensure_strict_json_schema(params_adapter.json_schema())
+    def with_output_type(self, output_type: OutputSpec[NewOutputT]) -> Agent[ContextT, NewOutputT]:
+        """Return a declaration variant with the same settings and a new output.
+
+        To restore a per-turn manual override, pass the corresponding variant
+        to session(state=...). Current tools, context and provider still apply.
+        Application subclass hooks and their policy references are retained;
+        the application initializer is not run again.
+        """
+        variant = copy(self)
+        object.__setattr__(variant, "output_type", output_type)
+        return cast("Agent[ContextT, NewOutputT]", variant)
+
+    @overload
+    def session(
+        self: Agent[None, OutputT],
+        *,
+        context: None = None,
+        state: SessionState | None = None,
+        storage: LocalStorage | None = None,
+        resume: str | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[None] | None = None,
+        tools: Sequence[Tool[None]] | None = None,
+    ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
+
+    @overload
+    def session(
+        self: Agent[object, OutputT],
+        *,
+        context: object = None,
+        state: SessionState | None = None,
+        storage: LocalStorage | None = None,
+        resume: str | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[object] | None = None,
+        tools: Sequence[Tool[object]] | None = None,
+    ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
+
+    @overload
+    def session(
+        self,
+        *,
+        context: ContextT,
+        state: SessionState | None = None,
+        storage: LocalStorage | None = None,
+        resume: str | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[ContextT] | None = None,
+        tools: Sequence[Tool[ContextT]] | None = None,
+    ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
+
+    @asynccontextmanager
+    async def session(
+        self: Agent[SessionContextT, OutputT],
+        *,
+        context: SessionContextT | None = None,
+        state: SessionState | None = None,
+        storage: LocalStorage | None = None,
+        resume: str | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[SessionContextT] | None = None,
+        tools: Sequence[Tool[SessionContextT]] | None = None,
+    ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
+        """Open one conversation and close all runtime work on context exit.
+
+        An explicit provider here overrides this Agent's provider. Both are
+        borrowed; the application closes them. When neither is supplied, this
+        Session creates and closes its own provider, including on opening failure.
+        `model=None` inherits the Agent model. Present model_settings keys
+        override Agent defaults; only a present `service_tier=None` clears a
+        value. Other omitted keys keep the Agent or native defaults.
+
+        Omitted ``tools`` or ``tools=None`` uses this Agent's tools.
+        A sequence replaces the finite opening definitions and defaults for
+        this Session. An empty sequence admits none. Current callbacks and MCP
+        connection details are captured at opening. Fresh and idle-restored
+        Sessions acquire external MCP resources when an operation selecting
+        them starts. Startup errors are reported on that Turn. Restoring an
+        already-admitted pending manual turn readies its selected resources
+        before exposing its replies.
+
+        ``environment`` belongs to this session, so one Agent can use different
+        application-owned executors for different users. A supplied Environment is
+        borrowed. A standard async context manager yielding an Environment
+        enters and exits in one SDK lease task. Native work closes before exit,
+        including on opening failure. Lease-local ContextVar changes stay in
+        that task. Restore uses only the supplied current environment and roots;
+        checkpoints contain no credentials.
+
+        With ``state``, restore an idle or settled manual native checkpoint
+        using the effective provider, current tools, and application context. Tool declarations and
+        instructions must match the saved conversation. Saved model settings
+        take precedence over this Agent's model settings. Non-None model or
+        model_settings overrides, including an empty mapping, are rejected with
+        state. Use update(model=...) on the restored Session after it becomes idle.
+        Live submission handles
+        and workspace files do not transfer to the restored Session. Each restore
+        owns isolated native storage; applications coordinate shared state files.
+        Programmatic tool calling uses this Agent's current declaration, not a saved setting;
+        enabling it on restore requires ``programmatic_tool_calling=True`` again.
+        Load checkpoints only from trusted application storage: their history
+        includes instructions. Unverifiable histories are rejected.
+
+        With ``storage=LocalStorage(path)``, use Core's native local storage.
+        Retain Session.id and supply ``resume=id`` in a later process to reopen
+        the same conversation. This requires the current tools, context and
+        provider. Missing tool receipts are rejected as unknown effects, not
+        replayed. Local storage and portable ``state`` cannot be combined.
+        """
+        from .session import Session, _close_after_error
+
+        session = await Session[SessionContextT, OutputT]._open(
+            self,
+            context=context,
+            state=state,
+            storage=storage,
+            resume=resume,
+            environment=environment,
+            provider=provider,
+            model=model,
+            model_settings=model_settings,
+            tool_selection=tools,
+        )
+        try:
+            yield session
+        except BaseException as error:
+            lease = session._environment_lease
+            await _close_after_error(error, session._exit_scope)
+            if lease is not None:
+                lease.raise_if_interrupted(error)
+            raise
         else:
-            if not _is_supported_parameters(parameters):
-                raise TypeError("Agent tool parameters must be a dataclass or Pydantic model type.")
-            params_adapter = TypeAdapter(parameters)
-            params_schema = ensure_strict_json_schema(params_adapter.json_schema())
+            lease = session._environment_lease
+            try:
+                await session._exit_scope()
+            except BaseException as error:
+                if lease is not None:
+                    lease.raise_if_interrupted(error)
+                raise
 
-        schema_info = build_structured_input_schema_info(
-            params_schema,
-            include_json_schema=include_schema,
+    @overload
+    async def run(
+        self: Agent[None, OutputT],
+        input: UserInput | None,
+        *,
+        context: None = None,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[None] | None = None,
+        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None = None,
+        before_step: _BeforeStep[None] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]: ...
+
+    @overload
+    async def run(
+        self: Agent[object, OutputT],
+        input: UserInput | None,
+        *,
+        context: object = None,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[object] | None = None,
+        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None = None,
+        before_step: _BeforeStep[object] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]: ...
+
+    @overload
+    async def run(
+        self,
+        input: UserInput | None,
+        *,
+        context: ContextT,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[ContextT] | None = None,
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        | None = None,
+        before_step: _BeforeStep[ContextT] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]: ...
+
+    async def run(
+        self: Agent[SessionContextT, OutputT],
+        input: UserInput | None,
+        *,
+        context: SessionContextT | None = None,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[SessionContextT] | None = None,
+        tools: Sequence[
+            ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents
+        ]
+        | None = None,
+        before_step: _BeforeStep[SessionContextT] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]:
+        """Run one submission through a Session and close it on completion.
+
+        provider, model, and model_settings follow the same precedence and
+        restore restrictions as session(). An implicit provider is retired when
+        the run closes, including failure and cancellation.
+
+        on_interaction receives a live request and returns request.reply(value),
+        directly or through an awaitable. The SDK validates and delivers it.
+        For approvals, use reply("allow_once") or reply("deny"). For forms,
+        use reply(values); reply(None) declines a form or URL request.
+        Native replies acknowledge enqueue only. Direct Session callers use
+        request.respond/decline. Handlers may run concurrently; synchronous
+        handlers run in worker threads. The SDK joins them before closing.
+        Without a handler, a plain or native-output Python/manual-only run can complete or
+        raise InteractionRequired with a checkpoint at a settled manual call.
+        Other interactive combinations require a handler or Agent.session().
+
+        Pass state to restore with current bindings. For a supported pending
+        manual checkpoint, input=None resumes the existing turn. Idle state
+        needs input for a new turn. return_state=True captures a successful
+        state before close; save_state restrictions and failures still apply.
+        """
+        from .schema import PromptedOutput
+        from .session import InteractionRequired, NativeError, _split_tools
+        from .state import SessionState
+        from .tools import WebSearch
+
+        if on_interaction is not None and not callable(on_interaction):
+            raise TypeError("on_interaction must be callable")
+        if not isinstance(return_state, bool):
+            raise TypeError("return_state must be a bool")
+        if state is not None and not isinstance(state, SessionState):
+            raise TypeError("state must be a SessionState")
+        resume_manual = state is not None and state.native_continuation is not None
+        if resume_manual:
+            if input is not None:
+                raise ValueError("Use input=None to resume a pending manual checkpoint")
+            if on_interaction is None:
+                error = InteractionRequired(
+                    "Resuming a pending manual checkpoint requires on_interaction "
+                    "or Agent.session()"
+                )
+                error.state = state
+                raise error
+            if tools is not None or before_step is not None:
+                raise ValueError("Cannot change tools or before_step on an already admitted turn")
+        elif input is None:
+            raise TypeError("input is required unless resuming a pending manual checkpoint")
+
+        declared, mcp_tools, native_agents = _split_tools(
+            self.tools, self.programmatic_tool_calling
         )
-
-        def _normalize_tool_input(parsed: Any, tool_name: str) -> Any:
-            # Prefer JSON mode so structured params (datetime/UUID/Decimal, etc.) serialize cleanly.
-            try:
-                return params_adapter.dump_python(parsed, mode="json")
-            except Exception as exc:
-                raise ModelBehaviorError(
-                    f"Failed to serialize structured tool input for {tool_name}: {exc}"
-                ) from exc
-
-        async def _run_agent_impl(context: ToolContext, input_json: str) -> Any:
-            from .run import DEFAULT_MAX_TURNS, Runner
-            from .tool_context import ToolContext
-
-            tool_name = (
-                context.tool_name if isinstance(context, ToolContext) else tool_name_resolved
-            )
-            json_data = _parse_function_tool_json_input(
-                tool_name=tool_name,
-                input_json=input_json,
-            )
-            _log_function_tool_invocation(tool_name=tool_name, input_json=input_json)
-
-            base_message = f"Invalid JSON input for tool {tool_name}"
-            validation_failed = False
-            try:
-                parsed_params = params_adapter.validate_python(json_data)
-            except ValidationError as exc:
-                if not _debug.DONT_LOG_TOOL_DATA:
-                    raise ModelBehaviorError(f"{base_message}: {exc}") from exc
-                validation_failed = True
-
-            if validation_failed:
-                raise ModelBehaviorError(base_message)
-
-            params_data = _normalize_tool_input(parsed_params, tool_name)
-            resolved_input = await resolve_agent_tool_input(
-                params=params_data,
-                schema_info=schema_info if should_capture_tool_input else None,
-                input_builder=input_builder,
-            )
-            if not isinstance(resolved_input, str) and not isinstance(resolved_input, list):
-                raise ModelBehaviorError("Agent tool called with invalid input")
-
-            resolved_max_turns = max_turns if max_turns is not None else DEFAULT_MAX_TURNS
-            resolved_run_config = run_config
-            if resolved_run_config is None and isinstance(context, ToolContext):
-                resolved_run_config = context.run_config
-            tool_state_scope_id = get_agent_tool_state_scope(context)
-            if isinstance(context, ToolContext):
-                # Use a fresh ToolContext to avoid sharing approval state with parent runs.
-                nested_context = ToolContext(
-                    context=context.context,
-                    usage=context.usage,
-                    tool_name=context.tool_name,
-                    tool_call_id=context.tool_call_id,
-                    tool_arguments=context.tool_arguments,
-                    tool_call=context.tool_call,
-                    tool_namespace=context.tool_namespace,
-                    agent=context.agent,
-                    run_config=resolved_run_config,
+        pause_manual = tuple(
+            tool
+            for tool in declared
+            if on_interaction is None
+            and before_step is None
+            and tool._bind is None
+            and (tools is None or tool in tools or tool.ref in tools)
+        )
+        # Restore persisted defaults before judging an omitted selection.
+        if (
+            pause_manual
+            and (state is None or tools is not None)
+            and (
+                self.programmatic_tool_calling
+                or isinstance(self.output_type, PromptedOutput)
+                or environment is not None
+                or native_agents is not None
+                or before_step is not None
+                or (
+                    mcp_tools
+                    and (
+                        (tools is None and state is None)
+                        or (tools is not None and _split_tools(tools, available=self.tools)[1])
+                    )
                 )
-                set_agent_tool_state_scope(nested_context, tool_state_scope_id)
-                if should_capture_tool_input:
-                    nested_context.tool_input = params_data
-            elif isinstance(context, RunContextWrapper):
-                if should_capture_tool_input:
-                    nested_context = RunContextWrapper(context=context.context)
-                    set_agent_tool_state_scope(nested_context, tool_state_scope_id)
-                    nested_context.tool_input = params_data
-                else:
-                    nested_context = context.context
-            else:
-                if should_capture_tool_input:
-                    nested_context = RunContextWrapper(context=context)
-                    set_agent_tool_state_scope(nested_context, tool_state_scope_id)
-                    nested_context.tool_input = params_data
-                else:
-                    nested_context = context
-            run_result: RunResult | RunResultStreaming | None = None
-            resume_state: RunState | None = None
-            should_record_run_result = True
-
-            def _nested_approvals_status(
-                pending_run_result: RunResult | RunResultStreaming,
-            ) -> Literal["approved", "pending", "rejected"]:
-                interruptions = pending_run_result.interruptions
-                nested_state = pending_run_result.to_state()
-                has_pending = False
-                has_decision = False
-                for interruption in interruptions:
-                    find_nested_owner = getattr(
-                        nested_state,
-                        "_find_nested_approval_state",
-                        None,
-                    )
-                    nested_owner = (
-                        find_nested_owner(interruption) if callable(find_nested_owner) else None
-                    )
-                    decision_state, decision_item = nested_owner or (nested_state, interruption)
-                    nested_decision_context = getattr(decision_state, "_context", None)
-                    call_id = get_tool_approval_item_call_id(decision_item)
-                    if not call_id:
-                        has_pending = True
-                        continue
-                    tool_namespace = RunContextWrapper._resolve_tool_namespace(decision_item)
-                    status = (
-                        nested_decision_context.get_approval_status(
-                            decision_item.tool_name or "",
-                            call_id,
-                            tool_namespace=tool_namespace,
-                            existing_pending=decision_item,
-                        )
-                        if nested_decision_context is not None
-                        else None
-                    )
-                    if (
-                        status is None
-                        and nested_decision_context is not None
-                        and context._allow_legacy_approval_binding_reconstruction
-                    ):
-                        status = context.get_approval_status(
-                            decision_item.tool_name or "",
-                            call_id,
-                            tool_namespace=tool_namespace,
-                            existing_pending=decision_item,
-                        )
-                        if status is not None:
-                            legacy_namespace = RunContextWrapper._resolve_tool_namespace(
-                                decision_item
-                            )
-                            legacy_tool_name = RunContextWrapper._resolve_tool_name(decision_item)
-                            legacy_qualified_key = (
-                                f"{legacy_namespace}.{legacy_tool_name}"
-                                if legacy_namespace is not None
-                                else legacy_tool_name
-                            )
-                            approval_keys = (
-                                RunContextWrapper._resolve_approval_key(decision_item),
-                                *RunContextWrapper._resolve_approval_keys(decision_item),
-                                legacy_qualified_key,
-                            )
-                            approval_record = next(
-                                (
-                                    context._approvals[key]
-                                    for key in approval_keys
-                                    if key in context._approvals
-                                ),
-                                None,
-                            )
-                            if status:
-                                RunContextWrapper.approve_tool(
-                                    nested_decision_context,
-                                    decision_item,
-                                    always_approve=bool(
-                                        approval_record and approval_record.approved is True
-                                    ),
-                                )
-                            else:
-                                RunContextWrapper.reject_tool(
-                                    nested_decision_context,
-                                    decision_item,
-                                    always_reject=bool(
-                                        approval_record and approval_record.rejected is True
-                                    ),
-                                    rejection_message=context.get_rejection_message(
-                                        decision_item.tool_name or "",
-                                        call_id,
-                                        tool_namespace=tool_namespace,
-                                        existing_pending=decision_item,
-                                    ),
-                                )
-                    if status is False:
-                        return "rejected"
-                    if status is True:
-                        has_decision = True
-                    if status is None:
-                        has_pending = True
-                if has_decision:
-                    return "approved"
-                if has_pending:
-                    return "pending"
-                return "approved"
-
-            if isinstance(context, ToolContext) and context.tool_call is not None:
-                pending_run_result = peek_agent_tool_run_result(
-                    context.tool_call,
-                    scope_id=tool_state_scope_id,
+            )
+        ):
+            raise InteractionRequired(
+                "Pausing for manual replies requires Python/manual tools, plain output or "
+                "native strict output, "
+                "no environment, children or before_step. "
+                "Pass on_interaction or use Agent.session() for live replies."
+            )
+        # Capture before opening. An override may expose the Session and its
+        # observations, including when it delegates to the original method.
+        session_factory = self.session
+        options: dict[str, Any] = {}
+        if state is not None:
+            options["state"] = state
+        if provider is not None:
+            options["provider"] = provider
+        if model is not None:
+            options["model"] = model
+        if model_settings is not None:
+            options["model_settings"] = model_settings
+        if environment is not None:
+            options["environment"] = environment
+        async with session_factory(
+            context=cast(SessionContextT, context),
+            **options,
+        ) as session:
+            if pause_manual:
+                # A delegating factory may change the opening roster or its
+                # default operation. Check the same effective selection that
+                # submit will capture, before it admits work or starts MCP.
+                opening = session._opening_agent
+                assert opening is not None
+                effective = session._default_tools if tools is None else tools
+                selected, selected_mcp, _ = _split_tools(
+                    opening.tools if effective is None else effective,
+                    opening.programmatic_tool_calling,
+                    available=None if effective is None else session._bindings,
+                    ceiling=opening.tools,
+                    environment=session._executor,
+                    native_agents=None if effective is None else session._native_agents,
                 )
-                pending_resume_state = get_agent_tool_resume_state(pending_run_result)
-                if pending_resume_state is not None:
-                    resume_state = pending_resume_state
-                elif pending_run_result and getattr(pending_run_result, "interruptions", None):
-                    resolved_pending_result = cast(
-                        "RunResult | RunResultStreaming",
-                        pending_run_result,
-                    )
-                    status = _nested_approvals_status(resolved_pending_result)
-                    if status == "pending":
-                        run_result = resolved_pending_result
-                        should_record_run_result = False
-                    elif status in ("approved", "rejected"):
-                        resume_state = resolved_pending_result.to_state()
-                        record_agent_tool_resume_state(
-                            context.tool_call,
-                            resume_state,
-                            scope_id=tool_state_scope_id,
-                            approval_items=resolved_pending_result.interruptions,
-                        )
-
-                # A cached nested Agent.as_tool() resume reuses resume_state without
-                # going through the branch above, so rebind usage on both paths: nested
-                # post-resume model turns must accrue on the current outer ToolContext,
-                # not on the detached copy _copy_for_run_state now isolates.
-                if resume_state is not None and resume_state._context is not None:
-                    resume_state._context.usage = context.usage
-
-            if run_result is None:
-                if on_stream is not None:
-                    stream_handler = on_stream
-                    run_result_streaming = Runner.run_streamed(
-                        starting_agent=cast(Agent[Any], self),
-                        input=resume_state if resume_state is not None else resolved_input,
-                        # On resume, pass the parent application context so
-                        # resolve_resumed_context can update the nested restored
-                        # wrapper's .context without dropping nested approvals.
-                        context=cast(Any, nested_context),
-                        run_config=resolved_run_config,
-                        max_turns=resolved_max_turns,
-                        hooks=hooks,
-                        previous_response_id=None
-                        if resume_state is not None
-                        else previous_response_id,
-                        conversation_id=None if resume_state is not None else conversation_id,
-                        session=session,
-                    )
-                    # Keep callbacks decoupled from event consumption within a bounded backlog.
-                    # Reserve one extra slot for completion, including on failure/cancellation.
-                    event_queue: asyncio.Queue[AgentToolStreamEvent | None] = asyncio.Queue(
-                        maxsize=on_stream_max_pending_events + 1
-                        if on_stream_max_pending_events is not None
-                        else 0
-                    )
-                    stream_events = cast(
-                        AsyncGenerator["StreamEvent", None], run_result_streaming.stream_events()
-                    )
-
-                    async def _run_handler(payload: AgentToolStreamEvent) -> None:
-                        """Execute the user callback while capturing exceptions."""
-                        try:
-                            maybe_result = stream_handler(payload)
-                            if inspect.isawaitable(maybe_result):
-                                await maybe_result
-                        except Exception as exc:
-
-                            def diagnostic_extra() -> dict[str, object]:
-                                return {"agent_name": self.name}
-
-                            log_model_and_tool_action_error(
-                                logger,
-                                "Error while handling an agent tool on_stream event",
-                                exc,
-                                diagnostic_extra=diagnostic_extra,
-                            )
-
-                    async def dispatch_stream_events() -> None:
-                        while True:
-                            payload = await event_queue.get()
-                            is_sentinel = payload is None  # None marks the end of the stream.
-                            try:
-                                if payload is not None:
-                                    await _run_handler(payload)
-                            finally:
-                                event_queue.task_done()
-
-                            if is_sentinel:
-                                break
-
-                    async def enqueue_stream_events() -> None:
-                        from .stream_events import AgentUpdatedStreamEvent
-
-                        current_agent = run_result_streaming.current_agent
-                        try:
-                            async for event in stream_events:
-                                if isinstance(event, AgentUpdatedStreamEvent):
-                                    current_agent = event.new_agent
-
-                                payload: AgentToolStreamEvent = {
-                                    "event": event,
-                                    "agent": current_agent,
-                                    "tool_call": context.tool_call,
-                                }
-                                if (
-                                    on_stream_max_pending_events is not None
-                                    and event_queue.qsize() >= on_stream_max_pending_events
-                                ):
-                                    # A burst of ready events must let a ready callback catch up.
-                                    await asyncio.sleep(0)
-                                    if event_queue.qsize() >= on_stream_max_pending_events:
-                                        raise _AgentToolStreamOverflow(
-                                            "Agent tool on_stream backlog exceeded "
-                                            "on_stream_max_pending_events="
-                                            f"{on_stream_max_pending_events}. "
-                                            "Use a faster handler, increase the limit, "
-                                            "or set it to None."
-                                        )
-                                event_queue.put_nowait(payload)
-                        finally:
-                            event_queue.put_nowait(None)
-
-                    try:
-                        await run_producer_consumer(
-                            enqueue_stream_events(),
-                            dispatch_stream_events(),
-                            fail_fast_exceptions=(_AgentToolStreamOverflow,),
-                            # Stop upstream work before awaiting callback cancellation cleanup.
-                            on_failure=lambda: run_result_streaming.cancel(),
-                        )
-                    except BaseException:
-                        # Cancellation can interrupt the producer between iterator advances.
-                        # Explicitly close the iterator after its owning task has stopped.
-                        try:
-                            await stream_events.aclose()
-                        except BaseException as close_error:
-                            # Cleanup cancellation must not replace the primary failure either.
-                            log_model_and_tool_action_error(
-                                logger,
-                                "Error while closing an agent tool stream after failure",
-                                close_error,
-                            )
-                        raise
-                    run_result = run_result_streaming
-                else:
-                    run_result = await Runner.run(
-                        starting_agent=cast(Agent[Any], self),
-                        input=resume_state if resume_state is not None else resolved_input,
-                        # On resume, pass the parent application context so
-                        # resolve_resumed_context can update the nested restored
-                        # wrapper's .context without dropping nested approvals.
-                        context=cast(Any, nested_context),
-                        run_config=resolved_run_config,
-                        max_turns=resolved_max_turns,
-                        hooks=hooks,
-                        previous_response_id=None
-                        if resume_state is not None
-                        else previous_response_id,
-                        conversation_id=None if resume_state is not None else conversation_id,
-                        session=session,
-                    )
-            assert run_result is not None
-
-            # Store the run result by tool call identity so nested interruptions can be read later.
-            interruptions = getattr(run_result, "interruptions", None)
-            if isinstance(context, ToolContext) and context.tool_call is not None and interruptions:
-                if should_record_run_result:
-                    record_agent_tool_run_result(
-                        context.tool_call,
-                        run_result,
-                        scope_id=tool_state_scope_id,
-                    )
-                return run_result.final_output
-
-            if custom_output_extractor is not None:
-                return await custom_output_extractor(run_result)
-
-            if run_result.final_output is not None and (
-                not isinstance(run_result.final_output, str) or run_result.final_output != ""
-            ):
-                return run_result.final_output
-
-            from .items import ItemHelpers, MessageOutputItem, ToolCallOutputItem
-
-            # Output guardrails validated the final output, not intermediate run items.
-            if run_result.output_guardrail_results:
-                return run_result.final_output
-
-            for item in reversed(run_result.new_items):
-                if isinstance(item, MessageOutputItem):
-                    text_output = ItemHelpers.text_message_output(item)
-                    if text_output:
-                        return text_output
-
-                if (
-                    isinstance(item, ToolCallOutputItem)
-                    and isinstance(item.output, str)
-                    and item.output
+                if any(tool is eligible for tool in selected for eligible in pause_manual) and (
+                    opening.programmatic_tool_calling
+                    or session._default_output.mode == "prompted"
+                    or session._executor is not None
+                    or session._native_agents is not None
+                    or session._storage is not None
+                    or selected_mcp
+                    or any(isinstance(tool, WebSearch) for tool in opening.tools)
                 ):
-                    return item.output
-
-            return run_result.final_output
-
-        run_agent_tool = _build_wrapped_function_tool(
-            name=tool_name_resolved,
-            description=tool_description_resolved,
-            params_json_schema=params_schema,
-            invoke_tool_impl=_run_agent_impl,
-            on_handled_error=_build_handled_function_tool_error_handler(
-                span_message="Error running tool (non-fatal)",
-                span_message_for_json_decode_error="Error running tool",
-                log_label="Tool",
-            ),
-            failure_error_function=failure_error_function,
-            strict_json_schema=True,
-            is_enabled=is_enabled,
-            needs_approval=needs_approval,
-            tool_origin=ToolOrigin(
-                type=ToolOriginType.AGENT_AS_TOOL,
-                agent_name=self.name,
-                agent_tool_name=tool_name_resolved,
-            ),
-        )
-        run_agent_tool._is_agent_tool = True
-        if not tool_name:
-            run_agent_tool._agent_tool_default_identity = (self.name, tool_name_resolved)
-        run_agent_tool._agent_instance = self
-
-        return run_agent_tool
-
-    async def get_system_prompt(self, run_context: RunContextWrapper[TContext]) -> str | None:
-        if isinstance(self.instructions, str):
-            return self.instructions
-        elif callable(self.instructions):
-            # Inspect the signature of the instructions function
-            sig = inspect.signature(self.instructions)
-            params = list(sig.parameters.values())
-
-            # Enforce exactly 2 parameters
-            if len(params) != 2:
-                raise TypeError(
-                    f"'instructions' callable must accept exactly 2 arguments (context, agent), "
-                    f"but got {len(params)}: {[p.name for p in params]}"
+                    raise InteractionRequired(
+                        "Pausing for manual replies requires Python/manual tools, plain output or "
+                        "native strict output, "
+                        "no local storage, environment, children or before_step. "
+                        "Pass on_interaction or use Agent.session() for live replies."
+                    )
+            session._fail_unhandled_questions = on_interaction is None and not pause_manual
+            if resume_manual:
+                restored = session.restored_turn
+                if restored is None:
+                    raise NativeError("Restored manual checkpoint has no pending submission")
+                submission = cast("Turn[OutputT]", restored)
+            else:
+                assert input is not None
+                submission = await session.submit(input, tools=tools, before_step=before_step)
+            if on_interaction is not None or pause_manual:
+                return await session._run_with_interactions(
+                    submission, on_interaction, return_state=return_state, pause_manual=pause_manual
                 )
-
-            # Call once, then await if needed. Callable instances with async
-            # ``__call__`` are not coroutine functions, so checking
-            # ``iscoroutinefunction(self.instructions)`` would skip the await.
-            result = self.instructions(run_context, self)
-            if inspect.isawaitable(result):
-                return await result
+            result = await submission.get_result()
+            if return_state:
+                result = replace(result, state=await session.save_state())
             return result
 
-        elif self.instructions is not None:
-            logger.error(
-                "Instructions must be a string or a callable function, got %s",
-                type(self.instructions).__name__,
+    @overload
+    def run_sync(
+        self: Agent[None, OutputT],
+        input: UserInput | None,
+        *,
+        context: None = None,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[None] | None = None,
+        tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None = None,
+        before_step: _BeforeStep[None] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]: ...
+
+    @overload
+    def run_sync(
+        self: Agent[object, OutputT],
+        input: UserInput | None,
+        *,
+        context: object = None,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[object] | None = None,
+        tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None = None,
+        before_step: _BeforeStep[object] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]: ...
+
+    @overload
+    def run_sync(
+        self,
+        input: UserInput | None,
+        *,
+        context: ContextT,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[ContextT] | None = None,
+        tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents]
+        | None = None,
+        before_step: _BeforeStep[ContextT] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]: ...
+
+    def run_sync(
+        self: Agent[SessionContextT, OutputT],
+        input: UserInput | None,
+        *,
+        context: SessionContextT | None = None,
+        on_interaction: _InteractionHandler | None = None,
+        provider: NativeProvider | None = None,
+        model: str | None = None,
+        model_settings: ModelSettings | None = None,
+        environment: EnvironmentSource[SessionContextT] | None = None,
+        tools: Sequence[
+            ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents
+        ]
+        | None = None,
+        before_step: _BeforeStep[SessionContextT] | None = None,
+        state: SessionState | None = None,
+        return_state: bool = False,
+    ) -> Completed[OutputT]:
+        """Run through session() outside an event loop.
+
+        on_interaction and state follow run(). A sync or async handler
+        returns request.reply(value); the SDK delivers it before closing.
+
+        If opening with a managed Environment fails and automatic cleanup leaves
+        the implicit provider open, the original error carries ``error.provider``.
+        Outside an event loop, call ``asyncio.run(error.provider.aclose())`` to
+        retry cleanup. Explicit providers remain the caller's responsibility and
+        are not attached to the error.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            options: dict[str, Any] = {}
+            if state is not None:
+                options["state"] = state
+            if return_state is not False:
+                options["return_state"] = return_state
+            if on_interaction is not None:
+                options["on_interaction"] = on_interaction
+            if provider is not None:
+                options["provider"] = provider
+            if model is not None:
+                options["model"] = model
+            if model_settings is not None:
+                options["model_settings"] = model_settings
+            if environment is not None:
+                options["environment"] = environment
+            return _SyncRun().run(
+                self.run(
+                    input,
+                    context=cast(SessionContextT, context),
+                    tools=tools,
+                    before_step=before_step,
+                    **options,
+                )
             )
-
-        return None
-
-    async def get_prompt(
-        self, run_context: RunContextWrapper[TContext]
-    ) -> ResponsePromptParam | None:
-        """Get the prompt for the agent."""
-        from ._public_agent import get_public_agent
-
-        return await PromptUtil.to_model_input(
-            self.prompt,
-            run_context,
-            get_public_agent(self),
-        )
+        raise RuntimeError("run_sync cannot run inside an event loop; await agent.run()")

@@ -1,3 +1,0 @@
-# `Materialization`
-
-::: agents.sandbox.materialization

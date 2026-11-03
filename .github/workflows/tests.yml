@@ -4,30 +4,277 @@ on:
   push:
     branches:
       - main
+      - v1
   pull_request:
     # All PRs, including stacked PRs
   merge_group:
     types: [checks_requested]
+  workflow_dispatch:
+  # Use GitHub's Re-run failed jobs action to retry this run.
 
 permissions:
   contents: read
+  actions: read
 
 env:
   UV_FROZEN: "1"
+  CARGO_BUILD_JOBS: "3"
+  CARGO_INCREMENTAL: "0"
 
 jobs:
-  lint:
+  changes:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      code: ${{ steps.changes.outputs.run }}
+      windows: ${{ steps.release-windows.outputs.run }}
+      native_source_run: ${{ steps.native-source.outputs.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - id: changes
+        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
+      - name: Select Windows test coverage
+        id: release-windows
+        env:
+          V1_QUALIFICATION: ${{ github.ref_name == 'v1' || github.base_ref == 'v1' || github.event.merge_group.base_ref == 'refs/heads/v1' }}
+          DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          import re
+          import subprocess
+
+          # Public v1 source qualification always covers all native platforms,
+          # including the first branch push, whose before SHA is all zeroes.
+          if os.environ.get("V1_QUALIFICATION") == "true":
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write("run=true\n")
+              raise SystemExit(0)
+
+          manual = os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+          default_push = os.environ.get("DEFAULT_BRANCH_PUSH") == "true"
+          versions = []
+          try:
+              revisions = (os.environ["HEAD_SHA"],) if manual else (
+                  os.environ["BASE_SHA"], os.environ["HEAD_SHA"]
+              )
+              for sha in revisions:
+                  if not re.fullmatch(r"[0-9a-f]{40}", sha):
+                      raise ValueError("event ref is not a full commit SHA")
+                  manifest = json.loads(subprocess.check_output(
+                      ["git", "show", f"{sha}:.release-please-manifest.json"], text=True
+                  ))
+                  version = manifest["."]
+                  if not isinstance(version, str) or not version.strip():
+                      raise ValueError("missing committed root release version")
+                  versions.append(version)
+          except (KeyError, TypeError, ValueError, subprocess.CalledProcessError) as error:
+              raise SystemExit(f"Cannot compare release versions; Tests cannot qualify this commit: {error}")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"run={str(manual or default_push or versions[0] != versions[1]).lower()}\n")
+          PYTHON
+      - name: Select a qualified native build
+        id: native-source
+        if: >-
+          steps.changes.outputs.run == 'true' &&
+          ((github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) ||
+          (github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository))
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          import re
+          import subprocess
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+          try:
+              import tomllib
+          except ImportError:  # Python 3.10 test jobs already install tomli with pytest.
+              import tomli as tomllib
+
+          repo = os.environ["GITHUB_REPOSITORY"]
+          repo_api = os.environ["GITHUB_API_URL"] + "/repos/" + repo
+          api = repo_api + "/actions"
+          headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                     "Accept": "application/vnd.github+json"}
+          def get(url):
+              with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
+                  return json.load(response)
+
+          def records(url, key):
+              results = []
+              page = 1
+              while True:
+                  response = get(url + f"&per_page=100&page={page}")
+                  batch = response[key]
+                  results.extend(batch)
+                  if len(results) == response["total_count"]:
+                      return results
+                  if not batch or len(results) > response["total_count"]:
+                      raise SystemExit("Incomplete source metadata; cannot verify native build provenance")
+                  page += 1
+
+          def job_block(workflow, name):
+              match = re.search(rf"(?m)^  {name}:\n(?:(?!^  \S).*\n)*", workflow)
+              return match[0] if match else None
+
+          def ancestor(before, after):
+              return bool(re.fullmatch(r"[0-9a-f]{40}", before or "")) and subprocess.run(
+                  ["git", "merge-base", "--is-ancestor", before, after], stderr=subprocess.DEVNULL
+              ).returncode == 0
+
+          def qualified(run):
+              if (run["repository"]["full_name"] != repo
+                      or (run.get("head_repository") or {}).get("full_name") != repo
+                      or run["path"] != ".github/workflows/tests.yml"
+                      or str(run["id"]) == os.environ["GITHUB_RUN_ID"]
+                      or run["event"] != "push"
+                      or run["head_branch"] != os.environ["DEFAULT_BRANCH"]):
+                  return False
+              source = run["head_sha"]
+              if not ancestor(source, "HEAD"):
+                  return False
+              run_api = api + "/runs/" + str(run["id"])
+              required = {
+                  "native-linux / Native package (ubuntu-24.04)": "native-Linux-X64",
+                  "native-macos / Native package (macos-latest)": "native-macOS-ARM64",
+              }
+              # Only a known routine run can omit Windows. A release consumes
+              # one complete qualified donor for all three platforms.
+              if os.environ.get("REQUIRE_WINDOWS") != "false":
+                  required["native-windows / Native package (windows-latest)"] = "native-Windows-X64"
+              jobs = records(run_api + "/jobs?filter=latest", "jobs")
+              # Native jobs qualify the artifacts independently of unrelated tests.
+              if not required.keys() <= {job["name"] for job in jobs if job["conclusion"] == "success"}:
+                  return False
+              native_workflow = ".github/workflows/codex-python.yml"
+              if subprocess.check_output(["git", "show", f"{source}:{native_workflow}"]) != Path(native_workflow).read_bytes():
+                  return False
+              tests_workflow = ".github/workflows/tests.yml"
+              prior_tests = subprocess.check_output(["git", "show", f"{source}:{tests_workflow}"], text=True)
+              current_tests = Path(tests_workflow).read_text()
+              # Reject artifacts made before this policy, including old push runs that
+              # repacked PR artifacts. Every accepted producer uses this same selector.
+              for name in ("changes", "native-linux", "native-windows", "native-macos"):
+                  before, after = (job_block(text, name) for text in (prior_tests, current_tests))
+                  if not before or not after or before != after:
+                      return False
+              changed = set(subprocess.check_output(
+                  ["git", "diff", "--name-only", "--no-renames", "-z", source, "HEAD", "--"]
+              ).split(b"\0")) - {b""}
+              # Refresh Python payloads only when build settings and dependencies match.
+              # Version and test selection do not change the compiled native assets.
+              for filename in ("pyproject.toml", "uv.lock"):
+                  if filename.encode() not in changed:
+                      continue
+                  prior = subprocess.run(["git", "show", f"{source}:{filename}"], capture_output=True, text=True)
+                  if prior.returncode or not Path(filename).is_file():
+                      return False
+                  try:
+                      before, after = tomllib.loads(prior.stdout), tomllib.loads(Path(filename).read_text())
+                      for data in (before, after):
+                          if filename == "pyproject.toml":
+                              data["project"].pop("version")
+                              data.get("tool", {}).get("pytest", {}).get("ini_options", {}).pop("testpaths", None)
+                          else:
+                              for package in data["package"]:
+                                  if package["name"] == "openai-agents" and package["source"] == {"editable": "."}:
+                                      package.pop("version")
+                  except (KeyError, StopIteration, tomllib.TOMLDecodeError):
+                      return False
+                  if before != after:
+                      return False
+                  changed.remove(filename.encode())
+              allowed = re.compile(
+                  rb"(?:src/agents/|packages/codex/tests/|tests/|examples/).+\.py\Z"
+                  rb"|(?:README|CHANGELOG-alpha|examples/README|packages/codex/README|\.github/RELEASING|docs/.+)\.md\Z"
+                  rb"|(?:release-please-config|\.release-please-manifest|pyrightconfig)\.json\Z"
+                  rb"|tests/fixtures/released_api_contract\.json\Z"
+                  rb"|packages/codex/(?:AGENTS|MAINTAINING)\.md\Z"
+                  rb"|packages/codex/docs/.+\.md\Z"
+                  rb"|packages/codex/scripts/verify_installed\.py\Z"
+                  rb"|(?:Makefile|mkdocs\.yml|tests/README\.md)\Z"
+                  rb"|\.github/workflows/(?:tests|codex-python|alpha-install)\.yml\Z"
+                  rb"|docs/assets/images/.+\.(?:png|jpg|jpeg|gif|svg|webp)\Z"
+              )
+              if any(not allowed.fullmatch(path) for path in changed):
+                  return False
+              artifacts = records(run_api + "/artifacts?", "artifacts")
+              return set(required.values()) <= {
+                  item["name"] for item in artifacts if not item["expired"]
+              }
+
+          # Search a bounded history. API errors fail instead of silently starting a cold build.
+          def candidates():
+              query = urllib.parse.urlencode({"branch": os.environ["DEFAULT_BRANCH"],
+                                              "event": "push", "per_page": 20})
+              yield from get(api + "/workflows/tests.yml/runs?" + query)["workflow_runs"]
+
+          for run in candidates():
+              if qualified(run):
+                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                      output.write(f"run_id={run['id']}\n")
+                  print(f"Reusing native build from {repo} run {run['id']} with run head {run['head_sha']}")
+                  break
+          else:
+              print("No compatible retained native build found; building the native runtime once per platform.")
+          PYTHON
+
+  native-linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: ubuntu-24.04
+      native_source_run: ${{ needs.changes.outputs.native_source_run }}
+
+  native-windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: windows-latest
+      native_source_run: ${{ needs.changes.outputs.native_source_run }}
+
+  native-macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    uses: ./.github/workflows/codex-python.yml
+    with:
+      runner: macos-latest
+      native_source_run: ${{ needs.changes.outputs.native_source_run }}
+
+  lint:
+    env:
+      UV_NO_SYNC: "1"
+      PYTHONPATH: src
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
@@ -35,7 +282,7 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
-        run: make sync
+        run: uv sync --group dev --no-install-project
       - name: Verify formatting
         if: steps.changes.outputs.run == 'true'
         run: make format-check
@@ -47,17 +294,20 @@ jobs:
         run: echo "Skipping lint for non-code changes."
 
   typecheck:
+    needs: native-linux
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 100
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
@@ -71,6 +321,9 @@ jobs:
           key: mypy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-${{ github.sha }}
           restore-keys: |
             mypy-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -82,17 +335,20 @@ jobs:
         run: echo "Skipping typecheck for non-code changes."
 
   mypy-win32:
+    needs: native-linux
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 100
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
@@ -106,6 +362,9 @@ jobs:
           key: mypy-win32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-${{ github.sha }}
           restore-keys: |
             mypy-win32-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('uv.lock', 'pyproject.toml', 'Makefile') }}-
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
@@ -117,9 +376,13 @@ jobs:
         run: echo "Skipping Windows mypy for non-code changes."
 
   tests:
+    needs: [changes, native-linux]
+    if: >-
+      !cancelled() && needs.changes.result == 'success' &&
+      ((needs.changes.outputs.code == 'false' && needs.native-linux.result == 'skipped') ||
+      (needs.changes.outputs.code == 'true' && needs.native-linux.result == 'success'))
     runs-on: ubuntu-latest
-    # Python 3.14 also runs coverage and installs Chromium with system dependencies.
-    timeout-minutes: ${{ matrix.python-version == '3.14' && 30 || 10 }}
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
@@ -131,74 +394,125 @@ jobs:
           - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
       - name: Detect code changes
         id: changes
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
           python-version: ${{ matrix.python-version }}
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
-      - name: Run tests with coverage
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.14'
-        run: make coverage
-      - name: Test realtime demo in Chromium
-        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.14'
+      - name: Allow the test executor and packaged helper to create sandboxes
+        if: steps.changes.outputs.run == 'true'
+        shell: bash
         run: |
-          uv run playwright install --with-deps chromium
-          uv run pytest -o pythonpath=. examples/realtime/app/test_frontend.py
-      - name: Run tests
-        if: steps.changes.outputs.run == 'true' && matrix.python-version != '3.14'
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+          helper="$(uv run --no-sync python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          import agents
+          helper = (Path(agents.__file__).resolve().parent / "bin" / "codex-linux-sandbox").resolve()
+          assert helper.is_file() and os.access(helper, os.X_OK), "packaged Linux helper is not executable"
+          runtime = helper.with_name("codex-sdk-runtime")
+          assert runtime.is_file() and os.access(runtime, os.X_OK), "packaged runtime is not executable"
+          print(helper)
+          PYTHON
+          )"
+          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+            executor="$GITHUB_WORKSPACE/packages/codex/target/debug/examples/exec-server-fixture"
+            sudo tee /etc/apparmor.d/agents-sdk-test-executor > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile agents-sdk-test-executor "$executor" flags=(unconfined) {
+            userns,
+          }
+          EOF
+            sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-test-executor
+            sudo tee /etc/apparmor.d/agents-sdk-linux-sandbox > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile agents-sdk-linux-sandbox "$helper" flags=(unconfined) {
+            userns,
+          }
+          profile agents-sdk-linux-runtime "${helper%/*}/codex-sdk-runtime" flags=(unconfined) {
+            userns,
+          }
+          EOF
+            sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-linux-sandbox
+          fi
+      - name: Run native SDK tests
+        if: steps.changes.outputs.run == 'true'
         run: make tests
-      - name: Run async teardown stability tests
-        if: steps.changes.outputs.run == 'true' && (matrix.python-version == '3.10' || matrix.python-version == '3.14')
-        run: make tests-asyncio-stability
+      - name: Verify the qualified wheel archive
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          OPENAI_AGENTS_WHEEL: ${{ env.OPENAI_AGENTS_NATIVE_WHEEL }}
+        run: PYTHONPATH=. uv run --no-sync python -m pytest -q packages/codex/tests/test_distribution.py
+      - name: Verify copied documentation code against the qualified wheel
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        run: |
+          uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q tests/test_docs_code.py
+      - name: Set up Node for the optional Vercel client example
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - name: Verify the optional Vercel client example with ai 6.0.315
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          AGENTS_REQUIRE_VERCEL_CLIENT: '1'
+        run: |
+          npm ci --prefix tests/vercel-client --ignore-scripts
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_vercel_client.py
+      - name: Verify the complete browser starter with ai 6.0.315
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          AGENTS_REQUIRE_WEB_BROWSER: '1'
+        run: |
+          npm ci --prefix examples/web_starter --ignore-scripts
+          npm run build --prefix examples/web_starter
+          npm exec --prefix examples/web_starter -- playwright install --with-deps chromium
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_web_starter_browser.py
+      - name: Verify the optional AG-UI example
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        run: |
+          uv run --with-requirements examples/ag_ui/requirements.txt python -c 'import ag_ui.core'
+          uv run --with-requirements examples/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_ag_ui_example.py
+      - name: Verify the optional MCP Tasks adapter
+        if: steps.changes.outputs.run == 'true'
+        run: |
+          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python -c 'from agents.experimental.mcp_tasks import MCPTasksProvider'
+          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_deferred_mcp_response_budget.py tests/test_deferred_mcp_tasks.py tests/test_deferred_mcp_tasks_import.py tests/test_deferred_mcp_wire_primitives.py tests/test_deferred_mcp_worker_context.py
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
-  containers:
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      OPENAI_API_KEY: fake-for-tests
-      # GitHub-hosted runners are ephemeral, and each test explicitly removes its containers.
-      TESTCONTAINERS_RYUK_DISABLED: "true"
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Detect code changes
-        id: changes
-        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
-      - name: Setup uv
-        if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: true
-          prune-cache: true
-          python-version: "3.14"
-      - name: Run local container integration tests
-        if: steps.changes.outputs.run == 'true'
-        run: make integration-tests-containers
-      - name: Skip local container integration tests
-        if: steps.changes.outputs.run != 'true'
-        run: echo "Skipping local container integration tests for non-code changes."
-
   native-macos-sandbox:
+    needs: native-macos
     runs-on: macos-latest
-    timeout-minutes: 15
+    timeout-minutes: 100
     env:
       OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -209,251 +523,93 @@ jobs:
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: false
           python-version: "3.14"
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: make sync
-      - name: Run native macOS sandbox tests
+      - name: Run native SDK tests on macOS
         if: steps.changes.outputs.run == 'true'
-        run: uv run pytest -m requires_native_macos_sandbox
+        timeout-minutes: 10
+        env:
+          PYTEST_ADDOPTS: "-rA -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true --max-worker-restart=0"
+          PYTHONUNBUFFERED: "1"
+        run: make tests
       - name: Skip native macOS sandbox tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping native macOS sandbox tests for non-code changes."
 
-  mcp-v1-compat:
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    env:
-      OPENAI_API_KEY: fake-for-tests
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Detect code changes
-        id: changes
-        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
-      - name: Setup uv
-        if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: true
-          prune-cache: true
-          python-version: "3.14"
-      - name: Run packaged MCP v1 compatibility tests
-        if: steps.changes.outputs.run == 'true'
-        run: make integration-tests-mcp-v1
-      - name: Skip MCP v1 compatibility tests
-        if: steps.changes.outputs.run != 'true'
-        run: echo "Skipping MCP v1 compatibility tests for non-code changes."
-
-  packaged-contract-310:
-    name: packaged-contract (3.10)
-    needs: prospective-release-contract
-    if: needs.prospective-release-contract.outputs.run == 'true'
-    runs-on: ubuntu-latest
-    env:
-      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.10"
-      OPENAI_API_KEY: fake-for-tests
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Detect code changes
-        id: changes
-        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
-      - name: Setup uv
-        if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: true
-          prune-cache: true
-          python-version: "3.10"
-      - name: Download prospective release contract
-        if: steps.changes.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: prospective-release-contract
-          path: .tmp
-      - name: Run packaged and prospective compatibility contracts
-        if: steps.changes.outputs.run == 'true'
-        env:
-          OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT: ${{ github.workspace }}/.tmp/prospective_released_api_contract.json
-        run: make integration-tests-prospective-contract
-      - name: Skip packaged compatibility contracts
-        if: steps.changes.outputs.run != 'true'
-        run: echo "Skipping packaged compatibility contracts for non-code changes."
-
-  packaged-contract-314:
-    name: packaged-contract (3.14)
-    needs: prospective-release-contract
-    if: needs.prospective-release-contract.outputs.run == 'true'
-    runs-on: ubuntu-latest
-    env:
-      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.14"
-      OPENAI_API_KEY: fake-for-tests
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Detect code changes
-        id: changes
-        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.before }}" "${{ github.sha }}"
-      - name: Setup uv
-        if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: true
-          prune-cache: true
-          python-version: "3.14"
-      - name: Download prospective release contract
-        if: steps.changes.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: prospective-release-contract
-          path: .tmp
-      - name: Run packaged and prospective compatibility contracts
-        if: steps.changes.outputs.run == 'true'
-        env:
-          OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT: ${{ github.workspace }}/.tmp/prospective_released_api_contract.json
-        run: make integration-tests-prospective-contract
-      - name: Skip packaged compatibility contracts
-        if: steps.changes.outputs.run != 'true'
-        run: echo "Skipping packaged compatibility contracts for non-code changes."
-
-  packaged-contract-windows:
-    needs: prospective-release-contract
-    if: needs.prospective-release-contract.outputs.run == 'true'
-    runs-on: windows-latest
-    timeout-minutes: 15
-    env:
-      OPENAI_AGENTS_INTEGRATION_PYTHON: "3.14"
-      OPENAI_API_KEY: fake-for-tests
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Detect code changes
-        id: changes
-        shell: bash
-        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
-      - name: Setup uv
-        if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: true
-          # Disable cache pruning on Windows to avoid intermittent post-job cleanup failures.
-          prune-cache: false
-          python-version: "3.14"
-      - name: Download prospective release contract
-        if: steps.changes.outputs.run == 'true'
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          name: prospective-release-contract
-          path: .tmp
-      - name: Run Windows prospective contract smoke test
-        if: steps.changes.outputs.run == 'true'
-        env:
-          OPENAI_AGENTS_PROSPECTIVE_RELEASE_CONTRACT: ${{ github.workspace }}/.tmp/prospective_released_api_contract.json
-        run: make integration-tests-prospective-platform
-      - name: Skip Windows prospective contract smoke test
-        if: steps.changes.outputs.run != 'true'
-        run: echo "Skipping Windows prospective contract smoke test for non-code changes."
-
-  prospective-release-contract:
-    outputs:
-      run: ${{ steps.changes.outputs.run }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    env:
-      OPENAI_API_KEY: fake-for-tests
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-      - name: Detect code changes
-        id: changes
-        run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
-      - name: Setup uv
-        if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
-        with:
-          version: "0.11.14"
-          enable-cache: true
-          prune-cache: true
-          python-version: "3.14"
-      - name: Install all optional dependencies
-        if: steps.changes.outputs.run == 'true'
-        run: make sync
-      - name: Validate source and generate prospective release contract
-        if: steps.changes.outputs.run == 'true'
-        run: make prepare-prospective-released-api-contract
-      - name: Upload prospective release contract
-        if: steps.changes.outputs.run == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: prospective-release-contract
-          path: .tmp/prospective_released_api_contract.json
-          if-no-files-found: error
-          include-hidden-files: true
-          retention-days: 1
-      - name: Skip prospective release contract
-        if: steps.changes.outputs.run != 'true'
-        run: echo "Skipping prospective release contract for non-code changes."
-
   tests-windows:
+    needs: native-windows
     runs-on: windows-latest
-    timeout-minutes: 15
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
-        # Keep Python 3.13 here because Daytona's locked obstore dependency has no Windows Python 3.14 wheel, so 3.14 builds it from source and exceeds this job's timeout.
         python-version:
           - "3.10"
-          - "3.13"
+          - "3.14"
     env:
       OPENAI_API_KEY: fake-for-tests
+      PYTEST_ADDOPTS: "-rA"
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Detect code changes
         id: changes
         shell: bash
         run: ./.github/scripts/detect-changes.sh code "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
           prune-cache: true
           python-version: ${{ matrix.python-version }}
+      - name: Use the shared native build
+        if: steps.changes.outputs.run == 'true'
+        uses: ./.github/actions/use-native
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
-        run: uv sync --all-extras --all-packages --group dev
-      - name: Run tests
+        run: uv sync --group dev
+      - name: Run parallel tests
+        id: parallel-tests
         if: steps.changes.outputs.run == 'true'
-        run: uv run pytest
+        run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
+      - name: Run serial tests after all workers exit
+        if: ${{ !cancelled() && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
+        run: uv run python .github/scripts/run_serial_tests.py
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
 
   build-docs:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 100
     env:
+      UV_NO_SYNC: "1"
+      PYTHONPATH: src
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Detect docs changes
         id: changes
         run: ./.github/scripts/detect-changes.sh docs "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}" "${{ github.sha }}"
       - name: Setup uv
         if: steps.changes.outputs.run == 'true'
-        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # setup-uv v9.0.0; uv 0.11.14
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # setup-uv v10.3.0; uv 0.11.14
         with:
           version: "0.11.14"
           enable-cache: true
@@ -461,7 +617,7 @@ jobs:
           python-version: "3.14"
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
-        run: make sync
+        run: uv sync --group dev --no-install-project
       - name: Build docs
         if: steps.changes.outputs.run == 'true'
         run: make build-docs

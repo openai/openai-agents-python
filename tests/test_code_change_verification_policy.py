@@ -24,7 +24,7 @@ def test_code_change_verification_keeps_codex_execution_sandboxed() -> None:
     assert "retry with broader host access" in combined
     assert (
         "/usr/bin/env -u OPENAI_API_KEY OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1 "
-        "UV_DEFAULT_INDEX=https://pypi.org/simple"
+        "bash .agents/skills/code-change-verification/scripts/run.sh"
     ) in skill
 
 

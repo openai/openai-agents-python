@@ -1,0 +1,28 @@
+{
+  "source_commit": "b61fb835717b54e9129bbaf070d70b1f2fa0ae1d",
+  "goal": {
+    "thread_id": "01a15a17-d7d1-7c23-a7b2-1ab6a67213ac",
+    "objective": "Review and summarize the report",
+    "status": "paused",
+    "token_budget": null,
+    "tokens_used": 0,
+    "time_used_seconds": 0,
+    "created_at": 1792512874,
+    "updated_at": 1792512874
+  },
+  "checklist": {
+    "thread_id": "01a15a17-d7d1-7c23-a7b2-1ab6a67213ac",
+    "turn_id": "01a15a17-d806-7983-b3fd-309a4901f4aa",
+    "explanation": "Finish the review",
+    "plan": [
+      {
+        "step": "Read report",
+        "status": "completed"
+      },
+      {
+        "step": "Write summary",
+        "status": "completed"
+      }
+    ]
+  }
+}

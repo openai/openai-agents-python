@@ -1,0 +1,122 @@
+diff --git a/crates/rmcp/src/model.rs b/crates/rmcp/src/model.rs
+index be911f7..27bd6e8 100644
+--- a/crates/rmcp/src/model.rs
++++ b/crates/rmcp/src/model.rs
+@@ -4549,14 +4549,69 @@ impl ClientResult {
+ 
+ pub type ClientJsonRpcMessage = JsonRpcMessage<ClientRequest, ClientResult, ClientNotification>;
+ 
+-ts_union!(
+-    export type ServerRequest =
++#[derive(Debug, Serialize, Clone)]
++#[serde(untagged)]
++#[allow(clippy::large_enum_variant)]
++#[non_exhaustive]
++#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
++pub enum ServerRequest {
++    PingRequest(PingRequest),
++    CreateMessageRequest(CreateMessageRequest),
++    ListRootsRequest(ListRootsRequest),
++    ElicitRequest(ElicitRequest),
++    CustomRequest(CustomRequest),
++}
++
++impl<'de> Deserialize<'de> for ServerRequest {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: serde::Deserializer<'de>,
++    {
++        // Keep form schemas intact until the client can choose its validator.
++        // The typed form schema otherwise discards unknown root keywords.
++        let value = serde_json::Value::deserialize(deserializer)?;
++        if value.get("method").and_then(serde_json::Value::as_str) == Some("elicitation/create")
++            && value
++                .get("params")
++                .and_then(serde_json::Value::as_object)
++                .is_some_and(|params| {
++                    params
++                        .get("mode")
++                        .is_none_or(|mode| mode.as_str() == Some("form"))
++                })
++        {
++            return serde_json::from_value(value)
++                .map(Self::CustomRequest)
++                .map_err(serde::de::Error::custom);
++        }
++
++        // Preserve the original untagged ordering for every other request.
++        #[derive(Deserialize)]
++        #[serde(untagged)]
++        enum Wire {
++            PingRequest(PingRequest),
++            CreateMessageRequest(CreateMessageRequest),
++            ListRootsRequest(ListRootsRequest),
++            ElicitRequest(ElicitRequest),
++            CustomRequest(CustomRequest),
++        }
++        match serde_json::from_value(value).map_err(serde::de::Error::custom)? {
++            Wire::PingRequest(request) => Ok(Self::PingRequest(request)),
++            Wire::CreateMessageRequest(request) => Ok(Self::CreateMessageRequest(request)),
++            Wire::ListRootsRequest(request) => Ok(Self::ListRootsRequest(request)),
++            Wire::ElicitRequest(request) => Ok(Self::ElicitRequest(request)),
++            Wire::CustomRequest(request) => Ok(Self::CustomRequest(request)),
++        }
++    }
++}
++
++ts_union!(@impl_from ServerRequest {
+     | PingRequest
+     | CreateMessageRequest
+     | ListRootsRequest
+     | ElicitRequest
+     | CustomRequest;
+-);
++});
+ 
+ ts_union!(
+     export type ServerNotification =
+diff --git a/crates/rmcp/tests/test_raw_form_codec.rs b/crates/rmcp/tests/test_raw_form_codec.rs
+new file mode 100644
+index 0000000..75b358f
+--- /dev/null
++++ b/crates/rmcp/tests/test_raw_form_codec.rs
+@@ -0,0 +1,39 @@
++use rmcp::model::ServerRequest;
++use serde_json::{Value, json};
++
++#[test]
++fn standard_forms_preserve_root_keywords_and_metadata_before_typed_decoding() {
++    for mode in [Some("form"), None] {
++        let mut original = json!({
++            "method": "elicitation/create",
++            "params": {
++                "message": "Synthetic form",
++                "_meta": {"synthetic": true},
++                "requestedSchema": {
++                    "type": "object",
++                    "properties": {"count": {"type": "integer"}},
++                    "allOf": [{"properties": {"count": {"minimum": 2}}}],
++                    "$defs": {"tag": {"type": "string"}}
++                }
++            }
++        });
++        if let Some(mode) = mode {
++            original["params"]["mode"] = Value::from(mode);
++        }
++        let parsed: ServerRequest = serde_json::from_value(original.clone()).unwrap();
++        assert!(matches!(parsed, ServerRequest::CustomRequest(_)));
++        assert_eq!(serde_json::to_value(parsed).unwrap(), original);
++    }
++}
++
++#[test]
++fn other_server_requests_keep_their_existing_codec_route() {
++    let ping: ServerRequest = serde_json::from_value(json!({"method": "ping"})).unwrap();
++    assert!(matches!(ping, ServerRequest::PingRequest(_)));
++    let url = json!({
++        "method": "elicitation/create",
++        "params": {"mode": "url", "message": "Verify", "url": "https://example.invalid/verify", "elicitationId": "sample"}
++    });
++    let parsed: ServerRequest = serde_json::from_value(url).unwrap();
++    assert!(matches!(parsed, ServerRequest::ElicitRequest(_)));
++}

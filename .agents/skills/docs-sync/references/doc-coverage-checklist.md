@@ -5,15 +5,15 @@ Use this checklist within the requested topic or diff. A comprehensive inventory
 ## Feature inventory targets
 
 - Public exports: classes, functions, types, and module entry points.
-- Configuration options: `*Settings` types, default config objects, and builder patterns.
+- Configuration options: supported Agent, provider and tool declaration settings.
 - Environment variables or runtime flags.
-- CLI commands, scripts, and example entry points that define supported usage.
+- Current example entry points and build/install commands that define supported usage.
 - User-facing behaviors: retry, timeouts, streaming, errors, logging, telemetry, and data handling.
 - Deprecations, removals, or renamed settings.
 
 ## Doc-first pass (page-by-page)
 
-- Review each relevant English page (excluding `docs/ja`, `docs/ko`, and `docs/zh`).
+- Review each relevant page within the requested scope. Use `docs/sdk/` and `mkdocs.yml` for the current API; keep published-wheel guides matched to their release.
 - Look for missing opt-in flags, env vars, or customization options that the page implies.
 - Add new features that belong on that page based on user intent and navigation.
 
@@ -21,7 +21,7 @@ Use this checklist within the requested topic or diff. A comprehensive inventory
 
 - Map features to the closest existing page based on the docs navigation in `mkdocs.yml`.
 - Prefer updating existing pages over creating new ones unless the topic is clearly new.
-- Use conceptual pages for cross-cutting concerns (auth, errors, streaming, tracing, tools).
+- Use the existing tools, Sessions and configuration pages for cross-cutting concerns.
 - Keep quick-start flows minimal; move advanced details into deeper pages.
 
 ## Evidence capture
@@ -34,7 +34,7 @@ Use this checklist within the requested topic or diff. A comprehensive inventory
 
 - Option names/types no longer exist or differ from code.
 - Default values or allowed ranges do not match implementation.
-- Features removed in code but still documented.
+- Features removed in code but still documented as supported. Confirm the current export and implementation before pruning; a familiar identifier can still name a supported native feature.
 - Released behaviors missing necessary guidance. Apply the repository's Documentation Release Timing policy before proposing documentation for unreleased behavior.
 
 ## When to propose structural changes
@@ -46,11 +46,11 @@ Use this checklist within the requested topic or diff. A comprehensive inventory
 ## Diff mode guidance (only for branch-scoped requests)
 
 - Focus only on changed behavior: new exports/options, modified defaults, removed features, or renamed settings.
-- Use `git diff main...HEAD` (or equivalent) to constrain analysis.
+- Use `git diff <base>...HEAD` (or equivalent) to constrain analysis.
 - Document removals explicitly so docs can be pruned if needed.
 
 ## Patch guidance
 
 - Keep edits scoped and aligned with existing tone and format.
 - Update cross-links when moving or renaming sections.
-- Leave translated docs untouched; English-only updates.
+- Follow the current English source and its navigation.

@@ -1,0 +1,2669 @@
+diff --git a/codex-rs/code-mode-host/src/lib.rs b/codex-rs/code-mode-host/src/lib.rs
+index 37687e660ce07f67a6d4866b26cfb4832326f45a..46a9ce7b8c3bdcc9e70141dc6dc6b3f62363004e 100644
+--- a/codex-rs/code-mode-host/src/lib.rs
++++ b/codex-rs/code-mode-host/src/lib.rs
+@@ -261,6 +261,7 @@ async fn negotiate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+         [
+             SESSION_RESOURCE_LIMITS_CAPABILITY,
+             YIELD_OBSERVATION_CAPABILITY,
++            codex_code_mode_protocol::host::STATE_TRANSFER_CAPABILITY,
+         ]
+         .into_iter()
+         .map(Capability::new)
+@@ -390,6 +391,29 @@ impl HostState {
+                 .map(|()| HostResponse::SessionReady { session_id });
+                 self.respond(request_id, result);
+             }
++            HostRequest::ExportSession { session_id } => {
++                let result = match self.session(&session_id) {
++                    Ok(session) => {
++                        codex_code_mode_protocol::CodeModeSession::export_state(session.as_ref())
++                            .await
++                            .map(|state| HostResponse::SessionExported { state })
++                    }
++                    Err(error) => Err(error),
++                };
++                self.respond(request_id, result);
++            }
++            HostRequest::ImportSession { session_id, state } => {
++                let result = match self.session(&session_id) {
++                    Ok(session) => codex_code_mode_protocol::CodeModeSession::import_state(
++                        session.as_ref(),
++                        state,
++                    )
++                    .await
++                    .map(|()| HostResponse::SessionImported),
++                    Err(error) => Err(error),
++                };
++                self.respond(request_id, result);
++            }
+             HostRequest::Execute {
+                 session_id,
+                 request,
+@@ -604,6 +628,8 @@ impl HostState {
+ 
+ #[derive(Clone, Copy)]
+ enum RequestKind {
++    ExportSession,
++    ImportSession,
+     OpenSession,
+     Execute,
+     Wait,
+@@ -614,6 +640,8 @@ enum RequestKind {
+ impl RequestKind {
+     fn from(request: &HostRequest) -> Self {
+         match request {
++            HostRequest::ExportSession { .. } => Self::ExportSession,
++            HostRequest::ImportSession { .. } => Self::ImportSession,
+             HostRequest::OpenSession { .. } => Self::OpenSession,
+             HostRequest::Execute { .. } => Self::Execute,
+             HostRequest::Wait { .. } => Self::Wait,
+@@ -628,6 +656,8 @@ impl RequestKind {
+ 
+     fn as_str(self) -> &'static str {
+         match self {
++            Self::ExportSession => "export_session",
++            Self::ImportSession => "import_session",
+             Self::OpenSession => "open_session",
+             Self::Execute => "execute",
+             Self::Wait => "wait",
+diff --git a/codex-rs/code-mode-protocol/src/host/message.rs b/codex-rs/code-mode-protocol/src/host/message.rs
+index 39dd61315a4e8c61df2f1dd7193b2496530b3fc2..7dafb33fad8a821443528871cfb58c75c0f654d3 100644
+--- a/codex-rs/code-mode-protocol/src/host/message.rs
++++ b/codex-rs/code-mode-protocol/src/host/message.rs
+@@ -181,6 +181,13 @@ pub enum HostToClient {
+ #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+ #[serde(deny_unknown_fields, tag = "method", rename_all_fields = "camelCase")]
+ pub enum HostRequest {
++    #[serde(rename = "session/export")]
++    ExportSession { session_id: SessionId },
++    #[serde(rename = "session/import")]
++    ImportSession {
++        session_id: SessionId,
++        state: crate::CodeModeSnapshot,
++    },
+     #[serde(rename = "session/open")]
+     OpenSession {
+         session_id: SessionId,
+@@ -209,6 +216,10 @@ pub enum HostRequest {
+ #[derive(Debug, Deserialize, PartialEq, Serialize)]
+ #[serde(deny_unknown_fields, tag = "type", rename_all_fields = "camelCase")]
+ pub enum HostResponse {
++    #[serde(rename = "session/exported")]
++    SessionExported { state: crate::CodeModeSnapshot },
++    #[serde(rename = "session/imported")]
++    SessionImported,
+     #[serde(rename = "session/ready")]
+     SessionReady { session_id: SessionId },
+     #[serde(rename = "execution/started")]
+diff --git a/codex-rs/code-mode-protocol/src/host/mod.rs b/codex-rs/code-mode-protocol/src/host/mod.rs
+index af3f960fdd8db98cbb06419a3db277e339b05285..7413c0ba568653790e947873a8b4a1a5ea88a347 100644
+--- a/codex-rs/code-mode-protocol/src/host/mod.rs
++++ b/codex-rs/code-mode-protocol/src/host/mod.rs
+@@ -17,6 +17,7 @@ pub const SESSION_RESOURCE_LIMITS_CAPABILITY: &str = "session-cell-execution-res
+ 
+ /// Support for yielding an in-flight execute or wait observation.
+ pub const YIELD_OBSERVATION_CAPABILITY: &str = "yield-observation";
++pub const STATE_TRANSFER_CAPABILITY: &str = "settled-session-state-transfer-v1";
+ 
+ pub use codec::EncodedFrame;
+ pub use codec::FramedReader;
+diff --git a/codex-rs/code-mode-protocol/src/lib.rs b/codex-rs/code-mode-protocol/src/lib.rs
+index aab810d95493f745430148c180a71947c561001d..9bf892dd98e0d34d7e0e4320f767e281404f42a7 100644
+--- a/codex-rs/code-mode-protocol/src/lib.rs
++++ b/codex-rs/code-mode-protocol/src/lib.rs
+@@ -5,6 +5,7 @@ mod json_schema_types;
+ mod response;
+ mod runtime;
+ mod session;
++mod snapshot;
+ 
+ pub use description::CODE_MODE_PRAGMA_PREFIX;
+ pub use description::CodeModeToolKind;
+@@ -48,6 +49,11 @@ pub use session::NoopCodeModeSessionDelegate;
+ pub use session::NotificationFuture;
+ pub use session::StartedCell;
+ pub use session::ToolInvocationFuture;
++pub use snapshot::CodeModeSnapshot;
++pub use snapshot::CompletedCellSnapshot;
++pub use snapshot::SnapshotCellEvent;
++pub use snapshot::SnapshotImageDetail;
++pub use snapshot::SnapshotOutputItem;
+ 
+ pub const PUBLIC_TOOL_NAME: &str = "exec";
+ pub const WAIT_TOOL_NAME: &str = "wait";
+diff --git a/codex-rs/code-mode-protocol/src/session.rs b/codex-rs/code-mode-protocol/src/session.rs
+index 1c87cb8ea13f42fd4e96c1d86f38d2582a3c801a..7f9f8cb7c01cfffbd84249943ce574c4bfa92c54 100644
+--- a/codex-rs/code-mode-protocol/src/session.rs
++++ b/codex-rs/code-mode-protocol/src/session.rs
+@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
+ use tokio_util::sync::CancellationToken;
+ 
+ use crate::CodeModeNestedToolCall;
++use crate::CodeModeSnapshot;
+ use crate::ExecuteRequest;
+ use crate::RuntimeResponse;
+ use crate::WaitOutcome;
+@@ -152,6 +153,16 @@ impl CodeModeSessionDelegate for NoopCodeModeSessionDelegate {
+ /// must keep those values isolated. Implementations may execute cells
+ /// in-process or remotely.
+ pub trait CodeModeSession: Send + Sync {
++    /// Copies committed state without running or cancelling any cell.
++    fn export_state(&self) -> CodeModeSessionResultFuture<'_, CodeModeSnapshot> {
++        Box::pin(async { Err("code-mode state transfer is unsupported".to_string()) })
++    }
++
++    /// Installs state before any execution in a fresh session.
++    fn import_state(&self, _state: CodeModeSnapshot) -> CodeModeSessionResultFuture<'_, ()> {
++        Box::pin(async { Err("code-mode state transfer is unsupported".to_string()) })
++    }
++
+     /// Executes a cell, yielding its foreground observation if `preempt` is signaled.
+     /// The cell continues running after its observation yields.
+     fn execute<'a>(
+@@ -185,6 +196,14 @@ pub trait CodeModeSessionProvider: Send + Sync {
+ 
+     fn create_session(&self) -> CodeModeSessionProviderFuture<'_>;
+ 
++    /// Creates the isolated runtime owned by this native thread.
++    fn create_session_for_thread(
++        &self,
++        _thread_id: codex_protocol::ThreadId,
++    ) -> CodeModeSessionProviderFuture<'_> {
++        self.create_session()
++    }
++
+     /// Creates a session whose cells share the supplied execution limits.
+     ///
+     /// Existing providers remain compatible with unlimited sessions, but must
+diff --git a/codex-rs/code-mode-protocol/src/snapshot.rs b/codex-rs/code-mode-protocol/src/snapshot.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..727a89ad32dc9cd20f3792e3e317f5cdefbe5fa5
+--- /dev/null
++++ b/codex-rs/code-mode-protocol/src/snapshot.rs
+@@ -0,0 +1,204 @@
++use std::collections::HashMap;
++
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::Value as JsonValue;
++
++use crate::CellId;
++
++/// Portable committed values and settled, unconsumed cell observations.
++#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct CodeModeSnapshot {
++    pub format_version: u32,
++    pub next_cell_id: u64,
++    pub stored_values: HashMap<String, JsonValue>,
++    pub completed_cells: HashMap<String, CompletedCellSnapshot>,
++}
++
++impl CodeModeSnapshot {
++    /// Validates the complete snapshot before any runtime or reply authority opens.
++    pub fn validate(&self) -> Result<(), String> {
++        if self.format_version != 1 || self.next_cell_id == 0 {
++            return Err("unsupported or invalid code-mode snapshot".to_string());
++        }
++        for (id, cell) in &self.completed_cells {
++            let number = id.parse::<u64>().map_err(|_| "invalid saved cell ID")?;
++            if number == 0 || number >= self.next_cell_id || number.to_string() != *id {
++                return Err("invalid saved cell ID".to_string());
++            }
++            if let Some(public) = &cell.public_cell_id {
++                let valid = public.as_str() == id
++                    || public
++                        .as_str()
++                        .strip_prefix('g')
++                        .and_then(|value| value.split_once(':'))
++                        .is_some_and(|(generation, wire)| {
++                            generation
++                                .parse::<u64>()
++                                .is_ok_and(|n| n > 1 && n.to_string() == generation)
++                                && wire == id
++                        });
++                if !valid {
++                    return Err("invalid retained public cell identity".to_string());
++                }
++            }
++            if !matches!(
++                cell.event,
++                SnapshotCellEvent::Completed { .. } | SnapshotCellEvent::Terminated { .. }
++            ) {
++                return Err("saved code-mode cell is not terminal".to_string());
++            }
++        }
++        Ok(())
++    }
++}
++
++/// A committed terminal outcome, with the cell's original observation order.
++#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
++#[serde(deny_unknown_fields)]
++pub struct CompletedCellSnapshot {
++    /// Exact process-facing identity, distinct from this record's numeric wire key.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub public_cell_id: Option<CellId>,
++    pub pending_initial_yield_items: Option<Vec<SnapshotOutputItem>>,
++    pub event: SnapshotCellEvent,
++}
++
++/// An observable cell lifecycle event.
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub enum SnapshotCellEvent {
++    Yielded {
++        content_items: Vec<SnapshotOutputItem>,
++    },
++    Pending {
++        content_items: Vec<SnapshotOutputItem>,
++        pending_tool_call_ids: Vec<String>,
++    },
++    Completed {
++        content_items: Vec<SnapshotOutputItem>,
++        error_text: Option<String>,
++    },
++    Terminated {
++        content_items: Vec<SnapshotOutputItem>,
++    },
++}
++
++/// Output emitted by a cell since its preceding observation.
++#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub enum SnapshotOutputItem {
++    Text {
++        text: String,
++    },
++    Image {
++        image_url: String,
++        detail: Option<SnapshotImageDetail>,
++    },
++    Audio {
++        audio_url: String,
++    },
++}
++
++/// Requested image fidelity for an output image.
++#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub enum SnapshotImageDetail {
++    Auto,
++    Low,
++    High,
++    Original,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn snapshot() -> serde_json::Value {
++        serde_json::json!({
++            "format_version": 1,
++            "next_cell_id": 2,
++            "stored_values": {"kept": {"n": 7}},
++            "completed_cells": {
++                "1": {
++                    "pending_initial_yield_items": [{"Text": {"text": "yield"}}],
++                    "event": {"Completed": {
++                        "content_items": [{"Image": {"image_url": "data:image/png;base64,AA==", "detail": "Low"}}],
++                        "error_text": null
++                    }}
++                }
++            }
++        })
++    }
++
++    #[test]
++    fn typed_snapshot_validates_and_round_trips_all_terminal_payloads() {
++        let value = snapshot();
++        let parsed: CodeModeSnapshot = serde_json::from_value(value.clone()).unwrap();
++        parsed.validate().unwrap();
++        assert_eq!(serde_json::to_value(parsed).unwrap(), value);
++    }
++
++    #[test]
++    fn malformed_nested_terminal_payloads_reject_before_runtime_creation() {
++        for malformed in [
++            serde_json::json!({"Completed": {"content_items": [{"Text": {"text": 7}}], "error_text": null}}),
++            serde_json::json!({"Completed": {"content_items": [{"Image": {"image_url": "synthetic", "detail": "Invalid"}}], "error_text": null}}),
++            serde_json::json!({"Completed": {"content_items": [], "error_text": {"bad": true}}}),
++            serde_json::json!({"Completed": {"content_items": [], "unexpected": "payload"}}),
++        ] {
++            let mut value = snapshot();
++            value["completed_cells"]["1"]["event"] = malformed;
++            assert!(serde_json::from_value::<CodeModeSnapshot>(value).is_err());
++        }
++    }
++
++    #[test]
++    fn nonterminal_cells_reject_through_the_shared_validator() {
++        let mut value = snapshot();
++        value["completed_cells"]["1"]["event"] =
++            serde_json::json!({"Pending": {"content_items": [], "pending_tool_call_ids": []}});
++        let parsed: CodeModeSnapshot = serde_json::from_value(value).unwrap();
++        assert!(parsed.validate().unwrap_err().contains("not terminal"));
++    }
++    #[test]
++    fn terminal_public_identity_accepts_exact_ids_and_rejects_conflicts() {
++        let mut value = snapshot();
++        for public in ["1", "g2:1", "g18446744073709551615:1"] {
++            value["completed_cells"]["1"]["public_cell_id"] = public.into();
++            assert!(
++                serde_json::from_value::<CodeModeSnapshot>(value.clone())
++                    .unwrap()
++                    .validate()
++                    .is_ok()
++            );
++        }
++        for public in [
++            "g1:1",
++            "g0:1",
++            "g02:1",
++            "g2:2",
++            "g2:01",
++            "g2:1:1",
++            "g18446744073709551616:1",
++        ] {
++            value["completed_cells"]["1"]["public_cell_id"] = public.into();
++            assert!(
++                serde_json::from_value::<CodeModeSnapshot>(value.clone())
++                    .unwrap()
++                    .validate()
++                    .is_err()
++            );
++        }
++        value["completed_cells"]["1"]["public_cell_id"] = "g2:1".into();
++        value["next_cell_id"] = 3.into();
++        value["completed_cells"]["2"] = value["completed_cells"]["1"].clone();
++        assert!(
++            serde_json::from_value::<CodeModeSnapshot>(value)
++                .unwrap()
++                .validate()
++                .is_err()
++        );
++    }
++}
+diff --git a/codex-rs/code-mode-runtime/src/cell_actor/mod.rs b/codex-rs/code-mode-runtime/src/cell_actor/mod.rs
+index 4480e133da44e2f71954cd22fdcf47ebc3ed0b33..ad63f6429766aa65522ef4589319cda1eed7fad7 100644
+--- a/codex-rs/code-mode-runtime/src/cell_actor/mod.rs
++++ b/codex-rs/code-mode-runtime/src/cell_actor/mod.rs
+@@ -27,6 +27,7 @@ pub(crate) use self::types::CellHandle;
+ pub(crate) use self::types::CellHost;
+ pub(crate) use self::types::CellState;
+ pub(crate) use self::types::CellToolCall;
++pub(crate) use self::types::CompletedCellSnapshot;
+ pub(crate) use self::types::CompletionCommit;
+ use self::types::CompletionDelivery;
+ use self::types::ObservationDelivery;
+diff --git a/codex-rs/code-mode-runtime/src/cell_actor/types.rs b/codex-rs/code-mode-runtime/src/cell_actor/types.rs
+index 2aa343022a6e03d54b24f3802bbf8f6642f0fa9c..def131d9396c08d6a27a1a3a4e71ce86a84d24a7 100644
+--- a/codex-rs/code-mode-runtime/src/cell_actor/types.rs
++++ b/codex-rs/code-mode-runtime/src/cell_actor/types.rs
+@@ -4,6 +4,7 @@ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::sync::Mutex;
+ 
++use codex_code_mode_protocol::CellId;
+ use serde_json::Value as JsonValue;
+ use tokio::sync::mpsc;
+ use tokio::sync::oneshot;
+@@ -15,6 +16,7 @@ use crate::session_runtime::ObserveMode;
+ use crate::session_runtime::OutputItem;
+ use crate::session_runtime::ToolKind;
+ use crate::session_runtime::ToolName;
++pub(crate) use codex_code_mode_protocol::CompletedCellSnapshot;
+ 
+ pub(crate) type CellEventFuture =
+     Pin<Box<dyn Future<Output = Result<CellEvent, CellError>> + Send + 'static>>;
+@@ -65,7 +67,8 @@ pub(crate) trait CellHost: Send + Sync + 'static {
+ 
+ #[derive(Clone)]
+ pub(crate) struct CellHandle {
+-    command_tx: mpsc::UnboundedSender<CellCommand>,
++    public_cell_id: Option<CellId>,
++    command_tx: Option<mpsc::UnboundedSender<CellCommand>>,
+     state: Arc<CellState>,
+ }
+ 
+@@ -74,7 +77,48 @@ impl CellHandle {
+         command_tx: mpsc::UnboundedSender<CellCommand>,
+         state: Arc<CellState>,
+     ) -> Self {
+-        Self { command_tx, state }
++        Self {
++            public_cell_id: None,
++            command_tx: Some(command_tx),
++            state,
++        }
++    }
++
++    pub(crate) fn restored(snapshot: CompletedCellSnapshot, token: CancellationToken) -> Self {
++        Self {
++            public_cell_id: snapshot.public_cell_id,
++            command_tx: None,
++            state: Arc::new(CellState {
++                phase: Mutex::new(CellPhase::Completed {
++                    pending_initial_yield_items: snapshot.pending_initial_yield_items,
++                    event: snapshot.event,
++                }),
++                cancellation_token: token,
++            }),
++        }
++    }
++
++    pub(crate) fn snapshot(&self) -> Option<CompletedCellSnapshot> {
++        let phase = self
++            .state
++            .phase
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        match &*phase {
++            CellPhase::Completed {
++                pending_initial_yield_items,
++                event,
++            } => Some(CompletedCellSnapshot {
++                public_cell_id: self.public_cell_id.clone(),
++                pending_initial_yield_items: pending_initial_yield_items.clone(),
++                event: event.clone(),
++            }),
++            _ => None,
++        }
++    }
++
++    pub(crate) fn restored_consumed(&self) -> bool {
++        self.command_tx.is_none() && !self.state.accepting_observations()
+     }
+ 
+     pub(crate) fn observe(&self, observation: impl Into<Observation>) -> CellEventFuture {
+@@ -82,10 +126,14 @@ impl CellHandle {
+             return closed_event();
+         }
+         let (response_tx, response_rx) = oneshot::channel();
+-        if self
+-            .command_tx
++        let observation = observation.into();
++        let Some(command_tx) = &self.command_tx else {
++            self.state.route_observation(observation.mode, response_tx);
++            return response_event(response_rx);
++        };
++        if command_tx
+             .send(CellCommand::Observe {
+-                observation: observation.into(),
++                observation,
+                 response_tx,
+             })
+             .is_err()
+diff --git a/codex-rs/code-mode-runtime/src/service.rs b/codex-rs/code-mode-runtime/src/service.rs
+index 37fa8506c7d344e6ee5244cb6b44bb101f842504..d4fccb673d0944fe9b004c8498a1e4dfb5eb1e8c 100644
+--- a/codex-rs/code-mode-runtime/src/service.rs
++++ b/codex-rs/code-mode-runtime/src/service.rs
+@@ -220,6 +220,18 @@ impl Default for InProcessCodeModeSession {
+ }
+ 
+ impl CodeModeSession for InProcessCodeModeSession {
++    fn export_state(
++        &self,
++    ) -> CodeModeSessionResultFuture<'_, codex_code_mode_protocol::CodeModeSnapshot> {
++        Box::pin(self.runtime.export_state())
++    }
++    fn import_state(
++        &self,
++        state: codex_code_mode_protocol::CodeModeSnapshot,
++    ) -> CodeModeSessionResultFuture<'_, ()> {
++        Box::pin(self.runtime.import_state(state))
++    }
++
+     fn execute<'a>(
+         &'a self,
+         request: ExecuteRequest,
+diff --git a/codex-rs/code-mode-runtime/src/session_runtime/mod.rs b/codex-rs/code-mode-runtime/src/session_runtime/mod.rs
+index 0d2f45392321f74fc8503b26d3275a1eb1e49dbb..13b46e4103690e48f31a3dbb949e67d2803b2707 100644
+--- a/codex-rs/code-mode-runtime/src/session_runtime/mod.rs
++++ b/codex-rs/code-mode-runtime/src/session_runtime/mod.rs
+@@ -74,6 +74,66 @@ impl SessionRuntime {
+         }
+     }
+ 
++    pub(crate) async fn export_state(
++        &self,
++    ) -> Result<codex_code_mode_protocol::CodeModeSnapshot, String> {
++        let cells = self.inner.cells.lock().await;
++        if self.inner.shutdown_token.is_cancelled() {
++            return Err("code-mode session is shutting down".to_string());
++        }
++        let stored_values = self.inner.stored_values.lock().await;
++        let mut completed_cells = HashMap::new();
++        for (id, cell) in cells.iter() {
++            let snapshot = cell
++                .snapshot()
++                .ok_or("code-mode session has active cells")?;
++            completed_cells.insert(id.as_str().to_owned(), snapshot);
++        }
++        Ok(codex_code_mode_protocol::CodeModeSnapshot {
++            format_version: 1,
++            next_cell_id: self.inner.next_cell_id.load(Ordering::Relaxed),
++            stored_values: stored_values
++                .iter()
++                .map(|(key, value)| (key.clone(), value.as_ref().clone()))
++                .collect(),
++            completed_cells,
++        })
++    }
++
++    pub(crate) async fn import_state(
++        &self,
++        snapshot: codex_code_mode_protocol::CodeModeSnapshot,
++    ) -> Result<(), String> {
++        snapshot.validate()?;
++        let mut restored = HashMap::new();
++        for (id, cell) in snapshot.completed_cells {
++            restored.insert(
++                CellId::new(id),
++                CellHandle::restored(cell, self.inner.shutdown_token.child_token()),
++            );
++        }
++        let mut cells = self.inner.cells.lock().await;
++        let mut stored_values = self.inner.stored_values.lock().await;
++        if self.inner.shutdown_token.is_cancelled()
++            || !cells.is_empty()
++            || !stored_values.is_empty()
++            || self.inner.next_cell_id.load(Ordering::Relaxed) != 1
++            || !self.inner.cell_tasks.is_empty()
++        {
++            return Err("code-mode import requires a fresh session".to_string());
++        }
++        *stored_values = snapshot
++            .stored_values
++            .into_iter()
++            .map(|(key, value)| (key, Arc::new(value)))
++            .collect();
++        *cells = restored;
++        self.inner
++            .next_cell_id
++            .store(snapshot.next_cell_id, Ordering::Relaxed);
++        Ok(())
++    }
++
+     pub(crate) async fn execute<D: SessionRuntimeDelegate>(
+         &self,
+         request: CreateCellRequest,
+@@ -83,14 +143,8 @@ impl SessionRuntime {
+         if self.inner.shutdown_token.is_cancelled() {
+             return Err(Error::ShuttingDown);
+         }
+-        let cell_id = self.allocate_cell_id()?;
+-        let initial_event = self
+-            .start_cell(
+-                cell_id.clone(),
+-                request,
+-                initial_observation.into(),
+-                delegate,
+-            )
++        let (cell_id, initial_event) = self
++            .start_cell(request, initial_observation.into(), delegate)
+             .await?;
+         Ok(StartedCell {
+             cell_id,
+@@ -111,16 +165,17 @@ impl SessionRuntime {
+         cell_id: &CellId,
+         observation: impl Into<Observation> + Send,
+     ) -> Result<PendingEvent, Error> {
+-        let handle = self
+-            .inner
+-            .cells
+-            .lock()
+-            .await
++        let mut cells = self.inner.cells.lock().await;
++        let handle = cells
+             .get(cell_id)
+             .cloned()
+             .ok_or_else(|| Error::MissingCell(cell_id.clone()))?;
++        let event = handle.observe(observation);
++        if handle.restored_consumed() {
++            cells.remove(cell_id);
++        }
+         Ok(PendingEvent {
+-            event: map_actor_event(cell_id.clone(), handle.observe(observation)),
++            event: map_actor_event(cell_id.clone(), event),
+         })
+     }
+ 
+@@ -133,10 +188,14 @@ impl SessionRuntime {
+             .get(cell_id)
+             .cloned()
+             .ok_or_else(|| Error::MissingCell(cell_id.clone()))?;
+-        handle
++        let result = handle
+             .terminate()
+             .await
+-            .map_err(|error| actor_error(cell_id, error))
++            .map_err(|error| actor_error(cell_id, error));
++        if handle.restored_consumed() {
++            self.inner.cells.lock().await.remove(cell_id);
++        }
++        result
+     }
+ 
+     pub(crate) async fn shutdown(&self) -> Result<(), Error> {
+@@ -162,11 +221,15 @@ impl SessionRuntime {
+ 
+     async fn start_cell<D: SessionRuntimeDelegate>(
+         &self,
+-        cell_id: CellId,
+         request: CreateCellRequest,
+         initial_observation: Observation,
+         delegate: Arc<D>,
+-    ) -> Result<RuntimeEventFuture, Error> {
++    ) -> Result<(CellId, RuntimeEventFuture), Error> {
++        let mut cells = self.inner.cells.lock().await;
++        if self.inner.shutdown_token.is_cancelled() {
++            return Err(Error::ShuttingDown);
++        }
++        let cell_id = self.allocate_cell_id()?;
+         let stored_values = self.inner.stored_values.lock().await.clone();
+         let host = Arc::new(RuntimeCellHost {
+             delegate,
+@@ -174,10 +237,6 @@ impl SessionRuntime {
+             inner: Arc::clone(&self.inner),
+             execution_context: opentelemetry::Context::current(),
+         });
+-        let mut cells = self.inner.cells.lock().await;
+-        if self.inner.shutdown_token.is_cancelled() {
+-            return Err(Error::ShuttingDown);
+-        }
+         if cells.contains_key(&cell_id) {
+             return Err(Error::DuplicateCell(cell_id));
+         }
+@@ -204,7 +263,7 @@ impl SessionRuntime {
+             });
+         }
+         drop(cells);
+-        Ok(map_actor_event(cell_id, initial_event))
++        Ok((cell_id.clone(), map_actor_event(cell_id, initial_event)))
+     }
+ 
+     fn begin_shutdown(&self) {
+diff --git a/codex-rs/code-mode-runtime/src/session_runtime/tests.rs b/codex-rs/code-mode-runtime/src/session_runtime/tests.rs
+index dc4395a975a00961dd53044f38526915079038ea..f886ce0133fa880bbd6458ee9af69011f75e05f5 100644
+--- a/codex-rs/code-mode-runtime/src/session_runtime/tests.rs
++++ b/codex-rs/code-mode-runtime/src/session_runtime/tests.rs
+@@ -267,3 +267,193 @@ async fn drop_terminates_cells_when_the_registry_is_locked() {
+         .unwrap();
+     assert!(inner.cell_tasks.is_empty());
+ }
++
++#[tokio::test]
++async fn stored_values_transfer_to_independent_fresh_runtimes() {
++    let source = SessionRuntime::new();
++    let started = source
++        .execute(
++            execute_request(r#"store("value", {n: 7, values: [null, true, "雪"]});"#),
++            ObserveMode::YieldAfter(Duration::from_secs(1)),
++            Arc::new(RecordingDelegate),
++        )
++        .await
++        .unwrap();
++    assert!(matches!(
++        started.initial_event().await.unwrap(),
++        CellEvent::Completed {
++            error_text: None,
++            ..
++        }
++    ));
++    source.inner.cell_tasks.wait().await;
++    let snapshot = source.export_state().await.unwrap();
++    assert_eq!(snapshot.next_cell_id, 2);
++    source.shutdown().await.unwrap();
++    drop(source);
++    let left = SessionRuntime::new();
++    let right = SessionRuntime::new();
++    left.import_state(snapshot.clone()).await.unwrap();
++    right.import_state(snapshot).await.unwrap();
++    for (runtime, source, expected) in [
++        (
++            &left,
++            r#"store("value", "left"); text(load("value"));"#,
++            "left",
++        ),
++        (&right, r#"text(load("value").n);"#, "7"),
++    ] {
++        let cell = runtime
++            .execute(
++                execute_request(source),
++                ObserveMode::YieldAfter(Duration::from_secs(1)),
++                Arc::new(RecordingDelegate),
++            )
++            .await
++            .unwrap();
++        assert_eq!(cell.cell_id.as_str(), "2");
++        assert_eq!(
++            cell.initial_event().await.unwrap(),
++            CellEvent::Completed {
++                content_items: vec![OutputItem::Text {
++                    text: expected.to_string()
++                }],
++                error_text: None,
++            }
++        );
++        runtime.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn busy_export_does_not_cancel_or_consume_the_source_cell() {
++    let runtime = SessionRuntime::new();
++    let started = runtime
++        .execute(
++            execute_request("yield_control(); await new Promise(() => {});"),
++            ObserveMode::YieldAfter(Duration::from_secs(1)),
++            Arc::new(RecordingDelegate),
++        )
++        .await
++        .unwrap();
++    let id = started.cell_id.clone();
++    assert!(matches!(
++        started.initial_event().await.unwrap(),
++        CellEvent::Yielded { .. }
++    ));
++    assert!(
++        runtime
++            .export_state()
++            .await
++            .unwrap_err()
++            .contains("active cells")
++    );
++    assert!(matches!(
++        runtime
++            .observe(&id, ObserveMode::YieldAfter(Duration::ZERO))
++            .await
++            .unwrap(),
++        CellEvent::Yielded { .. }
++    ));
++    assert!(matches!(
++        runtime.terminate(&id).await.unwrap(),
++        CellEvent::Terminated { .. }
++    ));
++    runtime.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn buffered_terminal_observation_survives_state_transfer_once() {
++    let source = SessionRuntime::new();
++    let started = source
++        .execute(
++            execute_request(r#"yield_control(); store("done", true); text("buffered");"#),
++            ObserveMode::YieldAfter(Duration::from_secs(1)),
++            Arc::new(RecordingDelegate),
++        )
++        .await
++        .unwrap();
++    let id = started.cell_id.clone();
++    assert!(matches!(
++        started.initial_event().await.unwrap(),
++        CellEvent::Yielded { .. }
++    ));
++    tokio::time::timeout(Duration::from_secs(2), async {
++        while !source.inner.stored_values.lock().await.contains_key("done") {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
++    let snapshot = source.export_state().await.unwrap();
++    assert!(snapshot.completed_cells.contains_key(id.as_str()));
++    let target = SessionRuntime::new();
++    target.import_state(snapshot).await.unwrap();
++    source.shutdown().await.unwrap();
++    assert_eq!(
++        target
++            .observe(&id, ObserveMode::YieldAfter(Duration::ZERO))
++            .await
++            .unwrap(),
++        CellEvent::Completed {
++            content_items: vec![OutputItem::Text {
++                text: "buffered".to_string()
++            }],
++            error_text: None,
++        }
++    );
++    assert!(matches!(
++        target
++            .observe(&id, ObserveMode::YieldAfter(Duration::ZERO))
++            .await,
++        Err(Error::MissingCell(_))
++    ));
++    target.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn malformed_import_leaves_receiver_fresh_and_used_receiver_intact() {
++    let runtime = SessionRuntime::new();
++    let mut snapshot = codex_code_mode_protocol::CodeModeSnapshot {
++        format_version: 2,
++        next_cell_id: 3,
++        stored_values: HashMap::from([("value".to_string(), serde_json::json!(7))]),
++        completed_cells: HashMap::new(),
++    };
++    assert!(runtime.import_state(snapshot.clone()).await.is_err());
++    assert!(
++        runtime
++            .export_state()
++            .await
++            .unwrap()
++            .stored_values
++            .is_empty()
++    );
++    snapshot.format_version = 1;
++    runtime.import_state(snapshot.clone()).await.unwrap();
++    snapshot
++        .stored_values
++        .insert("value".to_string(), serde_json::json!(8));
++    assert!(runtime.import_state(snapshot).await.is_err());
++    assert_eq!(
++        runtime.export_state().await.unwrap().stored_values["value"],
++        serde_json::json!(7)
++    );
++    runtime.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn snapshot_preserves_restored_public_terminal_identity() {
++    let runtime = super::SessionRuntime::new();
++    let snapshot: codex_code_mode_protocol::CodeModeSnapshot =
++        serde_json::from_value(serde_json::json!({
++            "format_version": 1, "next_cell_id": 2, "stored_values": {},
++            "completed_cells": { "1": {
++                "public_cell_id": "g2:1", "pending_initial_yield_items": null,
++                "event": { "Completed": { "content_items": [], "error_text": null } }
++            } }
++        }))
++        .unwrap();
++    runtime.import_state(snapshot.clone()).await.unwrap();
++    assert_eq!(runtime.export_state().await.unwrap(), snapshot);
++}
+diff --git a/codex-rs/code-mode-runtime/src/session_runtime/types.rs b/codex-rs/code-mode-runtime/src/session_runtime/types.rs
+index d1cdd79ceeef63ef7811fc3879628f9c2350019f..7e6d7edfe9014cbab6ef9f293e313ef24f8f9302 100644
+--- a/codex-rs/code-mode-runtime/src/session_runtime/types.rs
++++ b/codex-rs/code-mode-runtime/src/session_runtime/types.rs
+@@ -53,48 +53,9 @@ impl From<ObserveMode> for Observation {
+     }
+ }
+ 
+-/// An observable cell lifecycle event.
+-#[derive(Clone, Debug, PartialEq)]
+-pub(crate) enum CellEvent {
+-    Yielded {
+-        content_items: Vec<OutputItem>,
+-    },
+-    Pending {
+-        content_items: Vec<OutputItem>,
+-        pending_tool_call_ids: Vec<String>,
+-    },
+-    Completed {
+-        content_items: Vec<OutputItem>,
+-        error_text: Option<String>,
+-    },
+-    Terminated {
+-        content_items: Vec<OutputItem>,
+-    },
+-}
+-
+-/// Output emitted by a cell since its preceding observation.
+-#[derive(Clone, Debug, PartialEq)]
+-pub(crate) enum OutputItem {
+-    Text {
+-        text: String,
+-    },
+-    Image {
+-        image_url: String,
+-        detail: Option<ImageDetail>,
+-    },
+-    Audio {
+-        audio_url: String,
+-    },
+-}
+-
+-/// Requested image fidelity for an output image.
+-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+-pub(crate) enum ImageDetail {
+-    Auto,
+-    Low,
+-    High,
+-    Original,
+-}
++pub(crate) use codex_code_mode_protocol::SnapshotCellEvent as CellEvent;
++pub(crate) use codex_code_mode_protocol::SnapshotImageDetail as ImageDetail;
++pub(crate) use codex_code_mode_protocol::SnapshotOutputItem as OutputItem;
+ 
+ /// Transport-neutral input for creating a cell.
+ ///
+diff --git a/codex-rs/code-mode/src/remote_session.rs b/codex-rs/code-mode/src/remote_session.rs
+index 36e4e1a74f57847f12608fc714b5d1228158c925..e63007dbb8c12389dc86f048836dfd32bef1d1fd 100644
+--- a/codex-rs/code-mode/src/remote_session.rs
++++ b/codex-rs/code-mode/src/remote_session.rs
+@@ -1,3 +1,4 @@
++use std::collections::HashMap;
+ use std::io;
+ use std::path::PathBuf;
+ use std::sync::Arc;
+@@ -210,6 +211,44 @@ struct SessionBinding {
+     connection: Arc<Connection>,
+     remote: RemoteSession,
+     cleanup: SessionCleanup,
++    retained_cell_ids: Arc<StdMutex<HashMap<String, CellId>>>,
++}
++
++impl SessionBinding {
++    fn request_cell_id(&self, public: &CellId) -> Result<CellId, String> {
++        let ids = self
++            .retained_cell_ids
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        let wire = public
++            .as_str()
++            .rsplit(':')
++            .next()
++            .unwrap_or(public.as_str());
++        if let Some(expected) = ids.get(wire) {
++            if expected != public {
++                return Err(format!(
++                    "cell {public} belongs to a stale code-mode host generation"
++                ));
++            }
++            return Ok(self.remote.public_cell_id(&CellId::new(wire.to_owned())));
++        }
++        Ok(public.clone())
++    }
++}
++
++fn retained_wait_identity(mut outcome: WaitOutcome, public: CellId) -> WaitOutcome {
++    let response = match &mut outcome {
++        WaitOutcome::LiveCell(response) | WaitOutcome::MissingCell(response) => response,
++    };
++    match response {
++        codex_code_mode_protocol::RuntimeResponse::Yielded { cell_id, .. }
++        | codex_code_mode_protocol::RuntimeResponse::Result { cell_id, .. }
++        | codex_code_mode_protocol::RuntimeResponse::Terminated { cell_id, .. } => {
++            *cell_id = public
++        }
++    }
++    outcome
+ }
+ 
+ struct SessionInner {
+@@ -270,19 +309,24 @@ impl ProcessOwnedCodeModeSession {
+ 
+     pub async fn wait(
+         &self,
+-        request: WaitRequest,
++        mut request: WaitRequest,
+         preempt: Option<CancellationToken>,
+     ) -> Result<WaitOutcome, String> {
+         let binding = self.connection().await?;
+-        binding
++        let public = request.cell_id.clone();
++        request.cell_id = binding.request_cell_id(&public)?;
++        let outcome = binding
+             .connection
+             .wait(binding.remote, request, preempt)
+-            .await
++            .await?;
++        Ok(retained_wait_identity(outcome, public))
+     }
+ 
+     pub async fn terminate(&self, cell_id: CellId) -> Result<WaitOutcome, String> {
+         let binding = self.connection().await?;
+-        binding.connection.terminate(binding.remote, cell_id).await
++        let target = binding.request_cell_id(&cell_id)?;
++        let outcome = binding.connection.terminate(binding.remote, target).await?;
++        Ok(retained_wait_identity(outcome, cell_id))
+     }
+ 
+     pub async fn shutdown(&self) -> Result<(), String> {
+@@ -291,6 +335,45 @@ impl ProcessOwnedCodeModeSession {
+ }
+ 
+ impl SessionInner {
++    fn allocate_generation(&self) -> Result<u64, String> {
++        self.next_generation
++            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
++                generation.checked_add(1)
++            })
++            .map_err(|_| "code-mode host generation space exhausted".to_string())
++    }
++
++    async fn export_binding(&self) -> Result<Option<SessionBinding>, String> {
++        if self.shutdown_requested.load(Ordering::Acquire) {
++            return Err("code mode session is shutting down".to_string());
++        }
++        let opening = {
++            let state = self
++                .state
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            match &*state {
++                SessionState::New if self.next_generation.load(Ordering::Relaxed) == 1 => {
++                    return Ok(None);
++                }
++                SessionState::New => {
++                    return Err("code-mode export has no retained source session".to_string());
++                }
++                SessionState::Open(binding) => {
++                    if !binding.connection.is_alive() {
++                        return Err(binding.connection.failure_message());
++                    }
++                    return Ok(Some(binding.clone()));
++                }
++                SessionState::Opening { result_rx, .. } => result_rx.clone(),
++                SessionState::Closing | SessionState::Closed => {
++                    return Err("code mode session is shutting down".to_string());
++                }
++            }
++        };
++        wait_for_watch(opening).await.map(Some)
++    }
++
+     async fn connection(self: &Arc<Self>) -> Result<SessionBinding, String> {
+         loop {
+             if self.shutdown_requested.load(Ordering::Acquire) {
+@@ -303,7 +386,7 @@ impl SessionInner {
+                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                 match &*state {
+                     SessionState::New => {
+-                        let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
++                        let generation = self.allocate_generation()?;
+                         let remote = RemoteSession {
+                             id: self.host.allocate_session_id(),
+                             generation,
+@@ -353,6 +436,7 @@ impl SessionInner {
+                     connection,
+                     remote: remote.clone(),
+                     cleanup,
++                    retained_cell_ids: Arc::new(StdMutex::new(HashMap::new())),
+                 })
+             }
+             Err(err) => Err(err.to_string()),
+@@ -412,11 +496,6 @@ impl SessionInner {
+                     SessionState::Opening { result_rx, .. } => {
+                         ShutdownAction::WaitForOpen(result_rx.clone())
+                     }
+-                    SessionState::Open(binding) if !binding.connection.is_alive() => {
+-                        let cleanup = binding.cleanup.clone();
+-                        *state = SessionState::Closing;
+-                        ShutdownAction::WaitForSessionCleanup(cleanup)
+-                    }
+                     SessionState::Open(binding) => {
+                         let binding = binding.clone();
+                         *state = SessionState::Closing;
+@@ -436,20 +515,11 @@ impl SessionInner {
+                     self.wait_for_retired_cleanups().await;
+                     return Ok(());
+                 }
+-                ShutdownAction::WaitForSessionCleanup(cleanup) => {
+-                    cleanup.wait().await;
+-                    self.wait_for_retired_cleanups().await;
+-                    *self
+-                        .state
+-                        .lock()
+-                        .unwrap_or_else(std::sync::PoisonError::into_inner) = SessionState::Closed;
+-                    return Ok(());
+-                }
+                 ShutdownAction::Close(binding) => {
+-                    let result = binding.connection.shutdown_session(binding.remote).await;
+-                    if result.is_err() && !binding.connection.is_alive() {
+-                        binding.cleanup.wait().await;
+-                    }
++                    let result = binding
++                        .connection
++                        .shutdown_session(binding.remote, binding.cleanup.clone())
++                        .await;
+                     self.wait_for_retired_cleanups().await;
+                     *self
+                         .state
+@@ -488,7 +558,6 @@ impl SessionInner {
+ enum ShutdownAction {
+     WaitForOpen(watch::Receiver<Option<Result<SessionBinding, String>>>),
+     Finish,
+-    WaitForSessionCleanup(SessionCleanup),
+     Close(SessionBinding),
+ }
+ 
+@@ -524,6 +593,75 @@ impl Default for ProcessOwnedCodeModeSession {
+ }
+ 
+ impl CodeModeSession for ProcessOwnedCodeModeSession {
++    fn export_state(
++        &self,
++    ) -> CodeModeSessionResultFuture<'_, codex_code_mode_protocol::CodeModeSnapshot> {
++        Box::pin(async move {
++            let Some(binding) = self.inner.export_binding().await? else {
++                return Ok(codex_code_mode_protocol::CodeModeSnapshot {
++                    format_version: 1,
++                    next_cell_id: 1,
++                    stored_values: HashMap::new(),
++                    completed_cells: HashMap::new(),
++                });
++            };
++            let mut state = binding
++                .connection
++                .export_state(binding.remote.clone())
++                .await?;
++            for (wire, cell) in &mut state.completed_cells {
++                if cell.public_cell_id.is_none() {
++                    cell.public_cell_id =
++                        Some(binding.remote.public_cell_id(&CellId::new(wire.clone())));
++                }
++            }
++            state.validate()?;
++            Ok(state)
++        })
++    }
++    fn import_state(
++        &self,
++        mut state: codex_code_mode_protocol::CodeModeSnapshot,
++    ) -> CodeModeSessionResultFuture<'_, ()> {
++        Box::pin(async move {
++            state.validate()?;
++            let mut ids = HashMap::new();
++            let mut retained_generation = 1;
++            for (wire, cell) in &mut state.completed_cells {
++                let public = cell
++                    .public_cell_id
++                    .get_or_insert_with(|| CellId::new(wire.clone()));
++                let generation = public
++                    .as_str()
++                    .strip_prefix('g')
++                    .and_then(|value| value.split_once(':'))
++                    .and_then(|(generation, _)| generation.parse::<u64>().ok())
++                    .unwrap_or(1);
++                retained_generation = retained_generation.max(generation);
++                ids.insert(wire.clone(), public.clone());
++            }
++            let binding = self.connection().await?;
++            // A later binding must never reuse an imported public generation for
++            // unrelated cells. Reserve the existing monotonic allocator before
++            // import can publish identities; MAX makes future allocation fail closed.
++            self.inner.next_generation.fetch_max(
++                retained_generation
++                    .max(binding.remote.generation)
++                    .saturating_add(1),
++                Ordering::Relaxed,
++            );
++            binding
++                .connection
++                .import_state(binding.remote, state)
++                .await?;
++            *binding
++                .retained_cell_ids
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner) = ids;
++            Ok(())
++        })
++    }
++
+     fn execute<'a>(
+         &'a self,
+         request: ExecuteRequest,
+diff --git a/codex-rs/code-mode/src/remote_session/connection.rs b/codex-rs/code-mode/src/remote_session/connection.rs
+index ed5a22074b12191272a3becb77a55fd745778b8a..4e8a14ce143c3af4ef6bf2c7bcd7fc6a2b6e531d 100644
+--- a/codex-rs/code-mode/src/remote_session/connection.rs
++++ b/codex-rs/code-mode/src/remote_session/connection.rs
+@@ -209,9 +209,15 @@ impl Connection {
+                 .map_err(|error| error.to_string())?;
+             let yield_capability =
+                 Capability::new(YIELD_OBSERVATION_CAPABILITY).map_err(|error| error.to_string())?;
+-            let optional_capabilities =
+-                CapabilitySet::try_new([session_limits_capability, yield_capability])
++            let state_capability =
++                Capability::new(codex_code_mode_protocol::host::STATE_TRANSFER_CAPABILITY)
+                     .map_err(|error| error.to_string())?;
++            let optional_capabilities = CapabilitySet::try_new([
++                session_limits_capability,
++                yield_capability,
++                state_capability,
++            ])
++            .map_err(|error| error.to_string())?;
+             let hello = ClientHello::new(
+                 SupportedProtocolVersions::try_new([ProtocolVersion::V1])
+                     .map_err(|err| err.to_string())?,
+@@ -449,14 +455,85 @@ impl Connection {
+         .await
+     }
+ 
+-    pub(super) async fn shutdown_session(&self, session: RemoteSession) -> Result<(), String> {
++    fn require_state_transfer(&self) -> Result<(), String> {
++        if !self.capabilities.iter().any(|capability| {
++            capability.as_str() == codex_code_mode_protocol::host::STATE_TRANSFER_CAPABILITY
++        }) {
++            return Err("code-mode host does not support settled state transfer".to_string());
++        }
++        Ok(())
++    }
++
++    pub(super) async fn export_state(
++        &self,
++        session: RemoteSession,
++    ) -> Result<codex_code_mode_protocol::CodeModeSnapshot, String> {
++        self.require_state_transfer()?;
+         let (response_tx, response_rx) = oneshot::channel();
+-        self.send(DriverCommand::ShutdownSession {
+-            session,
+-            response_tx,
++        // A transfer observation deadline does not prove the shared host failed.
++        tokio::time::timeout(DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT, async {
++            self.send(DriverCommand::ExportState {
++                session,
++                response_tx,
++            })
++            .await?;
++            self.receive(response_rx).await
+         })
+-        .await?;
+-        self.receive(response_rx).await
++        .await
++        .map_err(|_| "code-mode state export timed out".to_string())?
++    }
++
++    pub(super) async fn import_state(
++        &self,
++        session: RemoteSession,
++        state: codex_code_mode_protocol::CodeModeSnapshot,
++    ) -> Result<(), String> {
++        self.require_state_transfer()?;
++        let (response_tx, response_rx) = oneshot::channel();
++        // The existing import owner joins this receiver on error or cancellation.
++        // Keep unrelated published sessions alive when only this reply is late.
++        tokio::time::timeout(DEFAULT_HOST_WAIT_TRANSPORT_TIMEOUT, async {
++            self.send(DriverCommand::ImportState {
++                session,
++                state,
++                response_tx,
++            })
++            .await?;
++            self.receive(response_rx).await
++        })
++        .await
++        .map_err(|_| "code-mode state import timed out".to_string())?
++    }
++
++    pub(super) async fn shutdown_session(
++        &self,
++        session: RemoteSession,
++        cleanup: SessionCleanup,
++    ) -> Result<(), String> {
++        let (response_tx, response_rx) = oneshot::channel();
++        if self
++            .send(DriverCommand::ShutdownSession {
++                session: session.clone(),
++                cleanup: cleanup.clone(),
++                response_tx,
++            })
++            .await
++            .is_ok()
++        {
++            if let Ok(Err(error)) = response_rx.await {
++                // An explicit rejected admission never authorizes another
++                // receipt to join; transport errors instead join below.
++                return Err(error);
++            }
++        }
++        // Transport death cannot prove successful retirement. Even if it precedes
++        // shutdown entry, join the exact receipt and inspect its acknowledgement.
++        cleanup.wait().await;
++        if cleanup.acknowledged_for(&session) {
++            Ok(())
++        } else {
++            Err(self.failure_message())
++        }
+     }
+ 
+     async fn with_transport_deadline<T>(
+@@ -496,7 +573,7 @@ impl Connection {
+         response_rx.await.map_err(|_| self.failure_message())?
+     }
+ 
+-    fn failure_message(&self) -> String {
++    pub(super) fn failure_message(&self) -> String {
+         self.failure
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner)
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs b/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs
+index b994b648875e15e9e80333f8642bb26ed4f8c1ed..1760e3b91deb3684daaecb6c6e3899c85c9111c4 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/cleanup.rs
+@@ -1,4 +1,6 @@
+-use std::sync::Arc;
++use std::sync::{Arc, Mutex};
++
++use super::types::RemoteSession;
+ 
+ use tokio_util::sync::CancellationToken;
+ 
+@@ -7,6 +9,7 @@ use super::session_registry::CellOwner;
+ 
+ struct CleanupInner {
+     complete: CancellationToken,
++    acknowledged: Mutex<Option<RemoteSession>>,
+ }
+ 
+ #[derive(Clone)]
+@@ -19,10 +22,33 @@ impl SessionCleanup {
+         Self {
+             inner: Arc::new(CleanupInner {
+                 complete: CancellationToken::new(),
++                acknowledged: Mutex::new(None),
+             }),
+         }
+     }
+ 
++    pub(super) fn same_receipt(&self, other: &Self) -> bool {
++        Arc::ptr_eq(&self.inner, &other.inner)
++    }
++
++    pub(in crate::remote_session) fn acknowledged_for(&self, session: &RemoteSession) -> bool {
++        self.inner
++            .acknowledged
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++            == Some(session)
++    }
++
++    pub(super) fn acknowledge(&self, session: RemoteSession) {
++        *self
++            .inner
++            .acknowledged
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session);
++        self.inner.complete.cancel();
++    }
++
+     pub(super) fn fail(&self, cells: Vec<CellOwner>) {
+         for owner in cells {
+             notify_cell_closed(&owner.delegate, &owner.cell_id);
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs b/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs
+index bdbde44c1eb738174eda9aebfff71bad7ae16f36..7cca65dc6377adc8b19fc31a96cb0473a4ba1534 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/commands.rs
+@@ -28,6 +28,41 @@ use super::types::RemoteSession;
+ impl ConnectionDriver {
+     pub(super) fn handle_command(&mut self, command: DriverCommand) -> bool {
+         match command {
++            DriverCommand::ExportState {
++                session,
++                response_tx,
++            } => {
++                if let Err(error) = self.sessions.require_ready(&session) {
++                    let _ = response_tx.send(Err(error));
++                    return true;
++                }
++                self.send_request(
++                    HostRequest::ExportSession {
++                        session_id: session.id,
++                    },
++                    PendingRequest::ExportState { response_tx },
++                )
++            }
++            DriverCommand::ImportState {
++                session,
++                state,
++                response_tx,
++            } => {
++                if let Err(error) = self.sessions.require_ready(&session) {
++                    let _ = response_tx.send(Err(error));
++                    return true;
++                }
++                self.send_request(
++                    HostRequest::ImportSession {
++                        session_id: session.id.clone(),
++                        state,
++                    },
++                    PendingRequest::ImportState {
++                        session,
++                        response_tx,
++                    },
++                )
++            }
+             DriverCommand::OpenSession {
+                 session,
+                 limits,
+@@ -70,8 +105,9 @@ impl ConnectionDriver {
+             } => self.terminate(session, cell_id, response_tx),
+             DriverCommand::ShutdownSession {
+                 session,
++                cleanup,
+                 response_tx,
+-            } => self.shutdown_session(session, response_tx),
++            } => self.shutdown_session(session, cleanup, response_tx),
+         }
+     }
+ 
+@@ -296,20 +332,36 @@ impl ConnectionDriver {
+     fn shutdown_session(
+         &mut self,
+         session: RemoteSession,
++        cleanup: super::cleanup::SessionCleanup,
+         response_tx: oneshot::Sender<Result<(), String>>,
+     ) -> bool {
+-        if let Err(err) = self.sessions.begin_shutdown(&session) {
+-            let _ = response_tx.send(Err(err));
+-            return true;
++        let start = match self.sessions.begin_shutdown(&session, &cleanup) {
++            Ok(start) => start,
++            Err(err) => {
++                let _ = response_tx.send(Err(err));
++                return true;
++            }
++        };
++        // This reply grants admission only. The caller always joins the exact
++        // receipt, including errors or an acknowledgement that already arrived.
++        let _ = response_tx.send(Ok(()));
++        if start {
++            self.start_session_shutdown(session, cleanup)
++        } else {
++            true
+         }
++    }
++
++    pub(super) fn start_session_shutdown(
++        &mut self,
++        session: RemoteSession,
++        cleanup: super::cleanup::SessionCleanup,
++    ) -> bool {
+         self.send_request(
+             HostRequest::ShutdownSession {
+                 session_id: session.id.clone(),
+             },
+-            PendingRequest::ShutdownSession {
+-                session,
+-                response_tx,
+-            },
++            PendingRequest::ShutdownSession { session, cleanup },
+         )
+     }
+ 
+@@ -328,9 +380,15 @@ impl ConnectionDriver {
+         let frame = match EncodedFrame::encode(&message) {
+             Ok(frame) => frame,
+             Err(err) => {
+-                pending.fail(format!(
+-                    "code-mode request exceeds the IPC frame limit: {err}"
+-                ));
++                let shutdown = matches!(&pending, PendingRequest::ShutdownSession { .. });
++                let reason = format!("code-mode request exceeds the IPC frame limit: {err}");
++                pending.fail(reason.clone());
++                if shutdown {
++                    // A receiver whose retirement cannot be sent must fail through
++                    // the existing joined connection cleanup, not leave waiters stuck.
++                    self.fail(reason);
++                    return false;
++                }
+                 return true;
+             }
+         };
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs b/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs
+index 6c95cc6e5d798179cb72f802af42e63e19f4599e..8e9cdf4ce1445c0d25ea56162df962bec637ecfe 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/responses.rs
+@@ -152,6 +152,28 @@ impl ConnectionDriver {
+             return false;
+         };
+         match pending {
++            PendingRequest::ExportState { response_tx } => {
++                let result = match result {
++                    Ok(HostResponse::SessionExported { state }) => Ok(state),
++                    Ok(_) => Err("invalid code-mode export response".to_string()),
++                    Err(error) => Err(error),
++                };
++                // Dropping a passive observation cannot retire its published source.
++                let _ = response_tx.send(result);
++            }
++            PendingRequest::ImportState {
++                session,
++                response_tx,
++            } => {
++                let result = match result {
++                    Ok(HostResponse::SessionImported) => Ok(()),
++                    Ok(_) => Err("invalid code-mode import response".to_string()),
++                    Err(error) => Err(error),
++                };
++                if response_tx.send(result).is_err() && self.sessions.contains(&session.id) {
++                    return self.shutdown_abandoned_session(session);
++                }
++            }
+             PendingRequest::OpenSession {
+                 session,
+                 cleanup,
+@@ -309,25 +331,22 @@ impl ConnectionDriver {
+                 };
+                 let _ = response_tx.send(Ok(result));
+             }
+-            PendingRequest::ShutdownSession {
+-                session,
+-                response_tx,
+-            } => match result {
++            PendingRequest::ShutdownSession { session, cleanup } => match result {
+                 Ok(HostResponse::SessionClosed { session_id }) if session_id == session.id => {
+                     let effects = self.close_session_locally(&session.id);
+                     if !self.apply_delegate_effects(effects) {
++                        cleanup.fail(Vec::new());
+                         return false;
+                     }
+-                    let _ = response_tx.send(Ok(()));
++                    // Publish success only after this receiver's local cleanup.
++                    cleanup.acknowledge(session);
+                 }
+                 Ok(_) => {
+                     let err = "code-mode host returned an invalid shutdown response".to_string();
+-                    let _ = response_tx.send(Err(err.clone()));
+                     self.fail(err);
+                     return false;
+                 }
+                 Err(err) => {
+-                    let _ = response_tx.send(Err(err.clone()));
+                     self.fail(err);
+                     return false;
+                 }
+@@ -392,27 +411,15 @@ impl ConnectionDriver {
+     }
+ 
+     fn shutdown_abandoned_session(&mut self, session: RemoteSession) -> bool {
+-        let Some(should_shutdown) = self.sessions.begin_abandoned_shutdown(&session.id) else {
+-            self.fail(format!(
+-                "code-mode host committed abandoned session {} without local state",
+-                session.id
+-            ));
+-            return false;
++        let cleanup = match self.sessions.begin_abandoned_shutdown(&session) {
++            Ok(Some(cleanup)) => cleanup,
++            Ok(None) => return true,
++            Err(error) => {
++                self.fail(error);
++                return false;
++            }
+         };
+-        if !should_shutdown {
+-            return true;
+-        }
+-        let (response_tx, response_rx) = oneshot::channel();
+-        drop(response_rx);
+-        self.send_request(
+-            HostRequest::ShutdownSession {
+-                session_id: session.id.clone(),
+-            },
+-            PendingRequest::ShutdownSession {
+-                session,
+-                response_tx,
+-            },
+-        )
++        self.start_session_shutdown(session, cleanup)
+     }
+ 
+     fn terminate_abandoned_cell(&mut self, session: RemoteSession, cell_id: WireCellId) -> bool {
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs b/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs
+index d3dda96b8513b553a94708ba94bffbdd6fc28203..193dc936e25c11282415dc00afb6110990543f66 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/session_registry.rs
+@@ -92,7 +92,31 @@ impl SessionRegistry {
+         Ok(())
+     }
+ 
+-    pub(super) fn begin_shutdown(&mut self, session: &RemoteSession) -> Result<(), String> {
++    pub(super) fn begin_shutdown(
++        &mut self,
++        session: &RemoteSession,
++        cleanup: &SessionCleanup,
++    ) -> Result<bool, String> {
++        let Some(record) = self.records.get_mut(&session.id) else {
++            if cleanup.acknowledged_for(session) {
++                return Ok(false);
++            }
++            return Err(format!("unknown code-mode session {}", session.id));
++        };
++        if record.remote != *session || !record.cleanup.same_receipt(cleanup) {
++            return Err("stale code-mode session generation or cleanup receipt".to_string());
++        }
++        if record.phase == SessionPhase::Closing {
++            return Ok(false);
++        }
++        record.phase = SessionPhase::Closing;
++        Ok(true)
++    }
++
++    pub(super) fn begin_abandoned_shutdown(
++        &mut self,
++        session: &RemoteSession,
++    ) -> Result<Option<SessionCleanup>, String> {
+         let record = self
+             .records
+             .get_mut(&session.id)
+@@ -101,19 +125,10 @@ impl SessionRegistry {
+             return Err("stale code-mode session generation".to_string());
+         }
+         if record.phase == SessionPhase::Closing {
+-            return Err("code-mode session is already closing".to_string());
+-        }
+-        record.phase = SessionPhase::Closing;
+-        Ok(())
+-    }
+-
+-    pub(super) fn begin_abandoned_shutdown(&mut self, session_id: &SessionId) -> Option<bool> {
+-        let record = self.records.get_mut(session_id)?;
+-        if record.phase == SessionPhase::Closing {
+-            return Some(false);
++            return Ok(None);
+         }
+         record.phase = SessionPhase::Closing;
+-        Some(true)
++        Ok(Some(record.cleanup.clone()))
+     }
+ 
+     pub(super) fn is_closing(&self, session_id: &SessionId) -> Option<bool> {
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver/types.rs b/codex-rs/code-mode/src/remote_session/connection/driver/types.rs
+index 8aed64908ee923616b95f258ab32ceb6aa87fcb4..18eb6873af772a6d2a71960213076bbce1e6e55b 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver/types.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver/types.rs
+@@ -28,7 +28,22 @@ pub(in crate::remote_session) struct RemoteSession {
+     pub(in crate::remote_session) generation: u64,
+ }
+ 
++impl RemoteSession {
++    pub(in crate::remote_session) fn public_cell_id(&self, cell_id: &CellId) -> CellId {
++        super::cell_ids::public_cell_id_from_protocol(self.generation, cell_id)
++    }
++}
++
+ pub(in crate::remote_session::connection) enum DriverCommand {
++    ExportState {
++        session: RemoteSession,
++        response_tx: oneshot::Sender<Result<codex_code_mode_protocol::CodeModeSnapshot, String>>,
++    },
++    ImportState {
++        session: RemoteSession,
++        state: codex_code_mode_protocol::CodeModeSnapshot,
++        response_tx: oneshot::Sender<Result<(), String>>,
++    },
+     OpenSession {
+         session: RemoteSession,
+         limits: CodeModeSessionCellExecutionLimits,
+@@ -58,6 +73,7 @@ pub(in crate::remote_session::connection) enum DriverCommand {
+     },
+     ShutdownSession {
+         session: RemoteSession,
++        cleanup: SessionCleanup,
+         response_tx: oneshot::Sender<Result<(), String>>,
+     },
+ }
+@@ -164,6 +180,15 @@ pub(super) struct UnclaimedExecute {
+ }
+ 
+ pub(super) enum PendingRequest {
++    // Export borrows published state. It never owns a session to retire.
++    ExportState {
++        response_tx: oneshot::Sender<Result<codex_code_mode_protocol::CodeModeSnapshot, String>>,
++    },
++    // Import owns an unpublished receiver until its caller accepts completion.
++    ImportState {
++        session: RemoteSession,
++        response_tx: oneshot::Sender<Result<(), String>>,
++    },
+     OpenSession {
+         session: RemoteSession,
+         cleanup: SessionCleanup,
+@@ -193,7 +218,7 @@ pub(super) enum PendingRequest {
+     },
+     ShutdownSession {
+         session: RemoteSession,
+-        response_tx: oneshot::Sender<Result<(), String>>,
++        cleanup: SessionCleanup,
+     },
+ }
+ 
+@@ -211,7 +236,10 @@ impl PendingRequest {
+             Self::OpenSession { cancellation, .. }
+             | Self::Execute { cancellation, .. }
+             | Self::Wait { cancellation, .. } => Some(cancellation),
+-            Self::Terminate { .. } | Self::ShutdownSession { .. } => None,
++            Self::Terminate { .. }
++            | Self::ShutdownSession { .. }
++            | Self::ExportState { .. }
++            | Self::ImportState { .. } => None,
+         }
+     }
+ 
+@@ -229,7 +257,11 @@ impl PendingRequest {
+ 
+     pub(super) fn fail(self, reason: String) {
+         match self {
+-            Self::OpenSession { response_tx, .. } | Self::ShutdownSession { response_tx, .. } => {
++            Self::ExportState { response_tx } => {
++                let _ = response_tx.send(Err(reason));
++            }
++            Self::ShutdownSession { .. } => {}
++            Self::OpenSession { response_tx, .. } | Self::ImportState { response_tx, .. } => {
+                 let _ = response_tx.send(Err(reason));
+             }
+             Self::Execute { response_tx, .. } => {
+diff --git a/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs b/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs
+index 4442fa62af1506edc4ec77d9097fa0d0444e838c..c3ae565399573279f2ea099d85f73cbdb9882f3a 100644
+--- a/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs
++++ b/codex-rs/code-mode/src/remote_session/connection/driver_tests.rs
+@@ -7,6 +7,7 @@ use std::time::Duration;
+ 
+ use codex_code_mode_protocol::CellId;
+ use codex_code_mode_protocol::CodeModeNestedToolCall;
++use codex_code_mode_protocol::CodeModeSession;
+ use codex_code_mode_protocol::CodeModeSessionCellExecutionLimits;
+ use codex_code_mode_protocol::CodeModeSessionDelegate;
+ use codex_code_mode_protocol::ExecuteRequest;
+@@ -101,10 +102,17 @@ impl DriverHarness {
+             })
+             .await
+             .expect("open command");
+-        self.outgoing_rx.recv().await.expect("open frame");
++        let frame = self.outgoing_rx.recv().await.expect("open frame");
++        let ClientToHost::Request {
++            id,
++            request: HostRequest::OpenSession { .. },
++        } = EncodedFrame::decode_framed::<ClientToHost>(&frame.into_framed_bytes()).unwrap()
++        else {
++            panic!("Expected open request")
++        };
+         self.event_tx
+             .send(DriverEvent::HostMessage(HostToClient::Response {
+-                id: RequestId::new(/*value*/ 1),
++                id,
+                 result: WireResult::Ok {
+                     value: HostResponse::SessionReady {
+                         session_id: session.id,
+@@ -935,7 +943,7 @@ async fn shutdown_closes_cell_without_waiting_for_delegate_cleanup() {
+     let mut harness = DriverHarness::start();
+     let session = remote_session();
+     let (delegate, mut events_rx, release) = HeldDelegate::new();
+-    harness.open(session.clone()).await;
++    let cleanup = harness.open(session.clone()).await;
+     let _started = harness
+         .start_cell(
+             session.clone(),
+@@ -956,6 +964,7 @@ async fn shutdown_closes_cell_without_waiting_for_delegate_cleanup() {
+         .command_tx
+         .send(DriverCommand::ShutdownSession {
+             session: session.clone(),
++            cleanup,
+             response_tx,
+         })
+         .await
+@@ -2035,12 +2044,13 @@ async fn aborting_driver_marks_connection_dead_and_closes_cells() {
+ async fn dropped_shutdown_waiter_does_not_abort_remote_cleanup() {
+     let mut harness = DriverHarness::start();
+     let session = remote_session();
+-    harness.open(session.clone()).await;
++    let cleanup = harness.open(session.clone()).await;
+     let (shutdown_tx, shutdown_rx) = oneshot::channel();
+     harness
+         .command_tx
+         .send(DriverCommand::ShutdownSession {
+             session: session.clone(),
++            cleanup,
+             response_tx: shutdown_tx,
+         })
+         .await
+@@ -2092,3 +2102,784 @@ async fn dropped_shutdown_waiter_does_not_abort_remote_cleanup() {
+         Err(mpsc::error::TryRecvError::Empty)
+     ));
+ }
++
++async fn import_cleanup_order(order: &str) {
++    let mut harness = DriverHarness::start();
++    let receiver = remote_session();
++    let cleanup = harness.open(receiver.clone()).await;
++    let sibling = RemoteSession {
++        id: SessionId::new("sibling").unwrap(),
++        generation: 2,
++    };
++    let _sibling_cleanup = harness.open(sibling.clone()).await;
++    let connection = Connection {
++        command_tx: harness.command_tx.clone(),
++        execute_claim_tx: harness.execute_claim_tx.clone(),
++        alive: Arc::clone(&harness.alive),
++        failure: Arc::clone(&harness.failure),
++        cancellation: harness.cancellation.clone(),
++        capabilities: CapabilitySet::empty(),
++    };
++    let (import_tx, import_rx) = oneshot::channel();
++    harness
++        .command_tx
++        .send(DriverCommand::ImportState {
++            session: receiver.clone(),
++            state: codex_code_mode_protocol::CodeModeSnapshot {
++                format_version: 1,
++                next_cell_id: 1,
++                stored_values: Default::default(),
++                completed_cells: Default::default(),
++            },
++            response_tx: import_tx,
++        })
++        .await
++        .unwrap();
++    harness.outgoing_rx.recv().await.expect("import request");
++    drop(import_rx);
++
++    let import_reply = DriverEvent::HostMessage(HostToClient::Response {
++        id: RequestId::new(3),
++        result: WireResult::Ok {
++            value: HostResponse::SessionImported,
++        },
++    });
++    let owner = connection.shutdown_session(receiver.clone(), cleanup.clone());
++    tokio::pin!(owner);
++    if order == "owner-first" {
++        // Poll through command admission, then hold the actual host acknowledgement.
++        tokio::select! {
++            biased;
++            result = &mut owner => panic!("Owner finished before ack: {result:?}"),
++            _ = std::future::ready(()) => {}
++        }
++        harness
++            .outgoing_rx
++            .recv()
++            .await
++            .expect("owner shutdown request");
++        harness.event_tx.send(import_reply).await.unwrap();
++    } else {
++        harness.event_tx.send(import_reply).await.unwrap();
++        // The only initiator here is complete_request's abandoned ImportState path.
++        harness
++            .outgoing_rx
++            .recv()
++            .await
++            .expect("abandoned import shutdown request");
++    }
++    if order != "ack-first" {
++        tokio::select! {
++            biased;
++            result = &mut owner => panic!("Owner finished before ack: {result:?}"),
++            _ = std::future::ready(()) => {}
++        }
++        // FIFO command receipt proves the owner's duplicate reached the driver.
++        let (barrier_tx, barrier_rx) = oneshot::channel();
++        harness
++            .command_tx
++            .send(DriverCommand::ExportState {
++                session: receiver.clone(),
++                response_tx: barrier_tx,
++            })
++            .await
++            .unwrap();
++        assert!(barrier_rx.await.unwrap().is_err());
++        tokio::select! {
++            biased;
++            result = &mut owner => panic!("Duplicate failed or completed before ack: {result:?}"),
++            _ = std::future::ready(()) => {}
++        }
++        assert!(!cleanup.is_complete());
++        assert!(
++            connection
++                .shutdown_session(receiver.clone(), SessionCleanup::new())
++                .await
++                .is_err()
++        );
++    }
++    if order == "transport-failure" || order == "host-error" {
++        assert!(harness.alive.load(Ordering::Acquire));
++        let failure = if order == "host-error" {
++            DriverEvent::HostMessage(HostToClient::Response {
++                id: RequestId::new(4),
++                result: WireResult::Err {
++                    message: "synthetic-import-shutdown-io-failure".to_string(),
++                },
++            })
++        } else {
++            DriverEvent::Failed("synthetic-import-shutdown-io-failure".to_string())
++        };
++        harness.event_tx.send(failure).await.unwrap();
++        let result = tokio::time::timeout(Duration::from_secs(1), &mut owner)
++            .await
++            .unwrap();
++        assert!(
++            result
++                .unwrap_err()
++                .contains("synthetic-import-shutdown-io-failure")
++        );
++        cleanup.wait().await;
++        assert!(!cleanup.acknowledged_for(&receiver));
++        assert!(!harness.alive.load(Ordering::Acquire));
++        return;
++    }
++    harness
++        .event_tx
++        .send(DriverEvent::HostMessage(HostToClient::Response {
++            id: RequestId::new(4),
++            result: WireResult::Ok {
++                value: HostResponse::SessionClosed {
++                    session_id: receiver.id.clone(),
++                },
++            },
++        }))
++        .await
++        .unwrap();
++    if order == "ack-first" {
++        cleanup.wait().await;
++    }
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), &mut owner)
++            .await
++            .unwrap(),
++        Ok(())
++    );
++    assert!(cleanup.acknowledged_for(&receiver));
++    assert!(harness.alive.load(Ordering::Acquire));
++    assert!(
++        harness.outgoing_rx.try_recv().is_err(),
++        "Duplicate emitted another shutdown"
++    );
++    let (sibling_tx, sibling_rx) = oneshot::channel();
++    harness
++        .command_tx
++        .send(DriverCommand::ExportState {
++            session: sibling,
++            response_tx: sibling_tx,
++        })
++        .await
++        .unwrap();
++    let frame = harness.outgoing_rx.recv().await.unwrap();
++    let ClientToHost::Request {
++        id,
++        request: HostRequest::ExportSession { .. },
++    } = EncodedFrame::decode_framed::<ClientToHost>(&frame.into_framed_bytes()).unwrap()
++    else {
++        panic!("Sibling authority was lost")
++    };
++    harness
++        .event_tx
++        .send(DriverEvent::HostMessage(HostToClient::Response {
++            id,
++            result: WireResult::Ok {
++                value: HostResponse::SessionExported {
++                    state: codex_code_mode_protocol::CodeModeSnapshot {
++                        format_version: 1,
++                        next_cell_id: 1,
++                        stored_values: Default::default(),
++                        completed_cells: Default::default(),
++                    },
++                },
++            },
++        }))
++        .await
++        .unwrap();
++    assert!(sibling_rx.await.unwrap().is_ok());
++    let stale = RemoteSession {
++        generation: receiver.generation + 1,
++        ..receiver.clone()
++    };
++    assert!(
++        connection
++            .shutdown_session(stale.clone(), cleanup.clone())
++            .await
++            .is_err()
++    );
++    let next_cleanup = harness.open(stale.clone()).await;
++    assert!(!next_cleanup.is_complete());
++    assert!(
++        connection
++            .shutdown_session(receiver, cleanup)
++            .await
++            .is_err()
++    );
++    assert!(harness.alive.load(Ordering::Acquire));
++}
++
++#[tokio::test]
++async fn import_cleanup_response_first_joins_owner_until_ack() {
++    import_cleanup_order("response-first").await;
++}
++
++#[tokio::test]
++async fn import_cleanup_owner_first_joins_late_import_until_ack() {
++    import_cleanup_order("owner-first").await;
++}
++
++#[tokio::test]
++async fn import_cleanup_ack_first_preserves_exact_identity() {
++    import_cleanup_order("ack-first").await;
++}
++
++#[tokio::test]
++async fn import_cleanup_transport_failure_wakes_duplicate_with_error() {
++    import_cleanup_order("transport-failure").await;
++}
++
++#[tokio::test]
++async fn import_cleanup_host_error_wakes_duplicate_with_error() {
++    import_cleanup_order("host-error").await;
++}
++
++#[tokio::test]
++async fn import_cleanup_error_receipt_joins_while_connection_appears_alive() {
++    let (command_tx, mut command_rx) = mpsc::channel(1);
++    let (execute_claim_tx, _claim_rx) = mpsc::unbounded_channel();
++    let failure = Arc::new(StdMutex::new(None));
++    let alive = Arc::new(AtomicBool::new(true));
++    let connection = Connection {
++        command_tx,
++        execute_claim_tx,
++        alive: alive.clone(),
++        failure: failure.clone(),
++        cancellation: CancellationToken::new(),
++        capabilities: CapabilitySet::empty(),
++    };
++    let session = remote_session();
++    let cleanup = SessionCleanup::new();
++    let owner = connection.shutdown_session(session.clone(), cleanup.clone());
++    tokio::pin!(owner);
++    tokio::select! {
++        biased;
++        result = &mut owner => panic!("Finished before command admission: {result:?}"),
++        _ = std::future::ready(()) => {}
++    }
++    let DriverCommand::ShutdownSession {
++        response_tx,
++        cleanup: admitted,
++        ..
++    } = command_rx.recv().await.unwrap()
++    else {
++        panic!("Expected shutdown admission")
++    };
++    response_tx.send(Ok(())).unwrap();
++    // Model the old error-reply/driver.fail scheduling window explicitly: the
++    // error is known, but the connection's alive flag has not changed yet.
++    *failure.lock().unwrap() = Some("synthetic-shutdown-error-before-dead-flag".to_string());
++    assert!(alive.load(Ordering::Acquire));
++    tokio::select! {
++        biased;
++        result = &mut owner => panic!("Skipped receipt join while alive: {result:?}"),
++        _ = std::future::ready(()) => {}
++    }
++    admitted.fail(Vec::new());
++    assert_eq!(
++        owner.await.unwrap_err(),
++        "synthetic-shutdown-error-before-dead-flag"
++    );
++    assert!(cleanup.is_complete());
++    assert!(!cleanup.acknowledged_for(&session));
++    assert!(alive.load(Ordering::Acquire));
++}
++
++fn raw_shutdown_binding(
++    harness: &DriverHarness,
++    remote: RemoteSession,
++    cleanup: SessionCleanup,
++) -> super::super::super::ProcessOwnedCodeModeSession {
++    let connection = Arc::new(Connection {
++        command_tx: harness.command_tx.clone(),
++        execute_claim_tx: harness.execute_claim_tx.clone(),
++        alive: Arc::clone(&harness.alive),
++        failure: Arc::clone(&harness.failure),
++        cancellation: harness.cancellation.clone(),
++        capabilities: serde_json::from_value(serde_json::json!([
++            codex_code_mode_protocol::host::STATE_TRANSFER_CAPABILITY
++        ]))
++        .unwrap(),
++    });
++    let raw = super::super::super::ProcessOwnedCodeModeSession::new();
++    *raw.inner.state.lock().unwrap() =
++        super::super::super::SessionState::Open(super::super::super::SessionBinding {
++            connection,
++            remote,
++            cleanup,
++            retained_cell_ids: Arc::new(StdMutex::new(Default::default())),
++        });
++    raw
++}
++
++#[tokio::test]
++async fn import_cleanup_raw_failure_before_shutdown_entry_stays_failed() {
++    let mut harness = DriverHarness::start();
++    let remote = remote_session();
++    let cleanup = harness.open(remote.clone()).await;
++    let raw = raw_shutdown_binding(&harness, remote.clone(), cleanup.clone());
++    let failure = "synthetic-connection-death-before-raw-shutdown";
++    *harness.failure.lock().unwrap() = Some(failure.to_string());
++    harness.alive.store(false, Ordering::Release);
++    {
++        let first = raw.shutdown();
++        tokio::pin!(first);
++        tokio::select! {
++            biased;
++            result = &mut first => panic!("Returned before failure cleanup: {result:?}"),
++            _ = std::future::ready(()) => {}
++        }
++        // Drop this waiter. The existing spawned shutdown owner must survive.
++    }
++    tokio::task::yield_now().await;
++    let joined = raw.shutdown();
++    tokio::pin!(joined);
++    tokio::select! {
++        biased;
++        result = &mut joined => panic!("Cached owner skipped cleanup: {result:?}"),
++        _ = std::future::ready(()) => {}
++    }
++    assert!(!cleanup.is_complete());
++    assert!(harness.outgoing_rx.try_recv().is_err());
++    harness
++        .event_tx
++        .send(DriverEvent::Failed(failure.to_string()))
++        .await
++        .unwrap();
++    assert_eq!(
++        tokio::time::timeout(Duration::from_secs(1), joined)
++            .await
++            .unwrap(),
++        Err(failure.to_string())
++    );
++    assert!(cleanup.is_complete());
++    assert!(!cleanup.acknowledged_for(&remote));
++    assert_eq!(raw.shutdown().await, Err(failure.to_string()));
++}
++
++#[tokio::test]
++async fn import_cleanup_raw_acknowledged_before_connection_death_stays_successful() {
++    let mut harness = DriverHarness::start();
++    let remote = remote_session();
++    let cleanup = harness.open(remote.clone()).await;
++    let raw = raw_shutdown_binding(&harness, remote.clone(), cleanup.clone());
++    let (response_tx, response_rx) = oneshot::channel();
++    harness
++        .command_tx
++        .send(DriverCommand::ShutdownSession {
++            session: remote.clone(),
++            cleanup: cleanup.clone(),
++            response_tx,
++        })
++        .await
++        .unwrap();
++    assert_eq!(response_rx.await.unwrap(), Ok(()));
++    harness.outgoing_rx.recv().await.expect("shutdown frame");
++    harness
++        .event_tx
++        .send(DriverEvent::HostMessage(HostToClient::Response {
++            id: RequestId::new(2),
++            result: WireResult::Ok {
++                value: HostResponse::SessionClosed {
++                    session_id: remote.id.clone(),
++                },
++            },
++        }))
++        .await
++        .unwrap();
++    cleanup.wait().await;
++    assert!(cleanup.acknowledged_for(&remote));
++    harness
++        .event_tx
++        .send(DriverEvent::Failed("synthetic-death-after-ack".to_string()))
++        .await
++        .unwrap();
++    harness.cancellation.cancelled().await;
++    assert!(!harness.alive.load(Ordering::Acquire));
++    assert_eq!(raw.shutdown().await, Ok(()));
++    assert_eq!(raw.shutdown().await, Ok(()));
++    assert!(harness.outgoing_rx.try_recv().is_err());
++}
++
++async fn pending_vm_request<F: std::future::Future>(
++    harness: &mut DriverHarness,
++    future: std::pin::Pin<&mut F>,
++) -> (RequestId, HostRequest) {
++    let frame = tokio::select! {
++        biased;
++        _ = future => panic!("VM operation completed before its native request"),
++        frame = tokio::time::timeout(Duration::from_secs(1), harness.outgoing_rx.recv()) => frame.unwrap().unwrap(),
++    };
++    let ClientToHost::Request { id, request } =
++        EncodedFrame::decode_framed::<ClientToHost>(&frame.into_framed_bytes()).unwrap()
++    else {
++        panic!("Expected VM request")
++    };
++    (id, request)
++}
++
++async fn vm_reply(harness: &DriverHarness, id: RequestId, value: HostResponse) {
++    harness
++        .event_tx
++        .send(DriverEvent::HostMessage(HostToClient::Response {
++            id,
++            result: WireResult::Ok { value },
++        }))
++        .await
++        .unwrap();
++}
++
++fn terminal_vm_image() -> codex_code_mode_protocol::CodeModeSnapshot {
++    serde_json::from_value(serde_json::json!({
++        "format_version": 1, "next_cell_id": 3, "stored_values": { "kept": "original" },
++        "completed_cells": {
++            "1": { "pending_initial_yield_items": null, "event": { "Completed": { "content_items": [], "error_text": null } } },
++            "2": { "pending_initial_yield_items": null, "event": { "Terminated": { "content_items": [] } } }
++        }
++    })).unwrap()
++}
++
++#[tokio::test]
++async fn import_cleanup_passive_export_preserves_original_source_failure() {
++    let mut harness = DriverHarness::start();
++    let remote = remote_session();
++    let cleanup = harness.open(remote.clone()).await;
++    let raw = raw_shutdown_binding(&harness, remote.clone(), cleanup.clone());
++    harness
++        .event_tx
++        .send(DriverEvent::Failed(
++            "synthetic-original-vm-source-loss".to_string(),
++        ))
++        .await
++        .unwrap();
++    cleanup.wait().await;
++    assert_eq!(
++        raw.export_state().await.unwrap_err(),
++        "synthetic-original-vm-source-loss"
++    );
++    assert!(harness.outgoing_rx.try_recv().is_err());
++    let state = raw.inner.state.lock().unwrap();
++    assert!(
++        matches!(&*state, super::super::super::SessionState::Open(binding) if binding.remote == remote)
++    );
++}
++
++#[tokio::test]
++async fn import_cleanup_unused_export_does_not_start_a_helper() {
++    let raw = super::super::super::ProcessOwnedCodeModeSession::with_host(
++        Arc::new(super::super::super::OwnedCodeModeHost::new(
++            "synthetic-missing-unused-vm-helper".into(),
++        )),
++        Default::default(),
++    );
++    let state = raw.export_state().await.unwrap();
++    assert_eq!(state.next_cell_id, 1);
++    assert!(state.stored_values.is_empty() && state.completed_cells.is_empty());
++    assert!(matches!(
++        *raw.inner.state.lock().unwrap(),
++        super::super::super::SessionState::New
++    ));
++    assert_eq!(raw.inner.next_generation.load(Ordering::Relaxed), 1);
++    raw.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn import_cleanup_attempted_source_export_does_not_retry_failed_open() {
++    let raw = super::super::super::ProcessOwnedCodeModeSession::with_host(
++        Arc::new(super::super::super::OwnedCodeModeHost::new(
++            "synthetic-missing-attempted-vm-helper".into(),
++        )),
++        Default::default(),
++    );
++    assert!(raw.connection().await.is_err());
++    let generation = raw.inner.next_generation.load(Ordering::Relaxed);
++    assert!(generation > 1);
++    assert!(
++        raw.export_state()
++            .await
++            .unwrap_err()
++            .contains("no retained source")
++    );
++    assert_eq!(
++        raw.inner.next_generation.load(Ordering::Relaxed),
++        generation
++    );
++}
++
++#[tokio::test]
++async fn import_cleanup_terminal_identity_survives_generation_change_and_consumption() {
++    let mut source_host = DriverHarness::start();
++    let source = RemoteSession {
++        generation: 2,
++        ..remote_session()
++    };
++    let cleanup = source_host.open(source.clone()).await;
++    let source_raw = raw_shutdown_binding(&source_host, source, cleanup);
++    let exporting = source_raw.export_state();
++    tokio::pin!(exporting);
++    let (id, request) = pending_vm_request(&mut source_host, exporting.as_mut()).await;
++    assert!(matches!(request, HostRequest::ExportSession { .. }));
++    vm_reply(
++        &source_host,
++        id,
++        HostResponse::SessionExported {
++            state: terminal_vm_image(),
++        },
++    )
++    .await;
++    let image = exporting.await.unwrap();
++    assert_eq!(
++        image.completed_cells["1"]
++            .public_cell_id
++            .as_ref()
++            .unwrap()
++            .as_str(),
++        "g2:1"
++    );
++    assert_eq!(
++        image.completed_cells["2"]
++            .public_cell_id
++            .as_ref()
++            .unwrap()
++            .as_str(),
++        "g2:2"
++    );
++
++    let mut receiver_host = DriverHarness::start();
++    let remote = remote_session();
++    let cleanup = receiver_host.open(remote.clone()).await;
++    let receiver = raw_shutdown_binding(&receiver_host, remote.clone(), cleanup);
++    let importing = receiver.import_state(image.clone());
++    tokio::pin!(importing);
++    let (id, request) = pending_vm_request(&mut receiver_host, importing.as_mut()).await;
++    let HostRequest::ImportSession {
++        state: native_image,
++        ..
++    } = request
++    else {
++        panic!("Expected import")
++    };
++    assert_eq!(native_image, image);
++    vm_reply(&receiver_host, id, HostResponse::SessionImported).await;
++    importing.await.unwrap();
++    let exporting = receiver.export_state();
++    tokio::pin!(exporting);
++    let (id, _) = pending_vm_request(&mut receiver_host, exporting.as_mut()).await;
++    vm_reply(
++        &receiver_host,
++        id,
++        HostResponse::SessionExported {
++            state: native_image,
++        },
++    )
++    .await;
++    assert_eq!(exporting.await.unwrap(), image);
++
++    for rejected in ["1", "2", "g9:1", "g2:3"] {
++        assert!(
++            receiver
++                .wait(
++                    WaitRequest {
++                        cell_id: CellId::new(rejected.to_string()),
++                        yield_time_ms: 1
++                    },
++                    None
++                )
++                .await
++                .unwrap_err()
++                .contains("stale")
++        );
++    }
++    assert!(receiver_host.outgoing_rx.try_recv().is_err());
++    for missing in [false, true] {
++        let waiting = receiver.wait(
++            WaitRequest {
++                cell_id: CellId::new("g2:1".to_string()),
++                yield_time_ms: 1,
++            },
++            None,
++        );
++        tokio::pin!(waiting);
++        let (id, request) = pending_vm_request(&mut receiver_host, waiting.as_mut()).await;
++        assert!(
++            matches!(request, HostRequest::Wait { request, .. } if request.cell_id.as_str() == "1")
++        );
++        let result = WireRuntimeResponse::Result {
++            cell_id: CellId::new("1".to_string()).into(),
++            content_items: Vec::new(),
++            error_text: None,
++            code_mode_host_duration_ns: 0,
++        };
++        let outcome = if missing {
++            WireWaitOutcome::MissingCell(result)
++        } else {
++            WireWaitOutcome::LiveCell(result)
++        };
++        vm_reply(&receiver_host, id, HostResponse::WaitCompleted { outcome }).await;
++        match waiting.await.unwrap() {
++            codex_code_mode_protocol::WaitOutcome::LiveCell(
++                codex_code_mode_protocol::RuntimeResponse::Result { cell_id, .. },
++            ) if !missing => assert_eq!(cell_id.as_str(), "g2:1"),
++            codex_code_mode_protocol::WaitOutcome::MissingCell(
++                codex_code_mode_protocol::RuntimeResponse::Result { cell_id, .. },
++            ) if missing => assert_eq!(cell_id.as_str(), "g2:1"),
++            other => panic!("Wrong retained result: {other:?}"),
++        }
++    }
++    let terminating = receiver.terminate(CellId::new("g2:2".to_string()));
++    tokio::pin!(terminating);
++    let (id, request) = pending_vm_request(&mut receiver_host, terminating.as_mut()).await;
++    assert!(matches!(request, HostRequest::Terminate { cell_id, .. } if cell_id.as_str() == "2"));
++    vm_reply(
++        &receiver_host,
++        id,
++        HostResponse::WaitCompleted {
++            outcome: WireWaitOutcome::LiveCell(WireRuntimeResponse::Terminated {
++                cell_id: CellId::new("2".to_string()).into(),
++                content_items: Vec::new(),
++                code_mode_host_duration_ns: 0,
++            }),
++        },
++    )
++    .await;
++    assert!(
++        matches!(terminating.await.unwrap(), codex_code_mode_protocol::WaitOutcome::LiveCell(codex_code_mode_protocol::RuntimeResponse::Terminated { cell_id, .. }) if cell_id.as_str() == "g2:2")
++    );
++
++    let executing = receiver.execute(
++        ExecuteRequest {
++            tool_call_id: "new-destination-cell".to_string(),
++            enabled_tools: Vec::new(),
++            source: "text('fresh');".to_string(),
++            yield_time_ms: Some(1),
++            max_output_tokens: None,
++        },
++        Arc::new(RecordingDelegate::default()),
++        None,
++    );
++    tokio::pin!(executing);
++    let (id, _) = pending_vm_request(&mut receiver_host, executing.as_mut()).await;
++    vm_reply(
++        &receiver_host,
++        id,
++        HostResponse::ExecutionStarted {
++            cell_id: CellId::new("3".to_string()).into(),
++        },
++    )
++    .await;
++    assert_eq!(executing.await.unwrap().cell_id.as_str(), "3");
++
++    assert_eq!(receiver.inner.next_generation.load(Ordering::Relaxed), 3);
++    let reserved = receiver.inner.allocate_generation().unwrap();
++    assert_eq!(reserved, 3);
++    let mut fresh_host = DriverHarness::start();
++    let fresh_remote = RemoteSession {
++        generation: reserved,
++        ..remote_session()
++    };
++    let cleanup = fresh_host.open(fresh_remote.clone()).await;
++    let fresh = raw_shutdown_binding(&fresh_host, fresh_remote, cleanup);
++    assert!(
++        fresh
++            .wait(
++                WaitRequest {
++                    cell_id: CellId::new("g2:1".to_string()),
++                    yield_time_ms: 1
++                },
++                None
++            )
++            .await
++            .unwrap_err()
++            .contains("stale")
++    );
++    assert!(fresh_host.outgoing_rx.try_recv().is_err());
++    let mut maximum = terminal_vm_image();
++    maximum.completed_cells.get_mut("1").unwrap().public_cell_id =
++        Some(CellId::new(format!("g{}:1", u64::MAX)));
++    let importing = fresh.import_state(maximum);
++    tokio::pin!(importing);
++    let (id, _) = pending_vm_request(&mut fresh_host, importing.as_mut()).await;
++    vm_reply(&fresh_host, id, HostResponse::SessionImported).await;
++    importing.await.unwrap();
++    assert_eq!(
++        fresh.inner.next_generation.load(Ordering::Relaxed),
++        u64::MAX
++    );
++    assert!(
++        fresh
++            .inner
++            .allocate_generation()
++            .unwrap_err()
++            .contains("exhausted")
++    );
++    assert_eq!(
++        fresh.inner.next_generation.load(Ordering::Relaxed),
++        u64::MAX
++    );
++}
++
++#[tokio::test]
++async fn import_cleanup_legacy_terminal_identity_stays_numeric_in_new_generation() {
++    let mut harness = DriverHarness::start();
++    let remote = RemoteSession {
++        generation: 3,
++        ..remote_session()
++    };
++    let cleanup = harness.open(remote.clone()).await;
++    let raw = raw_shutdown_binding(&harness, remote, cleanup);
++    let importing = raw.import_state(terminal_vm_image());
++    tokio::pin!(importing);
++    let (id, request) = pending_vm_request(&mut harness, importing.as_mut()).await;
++    let HostRequest::ImportSession { state, .. } = request else {
++        panic!("Expected import")
++    };
++    assert_eq!(
++        state.completed_cells["1"]
++            .public_cell_id
++            .as_ref()
++            .unwrap()
++            .as_str(),
++        "1"
++    );
++    vm_reply(&harness, id, HostResponse::SessionImported).await;
++    importing.await.unwrap();
++    let waiting = raw.wait(
++        WaitRequest {
++            cell_id: CellId::new("1".to_string()),
++            yield_time_ms: 1,
++        },
++        None,
++    );
++    tokio::pin!(waiting);
++    let (id, request) = pending_vm_request(&mut harness, waiting.as_mut()).await;
++    assert!(
++        matches!(request, HostRequest::Wait { request, .. } if request.cell_id.as_str() == "1")
++    );
++    vm_reply(
++        &harness,
++        id,
++        HostResponse::WaitCompleted {
++            outcome: WireWaitOutcome::MissingCell(WireRuntimeResponse::Result {
++                cell_id: CellId::new("1".to_string()).into(),
++                content_items: Vec::new(),
++                error_text: None,
++                code_mode_host_duration_ns: 0,
++            }),
++        },
++    )
++    .await;
++    assert!(
++        matches!(waiting.await.unwrap(), codex_code_mode_protocol::WaitOutcome::MissingCell(codex_code_mode_protocol::RuntimeResponse::Result { cell_id, .. }) if cell_id.as_str() == "1")
++    );
++    assert!(
++        raw.wait(
++            WaitRequest {
++                cell_id: CellId::new("g3:1".to_string()),
++                yield_time_ms: 1
++            },
++            None
++        )
++        .await
++        .unwrap_err()
++        .contains("stale")
++    );
++    assert!(harness.outgoing_rx.try_recv().is_err());
++}
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 870f7797c8403f3b0e2366eba929e045d57308c4..e6159f969a2b11e829401cd7b0e0860951c36fd2 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -254,6 +254,21 @@ impl CodexThread {
+         }
+     }
+ 
++    pub async fn export_code_mode_state(
++        &self,
++    ) -> Result<Option<codex_code_mode::CodeModeSnapshot>, String> {
++        self.session.services.code_mode_service.export_state().await
++    }
++
++    pub async fn prepare_code_mode_state(&self) -> Result<(), String> {
++        self.session
++            .services
++            .code_mode_service
++            .session()
++            .await
++            .map(|_| ())
++    }
++
+     pub async fn submit(&self, op: Op) -> CodexResult<String> {
+         self.io.submit(op).await
+     }
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+index 79a95b2ac26288ff141e5d670bf49bb8ae3f7eda..914f4daba42a3b0b52b3d8b5d7ef834773843228 100644
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -73,6 +73,7 @@ pub(crate) struct ExecContext {
+ 
+ pub(crate) struct CodeModeService {
+     session: OnceCell<Arc<dyn CodeModeSession>>,
++    thread_id: ThreadId,
+     session_provider: Arc<dyn CodeModeSessionProvider>,
+     availability: Result<(), String>,
+     dispatch_broker: Arc<CodeModeDispatchBroker>,
+@@ -92,6 +93,7 @@ impl CodeModeService {
+         let availability = session_provider.availability();
+         Self {
+             session: OnceCell::new(),
++            thread_id,
+             session_provider,
+             availability,
+             dispatch_broker,
+@@ -229,6 +231,15 @@ impl CodeModeService {
+         )
+     }
+ 
++    pub(crate) async fn export_state(
++        &self,
++    ) -> Result<Option<codex_code_mode::CodeModeSnapshot>, String> {
++        match self.session.get() {
++            Some(session) => session.export_state().await.map(Some),
++            None => Ok(None),
++        }
++    }
++
+     pub(crate) async fn session(&self) -> Result<Arc<dyn CodeModeSession>, String> {
+         if self.shutdown_token.is_cancelled() {
+             return Err("code mode session is shutting down".to_string());
+@@ -245,7 +256,7 @@ impl CodeModeService {
+                     }
+                     session = self
+                         .session_provider
+-                        .create_session() => session?,
++                        .create_session_for_thread(self.thread_id) => session?,
+                 };
+                 if self.shutdown_token.is_cancelled() {
+                     let _ = session.shutdown().await;

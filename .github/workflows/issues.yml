@@ -5,6 +5,7 @@ on:
 
 jobs:
   close-issues:
+    if: github.repository == 'openai/openai-agents-python'
     runs-on: ubuntu-latest
     permissions:
       issues: write

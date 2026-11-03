@@ -1,0 +1,103 @@
+name: Verify private alpha installation
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published alpha release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    # Historical private-alpha installation check; disabled in the public source-only branch.
+    if: ${{ false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.14']
+        platform:
+          - runner: ubuntu-24.04
+            wheel: manylinux_2_39_x86_64
+          - runner: windows-latest
+            wheel: win_amd64
+          - runner: macos-latest
+            wheel: macosx_11_0_arm64
+    runs-on: ${{ matrix.platform.runner }}
+    timeout-minutes: 15
+    env:
+      ALPHA_TAG: ${{ inputs.tag }}
+      WHEEL_PLATFORM: ${{ matrix.platform.wheel }}
+    defaults:
+      run:
+        shell: python
+    steps:
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Download the private release without a source checkout
+        working-directory: ${{ runner.temp }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import os, re, subprocess
+          from pathlib import Path
+          tag = os.environ['ALPHA_TAG']
+          match = re.fullmatch(r'v(\d+\.\d+\.\d+)(?:a|-alpha\.)(\d+)', tag)
+          assert match, 'Expected an alpha version tag'
+          wheel_version = f'{match[1]}a{match[2]}'
+          repo = os.environ['GITHUB_REPOSITORY']
+          wheel = f"openai_agents-{wheel_version}-cp310-abi3-{os.environ['WHEEL_PLATFORM']}.whl"
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              print(f'WHEEL_VERSION={wheel_version}', file=output)
+          subprocess.run(['gh', 'release', 'download', tag, '--repo', repo,
+                          '--pattern', wheel, '--pattern', 'SHA256SUMS'], check=True)
+          with Path('verify_installed.py').open('wb') as output:
+              subprocess.run(['gh', 'api', f'repos/{repo}/contents/packages/codex/scripts/verify_installed.py?ref={os.environ["GITHUB_SHA"]}',
+                              '-H', 'Accept: application/vnd.github.raw'], stdout=output, check=True)
+      - name: Install and exercise the released wheel in a fresh environment
+        working-directory: ${{ runner.temp }}
+        run: |
+          import hashlib, json, os, stat, subprocess, sys, time, venv
+          from pathlib import Path
+          def venv_logical_bytes():
+              total = 0
+              for root, _, files in os.walk('alpha-venv', followlinks=False):
+                  for name in files:
+                      info = os.lstat(os.path.join(root, name))
+                      if stat.S_ISREG(info.st_mode):
+                          total += info.st_size
+              return total
+          wheel, = Path('.').glob('openai_agents-*.whl')
+          checksums = dict(line.split(maxsplit=1)[::-1] for line in Path('SHA256SUMS').read_text().splitlines())
+          assert hashlib.sha256(wheel.read_bytes()).hexdigest() == checksums[wheel.name]
+          venv.create('alpha-venv', with_pip=True)
+          python = Path('alpha-venv') / ('Scripts/python.exe' if os.name == 'nt' else 'bin/python')
+          baseline_bytes = venv_logical_bytes()
+          install_started = time.perf_counter()
+          subprocess.run([str(python), '-I', '-m', 'pip', 'install', '--only-binary=:all:', str(wheel)], check=True)
+          install_seconds = time.perf_counter() - install_started
+          installed_bytes = venv_logical_bytes()
+          subprocess.run([str(python), '-I', '-c',
+                          'from importlib.metadata import version; import sys; assert version("openai-agents") in sys.argv[1:]',
+                          os.environ['ALPHA_TAG'][1:], os.environ['WHEEL_VERSION']], check=True)
+          subprocess.run([str(python), '-I', 'verify_installed.py', '--output', 'installed.json'], check=True)
+          receipt_path = Path('installed.json')
+          receipt = json.loads(receipt_path.read_text(encoding='utf-8'))
+          receipt['installation_measurement'] = {
+              'scope': 'fresh venv regular files; excludes symlinks, non-regular files, files outside the venv, and filesystem allocation',
+              'baseline_logical_bytes': baseline_bytes,
+              'installed_logical_bytes': installed_bytes,
+              'incremental_logical_bytes': installed_bytes - baseline_bytes,
+              'install_elapsed_seconds': install_seconds,
+          }
+          receipt_path.write_text(json.dumps(receipt, indent=2) + '\n', encoding='utf-8')
+      - name: Save installation evidence
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: alpha-install-${{ matrix.platform.wheel }}-${{ matrix.python }}
+          path: ${{ runner.temp }}/installed.json
+          if-no-files-found: error

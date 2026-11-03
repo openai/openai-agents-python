@@ -1,3 +1,0 @@
-# `Logger`
-
-::: agents.tracing.logger

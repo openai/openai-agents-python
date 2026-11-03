@@ -1,3 +1,0 @@
-# `Events`
-
-::: agents.voice.events

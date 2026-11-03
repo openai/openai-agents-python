@@ -1,0 +1,124 @@
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 870f7797c8403f3b0e2366eba929e045d57308c4..642a0e48790aa89751fbc895da0e84249fda7ea9 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -473,6 +473,7 @@ impl CodexThread {
+             thread_settings,
+             trace,
+             cyber_access_program,
++            final_output_json_schema,
+         } = request;
+         let root_turn_id = self
+             .session
+@@ -482,6 +483,7 @@ impl CodexThread {
+             .and_then(|context| context.root_turn_id);
+         let start_options = TurnStartOptions {
+             cyber_access_program,
++            final_output_json_schema,
+             root_turn_id,
+             ..Default::default()
+         };
+diff --git a/codex-rs/core/tests/suite/abort_tasks.rs b/codex-rs/core/tests/suite/abort_tasks.rs
+index 797ba476fe758e730a69a3952b324971681a53e0..9368b1f4a168ae081e543d2f6fa2603d643c82b5 100644
+--- a/codex-rs/core/tests/suite/abort_tasks.rs
++++ b/codex-rs/core/tests/suite/abort_tasks.rs
+@@ -187,6 +187,7 @@ async fn root_turn_suspension_preserves_unfinished_turn_history() {
+                 thread_settings: Default::default(),
+                 trace: None,
+                 cyber_access_program: None,
++                final_output_json_schema: None,
+             })
+             .await
+             .expect("recover the unfinished turn"),
+diff --git a/codex-rs/core/tests/suite/cyber_access_program.rs b/codex-rs/core/tests/suite/cyber_access_program.rs
+index dbb709aa2bd5f3ac975d9528e473edf5c36fd2a7..3db422ca1768af7c6a256994b260a8f2f4546718 100644
+--- a/codex-rs/core/tests/suite/cyber_access_program.rs
++++ b/codex-rs/core/tests/suite/cyber_access_program.rs
+@@ -100,6 +100,7 @@ async fn recover_turn_restores_cyber_access_program_without_making_it_sticky() -
+             thread_settings: Default::default(),
+             trace: None,
+             cyber_access_program: persisted_context.cyber_access_program,
++            final_output_json_schema: None,
+         })
+         .await?;
+     assert_eq!(
+diff --git a/codex-rs/core/tests/suite/reasoning_effort_override.rs b/codex-rs/core/tests/suite/reasoning_effort_override.rs
+index 14a6b0a92030f581372c2cbae78599bd2f2147fc..f808db1935df3020204555860c988d64623887c0 100644
+--- a/codex-rs/core/tests/suite/reasoning_effort_override.rs
++++ b/codex-rs/core/tests/suite/reasoning_effort_override.rs
+@@ -312,6 +312,7 @@ async fn reasoning_effort_override_recovery_reuses_trusted_tail_update() -> anyh
+                 thread_settings: Default::default(),
+                 trace: None,
+                 cyber_access_program: None,
++                final_output_json_schema: None,
+             })
+             .await?,
+         StartIfIdleSubmission::Started { turn_id },
+diff --git a/codex-rs/core/tests/suite/turn_input_submission.rs b/codex-rs/core/tests/suite/turn_input_submission.rs
+index a81e68f6ab7de5220162b497b34099cd3f1e5e75..1753ea5a81d39aa0311da27a7e1702fea92fd632 100644
+--- a/codex-rs/core/tests/suite/turn_input_submission.rs
++++ b/codex-rs/core/tests/suite/turn_input_submission.rs
+@@ -602,7 +602,7 @@ async fn start_turn_if_idle_keeps_automatic_plan_rejections_atomic(
+ }
+ 
+ #[tokio::test]
+-async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
++async fn recover_turn_if_idle_preserves_id_schema_and_resumes_plan_mode() {
+     let server = responses::start_mock_server().await;
+     let response_mock =
+         responses::mount_sse_once(&server, responses::sse_completed("resp-1")).await;
+@@ -611,6 +611,12 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
+         .await
+         .expect("build recovered turn session");
+     let turn_id = "durable-recovered-turn";
++    let schema = serde_json::json!({
++        "type": "object",
++        "properties": {"answer": {"type": "string"}},
++        "required": ["answer"],
++        "additionalProperties": false
++    });
+ 
+     let submission = test
+         .codex
+@@ -629,6 +635,7 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
+             },
+             trace: None,
+             cyber_access_program: None,
++            final_output_json_schema: Some(schema.clone()),
+         })
+         .await
+         .expect("recovered turn should start");
+@@ -657,6 +664,8 @@ async fn recover_turn_if_idle_preserves_id_and_resumes_plan_mode() {
+     .await;
+ 
+     let request = response_mock.single_request();
++    assert_eq!(request.body_json()["text"]["format"]["schema"], schema);
++    assert_eq!(request.body_json()["text"]["format"]["strict"], true);
+     let turn_metadata: Value = serde_json::from_str(
+         request
+             .header("x-codex-turn-metadata")
+diff --git a/codex-rs/core/tests/suite/turn_phase_trace.rs b/codex-rs/core/tests/suite/turn_phase_trace.rs
+index 3614c9f34cc983f2cef9cea11207a872924a2df7..e3c019de88afdfd5c0fa4eeac140051b69f7be30 100644
+--- a/codex-rs/core/tests/suite/turn_phase_trace.rs
++++ b/codex-rs/core/tests/suite/turn_phase_trace.rs
+@@ -220,6 +220,7 @@ async fn steer_joins_existing_turn_without_extending_sampling(
+                         thread_settings: Default::default(),
+                         trace: codex_otel::span_w3c_trace_context(&recovery),
+                         cyber_access_program: None,
++                        final_output_json_schema: None,
+                     })
+                     .await?,
+                 StartIfIdleSubmission::Started {
+diff --git a/codex-rs/protocol/src/turn_input.rs b/codex-rs/protocol/src/turn_input.rs
+index cb27cd4f963960acc44b301e5c23fcbf43d795ac..11e50bc4ddeea2c9197435605d6ba23943d66ff5 100644
+--- a/codex-rs/protocol/src/turn_input.rs
++++ b/codex-rs/protocol/src/turn_input.rs
+@@ -63,6 +63,8 @@ pub struct RecoverTurnRequest {
+     pub trace: Option<W3cTraceContext>,
+     /// Program recorded in the interrupted turn's persisted context.
+     pub cyber_access_program: Option<CyberAccessProgram>,
++    /// Restores the original strict output schema before recovered sampling starts.
++    pub final_output_json_schema: Option<Value>,
+ }
+ 
+ impl TurnInputRequest {

@@ -9,20 +9,19 @@ assignees: ''
 
 ### Please read this first
 
-- **Have you read the custom model provider docs, including the troubleshooting section?** [Model provider docs](https://openai.github.io/openai-agents-python/models/#non-openai-models)
+- **Have you read the provider guide?** Use the [v1 provider configuration guide](https://github.com/openai/openai-agents-python/blob/v1/docs/sdk/configuration.md) from the same source commit as your build. Include that commit below.
 - **Have you searched for related issues?** Others may have faced similar issues.
 
 ### Describe the question
 <!-- Clearly and concisely describe the question or bug. -->
 
 ### Debug information
-- Agents SDK version:
+- Agents SDK version and source commit:
 - Related library versions (optional, e.g. `any-llm`, `litellm`, or `pydantic`):
 - Python version:
 - Operating system:
 - Model and model provider:
-- Integration method (e.g. Any-LLM, LiteLLM, custom `ModelProvider`, or direct `Model` implementation):
-- Does the issue reproduce with the latest Agents SDK release?
+- Integration method (`NativeProvider` or another integration):
 - Does the issue occur consistently or intermittently?
 
 If an error occurred, include the full traceback and any relevant logs. Remove API keys, tokens, model input or output, and other sensitive information before posting.
@@ -38,7 +37,7 @@ If an error occurred, include the full traceback and any relevant logs. Remove A
 Ideally provide a minimal, self-contained Python script that can be run to reproduce the issue.
 
 ```python
-from agents import Agent, Runner
+from agents import Agent
 
 agent = Agent(
     name="Example agent",
@@ -46,7 +45,7 @@ agent = Agent(
     # Add the model provider, model, and any other settings needed to reproduce the issue.
 )
 
-result = Runner.run_sync(agent, "...")
+result = agent.run_sync("...")
 print(result.final_output)
 ```
 

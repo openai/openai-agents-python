@@ -270,13 +270,13 @@ Keep each draft polite, direct, and copy-paste-ready. Usually use 60-160 words i
 
 Use GitHub-native references in every draft:
 
-- Use `#123` for an issue or pull request in `openai/openai-agents-python`.
+- Use `#123` for an issue or pull request in the destination repository. Keep `openai/openai-agents-python#123` qualified when the destination is this private preview repository.
 - Use `owner/repo#123` for an issue or pull request in another repository.
 - Keep closing keywords native, for example `Fixes #123` or `Resolves #123`.
 - Never wrap a native reference in a Markdown link. Write `#123`, not `[PR #123](https://github.com/openai/openai-agents-python/pull/123)` or `[#123](...)`.
 - Remove Codex-only navigation links, local file links, Codex-only citation markers or footnotes, and app directives from the draft. Preserve ordinary descriptive Markdown links for API docs, design notes, external resources, and GitHub targets that do not have native issue or pull-request syntax.
 
-Before returning the draft, normalize any same-repository URL or qualified reference to `#<number>`, normalize any cross-repository issue or pull-request URL to `owner/repo#<number>`, and rescan the draft. Do not return it while a Markdown-linked issue or pull-request label, `openai/openai-agents-python#<number>`, or bare GitHub issue or pull-request URL remains.
+Before returning the draft, identify the destination repository. Normalize only its issue and pull-request URLs or qualified references to `#<number>`, normalize any cross-repository issue or pull-request URL to `owner/repo#<number>`, and rescan the draft. Do not return it while a Markdown-linked issue or pull-request label, a same-repository qualified reference, or bare GitHub issue or pull-request URL remains.
 
 Perform an action-delta pass after the paste-readiness pass:
 

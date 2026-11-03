@@ -1,0 +1,173 @@
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index b9739289d123239f3e6670b1f2aad39d1af096d7..0b14cdb03906e2d203c3f77097a4021212516d9e 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -350,13 +350,21 @@ pub fn process_responses_event(
+                 return Err(ResponsesEventError::Api(error));
+             }
+         }
+-        "response.output_item.done" => {
+-            if let Some(item_val) = event.item {
+-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
+-                    return Ok(Some(ResponseEvent::OutputItemDone(item)));
+-                }
+-                debug!("failed to parse ResponseItem from output_item.done");
+-            }
++        "response.output_item.done" | "response.output_item.added" => {
++            let item = event
++                .item
++                .and_then(|value| serde_json::from_value::<ResponseItem>(value).ok())
++                .ok_or_else(|| {
++                    ResponsesEventError::Api(ApiError::InvalidRequest {
++                        message: "Native model response ended without complete supported output"
++                            .to_string(),
++                    })
++                })?;
++            return Ok(Some(if event.kind == "response.output_item.done" {
++                ResponseEvent::OutputItemDone(item)
++            } else {
++                ResponseEvent::OutputItemAdded(item)
++            }));
+         }
+         "response.output_text.delta" => {
+             if let Some(delta) = event.delta {
+@@ -462,14 +470,6 @@ pub fn process_responses_event(
+                 }
+             }
+         }
+-        "response.output_item.added" => {
+-            if let Some(item_val) = event.item {
+-                if let Ok(item) = serde_json::from_value::<ResponseItem>(item_val) {
+-                    return Ok(Some(ResponseEvent::OutputItemAdded(item)));
+-                }
+-                debug!("failed to parse ResponseItem from output_item.added");
+-            }
+-        }
+         "response.reasoning_summary_part.added" => {
+             if let Some(summary_index) = event.summary_index {
+                 return Ok(Some(ResponseEvent::ReasoningSummaryPartAdded {
+@@ -639,7 +639,10 @@ async fn process_sse_with_treatment(
+             Ok(None) => {}
+             Err(error) => {
+                 let error = error.into_api_error();
+-                if matches!(error, ApiError::FlexUnavailable) {
++                if matches!(
++                    error,
++                    ApiError::FlexUnavailable | ApiError::InvalidRequest { .. }
++                ) {
+                     let _ = tx_event.send(Err(error)).await;
+                     return;
+                 }
+@@ -699,6 +702,112 @@ mod tests {
+         events
+     }
+ 
++    #[test]
++    fn undecodable_output_items_fail_without_exposing_payload() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            let text: ResponsesStreamEvent = serde_json::from_value(json!({
++                "type": "response.output_item.done",
++                "item": {"type": "message", "role": "assistant", "content": [
++                    {"type": "output_text", "text": "earlier commentary"}
++                ]}
++            }))
++            .unwrap();
++            assert_matches!(
++                process_responses_event(text),
++                Ok(Some(ResponseEvent::OutputItemDone(_)))
++            );
++            let invalid: ResponsesStreamEvent = serde_json::from_value(json!({
++                "type": kind,
++                "item": {"type": "message", "id": "private-item-id", "role": "assistant", "content": [
++                    {"type": "refusal", "refusal": "private-refusal-payload"}
++                ]}
++            })).unwrap();
++            let error = process_responses_event(invalid)
++                .unwrap_err()
++                .into_api_error();
++            assert_matches!(&error, ApiError::InvalidRequest { message }
++                if message == "Native model response ended without complete supported output");
++            assert!(!format!("{error:?}").contains("private"));
++        }
++    }
++
++    #[test]
++    fn missing_or_null_known_output_items_fail_without_payload() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            for event in [json!({"type": kind}), json!({"type": kind, "item": null})] {
++                let error = process_responses_event(serde_json::from_value(event).unwrap())
++                    .unwrap_err()
++                    .into_api_error();
++                assert_matches!(error, ApiError::InvalidRequest { message }
++                    if message == "Native model response ended without complete supported output");
++            }
++        }
++    }
++
++    #[test]
++    fn supported_output_and_unknown_events_keep_existing_parser_behavior() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            for text in ["ordinary text", "", " \n\t "] {
++                let event = serde_json::from_value(json!({
++                    "type": kind,
++                    "item": {"type": "message", "role": "assistant", "content": [
++                        {"type": "output_text", "text": text}
++                    ]}
++                }))
++                .unwrap();
++                assert!(process_responses_event(event).unwrap().is_some());
++            }
++            let tool = serde_json::from_value(json!({
++                "type": kind,
++                "item": {"type": "function_call", "call_id": "call", "name": "lookup", "arguments": "{}"}
++            })).unwrap();
++            assert!(process_responses_event(tool).unwrap().is_some());
++        }
++        let unknown = serde_json::from_value(json!({
++            "type": "response.future_event", "item": {"private": "ignored"}
++        }))
++        .unwrap();
++        assert!(process_responses_event(unknown).unwrap().is_none());
++    }
++
++    #[tokio::test]
++    async fn undecodable_output_is_terminal_before_later_completion_or_tool() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            for item in [
++                None,
++                Some(Value::Null),
++                Some(json!({
++                    "type": "message", "role": "assistant", "content": [
++                        {"type": "refusal", "refusal": "private-refusal-payload"}
++                    ]
++                })),
++            ] {
++                let mut invalid = json!({"type": kind});
++                if let Some(item) = item {
++                    invalid["item"] = item;
++                }
++                let events = [
++                    json!({"type": "response.output_text.delta", "delta": "earlier commentary"}),
++                    invalid,
++                    json!({"type": "response.output_item.done", "item": {
++                        "type": "function_call", "call_id": "late-call", "name": "lookup", "arguments": "{}"
++                    }}),
++                    json!({"type": "response.completed", "response": {"id": "response"}}),
++                ];
++                let body = events
++                    .iter()
++                    .map(|event| format!("data: {event}\n\n"))
++                    .collect::<String>();
++                let results = collect_events(&[body.as_bytes()]).await;
++                assert_eq!(results.len(), 2);
++                assert_matches!(&results[0], Ok(ResponseEvent::OutputTextDelta(text)) if text == "earlier commentary");
++                assert_matches!(&results[1], Err(ApiError::InvalidRequest { message })
++                    if message == "Native model response ended without complete supported output");
++                assert!(!format!("{:?}", results[1]).contains("private-refusal-payload"));
++            }
++        }
++    }
++
+     async fn run_sse(events: Vec<serde_json::Value>) -> Vec<ResponseEvent> {
+         let mut body = String::new();
+         for e in events {

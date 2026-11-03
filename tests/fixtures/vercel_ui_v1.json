@@ -1,0 +1,24 @@
+{
+  "protocol": "x-vercel-ai-ui-message-stream: v1",
+  "source": "https://ai-sdk.dev/docs/ai-sdk-ui/stream-protocol",
+  "success": [
+    {"type": "start"},
+    {"type": "text-start", "id": "msg_intro_r10"},
+    {"type": "text-delta", "id": "msg_intro_r10", "delta": "Checking\n"},
+    {"type": "text-delta", "id": "msg_intro_r10", "delta": "雪"},
+    {"type": "data-tool-progress", "data": {"type": "tool_started", "call_id": "call_r10", "name": "lookup", "namespace": null, "family": "function"}, "transient": true},
+    {"type": "data-tool-progress", "data": {"type": "tool_finished", "call_id": "call_r10", "name": "lookup", "namespace": null, "family": "function", "status": "completed"}, "transient": true},
+    {"type": "text-start", "id": "msg_final_r10"},
+    {"type": "text-delta", "id": "msg_final_r10", "delta": "Found "},
+    {"type": "text-delta", "id": "msg_final_r10", "delta": "it."},
+    {"type": "text-end", "id": "msg_intro_r10"},
+    {"type": "text-end", "id": "msg_final_r10"},
+    {"type": "finish"},
+    "[DONE]"
+  ],
+  "lost": [
+    {"type": "start"},
+    {"type": "error", "errorText": "resync_required"},
+    "[DONE]"
+  ]
+}

@@ -1,0 +1,398 @@
+"""Public executor declarations use native tools over authenticated WSS."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+from dataclasses import replace
+from pathlib import Path
+from typing import Any, Literal
+
+import pytest
+
+from agents import Agent, Environment, NativeError, ToolRef, function_tool
+from tests._asyncio import timeout
+from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_fixtures import (
+    ResponsesFixture,
+    assistant_output,
+    function_call,
+    responses as responses,
+    tool_output,
+)
+from tests.test_native_agent import provider
+from tests.test_native_mcp_tools import declarations
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_selected_remote_process_uses_wss_and_current_directory(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        tools = Environment(
+            url=peer.url,
+            cwd=str(peer.root),
+            headers={"Authorization": "Bearer " + peer.token},
+            tools=["exec_command"],
+        )
+        responses.respond(
+            function_call("exec_command", {"cmd": "pwd", "max_output_tokens": 100}, "pwd")
+        )
+        responses.respond(assistant_output("done"))
+        async with Agent(
+            instructions="Use the selected process tool.",
+            tools=[],
+            provider=provider(responses),
+        ).session(environment=tools) as session:
+            result = await (await session.submit("Show the current directory.")).get_result()
+            assert result.final_output == "done"
+            assert str(peer.root) in tool_output(responses.requests[1], "pwd")
+            assert set(declarations(responses.requests[0])) == {("functions", "exec_command")}
+            assert peer.token not in repr(tools)
+            assert peer.token not in str(await session.save_state())
+        assert peer.attempts > 0
+        assert any(request.get("method") == "process/start" for request in peer.requests)
+
+
+def declaration(peer: ExecutorPeer, **kwargs: Any) -> Environment:
+    return Environment(
+        url=peer.url,
+        cwd=str(peer.root),
+        headers={"Authorization": "Bearer " + peer.token},
+        tools=["exec_command", "write_stdin", "apply_patch"],
+        **kwargs,
+    )
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_native_tty_stdin_and_patch(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with timeout(25), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        responses.respond(
+            function_call(
+                "exec_command",
+                {
+                    "cmd": "read -r value; printf 'remote:%s\\n' \"$value\"",
+                    "tty": True,
+                    "yield_time_ms": 1000,
+                },
+                "start",
+            )
+        )
+        responses.respond(function_call("write_stdin", {}, "stdin"))
+        responses.respond(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "custom_tool_call",
+                    "call_id": "patch",
+                    "name": "apply_patch",
+                    "input": (
+                        "*** Begin Patch\n*** Add File: result.txt\n+remote patch\n*** End Patch"
+                    ),
+                },
+            }
+        )
+        responses.respond(assistant_output("done"))
+
+        async def supply_terminal(event: dict[str, Any]) -> None:
+            if event.get("item", {}).get("call_id") == "stdin":
+                output = tool_output(responses.requests[-1], "start")
+                match = re.search(r"Process running with session ID (\d+)", output)
+                assert match, output
+                event["item"]["arguments"] = json.dumps(
+                    {"session_id": int(match[1]), "chars": "hello\n", "yield_time_ms": 1000}
+                )
+
+        responses.before_event = supply_terminal
+        selected = declaration(peer)
+        async with Agent(
+            instructions="Use the selected tools.", tools=[], provider=provider(responses)
+        ).session(environment=selected) as session:
+            assert (
+                await (await session.submit("Write interactively.")).get_result()
+            ).final_output == "done"
+            assert "remote:hello" in tool_output(responses.requests[2], "stdin")
+            assert (peer.root / "result.txt").read_text() == "remote patch\n"
+            offered = declarations(responses.requests[0])
+            assert set(offered) == {("functions", name) for name in selected.tools}
+            history = json.dumps([item async for item in session.items()])
+            assert all(call in history for call in ("start", "stdin", "patch"))
+        methods = {request.get("method") for request in peer.requests}
+        assert "process/write" in methods
+        assert "fs/writeFile" in methods
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_session_tool_update_cannot_replace_its_environment(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with timeout(20), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        selected = declaration(peer)
+
+        @function_tool
+        def local() -> str:
+            return "local receipt"
+
+        async with Agent(
+            instructions="Use the selected tools.", tools=[local], provider=provider(responses)
+        ).session(environment=selected) as session:
+            before = len(peer.requests)
+            for replacement in (
+                replace(selected, cwd=str(tmp_path)),
+                replace(selected, headers={}),
+            ):
+                with pytest.raises(TypeError):
+                    await session.submit("select", **{"environment": replacement})
+                with pytest.raises(ValueError, match="captured"):
+                    await session.submit("select", tools=[replacement])  # type: ignore[list-item]
+                with pytest.raises(ValueError, match="captured"):
+                    await session.update(tools=[local, replacement])
+            assert len(peer.requests) == before
+            responses.respond(assistant_output("no tools"))
+            await (await session.submit("empty", tools=[])).get_result()
+            assert not declarations(responses.requests[-1])
+            await session.update(tools=[local, selected])
+            with pytest.raises(ValueError, match="distinct fixed"):
+                await session.update(tools=[local, selected, ToolRef("exec_command", "functions")])
+            await session.update(tools=[local])
+            responses.respond(function_call("local", {}, "local"))
+            responses.respond(assistant_output("local done"))
+            assert (await (await session.submit("local")).get_result()).final_output == "local done"
+            assert tool_output(responses.requests[-1], "local") == "local receipt"
+            assert set(declarations(responses.requests[-1])) == {
+                ("functions", name) for name in (*selected.tools, "local")
+            }
+            await session.update(tools=[])
+            responses.respond(function_call("exec_command", {"cmd": "pwd"}, "after-reject"))
+            responses.respond(assistant_output("done"))
+            await (await session.submit("still usable")).get_result()
+            assert str(peer.root) in tool_output(responses.requests[-1], "after-reject")
+            assert set(declarations(responses.requests[-1])) == {
+                ("functions", name) for name in selected.tools
+            }
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"url": "ws://localhost/executor"},
+        {"url": "https://localhost/executor"},
+        {"url": "wss://user:secret@localhost/executor"},
+        {"url": "wss://localhost/executor?secret=x"},
+        {"url": "wss://localhost/executor#fragment"},
+        {"url": "wss://localhost:bad/executor"},
+        {"cwd": "relative"},
+        {"tools": ["exec_command", "exec_command"]},
+        {"tools": ["write_stdin"]},
+        {"tools": ["shell_command"]},
+        {"sandbox_mode": "danger-full-access"},
+        {"headers": {"Host": "secret"}},
+        {"headers": {"Sec-WebSocket-Key": "secret"}},
+        {"headers": {"Authorization": "one", "authorization": "two"}},
+        {"headers": {"Bad\rName": "secret"}},
+        {"headers": {"Authorization": "secret\r\nextra"}},
+        {"connect_timeout": 0},
+        {"connect_timeout": -1},
+        {"connect_timeout": float("inf")},
+        {"connect_timeout": float("nan")},
+        {"connect_timeout": True},
+        {"connect_timeout": 10**1000},
+    ],
+)
+def test_invalid_executor_declarations_reject_without_io(changes: dict[str, Any]) -> None:
+    values: dict[str, Any] = {
+        "url": "wss://localhost/executor",
+        "cwd": "/remote",
+        "tools": ["exec_command"],
+    }
+    values.update(changes)
+    with pytest.raises((TypeError, ValueError)) as error:
+        Environment(**values)
+    assert "secret" not in str(error.value)
+
+
+def test_executor_freezes_authority() -> None:
+    names: list[Literal["exec_command", "apply_patch"]] = ["exec_command"]
+    headers = {"Authorization": "Bearer original"}
+    selected = Environment(
+        url="wss://localhost/executor", cwd="/remote", tools=names, headers=headers
+    )
+    names.append("apply_patch")
+    headers["Authorization"] = "Bearer mutated"
+    assert selected.tools == ("exec_command",)
+    assert selected.headers["authorization"] == "Bearer original"
+    assert "original" not in repr(selected)
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_current_credentials_roots_and_restored_authority(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "one", token="first-executor-secret").serve() as one,
+        ExecutorPeer(tmp_path / "two", token="second-executor-secret").serve() as two,
+    ):
+        assert one.ca is not None and two.ca is not None
+        roots = tmp_path / "trusted.pem"
+        roots.write_bytes(one.ca.read_bytes() + two.ca.read_bytes())
+        monkeypatch.setenv("SSL_CERT_FILE", str(roots))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        first, second = declaration(one), declaration(two)
+        agent = Agent(instructions="Use current tools.", provider=provider(responses))
+        async with agent.session(environment=first) as a, agent.session(environment=second) as b:
+            for session, peer, call_id in ((a, one, "one"), (b, two, "two")):
+                responses.respond(function_call("exec_command", {"cmd": "pwd"}, call_id))
+                responses.respond(assistant_output("done"))
+                await (await session.submit(call_id)).get_result()
+                assert str(peer.root) in tool_output(responses.requests[-1], call_id)
+            saved = await a.save_state()
+            serialized = saved.to_json()
+            assert one.token not in serialized and two.token not in serialized
+        async with agent.session(state=saved, environment=second) as restored:
+            responses.respond(function_call("exec_command", {"cmd": "pwd"}, "restored"))
+            responses.respond(assistant_output("done"))
+            await (await restored.submit("Use the current executor.")).get_result()
+            assert str(two.root) in tool_output(responses.requests[-1], "restored")
+        before = len(two.requests)
+        wrong = replace(
+            second, headers={"Authorization": "Bearer " + one.token}, connect_timeout=0.5
+        )
+        with pytest.raises(RuntimeError, match="remote executor") as error:
+            async with Agent(instructions="Use tools.", provider=provider(responses)).session(
+                environment=wrong
+            ):
+                pytest.fail("Wrong credentials were accepted")
+        assert one.token not in str(error.value) and two.token not in str(error.value)
+        assert len(two.requests) == before
+
+
+async def test_unknown_native_environment_never_uses_local_fallback(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with timeout(20), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        marker = tmp_path / "must-not-exist"
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": f"touch {marker}", "environment_id": "foreign-environment"},
+                "foreign",
+            )
+        )
+        responses.respond(assistant_output("done"))
+        async with Agent(
+            instructions="Use tools.",
+            tools=[],
+            provider=provider(responses),
+        ).session(environment=declaration(peer)) as session:
+            with pytest.raises(NativeError) as error:
+                await (await session.submit("reject foreign environment")).get_result()
+            assert str(error.value) == (
+                "Native executor rejected invalid arguments before dispatch: "
+                "tool=exec_command; call_id_sha256=" + hashlib.sha256(b"foreign").hexdigest()
+            )
+            assert len(responses.requests) == 1
+            assert not marker.exists()
+        assert not any(request.get("method") == "process/start" for request in peer.requests)
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_close_acknowledges_remote_termination_attempt(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with timeout(20), ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        responses.respond(
+            function_call("exec_command", {"cmd": "sleep 5", "yield_time_ms": 1000}, "background")
+        )
+        responses.respond(assistant_output("running"))
+        async with Agent(instructions="Use tools.", tools=[], provider=provider(responses)).session(
+            environment=declaration(peer)
+        ) as session:
+            await (await session.submit("start background process")).get_result()
+            assert "Process running with session ID" in tool_output(
+                responses.requests[-1], "background"
+            )
+        assert any(request.get("method") == "process/terminate" for request in peer.requests)
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_close_reports_unacknowledged_termination_attempt(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with timeout(20), ExecutorPeer(tmp_path / "remote", deny_terminate=True).serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        responses.respond(
+            function_call("exec_command", {"cmd": "sleep 5", "yield_time_ms": 1000}, "background")
+        )
+        responses.respond(assistant_output("running"))
+        native_provider = provider(responses)
+        with pytest.raises(RuntimeError, match="termination attempt was not acknowledged") as error:
+            async with Agent(instructions="Use tools.", tools=[], provider=native_provider).session(
+                environment=declaration(peer)
+            ) as session:
+                await (await session.submit("start background process")).get_result()
+                assert "Process running with session ID" in tool_output(
+                    responses.requests[-1], "background"
+                )
+        assert "private-termination-error" not in str(error.value)
+        assert peer.token not in str(error.value)
+        assert any(request.get("method") == "process/terminate" for request in peer.requests)
+
+        attempts = sum(request.get("method") == "process/terminate" for request in peer.requests)
+        with pytest.raises(RuntimeError, match="termination attempt was not acknowledged"):
+            await session._aclose()
+        await native_provider.aclose()
+        await native_provider.aclose()
+        async with timeout(5):
+            await peer.wait_disconnected()
+        assert (
+            sum(request.get("method") == "process/terminate" for request in peer.requests)
+            == attempts
+        )
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_lost_start_ack_does_not_establish_no_effects(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / "remote" / "started.txt"
+    async with (
+        timeout(25),
+        ExecutorPeer(tmp_path / "remote", drop_start_reply_after=marker).serve() as peer,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": "printf started > started.txt; sleep 1", "yield_time_ms": 1000},
+                "lost-start",
+            )
+        )
+        responses.respond(assistant_output("done"))
+        async with Agent(
+            instructions="Use tools.",
+            tools=[],
+            provider=provider(responses),
+        ).session(environment=declaration(peer)) as session:
+            turn = await session.submit("start")
+            await peer.start_reply_dropped.wait()
+            await turn.cancel()
+            assert marker.read_text() == "started"
+        # This fixture observed one start, not an exactly-once protocol guarantee.
+        starts = [request for request in peer.requests if request.get("method") == "process/start"]
+        assert len(starts) == 1

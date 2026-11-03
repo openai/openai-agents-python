@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Preflight and materialize an isolated release candidate from exact origin/main."""
+"""Preflight and materialize an isolated release candidate from exact origin/feat/v1.0-release."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ else:
 from collections.abc import Sequence
 
 ROOT = Path(__file__).resolve().parents[4]
-VERSION_PATTERN = re.compile(r"\d+\.\d+(?:\.\d+)*(?:[A-Za-z0-9.-]+)?\Z")
+VERSION_PATTERN = re.compile(r"(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-alpha\.(0|[1-9]\d*)\Z")
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}\Z")
 PROJECT_VERSION_PATTERN = re.compile(r'(?m)^version\s*=\s*"[^"]+"')
 SOURCE_VERSION_PATTERN = re.compile(r'(?m)^([ \t]*__version__[ \t]*=[ \t]*)"([^"]+)"[ \t]*$')
@@ -117,11 +117,11 @@ def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProce
 
 
 def validate_version(version: str) -> str:
-    """Validate the release version accepted by the existing contract updater."""
+    """Validate the canonical private alpha version."""
 
     if version.startswith("v") or ".." in version or VERSION_PATTERN.fullmatch(version) is None:
         raise ReleasePreparationError(
-            "Version must be semver-like without a leading v, for example 0.20.1 or 0.21.0-rc1."
+            "Version must be X.Y.Z-alpha.N without a leading v, for example 0.24.0-alpha.6."
         )
     return version
 
@@ -197,7 +197,9 @@ def replace_project_version(repo: Path, version: str) -> None:
 def _current_branch(repo: Path) -> str:
     result = git(repo, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
     if result.returncode != 0:
-        raise ReleasePreparationError("Release preparation requires a named main branch.")
+        raise ReleasePreparationError(
+            "Release preparation requires a named feat/v1.0-release branch."
+        )
     return result.stdout.strip()
 
 
@@ -213,11 +215,11 @@ def _require_repository_root(repo: Path) -> None:
         )
 
 
-def _require_clean_main(repo: Path) -> None:
+def _require_clean_default_branch(repo: Path) -> None:
     branch = _current_branch(repo)
-    if branch != "main":
+    if branch != "feat/v1.0-release":
         raise ReleasePreparationError(
-            f"Release preparation requires branch 'main', found {branch!r}."
+            f"Release preparation requires branch 'feat/v1.0-release', found {branch!r}."
         )
     if _status(repo):
         raise ReleasePreparationError("Release preparation requires a clean working tree.")
@@ -374,7 +376,7 @@ def _validate_prepared_files(repo: Path, version: str, base_commit: str) -> tupl
         )
     if project_version(repo) != version:
         raise ReleasePreparationError("pyproject.toml does not contain the requested version.")
-    if _locked_project_version(repo) != version:
+    if _locked_project_version(repo) not in {version, version.replace("-alpha.", "a")}:
         raise ReleasePreparationError("uv.lock does not contain the requested project version.")
     manifest = json.loads((repo / ".release-please-manifest.json").read_text(encoding="utf-8"))
     if manifest.get(".") != version:
@@ -388,6 +390,19 @@ def _validate_prepared_files(repo: Path, version: str, base_commit: str) -> tupl
     contract = json.loads(
         (repo / "tests/fixtures/released_api_contract.json").read_text(encoding="utf-8")
     )
+    previous_contract = json.loads(
+        git(repo, "show", f"{base_commit}:tests/fixtures/released_api_contract.json").stdout
+    )
+    metadata = {"baseline", "baseline_commit"}
+    if {k: v for k, v in contract.items() if k not in metadata} != {
+        k: v for k, v in previous_contract.items() if k not in metadata
+    }:
+        raise ReleasePreparationError(
+            "Release preparation must not change the reviewed API surface."
+        )
+    native_revision = (repo / "packages/codex/CODEX_REVISION").read_text().strip()
+    if contract.get("native_revision") != native_revision:
+        raise ReleasePreparationError("The API contract does not match the current Codex revision.")
     if contract.get("baseline") != f"v{version}":
         raise ReleasePreparationError(
             "The released API contract baseline does not match the version."
@@ -395,20 +410,42 @@ def _validate_prepared_files(repo: Path, version: str, base_commit: str) -> tupl
     if contract.get("baseline_commit") != base_commit:
         raise ReleasePreparationError(
             "The released API contract baseline_commit does not match "
-            "the origin/main source commit."
+            "the origin/feat/v1.0-release source commit."
         )
     if git(repo, "diff", "--cached", "--quiet", check=False).returncode != 0:
         raise ReleasePreparationError("The helper must leave all release changes unstaged.")
     return tuple(sorted(changed))
 
 
+def _require_new_release(repo: Path, version: str, base_commit: str) -> None:
+    """Reject a reused tag or a version that does not advance the preview."""
+
+    current = validate_version(project_version_at(repo, base_commit))
+    current_match = VERSION_PATTERN.fullmatch(current)
+    requested_match = VERSION_PATTERN.fullmatch(version)
+    assert current_match is not None and requested_match is not None
+    if tuple(map(int, requested_match.groups())) <= tuple(map(int, current_match.groups())):
+        raise ReleasePreparationError(f"Version {version} must be newer than {current}.")
+    tag = f"refs/tags/v{version}"
+    local = git(repo, "show-ref", "--verify", "--quiet", tag, check=False)
+    if local.returncode == 0:
+        raise ReleasePreparationError(f"Release tag v{version} already exists locally.")
+    if local.returncode != 1:
+        raise ReleasePreparationError(f"Unable to inspect local release tag v{version}.")
+    remote = git(repo, "ls-remote", "--exit-code", "--tags", "origin", tag, check=False)
+    if remote.returncode == 0:
+        raise ReleasePreparationError(f"Release tag v{version} already exists on origin.")
+    if remote.returncode != 2:
+        raise ReleasePreparationError(f"Unable to inspect remote release tag v{version}.")
+
+
 def preflight(repo: Path, version: str, worktree_root: Path) -> ReleasePreflight:
-    """Refresh exact main and create an isolated branch-free readiness checkout."""
+    """Refresh exact feat/v1.0-release and create an isolated branch-free readiness checkout."""
 
     repo = repo.resolve()
     version = validate_version(version)
     _require_repository_root(repo)
-    _require_clean_main(repo)
+    _require_clean_default_branch(repo)
     source_commit = git(repo, "rev-parse", "HEAD").stdout.strip()
     branch = f"release/v{version}"
     _require_branch_replaceable(repo, branch)
@@ -419,20 +456,19 @@ def preflight(repo: Path, version: str, worktree_root: Path) -> ReleasePreflight
             "git",
             "fetch",
             "origin",
-            "refs/heads/main:refs/remotes/origin/main",
+            "refs/heads/feat/v1.0-release:refs/remotes/origin/feat/v1.0-release",
             "--prune",
         ],
         env=env,
         announce=True,
     )
-    base_commit = git(repo, "rev-parse", "origin/main").stdout.strip()
-    if project_version_at(repo, base_commit) == version:
-        raise ReleasePreparationError(f"Refreshed origin/main already declares version {version}.")
+    base_commit = git(repo, "rev-parse", "origin/feat/v1.0-release").stdout.strip()
+    _require_new_release(repo, version, base_commit)
 
     _require_branch_replaceable(repo, branch)
     if _status(repo):
         raise ReleasePreparationError(
-            "Release preflight must leave the source main working tree clean."
+            "Release preflight must leave the source feat/v1.0-release working tree clean."
         )
     worktree = _choose_worktree_path(repo, worktree_root, version)
     worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -443,7 +479,7 @@ def preflight(repo: Path, version: str, worktree_root: Path) -> ReleasePreflight
         announce=True,
     )
     _require_registered_detached_worktree(repo, worktree, base_commit)
-    _require_clean_main(repo)
+    _require_clean_default_branch(repo)
     _require_source_head(repo, source_commit)
     return ReleasePreflight(
         base_commit=base_commit,
@@ -469,7 +505,7 @@ def materialize(
     version = validate_version(version)
     worktree = worktree.expanduser().resolve()
     _require_repository_root(repo)
-    _require_clean_main(repo)
+    _require_clean_default_branch(repo)
     _require_source_head(repo, expected_source_head)
     _require_registered_detached_worktree(repo, worktree, expected_base)
 
@@ -482,25 +518,34 @@ def materialize(
             "git",
             "fetch",
             "origin",
-            "refs/heads/main:refs/remotes/origin/main",
+            "refs/heads/feat/v1.0-release:refs/remotes/origin/feat/v1.0-release",
             "--prune",
         ],
         env=env,
         announce=True,
     )
-    base_commit = git(repo, "rev-parse", "origin/main").stdout.strip()
+    base_commit = git(repo, "rev-parse", "origin/feat/v1.0-release").stdout.strip()
     if base_commit != expected_base:
         raise ReleasePreparationError(
-            f"Preflight reviewed {expected_base}, but refreshed origin/main is {base_commit}; "
+            f"Preflight reviewed {expected_base}, but refreshed "
+            f"origin/feat/v1.0-release is {base_commit}; "
             "leave the detached worktree intact and rerun preflight plus both readiness gates."
         )
-    _require_clean_main(repo)
+    _require_clean_default_branch(repo)
     _require_source_head(repo, expected_source_head)
     _require_branch_replaceable(repo, branch)
     _require_registered_detached_worktree(repo, worktree, expected_base)
-    if project_version(worktree) == version:
-        raise ReleasePreparationError(f"Project version is already {version}.")
+    _require_new_release(repo, version, base_commit)
 
+    old_version = project_version(worktree)
+    run_command(
+        worktree,
+        ["make", "check-released-api-contract", f"VERSION={old_version}"],
+        env=env,
+        announce=True,
+    )
+    if _status(worktree):
+        raise ReleasePreparationError("The API check must leave the release worktree clean.")
     replace_project_version(worktree, version)
     run_command(worktree, ["make", "sync"], env=env, announce=True)
     run_command(
@@ -516,7 +561,7 @@ def materialize(
         announce=True,
     )
     changed_paths = _validate_prepared_files(worktree, version, base_commit)
-    _require_clean_main(repo)
+    _require_clean_default_branch(repo)
     _require_source_head(repo, expected_source_head)
     _require_branch_replaceable(repo, branch)
     run_command(
@@ -537,17 +582,17 @@ def materialize(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Preflight or materialize an isolated release candidate from exact origin/main."
+        description="Prepare an isolated release candidate from origin/feat/v1.0-release."
     )
     subparsers = parser.add_subparsers(dest="phase", required=True)
     preflight_parser = subparsers.add_parser(
         "preflight",
-        help="Refresh exact main and validate inputs without creating a release branch.",
+        help="Refresh feat/v1.0-release and validate inputs before creating a release branch.",
     )
     preflight_parser.add_argument(
         "--version",
         required=True,
-        help="Release version without a leading v, for example 0.20.1.",
+        help="Release version without a leading v, for example 0.24.0-alpha.6.",
     )
     preflight_parser.add_argument(
         "--worktree-root",
@@ -562,12 +607,12 @@ def parse_args() -> argparse.Namespace:
     materialize_parser.add_argument(
         "--version",
         required=True,
-        help="Release version without a leading v, for example 0.20.1.",
+        help="Release version without a leading v, for example 0.24.0-alpha.6.",
     )
     materialize_parser.add_argument(
         "--expected-base",
         required=True,
-        help="Exact 40-character origin/main commit approved by release preflight.",
+        help="Exact 40-character origin/feat/v1.0-release commit approved by release preflight.",
     )
     materialize_parser.add_argument(
         "--expected-source-head",
@@ -601,7 +646,7 @@ def main() -> int:
         return 1
 
     if args.phase == "preflight":
-        print("Release preflight passed without changing the source main checkout.")
+        print("Release preflight passed without changing the source feat/v1.0-release checkout.")
         print(f"Base commit: {release_input.base_commit}")
         print(f"Source commit: {release_input.source_commit}")
         print(f"Planned branch: {release_input.branch}")

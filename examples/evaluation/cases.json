@@ -1,0 +1,4 @@
+[
+  {"id": "known", "prompt": "Look up code A.", "expected_answer": "violet", "expected_lookups": ["A"]},
+  {"id": "absent", "prompt": "Look up code Z.", "expected_answer": "UNKNOWN", "expected_lookups": ["Z"]}
+]

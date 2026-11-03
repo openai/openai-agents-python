@@ -1,0 +1,2 @@
+# Only this application example uses AG-UI. The SDK does not depend on it.
+ag-ui-protocol==0.1.9

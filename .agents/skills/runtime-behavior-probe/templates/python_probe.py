@@ -82,7 +82,7 @@ def runtime_context() -> dict[str, object]:
     approved = {name: ("set" if os.getenv(name) else "unset") for name in APPROVED_ENV_VARS}
     package_versions = {
         name: version
-        for name in ("openai", "agents")
+        for name in ("openai", "openai-agents")
         if (version := _package_version(name)) is not None
     }
     return {

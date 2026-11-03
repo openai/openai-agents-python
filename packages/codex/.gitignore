@@ -1,0 +1,12 @@
+.upstream/
+.cache/
+.venv/
+target/
+dist/
+__pycache__/
+*.pyc
+*.so
+.pytest_cache/
+.ruff_cache/
+.demo-output/
+/site/

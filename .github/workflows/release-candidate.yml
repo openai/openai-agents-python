@@ -46,7 +46,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: python .github/scripts/release_automation.py discover
       - if: steps.candidate.outputs.candidate == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: candidate-input-${{ github.run_attempt }}
           path: candidate.json
@@ -64,7 +64,7 @@ jobs:
         with:
           ref: ${{ needs.discover.outputs.commit_sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           version: '0.11.14'
           python-version: '3.14'
@@ -73,12 +73,12 @@ jobs:
         env:
           VERSION: ${{ needs.discover.outputs.version }}
           UV_FROZEN: '1'
+          UV_NO_SYNC: '1'
         run: |
-          make sync
-          make update-released-api-contract VERSION="$VERSION"
+          uv sync --group dev --no-install-project
           make check-released-api-contract VERSION="$VERSION"
-          make check-prospective-released-api-contract
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+          make update-released-api-contract VERSION="$VERSION"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: generated-contract-${{ github.run_attempt }}
           path: tests/fixtures/released_api_contract.json
@@ -97,15 +97,15 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: candidate-input-${{ github.run_attempt }}
           path: input
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
         with:
           name: generated-contract-${{ github.run_attempt }}
           path: generated
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
         id: app
         with:
           app-id: ${{ vars.OPENAI_SDKS_APP_CLIENT_ID }}

@@ -9,7 +9,7 @@ assignees: ''
 
 ### Please read this first
 
-- **Have you read the docs?** [Agents SDK docs](https://openai.github.io/openai-agents-python/)
+- **Have you read the docs?** [Public v1 source-build setup and guides](https://github.com/openai/openai-agents-python/blob/v1/README.md)
 - **Have you searched for related issues?** Others may have had similar requests
 
 ### Question

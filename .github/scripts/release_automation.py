@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
+import tarfile
+import tempfile
 import time
+import zipfile
+from datetime import datetime
+from email.parser import BytesParser
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -23,6 +30,11 @@ FILES = {
     "src/agents/version.py",
     ".release-please-manifest.json",
     "CHANGELOG.md",
+}
+NATIVE_RELEASE_ARTIFACTS = {
+    "native-Linux-X64": ("native-linux / Native package (ubuntu-24.04)", "manylinux_2_39_x86_64"),
+    "native-Windows-X64": ("native-windows / Native package (windows-latest)", "win_amd64"),
+    "native-macOS-ARM64": ("native-macos / Native package (macos-latest)", "macosx_11_0_arm64"),
 }
 
 
@@ -75,6 +87,213 @@ def pages(path: str) -> list[Any]:
         if len(batch) < 100:
             return rows
     raise ValueError("Pagination limit reached; review input would be incomplete")
+
+
+def records(path: str, key: str) -> list[Any]:
+    rows: list[Any] = []
+    total = None
+    for page in range(1, 101):
+        response = repo_api(f"{path}{'&' if '?' in path else '?'}per_page=100&page={page}")
+        if total is not None and total != response["total_count"]:
+            break
+        total = response["total_count"]
+        batch = response[key]
+        rows.extend(batch)
+        if len({item["id"] for item in rows}) != len(rows):
+            break
+        if len(rows) == total:
+            return rows
+        if not batch or len(rows) > total:
+            break
+    raise ValueError("Incomplete release artifact metadata")
+
+
+def release_timestamp(value: str) -> datetime:
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError):
+        raise ValueError("Invalid release timestamp") from None
+    if result.tzinfo is None:
+        raise ValueError("Release timestamp must include a timezone")
+    return result
+
+
+def qualified_distributions(head: str) -> dict[str, Any]:
+    """Select the latest exact-commit push run; never fall back to an older success."""
+    head = sha(head)
+    runs = records(
+        f"actions/workflows/tests.yml/runs?head_sha={head}&event=push&branch=main", "workflow_runs"
+    )
+    if not runs:
+        raise ValueError("No default-branch Tests run for the release commit")
+    run = max(runs, key=lambda item: int(item["id"]))
+    if (
+        run["repository"]["full_name"] != REPO
+        or (run.get("head_repository") or {}).get("full_name") != REPO
+        or run["path"] != ".github/workflows/tests.yml"
+        or run["event"] != "push"
+        or run["head_branch"] != "main"
+        or run["head_sha"] != head
+        or run["status"] != "completed"
+        or run["conclusion"] != "success"
+    ):
+        raise ValueError("Release requires a successful exact-commit main Tests run")
+    commit = repo_api(f"git/commits/{head}")
+    manifest = ".release-please-manifest.json"
+    release_version = json.loads(content(manifest, head))["."]
+    if (
+        not commit["parents"]
+        or release_version == json.loads(content(manifest, sha(commit["parents"][0]["sha"])))["."]
+    ):
+        raise ValueError("The qualified release commit must advance the release version")
+    if os.environ["RELEASE_TAG"] != f"v{release_version}":
+        raise ValueError("Release version manifest does not match the validated tag")
+    run_path = f"actions/runs/{int(run['id'])}"
+    jobs = records(run_path + "/jobs?filter=all", "jobs")
+    required = {job for job, _ in NATIVE_RELEASE_ARTIFACTS.values()} | {
+        "lint",
+        "typecheck",
+        "mypy-win32",
+        "native-macos-sandbox",
+        *(f"tests (3.{minor})" for minor in range(10, 15)),
+        "tests-windows (3.10)",
+        "tests-windows (3.14)",
+    }
+    # A failed-jobs rerun retains successful jobs from earlier attempts. Select
+    # each job's latest execution, not only jobs from the run's final attempt.
+    producers = {}
+    for name in sorted(required):
+        executions = [job for job in jobs if job["name"] == name]
+        if not executions:
+            raise ValueError(f"Release test gates did not pass: {name}")
+        if any(
+            job.get("run_id") != run["id"]
+            or job.get("head_sha") != head
+            or type(job.get("run_attempt")) is not int
+            or not 1 <= job["run_attempt"] <= run["run_attempt"]
+            for job in executions
+        ):
+            raise ValueError(f"Unbound release producer: {name}")
+        attempt = max(job["run_attempt"] for job in executions)
+        latest = [job for job in executions if job["run_attempt"] == attempt]
+        if len(latest) != 1:
+            raise ValueError(f"Ambiguous release producer: {name}")
+        job = latest[0]
+        if job["status"] != "completed" or job["conclusion"] != "success":
+            raise ValueError(f"Release test gates did not pass: {name}")
+        producers[name] = job
+    artifacts = records(run_path + "/artifacts", "artifacts")
+    selected = []
+    for name, (job_name, _) in NATIVE_RELEASE_ARTIFACTS.items():
+        producer = producers[job_name]
+        started = release_timestamp(producer.get("started_at"))
+        completed = release_timestamp(producer.get("completed_at"))
+        if completed < started:
+            raise ValueError(f"Invalid release producer interval: {job_name}")
+        matches = [
+            item
+            for item in artifacts
+            if item["name"] == name
+            and started <= release_timestamp(item.get("created_at")) <= completed
+        ]
+        if len(matches) != 1 or matches[0]["expired"]:
+            raise ValueError(f"Missing, expired or ambiguous release artifact: {name}")
+        artifact = matches[0]
+        if (
+            artifact["workflow_run"]["id"] != run["id"]
+            or artifact["workflow_run"]["head_sha"] != head
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", artifact.get("digest") or "")
+        ):
+            raise ValueError(f"Unbound release artifact: {name}")
+        selected.append(artifact)
+    return {"run": run, "version": release_version, "artifacts": selected}
+
+
+def normalized_version(value: str) -> str:
+    if not re.fullmatch(r"\d+\.\d+\.\d+(?:(?:-alpha\.|a)\d+)?", value):
+        raise ValueError("Unsupported release artifact version")
+    return value.replace("-alpha.", "a")
+
+
+def verify_distribution(path: Path, release_version: str, platform: str | None = None) -> None:
+    version = normalized_version(release_version)
+    if platform is not None:
+        if path.name != f"openai_agents-{version}-cp310-abi3-{platform}.whl":
+            raise ValueError("Unexpected wheel filename or platform")
+        with zipfile.ZipFile(path) as archive:
+            (metadata,) = [
+                name for name in archive.namelist() if name.endswith(".dist-info/METADATA")
+            ]
+            package = BytesParser().parsebytes(archive.read(metadata))
+            wheel = BytesParser().parsebytes(
+                archive.read(metadata.removesuffix("METADATA") + "WHEEL")
+            )
+            if (
+                wheel.get_all("Tag") != [f"cp310-abi3-{platform}"]
+                or wheel["Root-Is-Purelib"] != "false"
+            ):
+                raise ValueError("Wheel metadata does not match its native platform")
+    else:
+        if path.name != f"openai_agents-{version}.tar.gz":
+            raise ValueError("Unexpected source distribution filename")
+        with tarfile.open(path) as archive:
+            member = archive.getmember(f"openai_agents-{version}/PKG-INFO")
+            if not member.isfile():
+                raise ValueError("Source metadata must be a regular file")
+            stream = archive.extractfile(member)
+            assert stream is not None
+            package = BytesParser().parsebytes(stream.read())
+    if package["Name"] != "openai-agents" or normalized_version(package["Version"]) != version:
+        raise ValueError("Distribution metadata does not match the release")
+
+
+def collect_distributions(qualified: dict[str, Any], destination: Path) -> None:
+    """Download immutable artifact IDs and publish only the validated four files."""
+    destination.mkdir(parents=True, exist_ok=False)
+    with tempfile.TemporaryDirectory(prefix="agents-release-") as directory:
+        staging = Path(directory)
+        distributions = []
+        for artifact in qualified["artifacts"]:
+            path = staging / f"{int(artifact['id'])}.zip"
+            with path.open("wb") as output_stream:
+                subprocess.run(
+                    ["gh", "api", f"repos/{REPO}/actions/artifacts/{int(artifact['id'])}/zip"],
+                    stdout=output_stream,
+                    check=True,
+                )
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            if f"sha256:{digest.hexdigest()}" != artifact["digest"]:
+                raise ValueError("Downloaded release artifact digest mismatch")
+            platform = NATIVE_RELEASE_ARTIFACTS[artifact["name"]][1]
+            with zipfile.ZipFile(path) as archive:
+                wheels = [name for name in archive.namelist() if name.endswith(".whl")]
+                if len(wheels) != 1:
+                    raise ValueError("Each release artifact must contain exactly one wheel")
+                names = [(wheels[0], platform)]
+                if artifact["name"] == "native-Linux-X64":
+                    sources = [name for name in archive.namelist() if name.endswith(".tar.gz")]
+                    if len(sources) != 1:
+                        raise ValueError("Linux release artifact must contain exactly one sdist")
+                    names.append((sources[0], None))
+                for name, expected_platform in names:
+                    if Path(name).name != name:
+                        raise ValueError("Distribution must be at the artifact root")
+                    target = staging / name
+                    with archive.open(name) as source, target.open("xb") as output_stream:
+                        shutil.copyfileobj(source, output_stream)
+                    verify_distribution(target, qualified["version"], expected_platform)
+                    distributions.append(target)
+        run = qualified["run"]
+        current_run = repo_api(f"actions/runs/{int(run['id'])}")
+        for key in ("id", "head_sha", "run_attempt", "status", "conclusion"):
+            if current_run[key] != run[key]:
+                raise ValueError("Qualified Tests run changed during artifact collection")
+        for distribution in distributions:
+            shutil.copy2(distribution, destination / distribution.name)
+    print(f"Collected three native wheels and one sdist from Tests run {run['id']}")
 
 
 def sha(value: str) -> str:
@@ -365,14 +584,21 @@ def main() -> None:
             "write-contract",
             "verify-publication",
             "publish-notes",
+            "qualify-distributions",
         ],
     )
     parser.add_argument("--context", type=Path, default=Path("candidate.json"))
     parser.add_argument("--file", type=Path)
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     if os.environ.get("GITHUB_REPOSITORY") != REPO:
         raise ValueError("This controller is restricted to the Agents Python repository")
-    if args.command == "gate":
+    if args.command == "qualify-distributions":
+        qualified = qualified_distributions(os.environ["RELEASE_SHA"])
+        if args.output_dir is not None:
+            collect_distributions(qualified, args.output_dir)
+        print(f"Qualified Tests run {qualified['run']['id']} at {qualified['run']['head_sha']}")
+    elif args.command == "gate":
         gate()
     elif args.command == "authorize-refresh":
         authorize_refresh()

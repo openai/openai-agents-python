@@ -1,0 +1,3112 @@
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+index 65f7c5b4457e906c903350b4f9c1645ac4429d3a..9fead0f91773c27e383dc457fcba5a709f82987c 100644
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -84,6 +84,8 @@ static LIVE_CONNECTIONS: Gauge = Gauge::new("mcp.connections.live");
+ 
+ pub(crate) struct McpServerConnection {
+     identity: Option<McpServerConnectionIdentity>,
++    is_stdio: bool,
++    stdio_owner: Option<codex_rmcp_client::ElicitationOwner>,
+     client: AsyncManagedClient,
+     // Startup-only budget; changing it must not replace a ready connection.
+     startup_timeout: Duration,
+@@ -140,6 +142,10 @@ impl McpServerConnection {
+         self.client.shutdown().await;
+     }
+ 
++    pub(crate) async fn shutdown_owned_stdio(&self) -> anyhow::Result<()> {
++        self.client.shutdown_owned_stdio().await
++    }
++
+     fn cancel_startup(&self) {
+         if !self.startup_is_dormant() && !self.client.startup_complete.load(Ordering::Acquire) {
+             self.client.cancel_token.cancel();
+@@ -340,6 +346,13 @@ impl McpConnectionSet {
+             };
+             let metadata = McpServerMetadata::from(&server);
+             let configured_config = server.config().clone();
++            let is_stdio = matches!(
++                &configured_config.transport,
++                McpServerTransportConfig::Stdio { .. }
++            );
++            let stdio_owner = is_stdio
++                .then(|| runtime_context.stdio_owner.clone())
++                .flatten();
+             let protocol_mode = if matches!(
+                 &configured_config.transport,
+                 McpServerTransportConfig::StreamableHttp { .. }
+@@ -475,8 +488,15 @@ impl McpConnectionSet {
+                     Some(_) => None,
+                 },
+             };
+-            if let Some(previous_view) =
+-                reusable_previous.and_then(|previous| previous.servers.get(&server_name))
++            if let Some(previous_view) = reusable_previous
++                .and_then(|previous| previous.servers.get(&server_name))
++                .filter(
++                    |previous| match (&previous.connection.stdio_owner, &stdio_owner) {
++                        (Some(old), Some(new)) => old.is_live() && old.same_admission(new),
++                        (None, None) => true,
++                        _ => false,
++                    },
++                )
+             {
+                 let connection = Arc::clone(&previous_view.connection);
+                 let reusable_pending_startup = connection.identity.as_ref()
+@@ -582,6 +602,7 @@ impl McpConnectionSet {
+             let cancel_token = startup_cancellation_token.child_token();
+             let tool_catalog_cache_context = if server_name == CODEX_APPS_MCP_SERVER_NAME
+                 || server.requires_read_only_mcp_tools()
++                || (runtime_context.owned_stdio_mode && is_stdio)
+             {
+                 None
+             } else if let Ok(environment) = resolved_environment.as_ref() {
+@@ -653,6 +674,8 @@ impl McpConnectionSet {
+                 McpServerView {
+                     connection: Arc::new(McpServerConnection {
+                         identity: Some(connection_identity),
++                        is_stdio,
++                        stdio_owner,
+                         client: async_managed_client.clone(),
+                         startup_timeout,
+                         startup_trigger,
+@@ -943,6 +966,14 @@ impl McpConnectionSet {
+         }
+     }
+ 
++    pub(crate) fn stdio_connections(&self) -> Vec<Arc<McpServerConnection>> {
++        self.servers
++            .values()
++            .filter(|view| view.connection.is_stdio)
++            .map(|view| Arc::clone(&view.connection))
++            .collect()
++    }
++
+     pub(crate) fn cancel_startup(&self) {
+         for view in self.servers.values() {
+             view.connection.cancel_startup();
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index 52be4fe1017c959b33932e7f233406333b8f545a..22f49f8a6a6cae730c79504caac15159da19d3a0 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -138,6 +138,8 @@ impl McpConnectionSet {
+                 protocol_mode: crate::McpProtocolMode::Legacy,
+                 startup_readiness: Default::default(),
+                 connection: Arc::new(McpServerConnection {
++                    is_stdio: false,
++                    stdio_owner: None,
+                     identity: None,
+                     client,
+                     startup_timeout: DEFAULT_STARTUP_TIMEOUT,
+@@ -552,6 +554,8 @@ async fn prepared_call_timeout_includes_trusted_access_lookup() {
+ 
+ pub(crate) async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> AsyncManagedClient {
+     AsyncManagedClient {
++        owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++        owned_stdio: false,
+         client: futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Ok(
+             create_test_managed_client(tools).await,
+         ))
+@@ -722,6 +726,8 @@ fn create_gated_async_managed_client(
+ 
+     (
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client,
+             is_codex_apps_mcp_server: false,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -786,6 +792,8 @@ pub(crate) async fn create_test_manager_with_ready_apps_client(
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: futures::future::ready::<Result<ManagedClient, StartupOutcomeError>>(Ok(
+                 managed_client,
+             ))
+@@ -842,6 +850,8 @@ fn create_test_manager_with_failed_apps_startup(
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -2284,6 +2294,8 @@ async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: pending_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -2343,6 +2355,8 @@ async fn capture_binding_uses_the_ready_clients_own_tools() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: futures::future::ready(Ok(ready_client)).boxed().shared(),
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -2707,6 +2721,8 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: pending_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -2804,6 +2820,8 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: pending_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -2904,6 +2922,8 @@ async fn capture_binding_skips_pending_optional_servers_after_configured_shared_
+         manager.insert_test_client(
+             server_name.to_string(),
+             AsyncManagedClient {
++                owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++                owned_stdio: false,
+                 client: futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+                     .boxed()
+                     .shared(),
+@@ -3156,6 +3176,8 @@ async fn capture_binding_shares_optional_startup_grace_across_connection_sets()
+         manager.insert_test_client(
+             "pending",
+             AsyncManagedClient {
++                owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++                owned_stdio: false,
+                 client: futures::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+                     .boxed()
+                     .shared(),
+@@ -3792,6 +3814,8 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: pending_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -3850,6 +3874,8 @@ async fn shutdown_cancels_pending_tool_listing() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: pending_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -3897,6 +3923,8 @@ async fn shutdown_continues_after_caller_is_aborted() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: blocking_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -3950,6 +3978,8 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: pending_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -4003,6 +4033,8 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
+     manager.insert_test_client(
+         CODEX_APPS_MCP_SERVER_NAME.to_string(),
+         AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: failed_client,
+             is_codex_apps_mcp_server: true,
+             server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -5134,6 +5166,8 @@ async fn manager_with_reusable_ready_server(
+             protocol_mode: crate::McpProtocolMode::Legacy,
+             startup_readiness: Default::default(),
+             connection: Arc::new(McpServerConnection {
++                is_stdio: false,
++                stdio_owner: None,
+                 identity: Some(reusable_server_identity("docs", config, runtime_context)),
+                 client: create_ready_async_managed_client(tools).await,
+                 startup_timeout: config
+@@ -5560,8 +5594,12 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
+             protocol_mode: crate::McpProtocolMode::Legacy,
+             startup_readiness: Default::default(),
+             connection: Arc::new(McpServerConnection {
++                is_stdio: false,
++                stdio_owner: None,
+                 identity: Some(reusable_server_identity("docs", &config, &runtime_context)),
+                 client: AsyncManagedClient {
++                    owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++                    owned_stdio: false,
+                     client: futures::future::ready(Ok(managed_client)).boxed().shared(),
+                     is_codex_apps_mcp_server: false,
+                     server_capabilities: Arc::new(std::sync::Mutex::new(None)),
+@@ -6263,8 +6301,12 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
+     let mut connected_client = view.connection.client().await?;
+     connected_client.client = Arc::clone(&client);
+     view.connection = Arc::new(McpServerConnection {
++        is_stdio: false,
++        stdio_owner: None,
+         identity: Some(reusable_server_identity("docs", &config, &runtime_context)),
+         client: AsyncManagedClient {
++            owned_stdio_client: Arc::new(tokio::sync::Mutex::new(None)),
++            owned_stdio: false,
+             client: futures::future::ready(Ok(connected_client))
+                 .boxed()
+                 .shared(),
+diff --git a/codex-rs/codex-mcp/src/elicitation.rs b/codex-rs/codex-mcp/src/elicitation.rs
+index 970794098af50b263e39d3e548b9484c0bb3740d..51c2d0b226c3d9ffea80cd16e6b4a00362caea9e 100644
+--- a/codex-rs/codex-mcp/src/elicitation.rs
++++ b/codex-rs/codex-mcp/src/elicitation.rs
+@@ -100,6 +100,8 @@ struct ActiveElicitation {
+ #[derive(Clone, Default)]
+ pub(crate) struct ElicitationRequestRouter {
+     requests: Arc<StdMutex<ResponderMap>>,
++    pub(crate) owned_startup: Arc<AtomicBool>,
++    pub(crate) startup_prompt_failed: Arc<AtomicBool>,
+     auto_deny: Arc<AtomicBool>,
+     full_access_form_input_enabled: Arc<AtomicBool>,
+ }
+@@ -139,6 +141,58 @@ impl ElicitationRequestRouter {
+             .store(true, Ordering::Release);
+     }
+ 
++    pub(crate) fn owned_admission(
++        &self,
++        server: &str,
++        id: &RequestId,
++    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
++        self.requests
++            .lock()
++            .ok()?
++            .get(&(server.to_owned(), id.clone()))?
++            .owner
++            .as_ref()
++            .filter(|owner| owner.is_live())
++            .map(|owner| owner.admission.clone())
++    }
++    pub(crate) fn owned_pending(&self, server: &str, id: &RequestId, turn: &str) -> bool {
++        self.requests.lock().ok().is_some_and(|requests| {
++            requests
++                .get(&(server.to_owned(), id.clone()))
++                .is_some_and(|entry| {
++                    !entry.sender.is_closed()
++                        && entry
++                            .owner
++                            .as_ref()
++                            .is_some_and(|owner| owner.turn_id == turn && owner.is_live())
++                })
++        })
++    }
++    pub(crate) fn resolve_owned(
++        &self,
++        server: &str,
++        id: &RequestId,
++        turn: &str,
++        response: ElicitationResponse,
++    ) -> bool {
++        let Ok(mut requests) = self.requests.lock() else {
++            return false;
++        };
++        let key = (server.to_owned(), id.clone());
++        if !requests.get(&key).is_some_and(|entry| {
++            !entry.sender.is_closed()
++                && entry
++                    .owner
++                    .as_ref()
++                    .is_some_and(|owner| owner.turn_id == turn && owner.is_live())
++        }) {
++            return false;
++        }
++        requests
++            .remove(&key)
++            .is_some_and(|entry| entry.sender.send(response).is_ok())
++    }
++
+     pub(crate) async fn resolve(
+         &self,
+         server_name: String,
+@@ -152,6 +206,7 @@ impl ElicitationRequestRouter {
+             .remove(&(server_name, id))
+             .ok_or_else(|| anyhow!("elicitation request not found"))?;
+         responder
++            .sender
+             .send(response)
+             .map_err(|_| anyhow!("elicitation response receiver closed"))
+     }
+@@ -170,6 +225,7 @@ impl ElicitationRequestRouter {
+                 meta: None,
+             });
+         };
++        let owner = codex_rmcp_client::current_elicitation_owner();
+         let (delivery_context, response_context) =
+             if matches!(&request, ElicitationRequest::UserVerification { .. }) {
+                 (
+@@ -198,7 +254,13 @@ impl ElicitationRequestRouter {
+         self.requests
+             .lock()
+             .map_err(|_| anyhow!("elicitation request router unavailable"))?
+-            .insert(request_key.clone(), tx);
++            .insert(
++                request_key.clone(),
++                PendingResponse {
++                    sender: tx,
++                    owner: owner.clone(),
++                },
++            );
+         let _pending_request = PendingElicitationRequest {
+             router: self.clone(),
+             key: request_key,
+@@ -207,7 +269,10 @@ impl ElicitationRequestRouter {
+             .send(Event {
+                 id: "mcp_elicitation_request".to_string(),
+                 msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+-                    turn_id: None,
++                    turn_id: owner
++                        .as_ref()
++                        .filter(|owner| owner.is_live())
++                        .map(|owner| owner.turn_id.clone()),
+                     server_name,
+                     id: ProtocolRequestId::String(public_request_id),
+                     request,
+@@ -290,6 +355,16 @@ impl ElicitationRequestManager {
+                     .lock()
+                     .ok()
+                     .and_then(|authority| authority.clone());
++                // Startup has a creation owner, not a child turn. Resolve the real
++                // peer waiter and fail candidate creation before registration.
++                if router.owned_startup.load(Ordering::Acquire) {
++                    router.startup_prompt_failed.store(true, Ordering::Release);
++                    return Ok(ElicitationResponse {
++                        action: ElicitationAction::Cancel,
++                        content: None,
++                        meta: None,
++                    });
++                }
+                 if let Elicitation::UserVerification {
+                     meta,
+                     title,
+@@ -558,7 +633,11 @@ pub(crate) fn elicitation_is_rejected_by_policy(approval_policy: AskForApproval)
+     }
+ }
+ 
+-type ResponderMap = HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>;
++struct PendingResponse {
++    sender: oneshot::Sender<ElicitationResponse>,
++    owner: Option<codex_rmcp_client::ElicitationOwner>,
++}
++type ResponderMap = HashMap<(String, RequestId), PendingResponse>;
+ 
+ fn can_auto_accept_elicitation(elicitation: &Elicitation) -> bool {
+     match elicitation {
+diff --git a/codex-rs/codex-mcp/src/owned_stdio_tests.rs b/codex-rs/codex-mcp/src/owned_stdio_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..ab57a30ebdfd43c114aff5966290737487ed7bc3
+--- /dev/null
++++ b/codex-rs/codex-mcp/src/owned_stdio_tests.rs
+@@ -0,0 +1,182 @@
++//! Native process regression for an old binding retained across a same-admission refresh.
++use super::*;
++use codex_protocol::models::PermissionProfile;
++use std::path::Path;
++
++const SERVER: &str = r#"
++import json, os, signal, sys
++from pathlib import Path
++log = Path(sys.argv[1]) / (str(os.getpid()) + '.jsonl')
++label = sys.argv[2]
++def record(event):
++    with log.open('a') as stream:
++        stream.write(json.dumps({'event': event, 'pid': os.getpid(), 'label': label}) + '\n')
++def stop(*args):
++    record('signal_exit')
++    sys.exit(0)
++signal.signal(signal.SIGTERM, stop)
++record('start')
++for line in sys.stdin:
++    message = json.loads(line)
++    method = message.get('method')
++    if method is None:
++        record('answer')
++        continue
++    if 'id' not in message:
++        continue
++    if method == 'initialize':
++        result = {'protocolVersion':'2025-06-18','capabilities':{'tools':{},'experimental':{'codex/tool-catalog-cache':{'cacheable':False}}},'serverInfo':{'name':'owned-stdio','version':'1'}}
++    elif method == 'tools/list':
++        result = {'tools':[{'name':'search','description':'Wait for user input','inputSchema':{'type':'object','properties':{}}}]}
++    elif method == 'tools/call':
++        record('pending')
++        print(json.dumps({'jsonrpc':'2.0','id':873,'method':'elicitation/create','params':{'mode':'form','message':label,'requestedSchema':{'type':'object','properties':{'answer':{'type':'string'}},'required':['answer']}}}), flush=True)
++        continue
++    else:
++        result = {}
++    print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':result}), flush=True)
++record('eof_exit')
++"#;
++
++fn input(home: &Path, log: &Path, label: &str, tx: Sender<Event>) -> McpRuntimeInput {
++    let server: codex_config::McpServerConfig = serde_json::from_value(serde_json::json!({
++        "command": "python3", "args": ["-u", "-c", SERVER, log, label],
++        "required": true, "enabled_tools": ["search"],
++    }))
++    .expect("stdio config");
++    let mut config = crate::mcp::tests::test_mcp_config(home.to_path_buf());
++    config.permission_profile = PermissionProfile::Disabled;
++    config.client_elicitation_capability =
++        rmcp::model::ElicitationCapability::default().with_form(Default::default());
++    let mut catalog = crate::ResolvedMcpCatalog::builder();
++    catalog.register(crate::McpServerRegistration::from_config(
++        "docs".to_owned(),
++        server.clone(),
++    ));
++    config.mcp_server_catalog = catalog.build();
++    McpRuntimeInput {
++        startup_policy: McpStartupPolicy::Eager,
++        config: Arc::new(config),
++        plugins_available: false,
++        ready_selected_capability_roots: Vec::new(),
++        mcp_servers: HashMap::from([(
++            "docs".to_owned(),
++            EffectiveMcpServer::from_host_config(server),
++        )]),
++        submit_id: "admission".to_owned(),
++        tx_event: Some(tx),
++        startup_cancellation_token: CancellationToken::new(),
++        runtime_context: McpRuntimeContext::new(
++            Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++            home.to_path_buf(),
++        ),
++        codex_apps_tools_cache: ConnectorRuntimeManager::new_without_cache(),
++        tool_catalog_cache: McpToolCatalogCache::default(),
++        codex_apps_tools_cache_key: ConnectorRuntimeContextKey::personal(None, None),
++        client_mcp_extensions: ClientMcpExtensions::default(),
++        auth: None,
++        auth_manager: None,
++        elicitation_reviewer: None,
++        elicitation_lifecycle: None,
++    }
++}
++
++async fn question(
++    rx: &async_channel::Receiver<Event>,
++) -> codex_protocol::approvals::ElicitationRequestEvent {
++    loop {
++        if let EventMsg::ElicitationRequest(request) = rx.recv().await.expect("native event") {
++            return request;
++        }
++    }
++}
++
++#[tokio::test]
++async fn retirement_joins_old_and_current_stdio_bindings_from_one_admission() -> anyhow::Result<()>
++{
++    tokio::time::timeout(Duration::from_secs(45), async {
++        let home = tempfile::tempdir()?;
++        let log = home.path().join("processes");
++        std::fs::create_dir(&log)?;
++        let (tx, rx) = async_channel::unbounded();
++        let runtime = McpRuntime::empty(true);
++        runtime.enable_full_access_form_input();
++        runtime.begin_owned_prompt_startup();
++        assert!(runtime.finish_owned_prompt_startup());
++        // The unit tests MCP lifetime, while SDK native tests use real Core TurnContext owners.
++        let owner = codex_rmcp_client::ElicitationOwner::for_admission(
++            "one-admission".to_owned(),
++            Arc::new(()),
++        );
++        runtime.set_stdio_admission(owner.clone());
++        runtime
++            .replace(input(home.path(), &log, "old", tx.clone()))
++            .await;
++        runtime.validate_required_servers().await?;
++        let old_binding = runtime.current_binding().await.expect("old binding");
++        let old_call = old_binding
++            .prepare_call("docs", "search")
++            .expect("old call");
++        let old_request = tokio::spawn(async move { old_call.call(None, None, None).await });
++        let original = question(&rx).await;
++        assert_eq!(original.turn_id.as_deref(), Some("one-admission"));
++        // A changed command forces a new connection, while the old request/binding stay alive.
++        runtime
++            .replace(input(home.path(), &log, "current", tx.clone()))
++            .await;
++        runtime.validate_required_servers().await?;
++        let current_binding = runtime.current_binding().await.expect("current binding");
++        let current_call = current_binding
++            .prepare_call("docs", "search")
++            .expect("current call");
++        let current_request =
++            tokio::spawn(async move { current_call.call(None, None, None).await });
++        let current = question(&rx).await;
++        assert_eq!(current.turn_id, original.turn_id);
++        assert_ne!(current.id, original.id);
++        // An unchanged refresh reuses the current connection and must not retain it twice.
++        runtime
++            .replace(input(home.path(), &log, "current", tx))
++            .await;
++        assert_eq!(runtime.stdio_retirement.lock().unwrap().len(), 2);
++        runtime.retire_owned_stdio().await?;
++        assert!(!owner.is_live());
++        assert!(runtime.stdio_retirement.lock().unwrap().is_empty());
++        assert!(old_request.await?.is_err());
++        assert!(current_request.await?.is_err());
++        assert!(
++            old_binding
++                .prepare_call("docs", "search")
++                .unwrap()
++                .call(None, None, None)
++                .await
++                .is_err()
++        );
++        let processes = std::fs::read_dir(&log)?.collect::<Result<Vec<_>, _>>()?;
++        assert_eq!(processes.len(), 2);
++        for process in processes {
++            let rows = std::fs::read_to_string(process.path())?;
++            let values = rows
++                .lines()
++                .map(serde_json::from_str::<serde_json::Value>)
++                .collect::<Result<Vec<_>, _>>()?;
++            assert!(values.iter().any(|row| row["event"] == "pending"));
++            assert!(
++                values.iter().any(|row| {
++                    matches!(row["event"].as_str(), Some("signal_exit" | "eof_exit"))
++                })
++            );
++            let pid = values[0]["pid"].as_u64().unwrap();
++            // A zombie still responds to kill -0; this proves native cleanup reaped each child.
++            assert!(
++                !std::process::Command::new("kill")
++                    .args(["-0", &pid.to_string()])
++                    .output()?
++                    .status
++                    .success()
++            );
++        }
++        anyhow::Ok(())
++    })
++    .await?
++}
+diff --git a/codex-rs/codex-mcp/src/rmcp_client.rs b/codex-rs/codex-mcp/src/rmcp_client.rs
+index 37089a380abc59ecadc19476327f3f7898424d6e..eed3b07e3554302116900abf88c2fed05ad7feaf 100644
+--- a/codex-rs/codex-mcp/src/rmcp_client.rs
++++ b/codex-rs/codex-mcp/src/rmcp_client.rs
+@@ -287,6 +287,7 @@ fn codex_apps_reconnect_backoff(consecutive_failures: u32) -> Duration {
+ 
+ #[derive(Clone)]
+ struct ManagedClientStartup {
++    owned_stdio_client: Arc<tokio::sync::Mutex<Option<Arc<RmcpClient>>>>,
+     originator: AuthStorageOriginator,
+     server_name: String,
+     server: EffectiveMcpServer,
+@@ -318,6 +319,7 @@ impl ManagedClientStartup {
+             .lock()
+             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+         let Self {
++            owned_stdio_client,
+             originator,
+             server_name,
+             server,
+@@ -346,45 +348,82 @@ impl ManagedClientStartup {
+             .startup_timeout_sec
+             .unwrap_or(DEFAULT_STARTUP_TIMEOUT);
+         let cancel_token_for_fut = cancel_token;
++        let owned_stdio = runtime_context.owned_stdio_mode
++            && matches!(
++                &server.config().transport,
++                codex_config::McpServerTransportConfig::Stdio { .. }
++            );
++        let stdio_owner = owned_stdio
++            .then(|| runtime_context.stdio_owner.clone())
++            .flatten();
+         let startup = async move {
+             let tool_catalog_fetch_ticket = tool_catalog_cache_context
+                 .as_ref()
+                 .map(McpToolCatalogCacheContext::begin_fetch);
+             let refresh_start = is_codex_apps_mcp_server.then(Instant::now);
+-            let outcome = match async {
++            let work = async {
++                if owned_stdio && cancel_token_for_fut.is_cancelled() {
++                    return Err(StartupOutcomeError::Cancelled);
++                }
+                 if let Err(error) = validate_mcp_server_name(&server_name) {
+                     return Err(error.into());
+                 }
+ 
+-                let client = match tokio::time::timeout(
+-                    startup_timeout,
+-                    make_rmcp_client(
+-                        &server_name,
+-                        server.clone(),
+-                        store_mode,
+-                        keyring_backend_kind,
+-                        oauth_refresh_mode,
+-                        runtime_context,
+-                        resolved_environment,
+-                        runtime_auth_provider,
+-                        protocol_mode,
+-                    ),
+-                )
+-                .await
+-                {
+-                    Ok(result) => Arc::new(
+-                        result?.with_read_only_tools(server.requires_read_only_mcp_tools()),
+-                    ),
+-                    Err(_) => {
+-                        return Err(StartupOutcomeError::from(anyhow!(
+-                            "MCP client startup timed out after {startup_timeout:?}"
+-                        )));
++                let create_client = make_rmcp_client(
++                    &server_name,
++                    server.clone(),
++                    store_mode,
++                    keyring_backend_kind,
++                    oauth_refresh_mode,
++                    runtime_context,
++                    resolved_environment,
++                    runtime_auth_provider,
++                    protocol_mode,
++                );
++                tokio::pin!(create_client);
++                // In the owned mode, a canceled launcher must finish transferring its process
++                // handle before cleanup can acknowledge retirement. Never abandon spawn_blocking.
++                let creation = if owned_stdio {
++                    tokio::select! {
++                        biased;
++                        result = &mut create_client => result,
++                        _ = cancel_token_for_fut.cancelled() => {
++                            if let Ok(client) = create_client.await {
++                                let client = Arc::new(client.with_owned_stdio_lifetime(true));
++                                *owned_stdio_client.lock().await = Some(client.clone());
++                                if let Err(error) = client.shutdown_owned_stdio().await { warn!("Owned stdio canceled launch cleanup failed: {error}"); }
++                            }
++                            return Err(StartupOutcomeError::Cancelled);
++                        }
++                        _ = tokio::time::sleep(startup_timeout) => {
++                            if let Ok(client) = create_client.await {
++                                let client = Arc::new(client.with_owned_stdio_lifetime(true));
++                                *owned_stdio_client.lock().await = Some(client.clone());
++                                if let Err(error) = client.shutdown_owned_stdio().await { warn!("Owned stdio timed-out launch cleanup failed: {error}"); }
++                            }
++                            return Err(StartupOutcomeError::from(anyhow!("MCP client startup timed out after {startup_timeout:?}")));
++                        }
+                     }
++                } else {
++                    tokio::time::timeout(startup_timeout, create_client)
++                        .await
++                        .map_err(|_| {
++                            anyhow!("MCP client startup timed out after {startup_timeout:?}")
++                        })?
+                 };
+-                start_server_task(
++                let client = Arc::new(
++                    creation?
++                        .with_read_only_tools(server.requires_read_only_mcp_tools())
++                        .with_owned_stdio_lifetime(owned_stdio),
++                );
++                if owned_stdio {
++                    *owned_stdio_client.lock().await = Some(client.clone());
++                }
++                let start = start_server_task(
+                     server_name.clone(),
+-                    client,
++                    client.clone(),
+                     StartServerTaskParams {
++                        stdio_owner,
+                         is_codex_apps_mcp_server,
+                         startup_timeout: Some(startup_timeout),
+                         tx_event,
+@@ -398,14 +437,29 @@ impl ManagedClientStartup {
+                         catalog_item_limit,
+                         server_capabilities,
+                     },
+-                )
+-                .await
+-            }
+-            .or_cancel(&cancel_token_for_fut)
+-            .await
+-            {
+-                Ok(result) => result,
+-                Err(CancelErr::Cancelled) => Err(StartupOutcomeError::Cancelled),
++                );
++                let result = if owned_stdio {
++                    start
++                        .or_cancel(&cancel_token_for_fut)
++                        .await
++                        .unwrap_or(Err(StartupOutcomeError::Cancelled))
++                } else {
++                    start.await
++                };
++                if owned_stdio && result.is_err() {
++                    if let Err(error) = client.shutdown_owned_stdio().await {
++                        warn!("Owned stdio startup cleanup failed: {error}");
++                    }
++                }
++                result
++            };
++            let outcome = if owned_stdio {
++                work.await
++            } else {
++                match work.or_cancel(&cancel_token_for_fut).await {
++                    Ok(result) => result,
++                    Err(CancelErr::Cancelled) => Err(StartupOutcomeError::Cancelled),
++                }
+             };
+             // Log once per startup attempt, including discovery without startup notifications.
+             if let Err(StartupOutcomeError::Failed { error, .. }) = &outcome {
+@@ -430,6 +484,8 @@ impl ManagedClientStartup {
+ 
+ #[derive(Clone)]
+ pub(crate) struct AsyncManagedClient {
++    pub(crate) owned_stdio_client: Arc<tokio::sync::Mutex<Option<Arc<RmcpClient>>>>,
++    pub(crate) owned_stdio: bool,
+     pub(crate) client: ManagedClientFuture,
+     pub(crate) is_codex_apps_mcp_server: bool,
+     pub(crate) cached_server_info: Option<McpServerInfo>,
+@@ -480,7 +536,14 @@ impl AsyncManagedClient {
+         };
+         let startup_complete = Arc::new(AtomicBool::new(false));
+         let server_capabilities = Arc::new(StdMutex::new(None));
++        let owned_stdio = runtime_context.owned_stdio_mode
++            && matches!(
++                &server.config().transport,
++                codex_config::McpServerTransportConfig::Stdio { .. }
++            );
++        let owned_stdio_client = Arc::new(tokio::sync::Mutex::new(None));
+         let startup = Arc::new(ManagedClientStartup {
++            owned_stdio_client: owned_stdio_client.clone(),
+             originator: AuthStorageOriginator::current(),
+             server_name,
+             server,
+@@ -516,6 +579,8 @@ impl AsyncManagedClient {
+             )
+         });
+         Self {
++            owned_stdio_client,
++            owned_stdio,
+             client,
+             is_codex_apps_mcp_server,
+             cached_server_info,
+@@ -569,7 +634,25 @@ impl AsyncManagedClient {
+         }
+     }
+ 
++    pub(crate) async fn shutdown_owned_stdio(&self) -> Result<()> {
++        self.cancel_token.cancel();
++        // Poll the shared startup to completion, including cancellation cleanup, before
++        // taking the retained client. Other startup workers do not own another join path.
++        let _ = self.client().await;
++        let retained = self.owned_stdio_client.lock().await;
++        if let Some(client) = retained.as_ref() {
++            client.shutdown_owned_stdio().await?;
++        }
++        Ok(())
++    }
++
+     pub(crate) async fn shutdown(&self) {
++        if self.owned_stdio {
++            if let Err(error) = self.shutdown_owned_stdio().await {
++                warn!("Owned stdio cleanup failed: {error}");
++            }
++            return;
++        }
+         self.cancel_token.cancel();
+         match self.client().await {
+             Ok(client) => client.client.shutdown().await,
+@@ -918,6 +1001,7 @@ async fn start_server_task(
+     params: StartServerTaskParams,
+ ) -> Result<ManagedClient, StartupOutcomeError> {
+     let StartServerTaskParams {
++        stdio_owner,
+         is_codex_apps_mcp_server,
+         startup_timeout,
+         tx_event,
+@@ -933,6 +1017,22 @@ async fn start_server_task(
+     } = params;
+     let send_elicitation =
+         elicitation_requests.make_sender(server_name.clone(), tx_event, &client_mcp_extensions);
++    let send_elicitation = if let Some(owner) = stdio_owner {
++        let send_elicitation: Arc<codex_rmcp_client::SendElicitation> = Arc::new(send_elicitation);
++        Box::new(move |id, request| {
++            let owner = owner.clone();
++            let send = send_elicitation.clone();
++            async move {
++                tokio::select! {
++                    biased;
++                    _ = owner.cancelled() => Ok(codex_rmcp_client::ElicitationResponse { action: rmcp::model::ElicitationAction::Cancel, content: None, meta: None }),
++                    result = codex_rmcp_client::scope_owner(Some(owner.clone()), async move { send(id, request).await }) => result,
++                }
++            }.boxed()
++        }) as codex_rmcp_client::SendElicitation
++    } else {
++        send_elicitation
++    };
+     let mut params =
+         mcp_initialize_request_params(client_elicitation_capability, client_mcp_extensions);
+     if auth_changes.is_some() {
+@@ -1145,6 +1245,7 @@ fn mcp_server_info_from_implementation(
+ }
+ 
+ struct StartServerTaskParams {
++    stdio_owner: Option<codex_rmcp_client::ElicitationOwner>,
+     server_capabilities: Arc<StdMutex<Option<serde_json::Value>>>,
+     is_codex_apps_mcp_server: bool,
+     startup_timeout: Option<Duration>, // TODO: cancel_token should handle this.
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index 197e64420e0dcd046d4c8c3baf7b13807b71fdd9..347efd57141b49a54555081ec2f8fd2ee647af54 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -107,6 +107,11 @@ pub struct McpRuntime {
+     resource_cache_generation: AtomicU64,
+     elicitation_router: ElicitationRequestRouter,
+     resource_origins: Mutex<ResourceOrigins>,
++    owned_stdio_mode: AtomicBool,
++    stdio_owner: Mutex<Option<codex_rmcp_client::ElicitationOwner>>,
++    // Retain only this admission's stdio handles, including bindings superseded by refresh.
++    // A failed receipt keeps them reachable and prevents a successor from claiming cleanup.
++    stdio_retirement: Mutex<Vec<Arc<crate::connection_manager::McpServerConnection>>>,
+ }
+ 
+ struct EventStreamCancellation {
+@@ -246,6 +251,9 @@ impl McpRuntime {
+             resource_cache_generation: AtomicU64::new(0),
+             elicitation_router: ElicitationRequestRouter::default(),
+             resource_origins: Mutex::default(),
++            owned_stdio_mode: AtomicBool::new(false),
++            stdio_owner: Mutex::new(None),
++            stdio_retirement: Mutex::new(Vec::new()),
+         }
+     }
+ 
+@@ -329,7 +337,32 @@ impl McpRuntime {
+         self.latest_hard_refresh_codex_apps_tools_cache().await
+     }
+ 
+-    async fn publish(&self, input: McpRuntimeInput, previous: Option<&McpConnectionSet>) {
++    async fn publish(&self, mut input: McpRuntimeInput, previous: Option<&McpConnectionSet>) {
++        input.runtime_context.owned_stdio_mode = self.owned_stdio_mode.load(Ordering::Acquire);
++        input.runtime_context.stdio_owner = self
++            .stdio_owner
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
++        if input.runtime_context.owned_stdio_mode
++            && !input
++                .runtime_context
++                .stdio_owner
++                .as_ref()
++                .is_some_and(codex_rmcp_client::ElicitationOwner::is_live)
++            && !self
++                .elicitation_router
++                .owned_startup
++                .load(Ordering::Acquire)
++        {
++            // Idle child runtimes cannot restart an unowned stdio process through prewarm or refresh.
++            input.mcp_servers.retain(|_, server| {
++                !matches!(
++                    server.config().transport,
++                    codex_config::McpServerTransportConfig::Stdio { .. }
++                )
++            });
++        }
+         let (publish, publication_gate) = McpPublicationGate::pending();
+         let config = Arc::clone(&input.config);
+         let auth = input.auth.clone();
+@@ -353,6 +386,20 @@ impl McpRuntime {
+             )
+             .await,
+         );
++        if self.owned_stdio_mode.load(Ordering::Acquire) {
++            let mut retained = self
++                .stdio_retirement
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            for connection in connections.stdio_connections() {
++                if !retained
++                    .iter()
++                    .any(|existing| Arc::ptr_eq(existing, &connection))
++                {
++                    retained.push(connection);
++                }
++            }
++        }
+         let hosted_event_server_retained = connections.contains_server(CODEX_APPS_MCP_SERVER_NAME)
+             && config
+                 .mcp_server_catalog
+@@ -602,6 +649,69 @@ impl McpRuntime {
+         self.elicitation_router.enable_full_access_form_input();
+     }
+ 
++    pub fn begin_owned_prompt_startup(&self) {
++        self.owned_stdio_mode.store(true, Ordering::Release);
++        self.elicitation_router
++            .owned_startup
++            .store(true, std::sync::atomic::Ordering::Release);
++    }
++    pub async fn validate_owned_prompt_catalog(&self) -> anyhow::Result<()> {
++        let published = self.current.load_full();
++        let tools = published.connections.list_all_tools().await;
++        if let Some(config) = &published.config {
++            for (server, settings) in crate::mcp::configured_mcp_servers(config) {
++                if !settings.required {
++                    continue;
++                }
++                if let Some(selected) = settings.enabled_tools {
++                    if selected.iter().any(|name| {
++                        !tools.iter().any(|tool| {
++                            tool.server_name == server && tool.tool.name.as_ref() == name.as_str()
++                        })
++                    }) {
++                        anyhow::bail!("Required native child MCP catalog omitted a selected tool");
++                    }
++                }
++            }
++        }
++        Ok(())
++    }
++    pub fn finish_owned_prompt_startup(&self) -> bool {
++        self.elicitation_router
++            .owned_startup
++            .store(false, std::sync::atomic::Ordering::Release);
++        !self
++            .elicitation_router
++            .startup_prompt_failed
++            .load(std::sync::atomic::Ordering::Acquire)
++    }
++
++    pub fn owned_elicitation_admission(
++        &self,
++        server: &str,
++        id: &rmcp::model::RequestId,
++    ) -> Option<Arc<dyn std::any::Any + Send + Sync>> {
++        self.elicitation_router.owned_admission(server, id)
++    }
++    pub fn owned_elicitation_pending(
++        &self,
++        server: &str,
++        id: &rmcp::model::RequestId,
++        turn: &str,
++    ) -> bool {
++        self.elicitation_router.owned_pending(server, id, turn)
++    }
++    pub fn resolve_owned_elicitation(
++        &self,
++        server: &str,
++        id: &rmcp::model::RequestId,
++        turn: &str,
++        response: codex_rmcp_client::ElicitationResponse,
++    ) -> bool {
++        self.elicitation_router
++            .resolve_owned(server, id, turn, response)
++    }
++
+     pub async fn resolve_elicitation(
+         &self,
+         server_name: String,
+@@ -777,7 +887,74 @@ impl McpRuntime {
+         cancellation.retained_subscription_cancellation = Some(retained);
+     }
+ 
++    /// Call under the owning session's MCP refresh gate before replacing this admission.
++    pub async fn retire_owned_stdio(&self) -> anyhow::Result<()> {
++        if !self.owned_stdio_mode.load(Ordering::Acquire) {
++            return Ok(());
++        }
++        let owner = self
++            .stdio_owner
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
++        if let Some(owner) = &owner {
++            owner.revoke();
++        }
++        let connections = self
++            .stdio_retirement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clone();
++        // Keep every actual join alive if its requesting turn is interrupted.
++        let cleanup = tokio::spawn(async move {
++            let mut first_error = None;
++            for connection in connections {
++                if let Err(error) = connection.shutdown_owned_stdio().await {
++                    if first_error.is_none() {
++                        first_error = Some(error);
++                    }
++                }
++            }
++            match first_error {
++                Some(error) => Err(error),
++                None => Ok(()),
++            }
++        });
++        cleanup
++            .await
++            .map_err(|error| anyhow::anyhow!("Owned stdio cleanup task failed: {error}"))??;
++        self.stdio_retirement
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clear();
++        *self
++            .stdio_owner
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
++        self.invalidate_resource_caches();
++        Ok(())
++    }
++
++    pub fn owns_stdio_admission(&self, expected: &codex_rmcp_client::ElicitationOwner) -> bool {
++        self.stdio_owner
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .as_ref()
++            .is_some_and(|owner| owner.same_admission(expected))
++    }
++
++    /// The caller must retire and join the preceding generation before installing this owner.
++    pub fn set_stdio_admission(&self, owner: codex_rmcp_client::ElicitationOwner) {
++        *self
++            .stdio_owner
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(owner);
++    }
++
+     pub async fn shutdown(&self) {
++        if let Err(error) = self.retire_owned_stdio().await {
++            tracing::warn!("Owned child stdio shutdown failed: {error}");
++        }
+         self.latest_connections().shutdown().await;
+     }
+ }
+@@ -805,6 +982,8 @@ pub struct McpRuntimeContext {
+     ready_environments: HashMap<String, Arc<Environment>>,
+     local_process_cwd: PathBuf,
+     local_http_client: Arc<dyn HttpClient>,
++    pub(crate) owned_stdio_mode: bool,
++    pub(crate) stdio_owner: Option<codex_rmcp_client::ElicitationOwner>,
+ }
+ 
+ /// Applies the local HTTP headers helper configured for an MCP server.
+@@ -850,6 +1029,8 @@ impl McpRuntimeContext {
+             ready_environments: HashMap::new(),
+             local_process_cwd,
+             local_http_client,
++            owned_stdio_mode: false,
++            stdio_owner: None,
+         }
+     }
+ 
+@@ -1401,3 +1582,7 @@ mod tests {
+         assert!(resolved_runtime.is_some());
+     }
+ }
++
++#[cfg(all(test, unix))]
++#[path = "owned_stdio_tests.rs"]
++mod owned_stdio_tests;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 870f7797c8403f3b0e2366eba929e045d57308c4..a05c08687fabe5f8044f5e76b8105b1ed149899d 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -235,6 +235,11 @@ pub struct BackgroundTerminalInfo {
+ /// Conduit for the bidirectional stream of messages that compose a thread
+ /// (formerly called a conversation) in Codex.
+ impl CodexThread {
++    /// Capture the exact pending responder; a later turn can never replace it.
++    pub async fn capture_owned_question(&self, event: &Event) -> Option<crate::OwnedQuestion> {
++        crate::OwnedQuestion::capture(self.session.clone(), event).await
++    }
++
+     pub(crate) fn new(
+         session: Arc<Session>,
+         io: SessionIo,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index e7753db4e508a33a740cbfcbafe93b82f5b50024..586fdd1c6b466ecf446eebb5349a032567a16975 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -48,12 +48,14 @@ pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
++mod owned_question;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+ pub use codex_thread::ConfigRefreshOutcome;
+ pub use codex_thread::GuardianAuthorizationVersion;
+ pub use codex_thread::GuardianRootMessage;
+ pub use codex_thread::GuardianRootSnapshot;
+ pub use codex_thread::ThreadConfigSnapshot;
++pub use owned_question::OwnedQuestion;
+ pub use session::turn_context::TurnContext;
+ pub use thread_startup_metadata::ThreadStartupMetadata;
+ mod agent;
+diff --git a/codex-rs/core/src/mcp_tool_call.rs b/codex-rs/core/src/mcp_tool_call.rs
+index af9d3d05b6c73edb90d0282350ad87a8903e9c38..6101cd1e54097503d9258546a775c2cdb517de20 100644
+--- a/codex-rs/core/src/mcp_tool_call.rs
++++ b/codex-rs/core/src/mcp_tool_call.rs
+@@ -467,8 +467,19 @@ async fn handle_approved_mcp_tool_call(
+     let mut elicitation_type = None;
+     let result = async {
+         let result = async {
+-            let mut result = prepared_call
+-                .call_with_preparation(/*requested_timeout*/ None, || async {
++            let mut result = codex_rmcp_client::with_elicitation_owner(
++                turn_context.sub_id.clone(),
++                if sess
++                    .services
++                    .client_mcp_extensions
++                    .contains("openai/sdk-child-prompts")
++                    && turn_context.session_source.is_non_root_agent()
++                {
++                    Some(step_context.turn.clone() as Arc<dyn std::any::Any + Send + Sync>)
++                } else {
++                    None
++                },
++                prepared_call.call_with_preparation(/*requested_timeout*/ None, || async {
+                     if let McpToolApprovalApplication::Apply { decision, policy } =
+                         &approval_application
+                     {
+@@ -544,9 +555,10 @@ async fn handle_approved_mcp_tool_call(
+                         rewritten_arguments,
+                         mcp_call_trace.add_request_meta(request_meta),
+                     ))
+-                })
+-                .await
+-                .map_err(|error| format!("tool call error: {error:?}"))?;
++                }),
++            )
++            .await
++            .map_err(|error| format!("tool call error: {error:?}"))?;
+             crate::tools::record_confirmed_code_mode_send(
+                 sess,
+                 &turn_context.sub_id,
+diff --git a/codex-rs/core/src/owned_question.rs b/codex-rs/core/src/owned_question.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..dd75a6fdb4c7dee446ea158d1a3e7900ac7a9810
+--- /dev/null
++++ b/codex-rs/core/src/owned_question.rs
+@@ -0,0 +1,253 @@
++//! A pending prompt captured from its original native turn, never the active successor.
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
++use crate::state::TurnState;
++use codex_protocol::protocol::{Event, EventMsg, Op, ReviewDecision};
++use rmcp::model::RequestId;
++use std::sync::Arc;
++use tokio::sync::Mutex;
++
++#[derive(Clone)]
++enum QuestionKey {
++    Approval(String),
++    Elicitation(String, RequestId),
++}
++#[derive(Clone)]
++pub struct OwnedQuestion {
++    session: Arc<Session>,
++    turn: Arc<TurnContext>,
++    state: Arc<Mutex<TurnState>>,
++    key: QuestionKey,
++    identity: Option<Arc<String>>,
++}
++impl OwnedQuestion {
++    pub(crate) async fn capture(session: Arc<Session>, event: &Event) -> Option<Self> {
++        let (turn_id, key) = match &event.msg {
++            EventMsg::ExecApprovalRequest(request) => (
++                request.turn_id.as_str(),
++                QuestionKey::Approval(
++                    request
++                        .approval_id
++                        .clone()
++                        .unwrap_or_else(|| request.call_id.clone()),
++                ),
++            ),
++            EventMsg::ApplyPatchApprovalRequest(request) => (
++                request.turn_id.as_str(),
++                QuestionKey::Approval(request.call_id.clone()),
++            ),
++            EventMsg::ElicitationRequest(request) => {
++                let id = match &request.id {
++                    codex_protocol::mcp::RequestId::String(id) => {
++                        RequestId::String(id.clone().into())
++                    }
++                    codex_protocol::mcp::RequestId::Integer(id) => RequestId::Number(*id),
++                };
++                (
++                    request.turn_id.as_deref()?,
++                    QuestionKey::Elicitation(request.server_name.clone(), id),
++                )
++            }
++            _ => return None,
++        };
++        let active = session.active_turn.lock().await;
++        let active = active.as_ref()?;
++        let task = active.task.as_ref()?;
++        if task.turn_context.sub_id != turn_id || task.cancellation_token.is_cancelled() {
++            return None;
++        }
++        let mut grant = Self {
++            session: session.clone(),
++            turn: task.turn_context.clone(),
++            state: active.turn_state.clone(),
++            key,
++            identity: None,
++        };
++        let state = grant.state.lock().await;
++        let identity = match &grant.key {
++            QuestionKey::Approval(id) => state.approval_identity(id),
++            QuestionKey::Elicitation(server, id) => state.elicitation_identity(server, id),
++        };
++        drop(state);
++        if let Some(identity) = &identity {
++            if event.id != format!("sdk-question:{}", identity.as_str()) {
++                return None;
++            }
++        } else if let QuestionKey::Elicitation(server, id) = &grant.key {
++            let original = grant
++                .session
++                .services
++                .mcp_runtime
++                .owned_elicitation_admission(server, id)?
++                .downcast::<TurnContext>()
++                .ok()?;
++            if !Arc::ptr_eq(&original, &grant.turn) {
++                return None;
++            }
++        } else {
++            return None;
++        }
++        grant.identity = identity;
++        let state = grant.state.lock().await;
++        let pending = grant.pending_in(&state);
++        drop(state);
++        pending.then_some(grant)
++    }
++    fn pending_in(&self, state: &TurnState) -> bool {
++        let current = match &self.key {
++            QuestionKey::Approval(id) => state.approval_identity(id),
++            QuestionKey::Elicitation(server, id) => state.elicitation_identity(server, id),
++        };
++        if let Some(expected) = &self.identity {
++            return current.is_some_and(|current| Arc::ptr_eq(&current, expected));
++        }
++        match &self.key {
++            QuestionKey::Approval(_) => false,
++            QuestionKey::Elicitation(server, id) => self
++                .session
++                .services
++                .mcp_runtime
++                .owned_elicitation_pending(server, id, &self.turn.sub_id),
++        }
++    }
++    pub async fn is_pending(&self) -> bool {
++        let active = self.session.active_turn.lock().await;
++        let Some(active) = active.as_ref() else {
++            return false;
++        };
++        if !active.task.as_ref().is_some_and(|task| {
++            Arc::ptr_eq(&task.turn_context, &self.turn) && !task.cancellation_token.is_cancelled()
++        }) || !Arc::ptr_eq(&active.turn_state, &self.state)
++        {
++            return false;
++        }
++        let state = self.state.lock().await;
++        self.pending_in(&state)
++    }
++    pub async fn respond(&self, operation: Op) -> bool {
++        // Hold the same admission lock through responder removal and send. No queued
++        // operation may resolve against a different active turn after this check.
++        let active = self.session.active_turn.lock().await;
++        let Some(active) = active.as_ref() else {
++            return false;
++        };
++        if !active.task.as_ref().is_some_and(|task| {
++            Arc::ptr_eq(&task.turn_context, &self.turn) && !task.cancellation_token.is_cancelled()
++        }) || !Arc::ptr_eq(&active.turn_state, &self.state)
++        {
++            return false;
++        }
++        let mut state = self.state.lock().await;
++        if !self.pending_in(&state) {
++            return false;
++        }
++        match (&self.key, operation) {
++            (
++                QuestionKey::Approval(expected),
++                Op::ExecApproval { id, decision, .. } | Op::PatchApproval { id, decision },
++            ) if expected == &id => {
++                // Persistent decisions and abort are outside the SDK grant.
++                if !matches!(
++                    decision,
++                    ReviewDecision::Approved | ReviewDecision::Denied { .. }
++                ) {
++                    return false;
++                }
++                state
++                    .remove_pending_approval(&id)
++                    .is_some_and(|sender| sender.send(decision).is_ok())
++            }
++            (
++                QuestionKey::Elicitation(server, expected),
++                Op::ResolveElicitation {
++                    server_name,
++                    request_id,
++                    decision,
++                    content,
++                    meta,
++                },
++            ) if server == &server_name => {
++                let id = match request_id {
++                    codex_protocol::mcp::RequestId::String(id) => RequestId::String(id.into()),
++                    codex_protocol::mcp::RequestId::Integer(id) => RequestId::Number(id),
++                };
++                if expected != &id {
++                    return false;
++                }
++                let action = match decision {
++                    codex_protocol::approvals::ElicitationAction::Accept => {
++                        codex_rmcp_client::ElicitationAction::Accept
++                    }
++                    codex_protocol::approvals::ElicitationAction::Decline => {
++                        codex_rmcp_client::ElicitationAction::Decline
++                    }
++                    codex_protocol::approvals::ElicitationAction::Cancel => {
++                        codex_rmcp_client::ElicitationAction::Cancel
++                    }
++                };
++                let response = codex_rmcp_client::ElicitationResponse {
++                    action,
++                    content,
++                    meta,
++                };
++                if let Some(sender) = state.remove_pending_elicitation(server, &id) {
++                    sender.send(response).is_ok()
++                } else {
++                    self.session.services.mcp_runtime.resolve_owned_elicitation(
++                        server,
++                        &id,
++                        &self.turn.sub_id,
++                        response,
++                    )
++                }
++            }
++            _ => false,
++        }
++    }
++}
++
++/// SDK-only prompt identity. Ordinary clients keep their original event IDs.
++pub(crate) async fn event_identity(
++    session: &Session,
++    turn: &TurnContext,
++    msg: &EventMsg,
++) -> Option<String> {
++    if !matches!(
++        msg,
++        EventMsg::ExecApprovalRequest(_)
++            | EventMsg::ApplyPatchApprovalRequest(_)
++            | EventMsg::ElicitationRequest(_)
++    ) || !turn.session_source.is_non_root_agent()
++        || !session
++            .services
++            .client_mcp_extensions
++            .contains("openai/sdk-child-prompts")
++    {
++        return None;
++    }
++    let active = session.active_turn.lock().await;
++    let active = active.as_ref()?;
++    if !active
++        .task
++        .as_ref()
++        .is_some_and(|task| std::ptr::eq(task.turn_context.as_ref(), turn))
++    {
++        return None;
++    }
++    let state = active.turn_state.lock().await;
++    let identity = match msg {
++        EventMsg::ExecApprovalRequest(request) => {
++            state.approval_identity(request.approval_id.as_deref().unwrap_or(&request.call_id))
++        }
++        EventMsg::ApplyPatchApprovalRequest(request) => state.approval_identity(&request.call_id),
++        EventMsg::ElicitationRequest(request) => {
++            let id = match &request.id {
++                codex_protocol::mcp::RequestId::String(id) => RequestId::String(id.clone().into()),
++                codex_protocol::mcp::RequestId::Integer(id) => RequestId::Number(*id),
++            };
++            state.elicitation_identity(&request.server_name, &id)
++        }
++        _ => None,
++    }?;
++    Some(format!("sdk-question:{}", identity.as_str()))
++}
+diff --git a/codex-rs/core/src/session/mcp.rs b/codex-rs/core/src/session/mcp.rs
+index c62ff6149d3131cf4b278d3fe7c3416aab99b589..aa7184208743d93285c1ddb266a819a1f763d737 100644
+--- a/codex-rs/core/src/session/mcp.rs
++++ b/codex-rs/core/src/session/mcp.rs
+@@ -95,6 +95,83 @@ impl ElicitationReviewer for GuardianMcpElicitationReviewer {
+ }
+ 
+ impl Session {
++    fn has_owned_child_stdio(&self, turn: &TurnContext) -> bool {
++        turn.session_source.is_non_root_agent()
++            && self
++                .services
++                .client_mcp_extensions
++                .contains("openai/sdk-child-prompts")
++    }
++
++    pub(crate) async fn begin_owned_child_stdio(
++        self: &Arc<Self>,
++        turn: &Arc<TurnContext>,
++    ) -> CodexResult<()> {
++        if !self.has_owned_child_stdio(turn) {
++            return Ok(());
++        }
++        let _refresh = self
++            .mcp_refresh
++            .acquire()
++            .await
++            .map_err(|_| CodexErr::InvalidRequest("MCP refresh gate closed".to_owned()))?;
++        self.services
++            .mcp_runtime
++            .retire_owned_stdio()
++            .await
++            .map_err(|error| {
++                CodexErr::InvalidRequest(format!(
++                    "Could not retire preceding child stdio admission: {error}"
++                ))
++            })?;
++        self.services.mcp_runtime.set_stdio_admission(
++            codex_rmcp_client::ElicitationOwner::for_admission(turn.sub_id.clone(), turn.clone()),
++        );
++        self.mark_mcp_runtime_dirty();
++        self.refresh_mcp_if_dirty_locked().await;
++        self.services
++            .mcp_runtime
++            .validate_required_servers()
++            .await
++            .map_err(|error| {
++                CodexErr::InvalidRequest(format!("Child stdio startup failed: {error}"))
++            })?;
++        self.services
++            .mcp_runtime
++            .validate_owned_prompt_catalog()
++            .await
++            .map_err(|error| {
++                CodexErr::InvalidRequest(format!("Child tool catalog failed: {error}"))
++            })?;
++        Ok(())
++    }
++
++    pub(crate) async fn end_owned_child_stdio(
++        self: &Arc<Self>,
++        turn: &Arc<TurnContext>,
++    ) -> CodexResult<()> {
++        if !self.has_owned_child_stdio(turn) {
++            return Ok(());
++        }
++        let _refresh = self
++            .mcp_refresh
++            .acquire()
++            .await
++            .map_err(|_| CodexErr::InvalidRequest("MCP refresh gate closed".to_owned()))?;
++        let expected =
++            codex_rmcp_client::ElicitationOwner::for_admission(turn.sub_id.clone(), turn.clone());
++        if self.services.mcp_runtime.owns_stdio_admission(&expected) {
++            self.services
++                .mcp_runtime
++                .retire_owned_stdio()
++                .await
++                .map_err(|error| {
++                    CodexErr::InvalidRequest(format!("Child stdio cleanup failed: {error}"))
++                })?;
++            self.mark_mcp_runtime_dirty();
++        }
++        Ok(())
++    }
+     pub(crate) async fn runtime_mcp_config(&self, config: &Config) -> McpConfig {
+         self.runtime_mcp_config_and_context(config).await.0
+     }
+@@ -193,6 +270,10 @@ impl Session {
+             error!("MCP runtime refresh semaphore closed");
+             return;
+         };
++        self.refresh_mcp_if_dirty_locked().await;
++    }
++
++    async fn refresh_mcp_if_dirty_locked(self: &Arc<Self>) {
+         loop {
+             // Compare and rebuild from current environments, not choices saved for a future turn.
+             let environments = self.services.turn_environments.snapshot().await;
+@@ -602,7 +683,29 @@ impl Session {
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
++                    let owned_child = self
++                        .services
++                        .client_mcp_extensions
++                        .contains("openai/sdk-child-prompts")
++                        && turn_context.session_source.is_non_root_agent();
++                    if owned_child
++                        && !at.task.as_ref().is_some_and(|task| {
++                            std::ptr::eq(task.turn_context.as_ref(), turn_context)
++                                && !task.cancellation_token.is_cancelled()
++                        })
++                    {
++                        return McpServerElicitationOutcome {
++                            response: None,
++                            sent: false,
++                        };
++                    }
+                     let mut ts = at.turn_state.lock().await;
++                    if owned_child && ts.elicitation_identity(&server_name, &request_id).is_some() {
++                        return McpServerElicitationOutcome {
++                            response: None,
++                            sent: false,
++                        };
++                    }
+                     ts.insert_pending_elicitation(
+                         server_name.clone(),
+                         request_id.clone(),
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 7b14f934c972ac163040c7371f715b9943a954b0..755779659e90e29c84a4e824f59d7bc0c2c25394 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -647,6 +647,20 @@ impl Session {
+             )
+         };
+ 
++        let mut config = config;
++        if session_source.is_non_root_agent()
++            && client_mcp_extensions.contains("openai/sdk-child-prompts")
++        {
++            // Preserve the root's policy. Apply the explicit SDK opt-in to each
++            // newly created/reloaded child, including descendants, before settings capture.
++            config
++                .permissions
++                .approval_policy
++                .set(AskForApproval::OnRequest)
++                .map_err(|error| {
++                    CodexErr::InvalidRequest(format!("Child approval policy is invalid: {error}"))
++                })?;
++        }
+         let mut config = Arc::new(config);
+         let refresh_strategy = if session_source.is_non_root_agent() {
+             codex_models_manager::manager::RefreshStrategy::Offline
+@@ -2290,8 +2304,10 @@ impl Session {
+         self.services
+             .rollout_thread_trace
+             .record_tool_call_event(turn_context.sub_id.clone(), &legacy_source);
++        let question_identity =
++            crate::owned_question::event_identity(self, turn_context, &msg).await;
+         let event = Event {
+-            id: turn_context.sub_id.clone(),
++            id: question_identity.unwrap_or_else(|| turn_context.sub_id.clone()),
+             msg,
+         };
+         // Private reviewers have no app-server listener; publicly resumed Guardian threads do.
+@@ -2779,7 +2795,23 @@ impl Session {
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
++                    let owned_child = self
++                        .services
++                        .client_mcp_extensions
++                        .contains("openai/sdk-child-prompts")
++                        && turn_context.session_source.is_non_root_agent();
++                    if owned_child
++                        && !at.task.as_ref().is_some_and(|task| {
++                            std::ptr::eq(task.turn_context.as_ref(), turn_context)
++                                && !task.cancellation_token.is_cancelled()
++                        })
++                    {
++                        return ReviewDecision::Abort;
++                    }
+                     let mut ts = at.turn_state.lock().await;
++                    if owned_child && ts.approval_identity(&effective_approval_id).is_some() {
++                        return ReviewDecision::Abort;
++                    }
+                     ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                 }
+                 None => None,
+@@ -2863,7 +2895,23 @@ impl Session {
+             let mut active = self.active_turn.lock().await;
+             match active.as_mut() {
+                 Some(at) => {
++                    let owned_child = self
++                        .services
++                        .client_mcp_extensions
++                        .contains("openai/sdk-child-prompts")
++                        && turn_context.session_source.is_non_root_agent();
++                    if owned_child
++                        && !at.task.as_ref().is_some_and(|task| {
++                            std::ptr::eq(task.turn_context.as_ref(), turn_context)
++                                && !task.cancellation_token.is_cancelled()
++                        })
++                    {
++                        return ReviewDecision::Abort;
++                    }
+                     let mut ts = at.turn_state.lock().await;
++                    if owned_child && ts.approval_identity(&approval_id).is_some() {
++                        return ReviewDecision::Abort;
++                    }
+                     ts.insert_pending_approval(approval_id.clone(), tx_approve)
+                 }
+                 None => None,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 8d16c6b9fc235cbfe0ad0fb03e60a47ddc1010f4..f4663fbfadf7f31e8c2de7407d5e3e640eea70e1 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1923,6 +1923,9 @@ impl Session {
+             } else {
+                 mcp_projection
+             };
++            let owned_child_prompts = sess.services.client_mcp_extensions.contains("openai/sdk-child-prompts")
++                && session_configuration.session_source.is_non_root_agent();
++            if owned_child_prompts { sess.services.mcp_runtime.begin_owned_prompt_startup(); }
+             sess.install_initial_mcp_runtime(
+                 &session_configuration,
+                 latest_auth,
+@@ -1931,6 +1934,19 @@ impl Session {
+                 mcp_runtime_cwd,
+             )
+             .await?;
++            if owned_child_prompts {
++                sess.services.mcp_runtime.validate_owned_prompt_catalog().await?;
++            }
++            if owned_child_prompts && !sess.services.mcp_runtime.finish_owned_prompt_startup() {
++                return Err(CodexErr::InvalidRequest("Native child startup requires interaction".to_owned()).into());
++            }
++            if owned_child_prompts {
++                // This validated candidate has no child admission yet. Join it rather than
++                // assigning its old stdout or process-local state to the first real turn.
++                sess.services.mcp_runtime.retire_owned_stdio().await
++                    .map_err(|error| CodexErr::InvalidRequest(format!("Native child startup cleanup failed: {error}")))?;
++                sess.mark_mcp_runtime_dirty();
++            }
+             sess.start_mcp_prewarm_worker(mcp_prewarm_rx, mcp_auth_changes);
+             sess.follow_inherited_environment_configurations(
+                 &inherited_environments,
+diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
+index 292e0a21fba545c489d9bad585c6fe5e43febe67..d2dd42b0237f24b7c0acfc8f90a9635aed1faf19 100644
+--- a/codex-rs/core/src/state/turn.rs
++++ b/codex-rs/core/src/state/turn.rs
+@@ -85,10 +85,10 @@ pub(crate) struct RunningTask {
+ /// Mutable state for a single turn.
+ #[derive(Default)]
+ pub(crate) struct TurnState {
+-    pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
++    pending_approvals: HashMap<String, PendingQuestion<ReviewDecision>>,
+     pending_request_permissions: HashMap<String, PendingRequestPermissions>,
+     pending_user_input: HashMap<String, oneshot::Sender<AcceptedUserInputResponse>>,
+-    pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
++    pending_elicitations: HashMap<(String, RequestId), PendingQuestion<ElicitationResponse>>,
+     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
+     pub(crate) pending_input: TurnInputQueue,
+     mailbox_delivery_phase: MailboxDeliveryPhase,
+@@ -116,20 +116,46 @@ pub(crate) struct PendingRequestPermissions {
+     pub(crate) turn_context: Arc<TurnContext>,
+ }
+ 
++struct PendingQuestion<T> {
++    sender: oneshot::Sender<T>,
++    identity: Arc<String>,
++}
++impl<T> PendingQuestion<T> {
++    fn new(sender: oneshot::Sender<T>) -> Self {
++        Self {
++            sender,
++            identity: Arc::new(uuid::Uuid::now_v7().to_string()),
++        }
++    }
++}
+ impl TurnState {
++    pub(crate) fn approval_identity(&self, id: &str) -> Option<Arc<String>> {
++        self.pending_approvals
++            .get(id)
++            .filter(|entry| !entry.sender.is_closed())
++            .map(|entry| entry.identity.clone())
++    }
++    pub(crate) fn elicitation_identity(&self, server: &str, id: &RequestId) -> Option<Arc<String>> {
++        self.pending_elicitations
++            .get(&(server.to_owned(), id.clone()))
++            .filter(|entry| !entry.sender.is_closed())
++            .map(|entry| entry.identity.clone())
++    }
+     pub(crate) fn insert_pending_approval(
+         &mut self,
+         key: String,
+         tx: oneshot::Sender<ReviewDecision>,
+     ) -> Option<oneshot::Sender<ReviewDecision>> {
+-        self.pending_approvals.insert(key, tx)
++        self.pending_approvals
++            .insert(key, PendingQuestion::new(tx))
++            .map(|entry| entry.sender)
+     }
+ 
+     pub(crate) fn remove_pending_approval(
+         &mut self,
+         key: &str,
+     ) -> Option<oneshot::Sender<ReviewDecision>> {
+-        self.pending_approvals.remove(key)
++        self.pending_approvals.remove(key).map(|entry| entry.sender)
+     }
+ 
+     pub(crate) fn clear_pending_waiters(&mut self) {
+@@ -178,7 +204,8 @@ impl TurnState {
+         tx: oneshot::Sender<ElicitationResponse>,
+     ) -> Option<oneshot::Sender<ElicitationResponse>> {
+         self.pending_elicitations
+-            .insert((server_name, request_id), tx)
++            .insert((server_name, request_id), PendingQuestion::new(tx))
++            .map(|entry| entry.sender)
+     }
+ 
+     pub(crate) fn remove_pending_elicitation(
+@@ -188,6 +215,7 @@ impl TurnState {
+     ) -> Option<oneshot::Sender<ElicitationResponse>> {
+         self.pending_elicitations
+             .remove(&(server_name.to_string(), request_id.clone()))
++            .map(|entry| entry.sender)
+     }
+ 
+     pub(crate) fn insert_pending_dynamic_tool(
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 5ace22c811bc97df2bf0546b461ba12102406cda..71517205ac41aa41926a7ed9319d42d812165866 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -365,15 +365,18 @@ impl Session {
+         let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
+         let task_future = async move {
+             let ctx_for_finish = Arc::clone(&ctx);
+-            let task_result = task_for_run
+-                .run(
+-                    Arc::clone(&session),
+-                    ctx,
+-                    task_input,
+-                    task_cancellation_token.child_token(),
+-                )
+-                .instrument(trace_span!("session_task.run"))
+-                .await;
++            let task_result = match session.begin_owned_child_stdio(&ctx).await {
++                Ok(()) => task_for_run
++                    .run(
++                        Arc::clone(&session),
++                        ctx,
++                        task_input,
++                        task_cancellation_token.child_token(),
++                    )
++                    .instrument(trace_span!("session_task.run"))
++                    .await,
++                Err(error) => Err(error),
++            };
+             let sess = Arc::clone(&session);
+             // Private reviewers save their transcript together with the terminal event.
+             // Errors and cancellation retain their existing save path.
+@@ -621,6 +624,18 @@ impl Session {
+         turn_context: Arc<TurnContext>,
+         task_result: SessionTaskResult,
+     ) {
++        // Retire before terminal delivery or automatic follow-up admission. Preserve the
++        // original task error if shutdown also fails, and retain the failed cleanup receipt.
++        let task_result = match self.end_owned_child_stdio(&turn_context).await {
++            Ok(()) => task_result,
++            Err(cleanup_error) => match task_result {
++                Err(original) => {
++                    warn!("Child stdio cleanup also failed: {cleanup_error}");
++                    Err(original)
++                }
++                Ok(_) => Err(cleanup_error),
++            },
++        };
+         let (last_agent_message, abort_reason) = match task_result {
+             Ok(last_agent_message) => (last_agent_message, None),
+             Err(err) if matches!(err.details(), CodexErrorDetails::TurnAborted) => {
+@@ -917,6 +932,9 @@ impl Session {
+     ) {
+         let sub_id = task.turn_context.sub_id.clone();
+         if task.cancellation_token.is_cancelled() {
++            if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
++                warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
++            }
+             self.emit_turn_abort_lifecycle(reason, task.turn_context.extension_data.as_ref())
+                 .await;
+             return;
+@@ -950,6 +968,9 @@ impl Session {
+         }
+ 
+         task.handle.abort();
++        if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
++            warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
++        }
+ 
+         session_task
+             .abort(Arc::clone(self), Arc::clone(&task.turn_context))
+diff --git a/codex-rs/protocol/src/mcp.rs b/codex-rs/protocol/src/mcp.rs
+index 1a409c4931c6b1e538224f0f694f05309fea41da..6c72351b9b6c9854082b67166235bf94e9cadfe5 100644
+--- a/codex-rs/protocol/src/mcp.rs
++++ b/codex-rs/protocol/src/mcp.rs
+@@ -163,7 +163,10 @@ pub struct McpResourceOrigin {
+ }
+ 
+ /// Client extensions that must not be advertised to MCP servers.
+-const MCP_CLIENT_ONLY_EXTENSION_IDS: [&str; 1] = [OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID];
++const MCP_CLIENT_ONLY_EXTENSION_IDS: [&str; 2] = [
++    OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID,
++    "openai/sdk-child-prompts",
++];
+ 
+ /// MCP extensions supplied by the client that created a Codex session.
+ #[derive(Clone, Debug, Default, Eq, PartialEq)]
+diff --git a/codex-rs/rmcp-client/src/elicitation_client_service.rs b/codex-rs/rmcp-client/src/elicitation_client_service.rs
+index 2ef94e2fbe75ebc3f2713de465585e1be6520eec..247a1830217c17579d6d9b8b35ccd010e85cf249 100644
+--- a/codex-rs/rmcp-client/src/elicitation_client_service.rs
++++ b/codex-rs/rmcp-client/src/elicitation_client_service.rs
+@@ -58,6 +58,7 @@ struct OpenAiFormRequestParams {
+ 
+ #[derive(Clone)]
+ pub(crate) struct ElicitationClientService {
++    pub(crate) request_owners: crate::elicitation_owner::RequestOwners,
+     handler: LoggingClientHandler,
+     supports_openai_form: bool,
+     supports_openai_elicitation_form: bool,
+@@ -120,6 +121,7 @@ impl ElicitationClientService {
+             .and_then(|settings| settings.get("userVerification"))
+             .is_some_and(Value::is_object);
+         Self {
++            request_owners: Default::default(),
+             handler: LoggingClientHandler::new(
+                 client_info,
+                 clone_send_elicitation(Arc::clone(&send_elicitation)),
+@@ -138,6 +140,17 @@ impl ElicitationClientService {
+         request: Elicitation,
+         context: RequestContext<RoleClient>,
+     ) -> Result<ElicitationResponse, rmcp::ErrorData> {
++        let owner = context
++            .extensions
++            .get::<crate::elicitation_owner::ElicitationOwner>()
++            .cloned()
++            .or_else(|| {
++                self.request_owners.get(
++                    context
++                        .extensions
++                        .get::<rmcp::service::InboundStreamOrigin>(),
++                )
++            });
+         let RequestContext { id, meta, ct, .. } = context;
+         let request = restore_context_meta(request, meta);
+         let user_verification = matches!(&request, Elicitation::UserVerification { .. });
+@@ -177,7 +190,11 @@ impl ElicitationClientService {
+                     meta: None,
+                 });
+             }
+-            response = (self.send_elicitation)(id, request) => response,
++            _ = async {
++                if let Some(owner)=&owner { owner.cancelled().await; }
++                else { std::future::pending::<()>().await; }
++            } => return Ok(ElicitationResponse { action: ElicitationAction::Cancel, content: None, meta: None }),
++            response = crate::elicitation_owner::scope_owner(owner.clone(), (self.send_elicitation)(id, request)) => response,
+         }
+         .map_err(|err| rmcp::ErrorData::internal_error(err.to_string(), None))?;
+         Ok(if user_verification {
+diff --git a/codex-rs/rmcp-client/src/elicitation_owner.rs b/codex-rs/rmcp-client/src/elicitation_owner.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..64e26be4d66b37579ad6543fd48f55ef49e7a550
+--- /dev/null
++++ b/codex-rs/rmcp-client/src/elicitation_owner.rs
+@@ -0,0 +1,335 @@
++//! Trusted call ownership carried through local RMCP extensions, never peer metadata.
++use rmcp::model::{ClientRequest, GetExtensions, JsonRpcMessage, RequestId};
++use rmcp::service::{InboundStreamOrigin, RoleClient, RxJsonRpcMessage, TxJsonRpcMessage};
++use rmcp::transport::{IntoTransport, Transport};
++use std::collections::HashMap;
++use std::future::Future;
++use std::sync::{Arc, Mutex};
++use tokio_util::sync::CancellationToken;
++
++#[derive(Clone)]
++pub struct ElicitationOwner {
++    pub turn_id: String,
++    pub admission: Arc<dyn std::any::Any + Send + Sync>,
++    revoked: CancellationToken,
++}
++impl ElicitationOwner {
++    pub fn for_admission(turn_id: String, admission: Arc<dyn std::any::Any + Send + Sync>) -> Self {
++        Self {
++            turn_id,
++            admission,
++            revoked: CancellationToken::new(),
++        }
++    }
++    pub fn revoke(&self) {
++        self.revoked.cancel();
++    }
++    pub fn same_admission(&self, other: &Self) -> bool {
++        Arc::ptr_eq(&self.admission, &other.admission)
++    }
++    pub fn is_live(&self) -> bool {
++        !self.revoked.is_cancelled()
++    }
++    pub async fn cancelled(&self) {
++        self.revoked.cancelled().await;
++    }
++}
++tokio::task_local! { static OWNER: Option<ElicitationOwner>; }
++pub fn current_elicitation_owner() -> Option<ElicitationOwner> {
++    OWNER
++        .try_with(Clone::clone)
++        .ok()
++        .flatten()
++        .filter(ElicitationOwner::is_live)
++}
++pub async fn with_elicitation_owner<T>(
++    turn_id: String,
++    admission: Option<Arc<dyn std::any::Any + Send + Sync>>,
++    future: impl Future<Output = T>,
++) -> T {
++    let Some(admission) = admission else {
++        return OWNER.scope(None, future).await;
++    };
++    struct Revoke(CancellationToken);
++    impl Drop for Revoke {
++        fn drop(&mut self) {
++            self.0.cancel();
++        }
++    }
++    let owner = ElicitationOwner {
++        turn_id,
++        admission,
++        revoked: CancellationToken::new(),
++    };
++    let _revoke = Revoke(owner.revoked.clone());
++    OWNER.scope(Some(owner), future).await
++}
++pub async fn scope_owner<T>(owner: Option<ElicitationOwner>, future: impl Future<Output = T>) -> T {
++    OWNER.scope(owner, future).await
++}
++pub(crate) fn owned_tool_request(params: rmcp::model::CallToolRequestParams) -> ClientRequest {
++    let mut request = rmcp::model::CallToolRequest::new(params);
++    if let Some(owner) = current_elicitation_owner() {
++        request.extensions.insert(owner);
++    }
++    ClientRequest::CallToolRequest(request)
++}
++#[derive(Clone, Default)]
++pub(crate) struct RequestOwners(Arc<Mutex<HashMap<RequestId, ElicitationOwner>>>);
++impl RequestOwners {
++    pub(crate) fn get(&self, origin: Option<&InboundStreamOrigin>) -> Option<ElicitationOwner> {
++        let Some(InboundStreamOrigin::OutboundRequest(id)) = origin else {
++            return None;
++        };
++        self.0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .get(id)
++            .cloned()
++            .filter(ElicitationOwner::is_live)
++    }
++}
++pub(crate) fn capture_request_owners<T, E, A>(
++    transport: T,
++    owners: RequestOwners,
++) -> impl Transport<RoleClient, Error = E> + 'static
++where
++    T: IntoTransport<RoleClient, E, A>,
++    E: std::error::Error + Send + Sync + 'static,
++{
++    OwnedTransport {
++        inner: transport.into_transport(),
++        owners,
++    }
++}
++struct OwnedTransport<T> {
++    inner: T,
++    owners: RequestOwners,
++}
++impl<T: Transport<RoleClient> + 'static> Transport<RoleClient> for OwnedTransport<T> {
++    type Error = T::Error;
++    fn send(
++        &mut self,
++        message: TxJsonRpcMessage<RoleClient>,
++    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
++        let id = if let JsonRpcMessage::Request(envelope) = &message {
++            if let Some(owner) = envelope
++                .request
++                .extensions()
++                .get::<ElicitationOwner>()
++                .cloned()
++            {
++                self.owners
++                    .0
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .insert(envelope.id.clone(), owner);
++                Some(envelope.id.clone())
++            } else {
++                None
++            }
++        } else {
++            None
++        };
++        let owners = self.owners.clone();
++        let send = self.inner.send(message);
++        async move {
++            let result = send.await;
++            if result.is_err() {
++                if let Some(id) = id {
++                    owners
++                        .0
++                        .lock()
++                        .unwrap_or_else(std::sync::PoisonError::into_inner)
++                        .remove(&id);
++                }
++            }
++            result
++        }
++    }
++    async fn close(&mut self) -> Result<(), Self::Error> {
++        self.owners
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .clear();
++        self.inner.close().await
++    }
++
++    async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
++        let message = self.inner.receive().await;
++        let mut owners = self
++            .owners
++            .0
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        match &message {
++            Some(JsonRpcMessage::Response(response)) => {
++                owners.remove(&response.id);
++            }
++            Some(JsonRpcMessage::Error(error)) => {
++                if let Some(id) = &error.id {
++                    owners.remove(id);
++                }
++            }
++            None => owners.clear(),
++            _ => {}
++        }
++        owners.retain(|_, owner| owner.is_live());
++        message
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn exact_stream_identity_and_call_retirement_bound_ownership() {
++        let owners = RequestOwners::default();
++        let id = RequestId::Number(7);
++        with_elicitation_owner("original".to_owned(), Some(Arc::new(())), async {
++            let owner = current_elicitation_owner().expect("call owner");
++            owners.0.lock().unwrap().insert(id.clone(), owner);
++            assert!(owners.get(None).is_none());
++            assert!(
++                owners
++                    .get(Some(&InboundStreamOrigin::Unassociated))
++                    .is_none()
++            );
++            assert!(
++                owners
++                    .get(Some(&InboundStreamOrigin::OutboundRequest(
++                        RequestId::Number(8)
++                    )))
++                    .is_none()
++            );
++            assert_eq!(
++                owners
++                    .get(Some(&InboundStreamOrigin::OutboundRequest(id.clone())))
++                    .unwrap()
++                    .turn_id,
++                "original"
++            );
++        })
++        .await;
++        // A remembered request ID does not revive the source call after its result.
++        assert!(
++            owners
++                .get(Some(&InboundStreamOrigin::OutboundRequest(id)))
++                .is_none()
++        );
++    }
++
++    #[tokio::test]
++    async fn cancelling_source_revokes_owned_request_without_a_successor_lookup() {
++        let owners = RequestOwners::default();
++        let ready = Arc::new(tokio::sync::Notify::new());
++        let task = tokio::spawn({
++            let owners = owners.clone();
++            let ready = ready.clone();
++            async move {
++                with_elicitation_owner("cancelled".to_owned(), Some(Arc::new(())), async {
++                    owners
++                        .0
++                        .lock()
++                        .unwrap()
++                        .insert(RequestId::Number(1), current_elicitation_owner().unwrap());
++                    ready.notify_one();
++                    std::future::pending::<()>().await;
++                })
++                .await;
++            }
++        });
++        ready.notified().await;
++        task.abort();
++        assert!(task.await.unwrap_err().is_cancelled());
++        with_elicitation_owner("successor".to_owned(), Some(Arc::new(())), async {
++            assert!(
++                owners
++                    .get(Some(&InboundStreamOrigin::OutboundRequest(
++                        RequestId::Number(1)
++                    )))
++                    .is_none()
++            );
++        })
++        .await;
++    }
++
++    #[tokio::test]
++    async fn call_owner_is_not_serialized_or_reconstructed_from_peer_metadata() {
++        with_elicitation_owner("private-admission".to_owned(), Some(Arc::new(())), async {
++            let request = owned_tool_request(rmcp::model::CallToolRequestParams::new("search"));
++            assert!(request.extensions().get::<ElicitationOwner>().is_some());
++            assert!(
++                !serde_json::to_string(&request)
++                    .unwrap()
++                    .contains("private-admission")
++            );
++        })
++        .await;
++    }
++
++    #[tokio::test]
++    async fn close_clears_owners_and_waits_for_inner_success_or_failure() {
++        struct Gate {
++            entered: Arc<tokio::sync::Notify>,
++            release: Arc<tokio::sync::Notify>,
++            fail: bool,
++        }
++        impl Transport<RoleClient> for Gate {
++            type Error = std::io::Error;
++            fn send(
++                &mut self,
++                _: TxJsonRpcMessage<RoleClient>,
++            ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
++                std::future::ready(Ok(()))
++            }
++            async fn receive(&mut self) -> Option<RxJsonRpcMessage<RoleClient>> {
++                std::future::pending().await
++            }
++            async fn close(&mut self) -> Result<(), Self::Error> {
++                self.entered.notify_one();
++                self.release.notified().await;
++                if self.fail {
++                    Err(std::io::Error::other("controlled inner close failure"))
++                } else {
++                    Ok(())
++                }
++            }
++        }
++        for fail in [false, true] {
++            let entered = Arc::new(tokio::sync::Notify::new());
++            let release = Arc::new(tokio::sync::Notify::new());
++            let owners = RequestOwners::default();
++            owners.0.lock().unwrap().insert(
++                RequestId::Number(7),
++                ElicitationOwner::for_admission("source".into(), Arc::new(())),
++            );
++            let mut transport = OwnedTransport {
++                inner: Gate {
++                    entered: entered.clone(),
++                    release: release.clone(),
++                    fail,
++                },
++                owners: owners.clone(),
++            };
++            let close = transport.close();
++            tokio::pin!(close);
++            tokio::select! {
++                result = &mut close => panic!("outer close returned before inner cleanup: {result:?}"),
++                _ = entered.notified() => {},
++            }
++            assert!(owners.0.lock().unwrap().is_empty());
++            release.notify_one();
++            let result = close.await;
++            assert_eq!(result.is_err(), fail);
++            if fail {
++                assert_eq!(
++                    result.unwrap_err().to_string(),
++                    "controlled inner close failure"
++                );
++            }
++        }
++    }
++}
+diff --git a/codex-rs/rmcp-client/src/lib.rs b/codex-rs/rmcp-client/src/lib.rs
+index e1c0a5264737ccce34e57f06bd0a7c2df8c85b7b..96d2306eeacca6efcb242bfadc36a3b7706a47f7 100644
+--- a/codex-rs/rmcp-client/src/lib.rs
++++ b/codex-rs/rmcp-client/src/lib.rs
+@@ -1,6 +1,10 @@
+ mod auth_status;
+ mod bounded_stdio_transport;
+ mod elicitation_client_service;
++mod elicitation_owner;
++pub use elicitation_owner::{
++    ElicitationOwner, current_elicitation_owner, scope_owner, with_elicitation_owner,
++};
+ mod ema_auth;
+ mod ema_auth_policy;
+ mod ema_claims;
+diff --git a/codex-rs/rmcp-client/src/local_stdio_transport.rs b/codex-rs/rmcp-client/src/local_stdio_transport.rs
+index 381aad1a9971db29fc42fd77fb60f6ab9b0e227a..f97c71f11dab7c2cd05138dc9a7c41d20feb6299 100644
+--- a/codex-rs/rmcp-client/src/local_stdio_transport.rs
++++ b/codex-rs/rmcp-client/src/local_stdio_transport.rs
+@@ -22,7 +22,8 @@ use crate::protocol_mode::McpProtocolMode;
+ use codex_utils_pty::Child;
+ 
+ pub(super) struct LocalStdioTransport {
+-    child: Box<Child>,
++    child: std::sync::Arc<tokio::sync::Mutex<Box<Child>>>,
++    process_id: Option<u32>,
+     transport: StdioTransport,
+ }
+ 
+@@ -57,15 +58,19 @@ impl LocalStdioTransport {
+         };
+         Ok((
+             Self {
+-                child: Box::new(child),
++                process_id: child.id(),
++                child: std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(child))),
+                 transport,
+             },
+             stderr,
+         ))
+     }
+ 
++    pub(super) fn child_waiter(&self) -> std::sync::Arc<tokio::sync::Mutex<Box<Child>>> {
++        self.child.clone()
++    }
+     pub(super) fn id(&self) -> Option<u32> {
+-        self.child.id()
++        self.process_id
+     }
+ }
+ 
+@@ -94,9 +99,10 @@ impl Transport<RoleClient> for LocalStdioTransport {
+             StdioTransport::Legacy(transport) => transport.close().await?,
+             StdioTransport::V20260728(transport) => transport.close().await?,
+         }
+-        match tokio::time::timeout(Duration::from_secs(3), self.child.wait()).await {
++        let mut child = self.child.lock().await;
++        match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
+             Ok(status) => status.map(|_| ()),
+-            Err(_) => self.child.kill().await,
++            Err(_) => child.kill().await,
+         }
+     }
+ }
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index 39dc2cdda454504eb9117030dde2814d407ea251..e8da15bf9131861a06900487c5211108d7b5ed3c 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -130,12 +130,113 @@ enum PendingTransport {
+     },
+ }
+ 
++// Only admission-owned stdio moves the existing RMCP join owner out of request handles.
++// The join task owns RunningService; this wrapper owns its peer and the join receipt.
++// A canceled request cannot retain RunningService or make cleanup depend on itself.
++pub(crate) enum ClientService {
++    Shared(RunningService<RoleClient, ElicitationClientService>),
++    Owned {
++        peer: rmcp::service::Peer<RoleClient>,
++        handler: ElicitationClientService,
++        cancellation: std::sync::Mutex<Option<rmcp::service::RunningServiceCancellationToken>>,
++        completion: futures::future::Shared<BoxFuture<'static, Result<(), String>>>,
++    },
++}
++impl ClientService {
++    fn new(service: RunningService<RoleClient, ElicitationClientService>, owned: bool) -> Self {
++        if !owned {
++            return Self::Shared(service);
++        }
++        let peer = service.peer().clone();
++        let handler = service.service().clone();
++        let cancellation = service.cancellation_token();
++        let task = tokio::spawn(async move {
++            service
++                .waiting()
++                .await
++                .map(|_| ())
++                .map_err(|error| error.to_string())
++        });
++        Self::Owned {
++            peer,
++            handler,
++            cancellation: std::sync::Mutex::new(Some(cancellation)),
++            completion: async move { task.await.map_err(|error| error.to_string())? }
++                .boxed()
++                .shared(),
++        }
++    }
++    pub(crate) fn peer(&self) -> &rmcp::service::Peer<RoleClient> {
++        match self {
++            Self::Shared(service) => service.peer(),
++            Self::Owned { peer, .. } => peer,
++        }
++    }
++    pub(crate) fn service(&self) -> &ElicitationClientService {
++        match self {
++            Self::Shared(service) => service.service(),
++            Self::Owned { handler, .. } => handler,
++        }
++    }
++    pub(crate) fn is_closed(&self) -> bool {
++        match self {
++            Self::Shared(service) => service.is_closed(),
++            Self::Owned {
++                peer, cancellation, ..
++            } => {
++                cancellation
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .is_none()
++                    || peer.is_transport_closed()
++            }
++        }
++    }
++    async fn stop_owned(&self) -> Result<()> {
++        if let Self::Owned {
++            cancellation,
++            completion,
++            ..
++        } = self
++        {
++            if let Some(token) = cancellation
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .take()
++            {
++                token.cancel();
++            }
++            completion.clone().await.map_err(anyhow::Error::msg)?;
++        }
++        Ok(())
++    }
++}
++impl std::ops::Deref for ClientService {
++    type Target = rmcp::service::Peer<RoleClient>;
++    fn deref(&self) -> &Self::Target {
++        self.peer()
++    }
++}
++impl Drop for ClientService {
++    fn drop(&mut self) {
++        if let Self::Owned { cancellation, .. } = self {
++            if let Some(token) = cancellation
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .take()
++            {
++                token.cancel();
++            }
++        }
++    }
++}
++
+ enum ClientState {
+     Connecting {
+         transport: Option<PendingTransport>,
+     },
+     Ready {
+-        service: Arc<RunningService<RoleClient, ElicitationClientService>>,
++        service: Arc<ClientService>,
+         oauth: Option<OAuthRuntime>,
+     },
+     Closed,
+@@ -405,6 +506,8 @@ pub struct RmcpClient {
+     transport_recipe: TransportRecipe,
+     protocol_mode: McpProtocolMode,
+     requires_read_only_tools: bool,
++    owned_stdio_lifetime: bool,
++    owned_stdio_shutdown: tokio::sync::OnceCell<std::result::Result<(), String>>,
+     initialize_context: Mutex<Option<InitializeContext>>,
+     session_recovery_lock: Semaphore,
+     elicitation_pause_state: ElicitationPauseState,
+@@ -417,6 +520,16 @@ impl RmcpClient {
+         self
+     }
+ 
++    pub fn with_owned_stdio_lifetime(mut self, enabled: bool) -> Self {
++        self.owned_stdio_lifetime = enabled && self.stdio_process.is_some();
++        if self.owned_stdio_lifetime
++            && let Some(process) = &self.stdio_process
++        {
++            process.enable_owned_lifetime();
++        }
++        self
++    }
++
+     fn apply_read_only_tools_meta(&self, meta: &mut Option<RequestMetaObject>) {
+         if self.requires_read_only_tools {
+             meta.get_or_insert_default()
+@@ -445,6 +558,8 @@ impl RmcpClient {
+             transport_recipe,
+             protocol_mode: McpProtocolMode::Legacy,
+             requires_read_only_tools: false,
++            owned_stdio_lifetime: false,
++            owned_stdio_shutdown: tokio::sync::OnceCell::new(),
+             initialize_context: Mutex::new(None),
+             session_recovery_lock: Semaphore::new(/*permits*/ 1),
+             elicitation_pause_state: ElicitationPauseState::new(),
+@@ -520,6 +635,8 @@ impl RmcpClient {
+             protocol_mode,
+             initialize_context: Mutex::new(None),
+             requires_read_only_tools: false,
++            owned_stdio_lifetime: false,
++            owned_stdio_shutdown: tokio::sync::OnceCell::new(),
+             session_recovery_lock: Semaphore::new(/*permits*/ 1),
+             elicitation_pause_state: ElicitationPauseState::new(),
+         })
+@@ -627,6 +744,8 @@ impl RmcpClient {
+             protocol_mode,
+             initialize_context: Mutex::new(None),
+             requires_read_only_tools: false,
++            owned_stdio_lifetime: false,
++            owned_stdio_shutdown: tokio::sync::OnceCell::new(),
+             session_recovery_lock: Semaphore::new(/*permits*/ 1),
+             elicitation_pause_state: ElicitationPauseState::new(),
+         })
+@@ -867,11 +986,13 @@ impl RmcpClient {
+         let mut rmcp_params = CallToolRequestParams::new(name);
+         rmcp_params.arguments = arguments;
+         let requested_modern = self.protocol_mode == McpProtocolMode::V20260728;
++        let owner = crate::elicitation_owner::current_elicitation_owner();
+         match self
+             .run_service_operation("tools/call", timeout, move |service| {
+                 let mut rmcp_params = rmcp_params.clone();
+                 let meta = meta.clone();
+-                async move {
++                let owner = owner.clone();
++                crate::elicitation_owner::scope_owner(owner, async move {
+                     let modern_session = requested_modern
+                         && service.peer().peer_info().is_some_and(|info| {
+                             info.protocol_version == ProtocolVersion::V_2026_07_28
+@@ -885,9 +1006,7 @@ impl RmcpClient {
+                     let result = service
+                         .peer()
+                         .send_request_with_option(
+-                            ClientRequest::CallToolRequest(rmcp::model::CallToolRequest::new(
+-                                rmcp_params,
+-                            )),
++                            crate::elicitation_owner::owned_tool_request(rmcp_params),
+                             options,
+                         )
+                         .await?
+@@ -897,7 +1016,7 @@ impl RmcpClient {
+                         ServerResult::CallToolResult(result) => Ok(result),
+                         _ => Err(rmcp::service::ServiceError::UnexpectedResponse),
+                     }
+-                }
++                })
+                 .boxed()
+             })
+             .await
+@@ -1017,7 +1136,7 @@ impl RmcpClient {
+         })
+     }
+ 
+-    async fn service(&self) -> Result<Arc<RunningService<RoleClient, ElicitationClientService>>> {
++    async fn service(&self) -> Result<Arc<ClientService>> {
+         let guard = self.state.lock().await;
+         match &*guard {
+             ClientState::Ready { service, .. } => Ok(Arc::clone(service)),
+@@ -1074,6 +1193,35 @@ impl RmcpClient {
+         drop(previous_state);
+     }
+ 
++    /// Join the actual stdio service and reap its process before acknowledging retirement.
++    pub async fn shutdown_owned_stdio(&self) -> Result<()> {
++        self.owned_stdio_shutdown
++            .get_or_init(|| async {
++                let previous = {
++                    let mut state = self.state.lock().await;
++                    std::mem::replace(&mut *state, ClientState::Closed)
++                };
++                let service_result = if let ClientState::Ready { service, .. } = previous {
++                    service.stop_owned().await
++                } else {
++                    Ok(())
++                };
++                let process_result = match &self.stdio_process {
++                    Some(process) => process
++                        .terminate_and_wait()
++                        .await
++                        .map_err(anyhow::Error::from),
++                    None => Ok(()),
++                };
++                service_result
++                    .and(process_result)
++                    .map_err(|error| error.to_string())
++            })
++            .await
++            .clone()
++            .map_err(anyhow::Error::msg)
++    }
++
+     /// This should be called after every tool call so that if a given tool call triggered
+     /// a refresh of the OAuth tokens, they are persisted.
+     async fn persist_oauth_tokens(&self) {
+@@ -1284,10 +1432,7 @@ impl RmcpClient {
+         pending_transport: PendingTransport,
+         initialize_context: &InitializeContext,
+         timeout: Option<Duration>,
+-    ) -> Result<(
+-        Arc<RunningService<RoleClient, ElicitationClientService>>,
+-        Option<OAuthRuntime>,
+-    )> {
++    ) -> Result<(Arc<ClientService>, Option<OAuthRuntime>)> {
+         // Request IDs and remembered cancellations belong to this connection, including
+         // when a failed initialization or expired HTTP session creates a new transport.
+         let send_elicitation = Arc::clone(&initialize_context.send_elicitation);
+@@ -1311,23 +1456,42 @@ impl RmcpClient {
+             }
+             TransportRecipe::InProcess { .. } | TransportRecipe::Stdio { .. } => None,
+         };
++        let request_owners = client_service.request_owners.clone();
+         let lifecycle = self.protocol_mode.client_lifecycle();
+         let (transport, oauth_runtime) = match pending_transport {
+             PendingTransport::InProcess { transport } => (
+                 client_service
+-                    .serve_with_lifecycle(transport, lifecycle)
++                    .serve_with_lifecycle(
++                        crate::elicitation_owner::capture_request_owners(
++                            transport,
++                            request_owners.clone(),
++                        ),
++                        lifecycle,
++                    )
+                     .boxed(),
+                 None,
+             ),
+             PendingTransport::Stdio { transport } => (
+                 client_service
+-                    .serve_with_lifecycle(*transport, lifecycle)
++                    .serve_with_lifecycle(
++                        crate::elicitation_owner::capture_request_owners(
++                            *transport,
++                            request_owners.clone(),
++                        ),
++                        lifecycle,
++                    )
+                     .boxed(),
+                 None,
+             ),
+             PendingTransport::StreamableHttp { transport } => (
+                 client_service
+-                    .serve_with_lifecycle(capture_event_notifications(transport), lifecycle)
++                    .serve_with_lifecycle(
++                        crate::elicitation_owner::capture_request_owners(
++                            capture_event_notifications(transport),
++                            request_owners.clone(),
++                        ),
++                        lifecycle,
++                    )
+                     .boxed(),
+                 None,
+             ),
+@@ -1336,13 +1500,25 @@ impl RmcpClient {
+                 oauth_runtime,
+             } => (
+                 client_service
+-                    .serve_with_lifecycle(transport, lifecycle)
++                    .serve_with_lifecycle(
++                        crate::elicitation_owner::capture_request_owners(
++                            transport,
++                            request_owners.clone(),
++                        ),
++                        lifecycle,
++                    )
+                     .boxed(),
+                 Some(oauth_runtime),
+             ),
+             PendingTransport::StreamableHttpWithAccessTokenOnly { transport } => (
+                 client_service
+-                    .serve_with_lifecycle(transport, lifecycle)
++                    .serve_with_lifecycle(
++                        crate::elicitation_owner::capture_request_owners(
++                            transport,
++                            request_owners.clone(),
++                        ),
++                        lifecycle,
++                    )
+                     .boxed(),
+                 None,
+             ),
+@@ -1382,7 +1558,10 @@ impl RmcpClient {
+             .set_response_cache_config(ClientCacheConfig::disabled())
+             .await;
+ 
+-        Ok((Arc::new(service), oauth_runtime))
++        Ok((
++            Arc::new(ClientService::new(service, self.owned_stdio_lifetime)),
++            oauth_runtime,
++        ))
+     }
+ 
+     async fn run_service_operation<T, F, Fut>(
+@@ -1392,7 +1571,7 @@ impl RmcpClient {
+         operation: F,
+     ) -> Result<T>
+     where
+-        F: Fn(Arc<RunningService<RoleClient, ElicitationClientService>>) -> Fut,
++        F: Fn(Arc<ClientService>) -> Fut,
+         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
+     {
+         let service = self.service().await?;
+@@ -1424,14 +1603,14 @@ impl RmcpClient {
+     }
+ 
+     async fn run_service_operation_with_transient_retries<T, F, Fut>(
+-        service: Arc<RunningService<RoleClient, ElicitationClientService>>,
++        service: Arc<ClientService>,
+         label: &str,
+         timeout: Option<Duration>,
+         pause_state: ElicitationPauseState,
+         operation: &F,
+     ) -> std::result::Result<T, ClientOperationError>
+     where
+-        F: Fn(Arc<RunningService<RoleClient, ElicitationClientService>>) -> Fut,
++        F: Fn(Arc<ClientService>) -> Fut,
+         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
+     {
+         let retry_deadline = timeout.map(|duration| Instant::now() + duration);
+@@ -1480,14 +1659,14 @@ impl RmcpClient {
+     }
+ 
+     async fn run_service_operation_once<T, F, Fut>(
+-        service: Arc<RunningService<RoleClient, ElicitationClientService>>,
++        service: Arc<ClientService>,
+         label: &str,
+         timeout: Option<Duration>,
+         pause_state: ElicitationPauseState,
+         operation: &F,
+     ) -> std::result::Result<T, ClientOperationError>
+     where
+-        F: Fn(Arc<RunningService<RoleClient, ElicitationClientService>>) -> Fut,
++        F: Fn(Arc<ClientService>) -> Fut,
+         Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
+     {
+         match timeout {
+@@ -1542,7 +1721,7 @@ impl RmcpClient {
+ 
+     async fn reinitialize_after_session_expiry(
+         &self,
+-        failed_service: &Arc<RunningService<RoleClient, ElicitationClientService>>,
++        failed_service: &Arc<ClientService>,
+     ) -> Result<()> {
+         let _recovery_guard = self
+             .session_recovery_lock
+diff --git a/codex-rs/rmcp-client/src/stdio_server_launcher.rs b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+index 195e00765f3b5411e2558aa2134e91e1fe946237..d6090a3ba9732cbeb8a289364cbfa7b0c3312400 100644
+--- a/codex-rs/rmcp-client/src/stdio_server_launcher.rs
++++ b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+@@ -244,6 +244,8 @@ struct StdioServerProcessHandleInner {
+     program_name: String,
+     kind: StdioServerProcessKind,
+     terminated: AtomicBool,
++    owned_lifetime: AtomicBool,
++    local_child: Option<Arc<tokio::sync::Mutex<Box<codex_utils_pty::Child>>>>,
+     // An escaped descendant can keep stderr open after the MCP server exits.
+     stderr_reader: Option<watch::Sender<()>>,
+ }
+@@ -394,7 +396,12 @@ impl LocalStdioServerLauncher {
+             }));
+             stop_tx
+         });
+-        let process = StdioServerProcessHandle::local(program_name, terminator, stderr_reader);
++        let local_child = match &transport {
++            StdioServerTransportInner::Local(local) => local.child_waiter(),
++            _ => unreachable!("local launcher"),
++        };
++        let process =
++            StdioServerProcessHandle::local(program_name, terminator, stderr_reader, local_child);
+ 
+         Ok(StdioServerTransport {
+             inner: transport,
+@@ -459,12 +466,15 @@ impl StdioServerProcessHandle {
+         program_name: String,
+         terminator: Option<LocalProcessTerminator>,
+         stderr_reader: Option<watch::Sender<()>>,
++        local_child: Arc<tokio::sync::Mutex<Box<codex_utils_pty::Child>>>,
+     ) -> Self {
+         Self {
+             inner: Arc::new(StdioServerProcessHandleInner {
+                 program_name,
+                 kind: StdioServerProcessKind::Local(terminator),
++                local_child: Some(local_child),
+                 terminated: AtomicBool::new(false),
++                owned_lifetime: AtomicBool::new(false),
+                 stderr_reader,
+             }),
+         }
+@@ -475,12 +485,57 @@ impl StdioServerProcessHandle {
+             inner: Arc::new(StdioServerProcessHandleInner {
+                 program_name,
+                 kind: StdioServerProcessKind::Executor(process),
++                local_child: None,
+                 terminated: AtomicBool::new(false),
++                owned_lifetime: AtomicBool::new(false),
+                 stderr_reader: None,
+             }),
+         }
+     }
+ 
++    pub(crate) fn enable_owned_lifetime(&self) {
++        self.inner.owned_lifetime.store(true, Ordering::Release);
++    }
++
++    pub(crate) async fn terminate_and_wait(&self) -> io::Result<()> {
++        // Subscribe before termination so an executor exit cannot fall between the request and wait.
++        let mut remote_events = match &self.inner.kind {
++            StdioServerProcessKind::Executor(process) => Some(process.subscribe_events()),
++            _ => None,
++        };
++        self.terminate().await?;
++        if let Some(child) = &self.inner.local_child {
++            let mut child = child.lock().await;
++            if tokio::time::timeout(Duration::from_secs(3), child.wait())
++                .await
++                .is_err()
++            {
++                child.kill().await?;
++            }
++            child.wait().await?;
++        }
++        if let Some(stderr_reader) = &self.inner.stderr_reader {
++            stderr_reader.closed().await;
++        }
++        if let Some(events) = remote_events.as_mut() {
++            loop {
++                match events.recv().await.map_err(io::Error::other)? {
++                    codex_exec_server::ExecProcessEvent::Exited { .. } => break,
++                    codex_exec_server::ExecProcessEvent::Closed { .. } => {
++                        return Err(io::Error::other(
++                            "MCP executor closed without an exit receipt",
++                        ));
++                    }
++                    codex_exec_server::ExecProcessEvent::Failed(error) => {
++                        return Err(io::Error::other(error));
++                    }
++                    _ => {}
++                }
++            }
++        }
++        Ok(())
++    }
++
+     pub(crate) async fn terminate(&self) -> io::Result<()> {
+         if self.inner.terminated.swap(true, Ordering::AcqRel) {
+             return Ok(());
+@@ -488,7 +543,23 @@ impl StdioServerProcessHandle {
+ 
+         let result = match &self.inner.kind {
+             StdioServerProcessKind::Local(Some(terminator)) => {
+-                terminator.terminate();
++                if self.inner.owned_lifetime.load(Ordering::Acquire) {
++                    #[cfg(unix)]
++                    {
++                        // Join the existing grace/escalation sequence instead of leaving its
++                        // delayed group kill running after a successor can start.
++                        if terminate_process_group(terminator.process_group_id)? {
++                            tokio::time::sleep(PROCESS_GROUP_TERM_GRACE_PERIOD).await;
++                            kill_process_group(terminator.process_group_id)?;
++                        }
++                    }
++                    #[cfg(not(unix))]
++                    {
++                        terminator.terminate();
++                    }
++                } else {
++                    terminator.terminate();
++                }
+                 Ok(())
+             }
+             StdioServerProcessKind::Local(None) => Ok(()),
+diff --git a/codex-rs/rmcp-client/src/streamable_http_retry.rs b/codex-rs/rmcp-client/src/streamable_http_retry.rs
+index 66dda2cb59c362f3cf8c78f9bcc595ac6652bdce..ae7695cc69011f04242160e5067b6f1823a26b97 100644
+--- a/codex-rs/rmcp-client/src/streamable_http_retry.rs
++++ b/codex-rs/rmcp-client/src/streamable_http_retry.rs
+@@ -6,16 +6,14 @@ use anyhow::Result;
+ use anyhow::anyhow;
+ use codex_exec_server::ExecServerError;
+ use http::StatusCode;
+-use rmcp::service::RoleClient;
+-use rmcp::service::RunningService;
+ use rmcp::transport::streamable_http_client::StreamableHttpError;
+ use tokio::time;
+ use tracing::warn;
+ 
+-use crate::elicitation_client_service::ElicitationClientService;
+ use crate::http_client_adapter::StreamableHttpClientAdapterError;
+ use crate::oauth::OAuthRuntime;
+ 
++use super::ClientService;
+ use super::InitializeContext;
+ use super::PendingTransport;
+ use super::RmcpClient;
+@@ -28,10 +26,7 @@ impl RmcpClient {
+         &self,
+         initial_transport: PendingTransport,
+         initialize_context: &InitializeContext,
+-    ) -> Result<(
+-        Arc<RunningService<RoleClient, ElicitationClientService>>,
+-        Option<OAuthRuntime>,
+-    )> {
++    ) -> Result<(Arc<ClientService>, Option<OAuthRuntime>)> {
+         let timeout = initialize_context.timeout;
+         let should_retry = match &initial_transport {
+             PendingTransport::InProcess { .. } | PendingTransport::Stdio { .. } => false,
+diff --git a/codex-rs/rmcp-client/src/tool_input.rs b/codex-rs/rmcp-client/src/tool_input.rs
+index ffda73988dfc6a0ec4c9a87ab81375ecbf22544c..2f31d814c1cf2c63d8c5eacb318a4c7152c68ab8 100644
+--- a/codex-rs/rmcp-client/src/tool_input.rs
++++ b/codex-rs/rmcp-client/src/tool_input.rs
+@@ -5,11 +5,8 @@
+ use std::collections::BTreeMap;
+ use std::time::Duration;
+ 
+-use rmcp::RoleClient;
+-use rmcp::model::CallToolRequest;
+ use rmcp::model::CallToolRequestParams;
+ use rmcp::model::CallToolResult;
+-use rmcp::model::ClientRequest;
+ use rmcp::model::DEFAULT_MRTR_MAX_ROUNDS;
+ use rmcp::model::GetExtensions;
+ use rmcp::model::GetMeta;
+@@ -19,15 +16,14 @@ use rmcp::model::ServerRequest;
+ use rmcp::model::ServerResult;
+ use rmcp::service::PeerRequestOptions;
+ use rmcp::service::RequestContext;
+-use rmcp::service::RunningService;
+ use rmcp::service::Service;
+ use rmcp::service::ServiceError;
+ use rmcp::transport::streamable_http_client::StreamableHttpError;
+ use serde::Deserialize;
+ use serde_json::Value;
+ 
+-use crate::elicitation_client_service::ElicitationClientService;
+ use crate::http_client_adapter::StreamableHttpClientAdapterError;
++use crate::rmcp_client::ClientService;
+ 
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -37,7 +33,7 @@ struct ToolInput {
+ }
+ 
+ pub(crate) async fn call_tool(
+-    service: &RunningService<RoleClient, ElicitationClientService>,
++    service: &ClientService,
+     mut params: CallToolRequestParams,
+ ) -> Result<CallToolResult, ServiceError> {
+     let mut state_only_rounds = 0;
+@@ -47,7 +43,7 @@ pub(crate) async fn call_tool(
+             let handle = service
+                 .peer()
+                 .send_request_with_option(
+-                    ClientRequest::CallToolRequest(CallToolRequest::new(params.clone())),
++                    crate::elicitation_owner::owned_tool_request(params.clone()),
+                     PeerRequestOptions::no_options(),
+                 )
+                 .await?;
+@@ -122,6 +118,9 @@ pub(crate) async fn call_tool(
+                 let mut context = RequestContext::new(request_id, service.peer().clone());
+                 context.meta = std::mem::take(request.get_meta_mut());
+                 context.extensions = std::mem::take(request.extensions_mut());
++                if let Some(owner) = crate::elicitation_owner::current_elicitation_owner() {
++                    context.extensions.insert(owner);
++                }
+                 async move {
+                     let result = service
+                         .service()
+diff --git a/codex-rs/rmcp-client/src/tool_input_tests.rs b/codex-rs/rmcp-client/src/tool_input_tests.rs
+index ebbdc962f69a4bdf3e861f5241882a3d0e67ac27..52badeca69ca0d1c10f8a266b3b37c0d0bbc787a 100644
+--- a/codex-rs/rmcp-client/src/tool_input_tests.rs
++++ b/codex-rs/rmcp-client/src/tool_input_tests.rs
+@@ -1,5 +1,6 @@
+ //! Exercises pending MRTR input cleanup over a real duplex transport.
+ 
++use super::ClientService;
+ use super::ElicitationClientService;
+ use crate::rmcp_client::ElicitationPauseState;
+ use crate::tool_input::call_tool;
+@@ -25,76 +26,84 @@ use tokio::time::timeout;
+ async fn connection_closure_releases_pending_inputs_and_timeout_pause() -> anyhow::Result<()> {
+     for mode in ["form", "openai/userVerification"] {
+         for close_transport in [false, true] {
+-            let pause_state = ElicitationPauseState::new();
+-            let mut paused = pause_state.subscribe();
+-            let (route_tx, mut route_rx) = mpsc::unbounded_channel();
+-            let mut info = ClientInfo::default();
+-            info.capabilities.extensions = Some(
+-                [(
+-                    OPENAI_ELICITATION_EXTENSION_ID.into(),
+-                    serde_json::Map::from_iter([
+-                        ("userVerification".into(), json!({})),
+-                        ("form".into(), json!({})),
+-                    ]),
+-                )]
+-                .into_iter()
+-                .collect(),
+-            );
+-            let service = ElicitationClientService::new(
+-                info,
+-                Box::new(move |_, _| {
+-                    let (tx, rx) = oneshot::channel();
+-                    route_tx.send(tx).unwrap();
+-                    Box::pin(async move { Ok(rx.await?) })
+-                }),
+-                pause_state,
+-            );
+-            let (client_transport, server_transport) =
+-                tokio::io::duplex(/*max_buf_size*/ 4096);
+-            let client = serve_directly(service, client_transport, /*peer_info*/ None);
+-            let mut server = IntoTransport::<RoleServer, _, _>::into_transport(server_transport);
+-            let call = call_tool(&client, CallToolRequestParams::new("test"));
+-            tokio::pin!(call);
+-            let request = tokio::select! {
+-                result = &mut call => panic!("tool completed before input: {result:?}"),
+-                request = timeout(Duration::from_secs(/*secs*/ 5), server.receive()) => request?,
+-            };
+-            let Some(ClientJsonRpcMessage::Request(request)) = request else {
+-                anyhow::bail!("expected tool call");
+-            };
+-            let params = match mode {
+-                "form" => json!({
+-                    "mode": mode, "message": "Confirm",
+-                    "requestedSchema": {"type": "object", "properties": {}},
+-                }),
+-                _ => json!({
+-                    "mode": mode, "title": "Verify", "description": "", "challenge": "AQID",
+-                }),
+-            };
+-            server.send(ServerJsonRpcMessage::response(
++            for owned_service in [false, true] {
++                let pause_state = ElicitationPauseState::new();
++                let mut paused = pause_state.subscribe();
++                let (route_tx, mut route_rx) = mpsc::unbounded_channel();
++                let mut info = ClientInfo::default();
++                info.capabilities.extensions = Some(
++                    [(
++                        OPENAI_ELICITATION_EXTENSION_ID.into(),
++                        serde_json::Map::from_iter([
++                            ("userVerification".into(), json!({})),
++                            ("form".into(), json!({})),
++                        ]),
++                    )]
++                    .into_iter()
++                    .collect(),
++                );
++                let service = ElicitationClientService::new(
++                    info,
++                    Box::new(move |_, _| {
++                        let (tx, rx) = oneshot::channel();
++                        route_tx.send(tx).unwrap();
++                        Box::pin(async move { Ok(rx.await?) })
++                    }),
++                    pause_state,
++                );
++                let (client_transport, server_transport) =
++                    tokio::io::duplex(/*max_buf_size*/ 4096);
++                let client = serve_directly(service, client_transport, /*peer_info*/ None);
++                let cancel = client.cancellation_token();
++                let client = ClientService::new(client, owned_service);
++                let mut server =
++                    IntoTransport::<RoleServer, _, _>::into_transport(server_transport);
++                let call = call_tool(&client, CallToolRequestParams::new("test"));
++                tokio::pin!(call);
++                let request = tokio::select! {
++                    result = &mut call => panic!("tool completed before input: {result:?}"),
++                    request = timeout(Duration::from_secs(/*secs*/ 5), server.receive()) => request?,
++                };
++                let Some(ClientJsonRpcMessage::Request(request)) = request else {
++                    anyhow::bail!("expected tool call");
++                };
++                let params = match mode {
++                    "form" => json!({
++                        "mode": mode, "message": "Confirm",
++                        "requestedSchema": {"type": "object", "properties": {}},
++                    }),
++                    _ => json!({
++                        "mode": mode, "title": "Verify", "description": "", "challenge": "AQID",
++                    }),
++                };
++                server.send(ServerJsonRpcMessage::response(
+                 ServerResult::CustomResult(CustomResult(json!({
+                     "resultType": "input_required",
+                     "inputRequests": {"input": {"method": "openai/elicitation/create", "params": params}},
+                 }))),
+                 request.id,
+             )).await?;
+-            let reply = tokio::select! {
+-                result = &mut call => panic!("tool completed before prompting: {result:?}"),
+-                reply = timeout(Duration::from_secs(/*secs*/ 5), route_rx.recv()) => reply?.unwrap(),
+-            };
+-            assert!(*paused.borrow());
+-            if close_transport {
+-                drop(server);
+-            } else {
+-                client.cancellation_token().cancel();
++                let reply = tokio::select! {
++                    result = &mut call => panic!("tool completed before prompting: {result:?}"),
++                    reply = timeout(Duration::from_secs(/*secs*/ 5), route_rx.recv()) => reply?.unwrap(),
++                };
++                assert!(*paused.borrow());
++                if close_transport {
++                    drop(server);
++                } else {
++                    cancel.cancel();
++                }
++                let result = timeout(Duration::from_secs(/*secs*/ 5), call).await?;
++                assert!(
++                    matches!(result, Err(ServiceError::TransportClosed)),
++                    "{result:?}"
++                );
++                assert!(reply.is_closed());
++                assert!(!*paused.borrow_and_update());
++                if owned_service {
++                    client.stop_owned().await?;
++                }
+             }
+-            let result = timeout(Duration::from_secs(/*secs*/ 5), call).await?;
+-            assert!(
+-                matches!(result, Err(ServiceError::TransportClosed)),
+-                "{result:?}"
+-            );
+-            assert!(reply.is_closed());
+-            assert!(!*paused.borrow_and_update());
+         }
+     }
+     Ok(())

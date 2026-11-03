@@ -1,0 +1,12 @@
+{
+  "include": [
+    "test_native_agent_typing_errors.py"
+  ],
+  "extraPaths": [
+    "../src",
+    ".."
+  ],
+  "pythonVersion": "3.10",
+  "typeCheckingMode": "strict",
+  "reportUnnecessaryTypeIgnoreComment": "error"
+}

@@ -4,9 +4,11 @@ The collector reports syntactic logging and raw-output candidates. It does not r
 
 ## Required validation matrix
 
-Test every changed sensitive caller boundary in both redacted and diagnostic modes. Use a unique sentinel for each source and inspect both rendered output and the complete `LogRecord`.
+Test every changed sensitive caller boundary under its supported redaction controls and allowed diagnostic modes. Use a unique sentinel for each source and inspect both rendered output and the complete `LogRecord`.
 
-| Case | Model flag | Tool flag | Value | Required assertion |
+The model and tool columns below describe redaction conditions, not named SDK flags. Map them to the controls on the affected path. Do not add modes or flags to satisfy this matrix. If a path always redacts, test that policy and mark unavailable diagnostic cases as not applicable.
+
+| Case | Model redaction | Tool redaction | Value | Required assertion |
 | --- | --- | --- | --- | --- |
 | Model redaction | on | off | `Exception(secret)` | No sentinel or exception object remains in the record |
 | Tool redaction | off | on | `Exception(secret)` | No sentinel or exception object remains in the record |
@@ -19,8 +21,8 @@ Test every changed sensitive caller boundary in both redacted and diagnostic mod
 | Supplemental arguments | applicable | applicable | fixed message plus secret formatting argument | Formatting arguments are omitted in redacted mode |
 | Extra payload | applicable | applicable | `extra={"detail": secret}` | Secret `LogRecord` attributes are omitted |
 | Traceback payload | applicable | applicable | `exc_info=True` or an exception tuple | `exc_info` and `exc_text` are absent in redacted mode |
-| MCP server or tool name | tool | on | path token or custom-name sentinel | Log uses a fixed message and does not read or attach the name |
-| URL-derived MCP name | tool | off | URL credentials, query, and fragment | Log retains only scheme, host, port, and path; the runtime value is unchanged |
+| MCP server or tool name | not applicable | on | path token or custom-name sentinel | Log uses a fixed message and does not read or attach the name |
+| URL-derived MCP name | not applicable | off | URL credentials, query, and fragment | Log retains only scheme, host, port, and path; the runtime value is unchanged |
 
 Also test the observable caller behavior after logging. Redaction is incorrect if it prevents a fallback result, cleanup, event emission, rejection, or cancellation from completing.
 

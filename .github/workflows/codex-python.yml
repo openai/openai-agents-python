@@ -1,0 +1,393 @@
+name: Build installable SDK package
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        type: string
+        required: true
+      native_source_run:
+        type: string
+        required: false
+        default: ''
+  workflow_dispatch:
+    inputs:
+      runner:
+        type: choice
+        default: ubuntu-24.04
+        options: [ubuntu-24.04, windows-latest, macos-latest]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Native package (${{ inputs.runner }})
+    runs-on: ${{ inputs.runner }}
+    # Allow cold builds of the bundled Codex runtime on Windows.
+    timeout-minutes: ${{ startsWith(inputs.runner, 'windows-') && 180 || 100 }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTUP_TOOLCHAIN: 1.95.0
+      OPENAI_AGENTS_NATIVE_TIMINGS: "1"
+      # PEP 517 frontends may copy only the wheel out of the backend directory.
+      OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: openai/socket-firewall@f6ef7e37dcf28e35280427862e2abd17aa2023fe
+        if: runner.os == 'Linux'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          enable-cache: true
+      - name: Select shared Cargo directories
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+      - name: Install native build tools
+        # Free Linux disk space before restoring the large dependency cache.
+        if: >-
+          inputs.native_source_run == '' ||
+          (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+        uses: ./.github/actions/setup-native
+      - name: Prepare the source distribution
+        # Use one stable source path for Cargo, the wheel and the test executor.
+        run: |
+          uv build --sdist
+          python - <<'PYTHON'
+          import os
+          import tarfile
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-source"
+          source.mkdir()
+          archive_path, = Path("dist").glob("openai_agents-*.tar.gz")
+          with tarfile.open(archive_path) as archive:
+              archive.extractall(source, filter="data")
+          extracted, = source.iterdir()
+          project = source / "project"
+          extracted.rename(project)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
+          PYTHON
+      - name: Restore Rust dependencies
+        # Touch the shared cache on default-branch runs, even when reusing a wheel.
+        if: >-
+          inputs.native_source_run == '' ||
+          (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+            ${{ env.OPENAI_AGENTS_BUILD_SOURCE }}/packages/codex/.cache/v8
+          key: native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runner }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('packages/codex/CODEX_REVISION', 'packages/codex/patches/**', 'packages/codex/rmcp-patches/**') }}-${{ hashFiles('packages/codex/Cargo.lock', 'packages/codex/Cargo.toml', 'packages/codex/scripts/*.py', 'pyproject.toml', '.github/actions/setup-native/action.yml', '.github/workflows/codex-python.yml') }}
+          restore-keys: |
+            native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runner }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('packages/codex/CODEX_REVISION', 'packages/codex/patches/**', 'packages/codex/rmcp-patches/**') }}-
+            native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runner }}-${{ env.RUSTUP_TOOLCHAIN }}-
+      - name: Select native build or reuse
+        id: native-source
+        env:
+          NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
+          WARM_SHARED_CACHE: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.rust-cache.outputs.cache-hit != 'true' }}
+        run: |
+          if [[ "$WARM_SHARED_CACHE" == true ]]; then
+            echo "Building native dependencies to warm the default-branch cache."
+            NATIVE_SOURCE_RUN=''
+          fi
+          echo "run_id=$NATIVE_SOURCE_RUN" >> "$GITHUB_OUTPUT"
+      - name: Download the qualified native build
+        if: steps.native-source.outputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/agents-native-qualified
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.native-source.outputs.run_id }}
+      - name: Select the qualified wheel and test executor
+        if: steps.native-source.outputs.run_id != ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-qualified"
+          wheel, = source.glob("openai_agents-*.whl")
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          Path("dist").mkdir(exist_ok=True)
+          shutil.copy2(source / name, Path("dist") / name)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\n")
+          PYTHON
+      - name: Clear previous compilation timings
+        id: clear-timings
+        if: steps.native-source.outputs.run_id == ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+          timings = Path(os.environ["CARGO_TARGET_DIR"]) / "cargo-timings"
+          if timings.exists():
+              shutil.rmtree(timings)
+          PYTHON
+      - name: Build the SDK and native runtime together
+        run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
+      - name: Build the shared test executor
+        if: steps.native-source.outputs.run_id == ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          fixture = Path("tests/fixtures/exec_server.rs")
+          (root / fixture).parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(Path("packages/codex") / fixture, root / fixture)
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, build_target = cargo_build_options(root, environment)
+          subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
+          target = Path(environment["CARGO_TARGET_DIR"])
+          if not target.is_absolute():
+              target = root / target
+          if build_target:
+              target /= Path(build_target).stem
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          shutil.copy2(target / "release" / "examples" / name, Path("dist") / name)
+          PYTHON
+      - name: Remove SDK outputs from the dependency cache
+        if: steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true'
+        # Reproducible sdists normalize mtimes, so never restore compiled SDK sources.
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, _ = cargo_build_options(root, environment)
+          subprocess.run(["cargo", "clean", "--release", "--locked", "--package", "codex-agents-python", *options],
+                         cwd=root, env=environment, check=True)
+          staging = Path(environment["CARGO_TARGET_DIR"]) / "maturin"
+          if staging.exists():
+              shutil.rmtree(staging)
+          PYTHON
+      - name: Save Rust dependencies
+        if: >-
+          steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true' &&
+          ((github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) ||
+          github.event_name == 'workflow_dispatch')
+        # Automatic PR builds read the shared cache without saving duplicate merge-ref entries.
+        # Explicit manual builds may warm their own branch for controlled comparisons.
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+            ${{ env.OPENAI_AGENTS_BUILD_SOURCE }}/packages/codex/.cache/v8
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: Install Linux sandbox runtime for fresh-wheel checks
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap dnsmasq-base
+      - name: Test fresh installations without a checkout on the import path
+        if: runner.os == 'Linux'
+        run: |
+          cp packages/codex/scripts/verify_installed.py "$RUNNER_TEMP/verify_installed.py"
+          uv export --frozen --no-default-groups --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$RUNNER_TEMP/sdk-install-constraints.txt"
+          for version in 3.10 3.11 3.12; do
+            uv venv --seed --python "$version" "$RUNNER_TEMP/sdk-$version"
+            "$RUNNER_TEMP/sdk-$version/bin/python" -m pip install \
+              --constraint "$RUNNER_TEMP/sdk-install-constraints.txt" dist/*.whl
+            helper="$("$RUNNER_TEMP/sdk-$version/bin/python" -I - <<'PYTHON'
+          import os
+          import sysconfig
+          from pathlib import Path
+          import agents
+          helper = (Path(agents.__file__).resolve().parent / "bin" / "codex-linux-sandbox").resolve()
+          libraries = {Path(sysconfig.get_path(kind)).resolve() for kind in ("purelib", "platlib")}
+          assert any(helper.is_relative_to(base) for base in libraries), "helper is outside the fresh environment"
+          assert helper.is_file() and os.access(helper, os.X_OK), "installed Linux helper is not executable"
+          runtime = helper.with_name("codex-sdk-runtime")
+          assert runtime.is_file() and os.access(runtime, os.X_OK), "installed runtime is not executable"
+          print(helper)
+          PYTHON
+            )"
+            userns_restriction=unavailable
+            profile_loaded=false
+            if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+              case "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" in
+                0) userns_restriction=0 ;;
+                1) userns_restriction=1 ;;
+                *) userns_restriction=other ;;
+              esac
+              profile="agents-sdk-installed-linux-${version//./}"
+              sudo tee "/etc/apparmor.d/$profile" > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile $profile "$helper" flags=(unconfined) {
+            userns,
+          }
+          profile $profile-runtime "${helper%/*}/codex-sdk-runtime" flags=(unconfined) {
+            userns,
+          }
+          EOF
+              sudo apparmor_parser -r "/etc/apparmor.d/$profile"
+              profile_loaded=true
+            fi
+            printf 'Installed Linux sandbox host setup: userns_restriction=%s helper_profile_loaded=%s\n' "$userns_restriction" "$profile_loaded"
+            (
+              cd "$RUNNER_TEMP"
+              env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
+                "$RUNNER_TEMP/sdk-$version/bin/python" -I verify_installed.py \
+                --output "$RUNNER_TEMP/installed-$version.json"
+            )
+          done
+          cp "$RUNNER_TEMP"/installed-*.json dist/
+      - name: Qualify offline Unix sockets with the installed Linux wheel
+        if: runner.os == 'Linux'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/offline-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{offline_ipc.py,unix_socket_command.py,unix_peer_approval.py,offline_executor.sh} "$stage/tests/qualification"
+          python="$RUNNER_TEMP/sdk-3.12/bin/python"
+          uv export --frozen --only-group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/test-constraints.txt"
+          "$python" -m pip install --constraint "$stage/test-constraints.txt" aiohttp pytest pytest-asyncio
+          (
+            cd "$stage"
+            env -i HOME="$stage/home" PATH=/usr/bin:/bin timeout 90 \
+              "$python" -I -B -m pytest -q -o "pythonpath=$stage" tests/qualification/unix_peer_approval.py
+          )
+          chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          sudo unshare --mount --net --propagation private -- /bin/bash tests/qualification/run_offline_ipc.sh \
+            "$(readlink /proc/self/ns/net)" "$(readlink /proc/self/ns/mnt)" "$(id -u)" "$(id -g)" \
+            "$stage" "$python" "$GITHUB_WORKSPACE/dist/exec-server-fixture"
+      - name: Test native macOS Unix socket policy with the installed wheel
+        if: runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
+          uv venv --seed --python "$(command -v python)" "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          python="$stage/venv/bin/python"
+          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          fixture="$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          chmod +x "$fixture"
+          cd "$stage"
+          env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
+            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
+      - name: Test Windows named pipes and Unix peer approval with the installed wheel
+        if: runner.os == 'Windows'
+        run: |
+          stage=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/windows-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/tests/qualification"
+          uv venv --seed --python 3.12 "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          "$stage/venv/Scripts/python.exe" -m pip install --constraint "$stage/constraints.txt" \
+            dist/*-win_amd64.whl aiohttp pytest pytest-asyncio
+          python -I - "$stage" <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          stage = Path(sys.argv[1]).resolve(strict=True)
+          fixture = Path("dist/exec-server-fixture.exe").resolve(strict=True)
+          keep = set("""
+              ALLUSERSPROFILE APPDATA COMMONPROGRAMFILES COMMONPROGRAMFILES(X86) COMMONPROGRAMW6432
+              COMPUTERNAME COMSPEC HOMEDRIVE HOMEPATH LOCALAPPDATA NUMBER_OF_PROCESSORS OS PATH PATHEXT
+              PROCESSOR_ARCHITECTURE PROGRAMDATA PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PUBLIC
+              SYSTEMDRIVE SYSTEMROOT TEMP TMP USERDOMAIN USERNAME USERPROFILE WINDIR
+          """.split())
+          env = {key: value for key, value in os.environ.items() if key.upper() in keep}
+          subprocess.run(
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
+               "import os, sys, pytest; sys.path.insert(0, os.getcwd()); "
+               "sys.exit(pytest.main(['-q', 'tests/qualification/unix_peer_approval.py']))"],
+              cwd=stage, env=env, check=True, timeout=90,
+          )
+          subprocess.run(
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
+               "import os, runpy, sys; sys.path.insert(0, os.getcwd()); "
+               "runpy.run_module('tests.qualification.windows_ipc', run_name='__main__')", fixture],
+              cwd=stage, env=env, check=True,
+          )
+          PYTHON
+      - name: Share the package and test executor
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Report native build configuration
+        if: always()
+        env:
+          NATIVE_SOURCE_RUN: ${{ steps.native-source.outputs.run_id }}
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+          RUST_CACHE_MATCHED_KEY: ${{ steps.rust-cache.outputs.cache-matched-key }}
+          RUST_CACHE_OUTCOME: ${{ steps.rust-cache.outcome }}
+        run: |
+          python - <<'PYTHON'
+          import os
+          from pathlib import Path
+          donor = os.environ["NATIVE_SOURCE_RUN"]
+          if donor:
+              cache = f"Qualified native artifact from run {donor}"
+          else:
+              cache = "Compiled native package"
+          if os.environ["RUST_CACHE_HIT"] == "true":
+              cache += "; Rust dependency cache exact hit"
+          elif os.environ["RUST_CACHE_MATCHED_KEY"]:
+              cache += "; Rust dependency cache prefix hit"
+          elif os.environ["RUST_CACHE_OUTCOME"] == "success":
+              cache += "; Rust dependency cache miss"
+          else:
+              cache += "; Rust dependency cache skipped or unavailable"
+          cpus = os.cpu_count()
+          jobs = os.environ.get("CARGO_BUILD_JOBS", f"Cargo default ({cpus} logical CPUs)")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
+              summary.write(f"### Native build\n\n{cache}\n\n")
+              summary.write(f"Runner: {os.environ.get('RUNNER_OS')} / {os.environ.get('RUNNER_ARCH')}; Cargo jobs: {jobs}\n\n")
+              summary.write("See the named workflow steps for cache transfer, wheel build, executor build and installation-check durations.\n")
+              if not donor:
+                  summary.write("Cargo compilation and concurrency reports, when produced, are in the native-timings artifact.\n")
+          PYTHON
+      - name: Share native compilation timings
+        if: always() && steps.native-source.outputs.run_id == '' && steps.clear-timings.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-timings-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
+          if-no-files-found: ignore
+          retention-days: 7
