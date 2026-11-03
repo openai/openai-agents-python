@@ -250,15 +250,15 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
     selected = Environment.local(
         cwd=work, writable_roots=[first, second], tools=["exec_command"], network=network
     )
+    denials = {
+        "blocked.example.invalid": (
+            "domain is explicitly denied by policy and cannot be approved from this prompt"
+        ),
+        "unlisted.example.invalid": "domain is not on the allowlist for the current sandbox mode",
+    }
 
     def command(*, allow: tuple[Path, ...], deny: tuple[Path, ...]) -> str:
         parts = ["set -e", 'test -n "$HTTP_PROXY"']
-        for host in ("blocked.example.invalid", "unlisted.example.invalid"):
-            parts.append(
-                'test "$(curl --silent --show-error --max-time 3 --proxy "$HTTP_PROXY" '
-                "--noproxy '' --output /dev/null --write-out '%{http_code}' "
-                f'http://{host}/)" = 403'
-            )
         for directory in allow:
             parts.append(f"printf allowed >> {shlex.quote(str(directory / 'marker'))}")
         for directory in deny:
@@ -267,11 +267,28 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
         return "; ".join(parts)
 
     async def run_turn(session, call_id, cmd, **settings):
+        start = len(responses.requests)
         responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, call_id))
+        # Core reports a blocked request as a tool failure, so probe each host separately.
+        for host in denials:
+            probe = (
+                'test -n "$HTTP_PROXY" && curl --silent --show-error --max-time 3 '
+                '--proxy "$HTTP_PROXY" '
+                f"--noproxy '' --output /dev/null http://{host}/"
+            )
+            responses.respond(
+                function_call("exec_command", {"cmd": probe, "login": False}, f"{call_id}-{host}")
+            )
         responses.respond(assistant_output(call_id))
         turn = await session.submit(call_id, **settings)
         assert (await turn.get_result()).final_output == call_id
-        assert "Process exited with code 0" in tool_output(responses.requests[-1], call_id)
+        assert "Process exited with code 0" in tool_output(responses.requests[start + 1], call_id)
+        for request, (host, reason) in zip(
+            responses.requests[start + 2 :], denials.items(), strict=True
+        ):
+            output = tool_output(request, f"{call_id}-{host}")
+            assert output.startswith("exec_command failed: ProcessFailed")
+            assert host in output and f"was blocked: {reason}" in output
         return turn.turn_id
 
     async with timeout(60), provider:
