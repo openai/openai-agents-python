@@ -107,11 +107,18 @@ def policy(*, network=""):
     return "\n".join(parts)
 
 
-def run_wrapper(binary, workspace, profile, command, *, tty=False):
+def run_wrapper(binary, workspace, profile, command, *, tty=False, inline=True):
+    if inline:
+        sandbox_args = ["-p", profile]
+    else:
+        # Keep the request small. The inline transport is measured separately.
+        policy_file = workspace.parent / "control" / "seatbelt.sb"
+        policy_file.write_text(profile)
+        sandbox_args = ["-f", policy_file]
     return subprocess.run(
         [
             binary, "tty" if tty else "pipe", workspace, "/usr/bin/sandbox-exec",
-            "-D", f"WORKSPACE={workspace}", "-p", profile, "/bin/sh", "-c", command,
+            "-D", f"WORKSPACE={workspace}", *sandbox_args, "/bin/sh", "-c", command,
         ],
         capture_output=True, text=True, timeout=20,
     )
@@ -124,14 +131,13 @@ def command_status(argv, name):
     )
 
 
-def ordinary(probe, workspace, *, tty=False):
-    args = [str(probe), "inspect", *(["tty"] if tty else [])]
+def ordinary(probe, workspace, git, *, tty=False):
+    args = [probe, "inspect", *(["tty"] if tty else [])]
     return (
-        "set -eu; " + shlex.join(args) + "; "
-        + shlex.join(["/usr/bin/git", "-C", str(workspace), "status", "--short"]) + "; "
-        + 'test "$(/bin/cat tracked.txt)" = "fixture text"; '
+        "set -eu; " + shlex.join(list(map(str, args))) + "; "
+        + 'test "$(/bin/cat tracked.txt)" = "fixture text"; printf "shell-ok\\n"; '
+        + command_status([git, "-C", workspace, "status", "--short"], "git_exit")
         + ("test -t 0 && test -t 1 && /bin/stty -a; " if tty else "")
-        + "printf 'shell-git-ok\\n'; "
     )
 
 
@@ -150,8 +156,32 @@ def check_cleared(output):
     bootstrap, registered, _, host, _, parent = rights(output)
     assert bootstrap == host == parent == "absent", output
     assert int(registered) == 0, output
+    assert "shell-ok" in output.splitlines(), output
+
+
+def check_git(output):
     assert "A  tracked.txt" in output.splitlines(), output
-    assert "shell-git-ok" in output.splitlines(), output
+    assert "git_exit=0" in output.splitlines(), output
+
+
+def compare_transport(original, stock, fixed, workspace, profile):
+    # The managed SDK passes -p in argv. A matched short/large pair measures
+    # the runtime difference independently of whether the policy is permissive.
+    short = "(version 1) (allow default)"
+    command = "printf 'transport-ok\\n'"
+    for label, binary, shape, text, inline in (
+        ("original", original, "short inline", short, True),
+        ("original", original, "large padded inline", short + "\n;" + "x" * len(profile), True),
+        ("original", original, "actual profile inline", profile, True),
+        ("original", original, "actual profile from file", profile, False),
+        ("blocking", stock, "actual profile inline", profile, True),
+        ("cleared", fixed, "actual profile inline", profile, True),
+    ):
+        result = run_wrapper(binary, workspace, text, command, inline=inline)
+        print(f"R15 transport {label} {shape} ({len(text)} bytes): rc={result.returncode}, "
+              f"stdout={result.stdout.strip()!r}, stderr={result.stderr.strip()!r}", flush=True)
+        if label != "original":
+            assert result.returncode == 0 and "transport-ok" in result.stdout, result
 
 
 class LoopbackHandler(BaseHTTPRequestHandler):
@@ -210,6 +240,7 @@ async def test_sdk_seatbelt_bootstrap_port(responses, request):
     domain = f"{kind}/{os.geteuid()}"
     stock = os.environ["SDK_WRAPPER_STOCK"]
     fixed = os.environ["SDK_WRAPPER_CLEARED"]
+    original = str(Path(stock).with_name("bootstrap-original"))
     # The SDK also allows temporary paths. Keep both synthetic siblings in
     # the checkout outside those paths, then grant only the workspace.
     scratch = tempfile.TemporaryDirectory(prefix=".sdk-bootstrap-port-", dir=Path.cwd())
@@ -225,6 +256,8 @@ async def test_sdk_seatbelt_bootstrap_port(responses, request):
          HERE / "probe.c", "-o", probe],
         check=True, timeout=20,
     )
+    git = subprocess.check_output(["/usr/bin/xcrun", "--find", "git"], text=True, timeout=5).strip()
+    assert Path(git).is_file()
     subprocess.run(["/usr/bin/git", "init", "-q", workspace], check=True, timeout=5)
     (workspace / "tracked.txt").write_text("fixture text\n")
     subprocess.run(["/usr/bin/git", "-C", workspace, "add", "tracked.txt"], check=True, timeout=5)
@@ -244,15 +277,15 @@ async def test_sdk_seatbelt_bootstrap_port(responses, request):
         print(f"synthetic kickstart target {idle_service}; out-of-root marker {idle_marker}", flush=True)
 
         command = (
-            ordinary(probe, workspace)
-            + command_status(["/usr/bin/touch", direct_marker], "direct_write_exit")
+            command_status(["/usr/bin/touch", direct_marker], "direct_write_exit")
             + command_status([probe, "run-launchctl", "bootstrap", domain, plist], "bootstrap_exit")
             + command_status([probe, "run-launchctl", "kickstart", idle_service], "kickstart_exit")
+            + ordinary(probe, workspace, git)
         )
         prepared = policy()
         baseline = run_wrapper(stock, workspace, prepared, command)
         observed_stock = await observe(
-            "R15 stock", baseline.stdout + baseline.stderr,
+            "R15 blocking worker", baseline.stdout + baseline.stderr,
             bootstrap_service, bootstrap_marker, idle_service, idle_marker,
         )
         reset_attempt(bootstrap_service, bootstrap_marker, idle_marker, observed_stock)
@@ -263,12 +296,13 @@ async def test_sdk_seatbelt_bootstrap_port(responses, request):
             bootstrap_service, bootstrap_marker, idle_service, idle_marker,
         )
         reset_attempt(bootstrap_service, bootstrap_marker, idle_marker, observed_fixed)
-        tty = run_wrapper(fixed, workspace, prepared, ordinary(probe, workspace, tty=True), tty=True)
+        tty_command = ordinary(probe, workspace, git, tty=True)
+        tty = run_wrapper(fixed, workspace, prepared, tty_command, tty=True)
         print(f"R15 cleared PTY rc={tty.returncode}:\n{tty.stdout}{tty.stderr}", flush=True)
 
         cleared = shlex.join(["exec", str(probe), "clear-all", "/bin/sh", "-c", command])
         terminal = shlex.join([
-            "exec", str(probe), "clear-all", "/bin/sh", "-c", ordinary(probe, workspace, tty=True),
+            "exec", str(probe), "clear-all", "/bin/sh", "-c", tty_command,
         ])
         responses.respond(function_call("exec_command", {"cmd": cleared, "login": False}, "clear"))
         responses.respond(function_call(
@@ -303,6 +337,7 @@ async def test_sdk_seatbelt_bootstrap_port(responses, request):
         print(f"trusted controls: bootstrap_rc={control_bootstrap.returncode}, "
               f"bootstrap_marker={trusted_bootstrap}, kickstart_rc={control_kickstart.returncode}, "
               f"kickstart_marker={trusted_kickstart}, runs={final_runs}", flush=True)
+        compare_transport(original, stock, fixed, workspace, prepared)
         network_comparison(stock, fixed, workspace)
 
         assert control_bootstrap.returncode == 0 and trusted_bootstrap, control_bootstrap.stderr
@@ -321,5 +356,11 @@ async def test_sdk_seatbelt_bootstrap_port(responses, request):
             assert "clear bootstrap_rc=0 registered_rc=0" in output.splitlines(), output
             check_cleared(output)
         assert "controlling-tty-ok" in tty.stdout.splitlines()
-        assert "controlling-tty-ok" in tty_out.splitlines()
+        assert "pty stdio=1" in tty_out
+        check_git(baseline.stdout)
+        check_git(candidate.stdout)
+        for output in (baseline.stdout, candidate.stdout, shell_out):
+            assert re.search(r"^direct_write_exit=[1-9]\d*$", output, re.MULTILINE), output
+            for key in ("bootstrap_exit", "kickstart_exit"):
+                assert re.search(rf"^{key}=\d+$", output, re.MULTILINE), output
         print("PASS: cleared payloads did not delegate; the trusted job and command controls passed")

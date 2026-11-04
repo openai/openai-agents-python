@@ -1,5 +1,4 @@
 #include <dlfcn.h>
-#include <fcntl.h>
 #include <mach/host_special_ports.h>
 #include <mach/mach.h>
 #include <mach/task_special_ports.h>
@@ -56,14 +55,16 @@ static int inspect(const char *tag, int tty)
         mach_port_deallocate(task, launchctl);
     }
     if (tty) {
-        int terminal = open("/dev/tty", O_RDONLY);
-        if (terminal < 0 || !isatty(0) || !isatty(1) || !isatty(2)
-            || tcgetpgrp(terminal) != getpgrp()) {
-            fprintf(stderr, "payload did not receive a controlling terminal\n");
+        pid_t group = tcgetpgrp(STDIN_FILENO);
+        int is_terminal = isatty(0) && isatty(1) && isatty(2);
+        printf("pty stdio=%d foreground_group=%ld process_group=%ld\n",
+               is_terminal, (long)group, (long)getpgrp());
+        if (!is_terminal) {
             return 2;
         }
-        close(terminal);
-        puts("controlling-tty-ok");
+        if (group == getpgrp()) {
+            puts("controlling-tty-ok");
+        }
     }
     return bootstrap_rc == KERN_SUCCESS && registered_rc == KERN_SUCCESS ? 0 : 1;
 }

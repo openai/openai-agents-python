@@ -575,6 +575,9 @@ impl LaunchdJob {
         loop {
             match listener.accept() {
                 Ok((mut stream, _)) => {
+                    // Darwin's accept inherits the listener's nonblocking mode.
+                    // The worker protocol uses blocking I/O with timeouts.
+                    stream.set_nonblocking(false)?;
                     stream.set_read_timeout(Some(
                         deadline
                             .saturating_duration_since(Instant::now())

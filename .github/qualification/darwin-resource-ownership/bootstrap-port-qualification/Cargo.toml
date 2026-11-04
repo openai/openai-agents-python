@@ -10,7 +10,8 @@ name = "sdk-darwin-bootstrap-entry"
 path = "entry.rs"
 
 [features]
-clear-bootstrap = []
+blocking-worker = []
+clear-bootstrap = ["blocking-worker"]
 
 [dependencies]
 anyhow = "=1.0.103"

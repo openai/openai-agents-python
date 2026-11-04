@@ -11,7 +11,11 @@ mod arg0;
 mod darwin_coalition;
 #[cfg_attr(feature = "clear-bootstrap", path = "fixed_darwin_command.rs")]
 #[cfg_attr(
-    not(feature = "clear-bootstrap"),
+    all(feature = "blocking-worker", not(feature = "clear-bootstrap")),
+    path = "blocking_darwin_command.rs"
+)]
+#[cfg_attr(
+    not(feature = "blocking-worker"),
     path = "../wrapper-qualification/production/codex-rs/exec-server/src/darwin_command.rs"
 )]
 mod darwin_command;
@@ -46,6 +50,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
 use tokio::sync::mpsc;
@@ -60,7 +65,9 @@ async fn collect(mut receiver: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
 
 async fn run(tty: bool, cwd: &Path, command: &[String]) -> Result<i32> {
     let executable = std::env::current_exe()?;
-    darwin_command::check_supported(&executable).await?;
+    darwin_command::check_supported(&executable)
+        .await
+        .context("launchd readiness probe")?;
     let (process, control) = darwin_command::spawn(
         &executable,
         command,
@@ -68,21 +75,22 @@ async fn run(tty: bool, cwd: &Path, command: &[String]) -> Result<i32> {
         &HashMap::new(),
         &None,
         tty,
-        /* stdin_open */ false,
+        /* stdin_open */ tty,
         &[],
     )
     .await?;
     let stdout = tokio::spawn(collect(process.stdout_rx));
     let stderr = tokio::spawn(collect(process.stderr_rx));
     control.start()?;
+    let started = control.wait_started().await;
     let status = process.exit_rx.await?;
     std::io::stdout().write_all(&stdout.await?)?;
     std::io::stderr().write_all(&stderr.await?)?;
+    started.context("payload did not reach STARTED")?;
     ensure!(
         control.wait_drained().await && control.is_drained(),
         "wrapper did not drain"
     );
-    control.wait_started().await?;
     Ok(status)
 }
 
