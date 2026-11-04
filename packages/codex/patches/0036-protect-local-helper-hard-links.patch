@@ -1,0 +1,96 @@
+diff --git a/codex-rs/sandboxing/src/local_write_roots.rs b/codex-rs/sandboxing/src/local_write_roots.rs
+index daa968fb3fe64ad5441c3febb5cb95f49a7e6061..a9d8c081966c400e307c847f6da5c97bc0c888ee 100644
+--- a/codex-rs/sandboxing/src/local_write_roots.rs
++++ b/codex-rs/sandboxing/src/local_write_roots.rs
+@@ -9,7 +9,6 @@ use std::os::unix::ffi::OsStringExt;
+ #[cfg(target_os = "linux")]
+ use std::os::unix::fs::MetadataExt;
+ use std::path::Path;
+-#[cfg(target_os = "linux")]
+ use std::path::PathBuf;
+ 
+ /// Canonical local write grants and the Linux mount entries they expose.
+@@ -52,6 +51,54 @@ impl<'a> LocalWriteRoots<'a> {
+         Ok(false)
+     }
+ 
++    /// Detect ordinary hard links to resolved helper files in Linux write grants.
++    #[cfg(target_os = "linux")]
++    pub fn contains_hard_link_to_any(&self, paths: &[PathBuf]) -> io::Result<bool> {
++        let mut linked_helpers = HashSet::new();
++        for path in paths {
++            let metadata = fs::symlink_metadata(path)?;
++            if metadata.is_file() && metadata.nlink() > 1 {
++                linked_helpers.insert((metadata.dev(), metadata.ino()));
++            }
++        }
++        if linked_helpers.is_empty() {
++            return Ok(false);
++        }
++
++        // A package manager may keep other links outside the grants. Walk the
++        // grants once for all multiply linked helpers and never follow symlinks.
++        let mut directories = Vec::new();
++        for root in self.roots {
++            if !self
++                .roots
++                .iter()
++                .any(|other| root != other && root.as_path().starts_with(other.as_path()))
++            {
++                directories.push(root.as_path().to_path_buf());
++            }
++        }
++        while let Some(directory) = directories.pop() {
++            for entry in fs::read_dir(directory)? {
++                let entry = entry?;
++                let kind = entry.file_type()?;
++                if kind.is_dir() {
++                    directories.push(entry.path());
++                } else if kind.is_file() {
++                    let metadata = entry.metadata()?;
++                    if linked_helpers.contains(&(metadata.dev(), metadata.ino())) {
++                        return Ok(true);
++                    }
++                }
++            }
++        }
++        Ok(false)
++    }
++
++    #[cfg(not(target_os = "linux"))]
++    pub fn contains_hard_link_to_any(&self, _paths: &[PathBuf]) -> io::Result<bool> {
++        Ok(false)
++    }
++
+     /// Also includes mounts of existing children of the protected directory.
+     pub fn has_root_at_or_below(&self, path: &Path) -> io::Result<bool> {
+         if self
+@@ -216,6 +263,28 @@ pub fn decode_mountinfo_path(encoded: &[u8]) -> io::Result<PathBuf> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn ordinary_hard_link_to_a_helper_must_be_inside_a_grant() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let workspace = temp.path().join("workspace");
++        let nested = workspace.join("nested");
++        fs::create_dir_all(&nested)?;
++        let helper = temp.path().join("helper");
++        fs::write(&helper, "synthetic helper")?;
++        let store = temp.path().join("store");
++        fs::create_dir(&store)?;
++        fs::hard_link(&helper, store.join("store-entry"))?;
++        std::os::unix::fs::symlink(store, workspace.join("symlink"))?;
++
++        let roots = [AbsolutePathBuf::from_absolute_path(&workspace)?];
++        let grants = LocalWriteRoots::new(&roots)?;
++        let helpers = [helper];
++        assert!(!grants.contains_hard_link_to_any(&helpers)?);
++        fs::hard_link(&helpers[0], nested.join("helper-alias"))?;
++        assert!(grants.contains_hard_link_to_any(&helpers)?);
++        Ok(())
++    }
++
+     #[test]
+     fn nested_mount_exposes_the_helper_identity() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;

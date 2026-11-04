@@ -135,7 +135,19 @@
     {
       "path": "0034-confirm-owned-tree-shutdown.patch",
       "sha256": "d46090b9165a1535b2df44c8f863203be163e6fa16156eef959f1783a16ef01d"
+    },
+    {
+      "path": "0035-scope-managed-process-shutdown.patch",
+      "sha256": "c036ebf1c2db9e048b7ae82d6d86821d92aa05fcaeec88aa687ed70ec6067848"
+    },
+    {
+      "path": "0036-protect-local-helper-hard-links.patch",
+      "sha256": "96cc15f6742b20578468fa01876774bcc735fbea325e442313c20eba12016de5"
+    },
+    {
+      "path": "0037-protect-reverse-local-bind-aliases.patch",
+      "sha256": "1eb99a3ac7386544dcfc83df9977e88050dfdf5bc45011acf61405d6fa10174f"
     }
   ],
-  "result_tree": "71ca73469aa442c3f090376bfaa75ac0590d1415"
+  "result_tree": "f5b9ecaf32cb76cdc296cfd080e53d5393e58eaa"
 }
