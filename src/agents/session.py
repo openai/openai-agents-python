@@ -7595,13 +7595,17 @@ class Session(Generic[ContextT, OutputT]):
                         if self._executor is not None and not self._executor_termination_attempted:
                             self._executor_termination_attempted = True
                             await self._native._terminate_executor_processes()
-                    finally:
-                        try:
-                            await self._native.close()
-                        except BaseException as error:
-                            if state is not None and state.deferred_close is not None:
-                                state.retain_cleanup_error(error)
-                            raise
+                    except BaseException as error:
+                        await _close_after_error(error, self._native.close)
+                        if state is not None and state.deferred_close is not None:
+                            state.retain_cleanup_error(error)
+                        raise
+                    try:
+                        await self._native.close()
+                    except BaseException as error:
+                        if state is not None and state.deferred_close is not None:
+                            state.retain_cleanup_error(error)
+                        raise
                 finally:
                     # Settle before joining interrupts or the reader: they may
                     # themselves be waiting on this unreceived admission.
