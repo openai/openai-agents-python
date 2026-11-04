@@ -171,9 +171,9 @@ jobs:
           mkdir "$volume" "$scratch/HostCaseProbe"
           sensitive="$scratch"
           if [[ -d "$scratch/hostcaseprobe" ]]; then
-            if ! hdiutil create -size 512m -fs 'Case-sensitive APFS' -volname AgentsProfileControl -format UDRW "$scratch/control.dmg"; then
+            if ! hdiutil create -size 512m -fs 'Case-sensitive APFS' -volname AgentsProfileControl "$scratch/control.dmg"; then
               rm -f "$scratch/control.dmg"
-              hdiutil create -size 512m -fs JHFSX -volname AgentsProfileControl -format UDRW "$scratch/control.dmg"
+              hdiutil create -size 512m -fs JHFSX -volname AgentsProfileControl "$scratch/control.dmg"
             fi
             hdiutil attach -owners off -nobrowse -mountpoint "$volume" "$scratch/control.dmg"
             attached=1
