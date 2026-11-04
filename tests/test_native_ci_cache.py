@@ -16,11 +16,15 @@ from tests.test_change_detection import workflow_bash
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def _steps() -> list[dict]:
+def _native_job() -> dict:
     workflow = yaml.load(
         (ROOT / ".github/workflows/codex-python.yml").read_text(), Loader=yaml.BaseLoader
     )
-    return workflow["jobs"]["build"]["steps"]
+    return workflow["jobs"]["build"]
+
+
+def _steps() -> list[dict]:
+    return _native_job()["steps"]
 
 
 def test_native_cache_excludes_credentials_and_final_artifacts() -> None:
@@ -48,8 +52,7 @@ def test_native_cache_excludes_credentials_and_final_artifacts() -> None:
     ]
     assert restore["with"]["key"].startswith(prefix + "${{ hashFiles(")
     assert save["with"]["key"] == "${{ steps.rust-cache.outputs.cache-primary-key }}"
-    assert "github.event_name == 'pull_request'" not in save["if"]
-    assert "github.ref_name == github.event.repository.default_branch" in save["if"]
+    assert "env.NATIVE_CACHE_PUSH == 'true'" in save["if"]
     names = [step.get("name", "") for step in steps]
     assert (
         names.index("Build the shared test executor")
@@ -64,11 +67,79 @@ def test_native_cache_excludes_credentials_and_final_artifacts() -> None:
 def _condition(expression: str, values: dict[str, str]) -> bool:
     expression = expression.removeprefix("${{ ").removesuffix(" }}")
     expression = re.sub(
-        r"(?:github|inputs|steps)\.[a-zA-Z0-9_.-]+",
+        r"(?:github|inputs|steps|env)\.[a-zA-Z0-9_.-]+",
         lambda match: repr(values[match[0]]),
         expression,
     )
     return bool(eval(expression.replace("&&", " and ").replace("||", " or "), {"__builtins__": {}}))
+
+
+@pytest.mark.parametrize(
+    ("event", "repository", "branch", "head_repository", "expected"),
+    [
+        ("push", "openai/openai-agents-python", "main", "", True),
+        ("push", "openai/openai-agents-python", "feat/codex-harness", "", True),
+        ("push", "openai/openai-agents-python", "feature/other", "", False),
+        ("push", "example/fork", "feat/codex-harness", "", False),
+        ("push", "example/fork", "main", "", True),
+        (
+            "pull_request",
+            "openai/openai-agents-python",
+            "123/merge",
+            "openai/openai-agents-python",
+            True,
+        ),
+        ("pull_request", "openai/openai-agents-python", "123/merge", "example/fork", False),
+        ("pull_request", "example/fork", "123/merge", "example/fork", False),
+        ("merge_group", "openai/openai-agents-python", "gh-readonly-queue/main/pr-123", "", False),
+    ],
+)
+def test_native_dependency_cache_saves_only_in_selected_scopes(
+    event: str, repository: str, branch: str, head_repository: str, expected: bool
+) -> None:
+    job = _native_job()
+    values = {
+        "github.event_name": event,
+        "github.repository": repository,
+        "github.ref_name": branch,
+        "github.event.repository.default_branch": "main",
+        "github.event.pull_request.head.repo.full_name": head_repository,
+        "steps.native-source.outputs.run_id": "",
+        "steps.rust-cache.outputs.cache-hit": "false",
+    }
+    values["env.NATIVE_CACHE_PUSH"] = str(
+        _condition(job["env"]["NATIVE_CACHE_PUSH"], values)
+    ).lower()
+    save = next(step for step in job["steps"] if step.get("name") == "Save Rust dependencies")
+    assert _condition(save["if"], values) is expected
+
+
+@pytest.mark.parametrize(
+    ("platform", "override", "expected"),
+    [
+        ("macOS", None, "11.0"),
+        ("macOS", "14.0", "14.0"),
+        ("Linux", None, None),
+        ("Windows", None, None),
+    ],
+)
+def test_native_ci_selects_shared_macos_deployment_target(
+    tmp_path: Path, platform: str, override: str | None, expected: str | None
+) -> None:
+    selection = next(
+        step for step in _steps() if step.get("name") == "Select shared Cargo directories"
+    )
+    output = tmp_path / "environment"
+    env = os.environ.copy()
+    env.pop("MACOSX_DEPLOYMENT_TARGET", None)
+    env.update(RUNNER_OS=platform, RUNNER_TEMP=str(tmp_path), GITHUB_ENV=str(output))
+    if override is not None:
+        env["MACOSX_DEPLOYMENT_TARGET"] = override
+    subprocess.run(
+        [workflow_bash(ROOT), "-e", "-c", selection["run"]], env=env, check=True, timeout=30
+    )
+    selected = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert selected.get("MACOSX_DEPLOYMENT_TARGET") == expected
 
 
 @pytest.mark.parametrize(
@@ -79,8 +150,10 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
         ("push", "feat/v1.0-release", "123", "true", True, "123", False),
         ("push", "feat/v1.0-release", "", "true", True, "", False),
         ("pull_request", "123/merge", "123", "", False, "123", False),
-        ("pull_request", "123/merge", "", "false", True, "", False),
+        ("pull_request", "123/merge", "", "false", True, "", True),
         ("pull_request", "123/merge", "", "true", True, "", False),
+        ("push", "feat/codex-harness", "123", "false", True, "", True),
+        ("push", "feat/codex-harness", "123", "true", True, "123", False),
         ("workflow_dispatch", "feat/v1.0-release", "", "false", True, "", True),
         ("workflow_dispatch", "benchmark", "", "false", True, "", True),
         ("merge_group", "merge-queue", "", "false", True, "", False),
@@ -104,9 +177,14 @@ def test_native_cache_warming_and_retention(
         "github.event_name": event,
         "github.ref_name": branch,
         "github.event.repository.default_branch": "feat/v1.0-release",
+        "github.repository": "openai/openai-agents-python",
+        "github.event.pull_request.head.repo.full_name": "openai/openai-agents-python",
         "inputs.native_source_run": donor,
         "steps.rust-cache.outputs.cache-hit": hit,
     }
+    values["env.NATIVE_CACHE_PUSH"] = str(
+        _condition(_native_job()["env"]["NATIVE_CACHE_PUSH"], values)
+    ).lower()
     assert _condition(restoring["if"], values) is restore
     output = tmp_path / "output"
     env = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}

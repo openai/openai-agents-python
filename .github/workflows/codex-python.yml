@@ -37,6 +37,7 @@ jobs:
         shell: bash
     env:
       CARGO_INCREMENTAL: "0"
+      NATIVE_CACHE_PUSH: ${{ github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch || (github.repository == 'openai/openai-agents-python' && github.ref_name == 'feat/codex-harness')) }}
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: "1"
       # PEP 517 frontends may copy only the wheel out of the backend directory.
@@ -49,6 +50,10 @@ jobs:
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+          # Match Maturin's existing ARM64 wheel minimum before compiling helpers.
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}" >> "$GITHUB_ENV"
+          fi
       - name: Configure Linux dependency registries
         if: runner.os == 'Linux'
         run: |
@@ -83,7 +88,7 @@ jobs:
         # Free Linux disk space before restoring the large dependency cache.
         if: >-
           inputs.native_source_run == '' ||
-          (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+          env.NATIVE_CACHE_PUSH == 'true'
         uses: ./.github/actions/setup-native
       - name: Prepare the source distribution
         # Use one stable source path for Cargo, the wheel and the test executor.
@@ -105,10 +110,10 @@ jobs:
               output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
           PYTHON
       - name: Restore Rust dependencies
-        # Touch the shared cache on default-branch runs, even when reusing a wheel.
+        # Touch the shared cache on trusted branch pushes, even when reusing a wheel.
         if: >-
           inputs.native_source_run == '' ||
-          (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+          env.NATIVE_CACHE_PUSH == 'true'
         id: rust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -126,10 +131,10 @@ jobs:
         id: native-source
         env:
           NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
-          WARM_SHARED_CACHE: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.rust-cache.outputs.cache-hit != 'true' }}
+          WARM_SHARED_CACHE: ${{ env.NATIVE_CACHE_PUSH == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
         run: |
           if [[ "$WARM_SHARED_CACHE" == true ]]; then
-            echo "Building native dependencies to warm the default-branch cache."
+            echo "Building native dependencies to warm the trusted branch cache."
             NATIVE_SOURCE_RUN=''
           fi
           echo "run_id=$NATIVE_SOURCE_RUN" >> "$GITHUB_OUTPUT"
@@ -220,10 +225,10 @@ jobs:
       - name: Save Rust dependencies
         if: >-
           steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true' &&
-          ((github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) ||
-          github.event_name == 'workflow_dispatch')
-        # Automatic PR builds read the shared cache without saving duplicate merge-ref entries.
-        # Explicit manual builds may warm their own branch for controlled comparisons.
+          (env.NATIVE_CACHE_PUSH == 'true' || github.event_name == 'workflow_dispatch' ||
+          (github.repository == 'openai/openai-agents-python' && github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.full_name == github.repository))
+        # PR caches stay in their merge ref; trusted branch pushes warm shared caches.
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
