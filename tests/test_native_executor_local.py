@@ -254,7 +254,7 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
         "blocked.example.invalid": (
             "domain is explicitly denied by policy and cannot be approved from this prompt"
         ),
-        "unlisted.example.invalid": "domain is not on the allowlist for the current sandbox mode",
+        "8.8.8.8": "domain is not on the allowlist for the current sandbox mode",
     }
 
     def command(*, allow: tuple[Path, ...], deny: tuple[Path, ...]) -> str:
