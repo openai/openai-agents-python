@@ -1,0 +1,177 @@
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 502334d2e16dca39e1207363e7ba8eeeed8114bc..4c4efb82a6df5607d672dacd50d5f3f536dcb1ce 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -397,10 +397,11 @@ impl UnifiedExecProcess {
+                 }
+             }
+             #[cfg(target_os = "macos")]
+-            if let Some(control) = &self.darwin_control
+-                && !control.wait_drained().await
+-            {
+-                return false;
++            if let Some(control) = &self.darwin_control {
++                control.resume_wrapper_for_shutdown();
++                if !control.wait_drained().await {
++                    return false;
++                }
+             }
+             state
+                 .wait_for(|state| {
+diff --git a/codex-rs/exec-server/src/darwin_coalition.rs b/codex-rs/exec-server/src/darwin_coalition.rs
+index ae2572f63ea436473710372fbe9b21aa86de5659..b6fd0aef45e30b1e4e6c2e4a2ce981bd0d32b75f 100644
+--- a/codex-rs/exec-server/src/darwin_coalition.rs
++++ b/codex-rs/exec-server/src/darwin_coalition.rs
+@@ -38,9 +38,30 @@ struct ProcessIdentity {
+ }
+ 
+ #[repr(transparent)]
+-struct AuditToken([u32; 8]);
++#[derive(Clone, Copy)]
++pub(crate) struct AuditToken(pub(crate) [u32; 8]);
+ 
+ impl AuditToken {
++    pub(crate) fn current() -> io::Result<Self> {
++        // SAFETY: getpid returns the calling process's PID.
++        let pid = unsafe { libc::getpid() };
++        task_audit_token(kernel_api()?, pid)
++    }
++
++    pub(crate) fn resume(self) -> io::Result<()> {
++        self.signal(kernel_api()?, libc::SIGCONT)
++    }
++
++    fn signal(mut self, api: &KernelApi, signal: c_int) -> io::Result<()> {
++        // SAFETY: This is a complete kernel audit token. XNU validates its PID
++        // and version at signal delivery.
++        let error = unsafe { (api.signal)(&mut self, signal) };
++        if error != 0 {
++            return Err(io::Error::from_raw_os_error(error));
++        }
++        Ok(())
++    }
++
+     fn pid(&self) -> pid_t {
+         self.0[5] as pid_t
+     }
+@@ -269,7 +290,7 @@ impl CoalitionOwner {
+     }
+ 
+     fn kill_member(&self, api: &KernelApi, pid: pid_t, keep_helper: bool) -> io::Result<()> {
+-        let mut token = task_audit_token(api, pid)?;
++        let token = task_audit_token(api, pid)?;
+         if token.pid() != pid {
+             return Err(io::Error::from_raw_os_error(libc::ESRCH));
+         }
+@@ -277,12 +298,7 @@ impl CoalitionOwner {
+         if id == self.id
+             && !(keep_helper && pid == self.helper_pid && identity == self.helper_identity)
+         {
+-            // SAFETY: token is the complete audit token returned by the
+-            // kernel. XNU validates its PID and version at signal delivery.
+-            let error = unsafe { (api.signal)(&mut token, libc::SIGKILL) };
+-            if error != 0 {
+-                return Err(io::Error::from_raw_os_error(error));
+-            }
++            token.signal(api, libc::SIGKILL)?;
+         }
+         Ok(())
+     }
+diff --git a/codex-rs/exec-server/src/darwin_command.rs b/codex-rs/exec-server/src/darwin_command.rs
+index e1cd44b7d0f2a89a3e29c207c7c3941fef87c162..172b94fb0df3ea444c9dbec6b80b32bc4024084c 100644
+--- a/codex-rs/exec-server/src/darwin_command.rs
++++ b/codex-rs/exec-server/src/darwin_command.rs
+@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
+ use tokio::io::AsyncReadExt;
+ use tokio::sync::watch;
+ 
+-use crate::darwin_coalition::CoalitionOwner;
++use crate::darwin_coalition::{AuditToken, CoalitionOwner};
+ use crate::sandboxed_file_open::{receive_file_descriptor, send_file_descriptor};
+ 
+ pub const WRAPPER_ARG: &str = "--codex-sdk-darwin-command";
+@@ -24,6 +24,7 @@ const STARTED: u8 = 2;
+ const DRAINED: u8 = 3;
+ const INTERRUPT: u8 = 4;
+ const EXITED: u8 = 5;
++const WRAPPER_STARTED: u8 = 6;
+ const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+ const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
+ const POLL_INTERVAL: Duration = Duration::from_millis(10);
+@@ -160,7 +161,7 @@ pub async fn check_supported(helper: &Path) -> io::Result<()> {
+ 
+ #[derive(Clone, Copy, Default)]
+ struct ControlState {
+-    started: bool,
++    started_wrapper: Option<AuditToken>,
+     drained: bool,
+     closed: bool,
+ }
+@@ -176,9 +177,20 @@ impl CommandControl {
+         let mut reader = tokio::net::UnixStream::from_std(socket.try_clone()?)?;
+         let (updates, state) = watch::channel(ControlState::default());
+         tokio::spawn(async move {
+-            loop {
++            'messages: loop {
+                 match reader.read_u8().await {
+-                    Ok(STARTED) => updates.send_modify(|state| state.started = true),
++                    Ok(WRAPPER_STARTED) => {
++                        // Only the trusted wrapper can send this frame.
++                        let mut words = [0; 8];
++                        for word in &mut words {
++                            let Ok(value) = reader.read_u32_le().await else {
++                                break 'messages;
++                            };
++                            *word = value;
++                        }
++                        updates
++                            .send_modify(|state| state.started_wrapper = Some(AuditToken(words)));
++                    }
+                     Ok(DRAINED) => updates.send_modify(|state| state.drained = true),
+                     _ => break,
+                 }
+@@ -200,10 +212,22 @@ impl CommandControl {
+         let _ = self.socket.shutdown(Shutdown::Write);
+     }
+ 
++    /// After requesting EOF, allow a stopped, published wrapper to drain its coalition.
++    pub fn resume_wrapper_for_shutdown(&self) {
++        let wrapper = self.state.borrow().started_wrapper;
++        if let Some(wrapper) = wrapper {
++            // Confirmation still depends on DRAINED and on actual wrapper exit.
++            let _ = wrapper.resume();
++        }
++    }
++
+     pub async fn wait_started(&self) -> io::Result<()> {
+         let mut state = self.state.clone();
+-        match state.wait_for(|state| state.started || state.closed).await {
+-            Ok(state) if state.started => Ok(()),
++        match state
++            .wait_for(|state| state.started_wrapper.is_some() || state.closed)
++            .await
++        {
++            Ok(state) if state.started_wrapper.is_some() => Ok(()),
+             _ => Err(io::Error::other(
+                 "managed local launchd command did not start",
+             )),
+@@ -296,6 +320,7 @@ fn run_managed(
+     owner: &CoalitionOwner,
+     request: &JobRequest,
+ ) -> io::Result<i32> {
++    let wrapper_token = AuditToken::current()?;
+     worker.write_all(&owner.id().to_le_bytes())?;
+     let bytes = serde_json::to_vec(request)?;
+     if bytes.len() > MAX_REQUEST_SIZE {
+@@ -320,7 +345,10 @@ fn run_managed(
+         }
+         if worker_ready {
+             match read_byte(worker)? {
+-                Some(STARTED) => control.write_all(&[STARTED])?,
++                Some(STARTED) => {
++                    control.write_all(&[WRAPPER_STARTED])?;
++                    control.write_all(wrapper_token.0.map(u32::to_le_bytes).as_flattened())?;
++                }
+                 Some(EXITED) => {
+                     let mut status = [0; 4];
+                     worker.read_exact(&mut status)?;

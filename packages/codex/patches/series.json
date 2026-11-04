@@ -151,7 +151,11 @@
     {
       "path": "0038-protect-macos-local-helper-hard-links.patch",
       "sha256": "dd1f102c61a4d8bac29b72dfbce0bb334228b0c31e3212590ebeac8f0f39cf08"
+    },
+    {
+      "path": "0039-resume-trusted-darwin-wrapper-during-shutdown.patch",
+      "sha256": "8e51ed328d871fa82532f9a8a4d2bfd33134852e936c0c092387c871adc8a049"
     }
   ],
-  "result_tree": "1e2d2b1a90ae8e211a261de8b12a09e7678d2b88"
+  "result_tree": "b4a5550a1ef384beb86c114acd231c9fb83c5927"
 }
