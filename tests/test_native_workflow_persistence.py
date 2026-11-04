@@ -28,7 +28,7 @@ from agents import (
 )
 from agents.state import SessionState
 from tests._asyncio import timeout
-from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_executor_fixtures import ExecutorPeer, assert_portable_executor_turns
 from tests.native_fixtures import (
     assistant_output,
     function_call,
@@ -417,7 +417,9 @@ async def worker() -> None:
             assert restored_state.root_goal == saved.root_goal
             assert restored_state.root_checklist == saved.root_checklist
             assert [item async for item in session.items()] == previous["root_items"]
-            assert [item async for item in session.turns()] == previous["root_turns"]
+            assert_portable_executor_turns(
+                [item async for item in session.turns()], previous["root_turns"]
+            )
             child_id = previous["child_id"]
             children = [item async for item in session.subagents()]
             assert [child.id for child in children] == [child_id]
@@ -428,7 +430,7 @@ async def worker() -> None:
                 "child_items"
             ]
             child_turns = [item async for item in session.turns(subagent_id=child_id)]
-            assert child_turns == previous["child_turns"]
+            assert_portable_executor_turns(child_turns, previous["child_turns"])
             assert any(
                 turn["id"] == previous["child_turn_id"] and turn["status"] == "completed"
                 for turn in child_turns

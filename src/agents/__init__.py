@@ -105,6 +105,12 @@ if TYPE_CHECKING:
         Turn as Turn,
         TurnNeedsAttention as TurnNeedsAttention,
     )
+    from .turn_receipt import (
+        ExecutorNetworkReceipt as ExecutorNetworkReceipt,
+        ExecutorPolicyReceipt as ExecutorPolicyReceipt,
+        InstructionFileReceipt as InstructionFileReceipt,
+        TurnReceipt as TurnReceipt,
+    )
 
 _MODULES = {
     "Allow": ".native_interception",
@@ -179,6 +185,10 @@ _MODULES = {
     "PendingRequests": ".turn",
     "SteeringReceipt": ".turn",
     "TurnNeedsAttention": ".turn",
+    "ExecutorNetworkReceipt": ".turn_receipt",
+    "ExecutorPolicyReceipt": ".turn_receipt",
+    "InstructionFileReceipt": ".turn_receipt",
+    "TurnReceipt": ".turn_receipt",
     "Subagent": ".subagents",
 }
 
