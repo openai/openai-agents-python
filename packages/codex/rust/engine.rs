@@ -58,6 +58,7 @@ pub struct EngineState {
     // (which itself owns its EngineState) alive.
     native_threads: std::sync::Mutex<Vec<Weak<std::sync::Mutex<crate::NativeThreadOwner>>>>,
     pub startup_warnings: Vec<String>,
+    pub(crate) codex_account: Option<crate::auth::CodexAccount>,
     extension_events: Arc<extensions::Events>,
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
@@ -66,25 +67,34 @@ pub struct EngineState {
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
 }
 
-const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
+const CODEX_LOGIN_PROVIDER: &str = "native_agent_codex_login";
+const CODEX_LOGIN_PROVIDER_PREFIX: &str = "native_agent_codex_login_";
 
 impl EngineState {
-    fn requires_model_validation(config: &Config) -> bool {
-        config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX)
-            || (config.web_search_mode.value()
-                != codex_protocol::config_types::WebSearchMode::Disabled
-                && !config.features.enabled(Feature::StandaloneWebSearch))
+    fn bind_codex_login(config: &mut Config, provider_id: &str) -> anyhow::Result<()> {
+        ensure!(
+            config.model_provider_id == CODEX_LOGIN_PROVIDER
+                || config.model_provider_id == provider_id,
+            "The selected model provider must use the saved Codex login"
+        );
+        config.model_provider_id = provider_id.to_owned();
+        config
+            .model_providers
+            .insert(provider_id.to_owned(), config.model_provider.clone());
+        Ok(())
     }
 
-    pub(crate) fn validate_model_for_provider(
-        config: &Config,
-        info: &ModelInfo,
-    ) -> anyhow::Result<()> {
-        // Lite puts function and custom tool declarations in additional_tools.
+    fn validate_resume_provider(stored: &str, current: &str) -> anyhow::Result<()> {
         ensure!(
-            !config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX) || info.use_responses_lite,
-            "Sign in with ChatGPT requires a native model with Responses Lite support"
+            (!stored.starts_with(CODEX_LOGIN_PROVIDER_PREFIX)
+                && !current.starts_with(CODEX_LOGIN_PROVIDER_PREFIX))
+                || stored == current,
+            "Local thread and Session must use the same authentication mode and Codex login"
         );
+        Ok(())
+    }
+
+    pub(crate) fn validate_hosted_search(config: &Config, info: &ModelInfo) -> anyhow::Result<()> {
         // Lite selects Core's standalone executor even with its feature flag
         // off. A hosted grant must not silently acquire that other route.
         ensure!(
@@ -96,28 +106,21 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) async fn validate_session_model(&self, model: &str) -> anyhow::Result<()> {
-        if Self::requires_model_validation(&self.service_config) {
+    pub(crate) async fn validate_hosted_search_model(&self, model: &str) -> anyhow::Result<()> {
+        if self.service_config.web_search_mode.value()
+            != codex_protocol::config_types::WebSearchMode::Disabled
+            && !self
+                .service_config
+                .features
+                .enabled(Feature::StandaloneWebSearch)
+        {
             let info = self
                 .manager
                 .get_models_manager()
                 .get_model_info(model, &self.service_config.to_models_manager_config())
                 .await;
-            Self::validate_model_for_provider(&self.service_config, &info)?;
+            Self::validate_hosted_search(&self.service_config, &info)?;
         }
-        Ok(())
-    }
-
-    fn validate_resume_provider(
-        stored_provider: &str,
-        current_provider: &str,
-    ) -> anyhow::Result<()> {
-        ensure!(
-            (!stored_provider.starts_with(SIWC_PROVIDER_PREFIX)
-                && !current_provider.starts_with(SIWC_PROVIDER_PREFIX))
-                || stored_provider == current_provider,
-            "Local thread and Session must use the same model authentication mode and ChatGPT registration"
-        );
         Ok(())
     }
 
@@ -194,6 +197,20 @@ impl EngineState {
                 "native local SDK storage requires non-ephemeral threads"
             );
         }
+        let (auth, codex_account) = if let Some(login) = config::sdk_codex_login(&runtime_json)? {
+            ensure!(
+                api_key.is_none(),
+                "A saved Codex login cannot use an API key"
+            );
+            let (manager, account) = login.open(&config)?;
+            Self::bind_codex_login(
+                &mut config,
+                &format!("{CODEX_LOGIN_PROVIDER_PREFIX}{}", account.binding),
+            )?;
+            (manager, Some(account))
+        } else {
+            (crate::auth::manager(&config, api_key).await?, None)
+        };
         let goals_enabled = config::native_goal_store_enabled(&runtime_json)?;
         let state_db = if goals_enabled || local_home.is_some() {
             // StateRuntime supplies the exact goal store used by the extension.
@@ -231,7 +248,18 @@ impl EngineState {
             Some(store) => store.clone(),
             None => Arc::new(crate::storage::MemoryThreadStore::default()),
         };
-        let auth = crate::auth::manager(&config, api_key).await?;
+        if let Some(id) = config::sdk_resume_thread_id(&runtime_json)?
+            && local_checklist_store.is_some()
+        {
+            let stored = store
+                .read_thread(ReadThreadParams {
+                    thread_id: id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await?;
+            Self::validate_resume_provider(&stored.model_provider, &config.model_provider_id)?;
+        }
         let provider = codex_model_provider::create_model_provider(
             config.model_provider.clone(),
             Some(auth.clone()),
@@ -252,7 +280,10 @@ impl EngineState {
                 ModelsResponse { models: catalog },
             ))
         } else {
-            if Self::requires_model_validation(&config) {
+            if config.web_search_mode.value()
+                != codex_protocol::config_types::WebSearchMode::Disabled
+                && !config.features.enabled(Feature::StandaloneWebSearch)
+            {
                 let model = if checkpoint {
                     initial_model.clone()
                 } else {
@@ -266,18 +297,14 @@ impl EngineState {
                             local_checklist_store.is_some(),
                             "SDK resume requires current native local storage"
                         );
-                        let stored = store
+                        let model = store
                             .read_thread(ReadThreadParams {
                                 thread_id: id,
                                 include_archived: true,
                                 include_history: false,
                             })
-                            .await?;
-                        Self::validate_resume_provider(
-                            &stored.model_provider,
-                            &config.model_provider_id,
-                        )?;
-                        let model = stored.model;
+                            .await?
+                            .model;
                         local_checklist_store
                             .as_ref()
                             .expect("local store checked above")
@@ -304,7 +331,7 @@ impl EngineState {
                     let info = models
                         .get_model_info(&model, &config.to_models_manager_config())
                         .await;
-                    Self::validate_model_for_provider(&config, &info)?;
+                    Self::validate_hosted_search(&config, &info)?;
                 }
             }
             models
@@ -402,6 +429,7 @@ impl EngineState {
             event_owners: Mutex::new(HashMap::new()),
             managed_thread_ids: Mutex::new(HashSet::new()),
             startup_warnings: config.startup_warnings.clone(),
+            codex_account,
             extension_events,
             cloud_config,
             service_config: config,
@@ -1130,8 +1158,11 @@ impl EngineState {
                 config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
             }]);
         }
-        let config = &startup.config;
         let original = &self.service_config;
+        if self.codex_account.is_some() {
+            Self::bind_codex_login(&mut startup.config, &original.model_provider_id)?;
+        }
+        let config = &startup.config;
         if let Some(enabled) = self.sdk_user_input_enabled {
             ensure!(
                 config.experimental_request_user_input_enabled == enabled,

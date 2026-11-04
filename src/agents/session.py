@@ -32,15 +32,13 @@ from ._history import project_history
 from ._native_async import _NativeCompletionError
 from ._projection import _error_code
 from .agent import (
-    _SIWC_AUDIENCE,
-    _SIWC_PROVIDER_PREFIX,
     Agent,
+    CodexAccount,
     ContextT,
     ModelSettings,
     NativeProvider,
     OutputT,
     _copy_model_settings,
-    _siwc_binding,
     _SyncRun,
 )
 from .executor import Environment, EnvironmentSource, ExecutorContext
@@ -623,7 +621,7 @@ class _Invocation:
 
 
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
-_SIWC_RESPONSES_BASE_URL = _SIWC_AUDIENCE
+_CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
 @dataclass(repr=False)
@@ -1106,26 +1104,6 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
-def _split_agent_tools(
-    agent: Agent[ContextT, Any],
-) -> tuple[tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents | None]:
-    tools = _split_tools(agent.tools, agent.programmatic_tool_calling)
-    if agent.provider is None or agent.provider.auth is None:
-        return tools
-    python_tools, mcp_tools, _ = tools
-    if agent.programmatic_tool_calling:
-        raise ValueError("Sign in with ChatGPT does not support programmatic_tool_calling")
-    if any(tool.defer_loading for tool in python_tools) or any(
-        server.defer_loading for server in mcp_tools
-    ):
-        raise ValueError("Sign in with ChatGPT does not support deferred tool loading")
-    if any(isinstance(server, (ChatGPTAppsMCP, HostedVerificationMCP)) for server in mcp_tools):
-        raise ValueError("Sign in with ChatGPT does not support hosted Apps MCP tools")
-    if any(isinstance(tool, WebSearch) for tool in agent.tools):
-        raise ValueError("Sign in with ChatGPT does not support WebSearch")
-    return tools
-
-
 def _selected_tool_refs(
     selection: Sequence[Any],
     python: Sequence[FunctionTool[Any, Any, Any]],
@@ -1355,6 +1333,7 @@ class Session(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         _captured_api_key: str | None = None,
+        _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
         if storage is not None and not isinstance(storage, LocalStorage):
             raise TypeError("storage must be a LocalStorage")
@@ -1403,7 +1382,7 @@ class Session(Generic[ContextT, OutputT]):
                 output_type=cast(OutputSpec[OutputT], agent.output_type),
                 programmatic_tool_calling=agent.programmatic_tool_calling,
             )
-        sign_in = agent.provider.auth if agent.provider is not None else None
+        codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
@@ -1421,14 +1400,12 @@ class Session(Generic[ContextT, OutputT]):
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
             _check_checkpoint(saved, agent.instructions)
-            if (saved.chatgpt_auth_binding is not None) != (sign_in is not None):
-                raise ValueError(
-                    "Checkpoint and Session must use the same model authentication mode"
-                )
+            if (saved.codex_login_binding is not None) != (codex_login is not None):
+                raise ValueError("Checkpoint and Session must use the same authentication mode")
             # The binding still consumes its original idle/manual format.
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
-            payload.pop("chatgpt_auth_binding", None)
+            payload.pop("codex_login_binding", None)
             if saved.format_version in (4, 5, 6, 7):
                 payload["format_version"] = saved.format_version - 2
             payload.pop("operation_tools", None)
@@ -1447,7 +1424,7 @@ class Session(Generic[ContextT, OutputT]):
             continuation = saved.native_continuation
             if manual_restore:
                 restored_model_settings = _manual_restore_model_settings(saved)
-        tools, mcp_tools, native_agents = _split_agent_tools(agent)
+        tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -1632,7 +1609,7 @@ class Session(Generic[ContextT, OutputT]):
             if executor is not None:
                 executor._check_context(context)
             home: TemporaryDirectory[str] | None = None
-            runtime = {
+            runtime: dict[str, Any] = {
                 "strict_config": True,
                 "loader": {"ignore_user_config": True, "ignore_project_config": True},
                 "base_instructions": (
@@ -1640,6 +1617,18 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
+            if codex_login is not None:
+                runtime["_sdk_codex_login"] = {
+                    "codex_home": (
+                        None if codex_login.codex_home is None else str(codex_login.codex_home)
+                    ),
+                    "account_id": codex_login.account_id,
+                    "expected_binding": (
+                        saved.codex_login_binding
+                        if state is not None
+                        else _expected_codex_login_binding
+                    ),
+                }
             if storage is not None:
                 runtime.update(native_thread_store=str(storage.path), ephemeral=False)
                 if resume is not None:
@@ -1688,44 +1677,23 @@ class Session(Generic[ContextT, OutputT]):
                 session = None
                 engine = None
                 thread = None
-                if selected is not None and sign_in is None:
-                    opening.api_key = selected.api_key
-                elif _captured_api_key is not None:
-                    opening.api_key = _captured_api_key
-                elif sign_in is not None:
-                    opening.api_key = await sign_in._resolve_access_token()
-                elif provider.api_key is None:
-                    opening.api_key = native._read_openai_api_key_from_env()
-                else:
-                    opening.api_key = provider.api_key
-                provider_id = "native_agent"
-                auth_binding = None
-                if sign_in is not None:
-                    auth_binding = _siwc_binding(opening.api_key)
-                    if auth_binding is None:
-                        raise ValueError(
-                            "Provide a Sign in with ChatGPT access token for Responses"
-                        )
-                    if state is not None and saved.chatgpt_auth_binding != auth_binding:
-                        raise ValueError("Checkpoint requires the original ChatGPT registration")
-                    provider_id = _SIWC_PROVIDER_PREFIX + auth_binding
+                provider_id = (
+                    "native_agent_codex_login" if codex_login is not None else "native_agent"
+                )
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
                     "model_provider": provider_id,
                     f"model_providers.{provider_id}": {
-                        "name": "Native agent provider",
+                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
                         "base_url": (
-                            _SIWC_RESPONSES_BASE_URL
-                            if sign_in is not None
-                            else provider.base_url or _SIWC_AUDIENCE
+                            _CODEX_RESPONSES_BASE_URL
+                            if codex_login is not None
+                            else provider.base_url or "https://api.openai.com/v1"
                         ),
                         "wire_api": "responses",
                         "requires_openai_auth": True,
                         "supports_websockets": provider._websockets_enabled,
-                        # The pinned Core treats unknown failed-stream codes as
-                        # retryable, including ChatGPT plan usage-limit errors.
-                        **({"stream_max_retries": 0} if sign_in is not None else {}),
                         # Both native web protocols require a compatible Responses
                         # provider. The declaration admits that provider capability.
                         "supports_standalone_web_search": (
@@ -1814,6 +1782,16 @@ class Session(Generic[ContextT, OutputT]):
                             "tools.experimental_request_user_input.enabled": False,
                         }
                     )
+                if codex_login is not None:
+                    opening.api_key = None
+                elif selected is not None:
+                    opening.api_key = selected.api_key
+                elif _captured_api_key is not None:
+                    opening.api_key = _captured_api_key
+                elif provider.api_key is None:
+                    opening.api_key = native._read_openai_api_key_from_env()
+                else:
+                    opening.api_key = provider.api_key
                 hosted_verification = next(
                     (server for server in allowed_mcp if type(server) is HostedVerificationMCP),
                     None,
@@ -1972,8 +1950,8 @@ class Session(Generic[ContextT, OutputT]):
                     create_engine(
                         json.dumps(config),
                         json.dumps(runtime),
-                        # None would let native read a later environment value.
-                        api_key=opening.api_key or "",
+                        # Preserve the captured environment value in API-key mode.
+                        api_key=None if codex_login is not None else (opening.api_key or ""),
                         provider_lease=provider_lease,
                         **(
                             {
@@ -2011,7 +1989,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
-                session._chatgpt_auth_binding = auth_binding
+                if codex_login is not None:
+                    account_id, plan_type, binding = engine._codex_account
+                    session._codex_account = CodexAccount(
+                        account_id=account_id, plan_type=plan_type
+                    )
+                    session._codex_login_binding = binding
+                    # Application-supplied compaction opens a replacement engine.
+                    runtime["_sdk_codex_login"]["expected_binding"] = binding
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
@@ -2102,13 +2087,15 @@ class Session(Generic[ContextT, OutputT]):
                                 "its runtime cannot be restored"
                             )
                 if (
-                    sign_in is not None or (web_search is not None and web_search.route == "hosted")
-                ) and (checkpoint is not None or "model" not in settings):
+                    web_search is not None
+                    and web_search.route == "hosted"
+                    and (checkpoint is not None or "model" not in settings)
+                ):
                     # Without a destination model, the restored model owns
                     # admission. Validate it before publishing any startup
                     # settings or instructions to an addressable local thread.
                     # Explicit model updates validate natively before writing.
-                    await session._publish_startup(thread._validate_session_model())
+                    await session._publish_startup(thread._validate_hosted_search_model())
                 if checkpoint is None and settings:
                     if (
                         await session._publish_startup(
@@ -2253,7 +2240,8 @@ class Session(Generic[ContextT, OutputT]):
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._model_api_key: str | None = None
-        self._chatgpt_auth_binding: str | None = None
+        self._codex_account: CodexAccount | None = None
+        self._codex_login_binding: str | None = None
         self._native_options: str | None = None
         self._websockets_enabled = False
         self._engine = engine
@@ -2337,6 +2325,11 @@ class Session(Generic[ContextT, OutputT]):
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def codex_account(self) -> CodexAccount | None:
+        """Read the saved Codex account and plan type selected at opening."""
+        return self._codex_account
 
     def events(self, *, after: int = 0) -> EventStream:
         """Observe all turns until this Session ends.
@@ -3350,7 +3343,9 @@ class Session(Generic[ContextT, OutputT]):
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),
                 json.dumps(options["runtime"]),
-                api_key=self._model_api_key or "",
+                api_key=(
+                    None if self._codex_login_binding is not None else (self._model_api_key or "")
+                ),
                 provider_lease=self._provider_lease,
                 **(
                     {
@@ -5158,7 +5153,8 @@ class Session(Generic[ContextT, OutputT]):
         handle = state.handle
         assert handle is not None and handle.turn_id is not None and self._opening_agent is not None
         provider = self._opening_agent.provider or self._owned_provider
-        assert provider is not None and self._model_api_key is not None
+        assert provider is not None
+        assert self._model_api_key is not None or self._codex_login_binding is not None
         history = json.loads(await self._native.read_thread_history(None))
         captured = None
         for row in reversed(history):
@@ -5194,7 +5190,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise asyncio.CancelledError()
             if state.failure.done():
                 raise state.failure.result()
-            repair = await Session._open(declaration, _captured_api_key=self._model_api_key)
+            repair = await Session._open(
+                declaration,
+                _captured_api_key=self._model_api_key,
+                _expected_codex_login_binding=self._codex_login_binding,
+            )
             repair._observations.repair_parent = (self._observations, handle.submission_id)
             try:
                 if state.graceful_requested:
@@ -7120,8 +7120,15 @@ class Session(Generic[ContextT, OutputT]):
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}
-            if self._chatgpt_auth_binding is not None:
-                payload["chatgpt_auth_binding"] = self._chatgpt_auth_binding
+            if self._codex_login_binding is not None:
+                payload["codex_login_binding"] = self._codex_login_binding
+                # Core adds creator identity to its live history. Portable
+                # snapshots need only the binding to validate a fresh login.
+                for captured in (payload, *payload["descendants"]):
+                    for item in captured["history"]:
+                        if item["type"] == "session_meta":
+                            item["payload"].pop("creator_account_id", None)
+                            item["payload"].pop("creator_user_id", None)
             if active is None:
                 # Do not persist a temporary operation as an idle default.
                 # Only selectors cross restore, never endpoints or credentials.

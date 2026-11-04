@@ -69,9 +69,9 @@
       "sha256": "4406a07b8bcd9769595ba9295e10986311e8b3fd96bcfeda3d9dfe13a3095048"
     },
     {
-      "path": "0018-native-stream-error-code.patch",
-      "sha256": "3a65c5ff9032aadb5903d56be4909267bdf569337129e456a0b20fa8eab3b750"
+      "path": "0018-saved-codex-login.patch",
+      "sha256": "4d9993f691208259f5fe320849d6968b30c2574fcc24b556b8233171f6958096"
     }
   ],
-  "result_tree": "945f75862b2156e0dbce0685c59646c2e93b8246"
+  "result_tree": "b031c4ebd6346732ad7295be8d7c862548437db7"
 }
