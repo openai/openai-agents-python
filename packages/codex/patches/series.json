@@ -171,7 +171,11 @@
     {
       "path": "0043-stop-responses-http-retries.patch",
       "sha256": "006646a16bc679be2c6824cf20e83ff365c54c58ed5d581ade421af07bf10e3b"
+    },
+    {
+      "path": "0044-scan-deep-helper-hard-links.patch",
+      "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
     }
   ],
-  "result_tree": "52c466ac5a72802e4bebdcd075d27012afbedece"
+  "result_tree": "fc1ed1b5c1649e5ca265af011f4748f9af391744"
 }
