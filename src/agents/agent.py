@@ -10,6 +10,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import FrozenInstanceError, dataclass, field, replace
+from pathlib import Path
 from threading import RLock
 from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
@@ -483,6 +484,7 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
+        instruction_files: Sequence[Path] = (),
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -498,6 +500,7 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
+        instruction_files: Sequence[Path] = (),
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -513,6 +516,7 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -528,6 +532,7 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -574,6 +579,10 @@ class Agent(Generic[ContextT, OutputT]):
         the same conversation. This requires the current tools, context and
         provider. Missing tool receipts are rejected as unknown effects, not
         replayed. Local storage and portable ``state`` cannot be combined.
+
+        Pass instruction_files to load trusted UTF-8 files as application
+        instructions. Use files and parent directories that untrusted actors
+        cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
         from .session import Session, _close_after_error
 
@@ -588,6 +597,7 @@ class Agent(Generic[ContextT, OutputT]):
             model=model,
             model_settings=model_settings,
             tool_selection=tools,
+            instruction_files=instruction_files,
         )
         try:
             yield session

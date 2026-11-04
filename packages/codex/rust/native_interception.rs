@@ -1853,6 +1853,21 @@ impl ThreadLifecycleContributor<Config> for Boundary {
                 }
                 let _ = control.native_agents.set(policy);
             }
+            // Custom roles own their developer instructions even when their text matches.
+            if !root
+                && let Some(policy) = control.native_agents.get()
+                && !control
+                    .agent_role
+                    .get()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|role| policy.roles.contains(role))
+            {
+                crate::application_instructions::retain_child_files(
+                    input.thread_store,
+                    input.config,
+                    &policy.instruction_files,
+                );
+            }
             if root
                 && let Some(policy) = input.thread_store.get::<ToolPolicy>()
                 && let Some(admission) = PinnedExecutorAdmission::from_policy(&policy, input.config)

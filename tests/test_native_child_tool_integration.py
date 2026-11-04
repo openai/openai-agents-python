@@ -28,6 +28,7 @@ from agents import (
     function_tool,
 )
 from agents.observation import (
+    ExecutionItemCompleted,
     OutputTextDelta,
     SessionEnded,
     ToolFinished,
@@ -300,7 +301,7 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 assert "accepted:" + name in child_wire
                 assert "accepted-mcp:" + handle.child_id in child_wire
                 assert "accepted:" + ({"alpha", "beta"} - {name}).pop() not in child_wire
-                events = await collect(handle.events())
+                events = await collect(handle.events(include_execution_details=True))
                 assert any(
                     isinstance(event, ToolStarted) and event.family == "function"
                     for event in events
@@ -315,6 +316,18 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 assert any(
                     isinstance(event, ToolFinished) and event.family == "mcp" for event in events
                 )
+                execution = [
+                    event.item for event in events if isinstance(event, ExecutionItemCompleted)
+                ]
+                [mcp] = [item for item in execution if item["type"] == "mcp_call"]
+                assert (mcp["thread_id"], mcp["turn_id"]) == (handle.child_id, handle.turn_id)
+                assert "accepted-mcp:" + handle.child_id in str(mcp["output"])
+                assert "mcp-private-f126" not in str(mcp)
+                assert [
+                    item
+                    async for item in session.items(subagent_id=handle.child_id)
+                    if item["type"] == "mcp_call"
+                ] == [mcp]
                 if execute:
                     assert (executor.root.parent / f"{name}.txt").read_text() == f"protected-{name}"
                     response = code_output(peer.child_requests[name][-1], "shared-exec-id")

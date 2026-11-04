@@ -13,6 +13,7 @@ from ._events import (
     EnvironmentError,
     EnvironmentStatus,
     ErrorEvent,
+    ExecutionItem,
     Failure,
     NativeEvent,
     RequiredAction,
@@ -119,6 +120,84 @@ def _error_http_status(error: dict[str, Any], fallback: int | None = None) -> in
             if type(status) is int and 400 <= status <= 599:
                 return status
     return fallback
+
+
+_EXECUTION_KINDS = {"CommandExecution", "FileChange", "McpToolCall"}
+
+
+def _execution_item(
+    native: dict[str, Any], thread_id: str | None, turn_id: str
+) -> dict[str, Any] | None:
+    item_id = native.get("id")
+    if not isinstance(item_id, str) or not item_id:
+        return None
+    native_status = native.get("status")
+    status = {
+        "inProgress": "in_progress",
+        "declined": "incomplete",
+    }.get(native_status or "", native_status or "incomplete")
+    common = {
+        "id": item_id,
+        "call_id": item_id,
+        "thread_id": thread_id,
+        "turn_id": turn_id,
+        "status": status,
+        "native_status": native_status,
+    }
+    if native["type"] == "McpToolCall":
+        return {
+            **common,
+            "type": "mcp_call",
+            "server_label": native["server"],
+            "name": native["tool"],
+            "arguments": native["arguments"],
+            "output": native.get("result"),
+            "error": native.get("error"),
+        }
+    if native["type"] == "CommandExecution":
+        duration = native.get("duration")
+        duration_ms = None
+        if isinstance(duration, dict):
+            duration_ms = duration.get("secs", 0) * 1000 + duration.get("nanos", 0) // 1_000_000
+        return {
+            **common,
+            "type": "command_execution",
+            "command": shlex.join(native["command"]),
+            "argv": native["command"],
+            "cwd": native.get("cwd"),
+            "output": native.get("aggregated_output"),
+            "exit_code": native.get("exit_code"),
+            "duration_ms": duration_ms,
+        }
+    if native["type"] == "FileChange":
+        return {
+            **common,
+            "type": "patch_execution",
+            "changes": native["changes"],
+            "stdout": native.get("stdout"),
+            "stderr": native.get("stderr"),
+        }
+    return None
+
+
+def project_execution_completion(
+    message: dict[str, Any], *, thread_id: str | None, turn_id: str
+) -> ExecutionItem | None:
+    """Project a canonical completion owned by this exact native turn."""
+    if (
+        message["type"] != "item_completed"
+        or message.get("thread_id") != thread_id
+        or message.get("turn_id") != turn_id
+    ):
+        return None
+    native = message.get("item")
+    if (
+        not isinstance(native, dict)
+        or native.get("type") not in _EXECUTION_KINDS
+        or native.get("status") in {"in_progress", "inProgress"}
+    ):
+        return None
+    return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
 
 
 class EventProjector:
@@ -354,32 +433,8 @@ class EventProjector:
                 "arguments": native["arguments"],
                 "status": "failed" if native.get("success") is False else native["status"],
             }
-        if kind == "McpToolCall":
-            return {
-                **common,
-                "type": "mcp_call",
-                "server_label": native["server"],
-                "name": native["tool"],
-                "arguments": native["arguments"],
-                "status": {"inProgress": "in_progress"}.get(native["status"], native["status"]),
-                "output": native.get("result"),
-                "error": native.get("error"),
-            }
-        if kind == "CommandExecution":
-            duration = native.get("duration")
-            duration_ms = None
-            if isinstance(duration, dict):
-                duration_ms = duration.get("secs", 0) * 1000 + duration.get("nanos", 0) // 1_000_000
-            return {
-                **common,
-                "type": "command_execution",
-                "command": shlex.join(native["command"]),
-                "cwd": native.get("cwd"),
-                "status": "incomplete" if native["status"] == "declined" else native["status"],
-                "output": native.get("aggregated_output"),
-                "exit_code": native.get("exit_code"),
-                "duration_ms": duration_ms,
-            }
+        if turn_id is not None and kind in _EXECUTION_KINDS:
+            return _execution_item(native, None, turn_id)
         return project_subagent_item(
             native, done, turn_id, self.source_id
         ) or project_web_search_item(native, done, turn_id)
@@ -491,6 +546,8 @@ class EventProjector:
                 initial.update(output=None, exit_code=None, duration_ms=None)
             elif initial["type"] == "mcp_call":
                 initial.update(output=None, error=None)
+            elif initial["type"] == "patch_execution":
+                initial.update(stdout=None, stderr=None)
         result = self._item_added(turn_id, initial)
         if not done:
             return result

@@ -17,7 +17,19 @@ from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, WSMsgTyp
 from aiohttp.test_utils import TestServer, unused_port
 
 import agents
+from agents.history import RecordedTurn
 from tests._asyncio import timeout
+
+
+def assert_portable_executor_turns(restored: list[RecordedTurn], live: list[RecordedTurn]) -> None:
+    """Compare turns that sampled the fixture executor before a portable restore."""
+    assert restored and len(restored) == len(live)
+    for actual, original in zip(restored, live, strict=True):
+        live_receipt = original.get("receipt")
+        restored_receipt = actual.get("receipt")
+        assert live_receipt is not None and live_receipt["executors"]
+        assert restored_receipt is not None and restored_receipt["executors"] is None
+        assert actual == {**original, "receipt": {**live_receipt, "executors": None}}
 
 
 async def _openssl(*arguments: str) -> None:

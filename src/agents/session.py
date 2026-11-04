@@ -30,7 +30,7 @@ from ._events import SessionItem
 from ._function_tools import FunctionTool, Tool, ToolContext
 from ._history import project_history
 from ._native_async import _NativeCompletionError
-from ._projection import _error_code
+from ._projection import _error_code, project_execution_completion
 from .agent import (
     Agent,
     ContextT,
@@ -84,6 +84,7 @@ from .observation import (
     ApiRateLimitsUpdated,
     ContextCompacted,
     EventStream,
+    ExecutionItemCompleted,
     OutputTextDelta,
     SubagentLifecycle,
     ToolFinished,
@@ -108,6 +109,7 @@ from .tools import (
     _ToolCatalog,
 )
 from .turn import PendingRequests, SteeringReceipt, Turn, _child_turn, _root_turn
+from .turn_receipt import _load_instruction_files, _redact_checkpoint_executor_receipts
 from .usage import TokenUsageInfo, _token_usage_info
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -1333,6 +1335,7 @@ class Session(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
         _captured_api_key: str | None = None,
     ) -> Session[ContextT, OutputT]:
         if storage is not None and not isinstance(storage, LocalStorage):
@@ -1383,6 +1386,9 @@ class Session(Generic[ContextT, OutputT]):
                 programmatic_tool_calling=agent.programmatic_tool_calling,
             )
         programmatic_tool_calling = agent.programmatic_tool_calling
+        instructions, instruction_receipts = _load_instruction_files(
+            agent.instructions, instruction_files
+        )
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
         checkpoint = None
@@ -1398,7 +1404,7 @@ class Session(Generic[ContextT, OutputT]):
             # Capture caller-owned data before the first await. The native
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
-            _check_checkpoint(saved, agent.instructions)
+            _check_checkpoint(saved, instructions)
             # The binding still consumes its original idle/manual format.
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
@@ -1445,7 +1451,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
         output = _prepare_spec(agent.output_type)
         mcp_names = _tool_names(allowed_mcp)
-        instructions = agent.instructions
         model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
@@ -1732,7 +1737,7 @@ class Session(Generic[ContextT, OutputT]):
                         {
                             "agents.enabled": True,
                             "features.multi_agent_v2": {
-                                "subagent_developer_instructions": agent.instructions,
+                                "subagent_developer_instructions": instructions,
                                 "enabled": True,
                                 "tool_namespace": "collaboration",
                                 "expose_spawn_agent_model_overrides": False,
@@ -1821,6 +1826,7 @@ class Session(Generic[ContextT, OutputT]):
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
+                            "_native_agent_instruction_files": instruction_receipts,
                         }
                         if native_agents is not None
                         else {}
@@ -2075,7 +2081,13 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError("Native model update acknowledgement did not match")
                 if checkpoint is None:
                     if (
-                        await session._publish_startup(thread._update_instructions(instructions))
+                        await session._publish_startup(
+                            thread._update_instructions(
+                                instructions, json.dumps(instruction_receipts)
+                            )
+                            if instruction_receipts
+                            else thread._update_instructions(instructions)
+                        )
                         is not True
                     ):
                         raise NativeError("Native instruction update acknowledgement did not match")
@@ -2295,16 +2307,21 @@ class Session(Generic[ContextT, OutputT]):
     def id(self) -> str:
         return self._id
 
-    def events(self, *, after: int = 0) -> EventStream:
+    def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
         """Observe all turns until this Session ends.
 
         after is a retained global sequence, with zero replaying the retained
-        suffix. Gaps report unavailable observations. This reader never exposes
-        authority to answer a request; use interactions for live requests.
+        suffix. Gaps report unavailable observations. Use items() to recover
+        recorded completions, including completions after a turn settles.
+        Use interactions() for live requests that need an answer.
+        Set include_execution_details=True for a trusted reader that needs
+        command, patch, and MCP payloads. The default includes their IDs and status.
         """
         self._check_loop()
         self._check_callback_operation("observe its own Session")
-        return EventStream(self._observations, after=after)
+        return EventStream(
+            self._observations, after=after, _include_execution_details=include_execution_details
+        )
 
     async def pending_interactions(self) -> tuple[Interaction, ...]:
         """Read fresh, still-live requests from this Session and its children."""
@@ -5299,7 +5316,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
             )
         elif message.get("thread_id") == thread_id and message.get("turn_id") == handle.turn_id:
-            if kind == "agent_message_content_delta":
+            if kind == "item_completed" and self._observe_execution(
+                message,
+                thread_id=thread_id,
+                turn_id=handle.turn_id,
+                submission_id=handle.submission_id,
+            ):
+                return
+            elif kind == "agent_message_content_delta":
                 self._observations.append(
                     OutputTextDelta(
                         session_id=self.id,
@@ -5318,6 +5342,26 @@ class Session(Generic[ContextT, OutputT]):
                         item_id=message["item"]["id"],
                     )
                 )
+
+    def _observe_execution(
+        self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str | None
+    ) -> bool:
+        item = project_execution_completion(message, thread_id=thread_id, turn_id=turn_id)
+        if item is None:
+            return False
+        if submission_id is None:
+            # Canonical history still has the completion after the stream loses its owner.
+            self._observations._mark_gap()
+            return True
+        self._observations.append(
+            ExecutionItemCompleted(
+                session_id=self.id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                item=item,
+            )
+        )
+        return True
 
     def _observe_mcp(self, event: dict[str, Any], state: _CallbackState) -> None:
         handle = state.handle
@@ -5621,6 +5665,13 @@ class Session(Generic[ContextT, OutputT]):
         else:
             state = self._child_callback_state(event["subagent_id"], incarnation, turn_id)
         if state.completion.done():
+            if kind == "item_completed":
+                self._observe_execution(
+                    message,
+                    thread_id=event["subagent_id"],
+                    turn_id=turn_id,
+                    submission_id=state.handle.submission_id,
+                )
             return
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
@@ -5903,6 +5954,24 @@ class Session(Generic[ContextT, OutputT]):
                     await self._read_child_event(event)
                     continue
                 state = self._active
+                if (
+                    message.get("type") == "item_completed"
+                    and message.get("thread_id") == self.id
+                    and isinstance(late_turn_id := message.get("turn_id"), str)
+                    and (
+                        state is None
+                        or state.handle is None
+                        or state.handle.turn_id != late_turn_id
+                    )
+                ):
+                    started = self._observations.turn_started(late_turn_id)
+                    if self._observe_execution(
+                        message,
+                        thread_id=self.id,
+                        turn_id=late_turn_id,
+                        submission_id=started.submission_id if started is not None else None,
+                    ):
+                        continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
                         "exec_approval_request",
@@ -7191,6 +7260,7 @@ class Session(Generic[ContextT, OutputT]):
             payload["network_policy_digest"] = (
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
+            _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions)
             raw = state.to_json()
