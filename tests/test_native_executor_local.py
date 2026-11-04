@@ -169,6 +169,41 @@ async def test_local_write_roots_cannot_overlap_native_storage(
     assert responses.requests == []
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+async def test_local_write_roots_cannot_overlap_native_runtime_home(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime_parent, cwd, cache = (tmp_path / name for name in ("runtime", "cwd", "cache"))
+    for directory in (runtime_parent, cwd, cache):
+        directory.mkdir()
+    monkeypatch.setenv("TMPDIR", str(runtime_parent))
+    overlap = "writable roots must stay outside the native SDK runtime home"
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Use the selected tools.", provider=provider)
+    selected = Environment.local(cwd=cwd, writable_roots=[cache], tools=["exec_command"])
+    responses.respond(assistant_output("done"))
+
+    async with provider:
+        with pytest.raises(RuntimeError, match=overlap):
+            async with agent.session(environment=Environment.local(cwd=runtime_parent)):
+                pytest.fail("A writable runtime home opened a Session")
+        async with agent.session(environment=selected) as session:
+            refused = await session.submit(
+                "Do not grant the runtime home.", writable_roots=[runtime_parent]
+            )
+            with pytest.raises(NativeError, match=overlap) as error:
+                await refused.get_result()
+            assert error.value.effects == "not_started"
+            assert responses.requests == []
+            allowed = await session.submit("Use the sibling cache.", writable_roots=[cache])
+            assert (await allowed.get_result()).final_output == "done"
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="requires Linux system helper paths")
 @pytest.mark.parametrize("system_root", ["/bin", "/usr"])
 async def test_local_write_roots_cannot_include_system_sandbox_helper_paths(
