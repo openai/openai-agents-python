@@ -1,0 +1,104 @@
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index e254bace2300873ae5e6b84c796ffd9dc8471bc8..946079da4beb0585d02f98098560f552b77a08ab 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -12,11 +12,14 @@ use codex_protocol::models::ResponseItem;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+-pub(crate) async fn wait_if_sampling_stopped(admission: Option<&dyn ModelToolAdmission>) {
+-    if admission
+-        .and_then(|admission| admission.turn_store().get::<TurnSamplingStop>())
++pub(crate) fn turn_sampling_stopped(turn_store: &ExtensionData) -> bool {
++    turn_store
++        .get::<TurnSamplingStop>()
+         .is_some_and(|stop| stop.requested())
+-    {
++}
++
++pub(crate) async fn wait_if_sampling_stopped(admission: Option<&dyn ModelToolAdmission>) {
++    if admission.is_some_and(|admission| turn_sampling_stopped(admission.turn_store())) {
+         // Keep the native interrupt responsible for aborting the task and joining cleanup.
+         std::future::pending::<()>().await;
+     }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 8f2ef3e3f8c09a4b353d0fc7ac0b74c4f1ff1570..370c005e078edb96645b2ef623f6a28bc857fc4b 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -351,6 +351,7 @@ pub(crate) async fn run_turn(
+             Arc::clone(&first_step_context),
+             &mut client_session,
+             Arc::clone(&world_state),
++            &cancellation_token,
+             CompactionReason::ContextLimit,
+             CompactionPhase::PreTurn,
+         )
+@@ -629,6 +630,7 @@ pub(crate) async fn run_turn(
+                         Arc::clone(&step_context),
+                         &mut client_session,
+                         Arc::clone(&world_state),
++                        &cancellation_token,
+                         CompactionReason::ContextLimit,
+                         CompactionPhase::MidTurn,
+                     )
+@@ -738,6 +740,7 @@ pub(crate) async fn run_turn(
+                             Arc::clone(&step_context),
+                             &mut client_session,
+                             Arc::clone(&world_state),
++                            &cancellation_token,
+                             CompactionReason::ContextLimit,
+                             CompactionPhase::PostTurn,
+                         )
+@@ -789,6 +792,7 @@ pub(crate) async fn run_turn(
+                     Arc::clone(&step_context),
+                     &mut client_session,
+                     Arc::clone(&world_state),
++                    &cancellation_token,
+                     CompactionReason::ContextLimit,
+                     CompactionPhase::MidTurn,
+                 )
+@@ -1331,6 +1335,7 @@ async fn run_pre_sampling_compact(
+             step_context,
+             client_session,
+             world_state,
++            cancellation_token,
+             CompactionReason::ContextLimit,
+             CompactionPhase::PreTurn,
+         )
+@@ -1432,6 +1437,7 @@ async fn maybe_run_previous_model_inline_compact(
+         replacement_step_context,
+         client_session,
+         world_state,
++        cancellation_token,
+         reason,
+         CompactionPhase::PreTurn,
+     )
+@@ -1440,6 +1446,7 @@ async fn maybe_run_previous_model_inline_compact(
+ }
+ 
+ /// `world_state` belongs to `replacement_step_context`, which may differ from the compactor.
++#[allow(clippy::too_many_arguments)]
+ #[instrument(
+     level = "trace",
+     skip_all,
+@@ -1451,6 +1458,7 @@ async fn run_auto_compact(
+     replacement_step_context: Arc<StepContext>,
+     client_session: &mut ModelClientSession,
+     world_state: Arc<WorldState>,
++    cancellation_token: &CancellationToken,
+     reason: CompactionReason,
+     phase: CompactionPhase,
+ ) -> CodexResult<()> {
+@@ -1480,6 +1488,12 @@ async fn run_auto_compact(
+         return Ok(());
+     }
+ 
++    if crate::model_request::turn_sampling_stopped(&turn_context.extension_data) {
++        // The native interrupt still owns task cancellation and cleanup.
++        cancellation_token.cancelled().await;
++        return Err(CodexErr::TurnAborted);
++    }
++
+     match turn_context.provider.capabilities().remote_compaction {
+         RemoteCompactionSupport::V2 => {
+             emit_compact_metric(
