@@ -49,10 +49,18 @@ pub struct Guard {
 #[derive(Default)]
 struct State {
     current: Option<Arc<HashSet<String>>>,
+    reconciled: Option<Arc<HashSet<String>>>,
     origins: HashMap<String, Origin>,
 }
 
 impl Guard {
+    pub(crate) fn set_reconciled(&self, ids: HashSet<String>) {
+        self.state
+            .lock()
+            .expect("recovery guard poisoned")
+            .reconciled = (!ids.is_empty()).then(|| Arc::new(ids));
+    }
+
     pub(crate) fn has_active_recovery(&self) -> bool {
         self.state
             .lock()
@@ -158,12 +166,14 @@ impl ModelRequestContributor for RecoveryContributor {
             .expect("recovery index poisoned")
             .get(input.thread_id)?
             .upgrade()?;
-        let original_ids = guard
-            .state
-            .lock()
-            .expect("recovery guard poisoned")
-            .current
-            .clone()?;
+        let state = guard.state.lock().expect("recovery guard poisoned");
+        let original_ids = match (&state.current, &state.reconciled) {
+            (Some(current), Some(reconciled)) => {
+                Arc::new(current.union(reconciled).cloned().collect())
+            }
+            (Some(ids), None) | (None, Some(ids)) => Arc::clone(ids),
+            (None, None) => return None,
+        };
         Some(Box::new(Request(original_ids)))
     }
 }
