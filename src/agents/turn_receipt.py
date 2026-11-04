@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import stat
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -81,6 +83,11 @@ class TurnReceipt(TypedDict):
     executors: list[ExecutorPolicyReceipt] | None
 
 
+def _open_instruction_file(path: str, flags: int) -> int:
+    # Resolve intentional symlinks first, then refuse links at the resolved leaf.
+    return os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
+
+
 def _load_instruction_files(
     instructions: str, paths: Sequence[Path]
 ) -> tuple[str, list[InstructionFileReceipt]]:
@@ -92,9 +99,16 @@ def _load_instruction_files(
         if not isinstance(supplied, Path):
             raise TypeError("instruction_files must contain Path values")
         path = supplied.resolve(strict=True)
-        if not path.is_file():
+        expected = path.lstat()
+        if not stat.S_ISREG(expected.st_mode):
             raise ValueError(f"Instruction file must be a regular file: {path}")
-        content = path.read_bytes()
+        with open(path, "rb", opener=_open_instruction_file) as file:
+            actual = os.fstat(file.fileno())
+            if not stat.S_ISREG(actual.st_mode):
+                raise ValueError(f"Instruction file must be a regular file: {path}")
+            if (actual.st_dev, actual.st_ino) != (expected.st_dev, expected.st_ino):
+                raise ValueError(f"Instruction file changed while opening: {path}")
+            content = file.read()
         try:
             value = content.decode("utf-8")
         except UnicodeDecodeError:

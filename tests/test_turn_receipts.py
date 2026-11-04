@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import sys
 from dataclasses import replace
+from errno import ELOOP
 from pathlib import Path
 
 import pytest
 
+import agents.turn_receipt as turn_receipt
 from agents import Agent, NativeAgents
 from agents.state import SessionState
 from agents.turn_receipt import (
@@ -53,6 +57,62 @@ def test_file_loader_hashes_the_exact_bytes_in_order(tmp_path):
     with pytest.raises(ValueError, match="must be UTF-8") as raised:
         _load_instruction_files("", [second])
     assert raised.value.__context__ is None
+
+
+@pytest.mark.parametrize("symlink", [False, True])
+def test_file_loader_rejects_a_replacement_before_reading(tmp_path, monkeypatch, symlink):
+    if symlink and sys.platform == "win32":
+        pytest.skip("Creating symlinks can require special privileges on Windows")
+    path = tmp_path.resolve() / "selected.md"
+    other = path.with_name("other.md")
+    path.write_bytes(b"Selected instructions.")
+    other.write_bytes(b"Different instructions.")
+    open_file = io.open
+    opened = None
+
+    def replace_then_open(name, *args, **kwargs):
+        nonlocal opened
+        if name != path:
+            return open_file(name, *args, **kwargs)
+        # Replace the path at the precise boundary before the real open.
+        path.rename(path.with_name("original.md"))
+        if symlink:
+            path.symlink_to(other)
+        else:
+            other.rename(path)
+        opened = open_file(name, *args, **kwargs)
+        return opened
+
+    with monkeypatch.context() as patch:
+        patch.setattr(io, "open", replace_then_open)
+        patch.setattr(turn_receipt, "open", replace_then_open, raising=False)
+        with pytest.raises((OSError, ValueError)) as raised:
+            _load_instruction_files("", [path])
+    if isinstance(raised.value, OSError):
+        assert raised.value.errno == ELOOP
+    else:
+        assert "Instruction file changed" in str(raised.value)
+    if opened is not None:
+        assert opened.closed
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Creating symlinks can require privileges")
+def test_file_loader_preserves_a_stable_selected_symlink(tmp_path):
+    path = tmp_path / "selected.md"
+    content = b"Selected instructions."
+    path.write_bytes(content)
+    link = tmp_path / "link.md"
+    link.symlink_to(path)
+
+    instructions, sources = _load_instruction_files("", [link])
+    assert instructions.encode() == content
+    assert sources == [
+        {
+            "path": str(path.resolve()),
+            "source": "application_file",
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    ]
 
 
 def test_old_context_or_unknown_receipt_version_is_unavailable():

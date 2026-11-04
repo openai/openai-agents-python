@@ -192,10 +192,9 @@ async fn validate_recorded_executor_policy(
     };
     let policy_error = "Local resume requires the recorded executor write and network policy";
     let previous = previous.and_then(Value::as_array).context(policy_error)?;
-    let strict_writes = match strict_writes {
-        None => false,
-        Some(strict) => strict.as_bool().context(policy_error)?,
-    };
+    let strict_writes = strict_writes
+        .map(|strict| strict.as_bool().context(policy_error))
+        .transpose()?;
     let current_strict_writes = state
         .thread
         .thread_extension_data()
@@ -206,7 +205,7 @@ async fn validate_recorded_executor_policy(
         // Only a genuinely model-only history can attach a new implicit remote
         // executor. An empty turn cannot replace a recorded strict policy.
         ensure!(
-            !strict_writes
+            strict_writes != Some(true)
                 && !current_strict_writes
                 && current.iter().all(can_drop_implicit_remote)
                 && !recorded_policies.any(|(older, strict)| {
@@ -220,8 +219,9 @@ async fn validate_recorded_executor_policy(
         );
         return Ok(());
     }
-    let matches = if strict_writes || current_strict_writes {
-        (!strict_writes || current_strict_writes) && previous == &current
+    let matches = if strict_writes == Some(true) || current_strict_writes {
+        // Legacy receipts lacked the mode and still require an exact profile.
+        strict_writes.is_none_or(|strict| strict == current_strict_writes) && previous == &current
     } else if current.is_empty() {
         // Opening without an Environment leaves a model-only Session.
         previous.iter().all(can_drop_implicit_remote)

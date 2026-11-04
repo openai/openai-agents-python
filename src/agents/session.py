@@ -1558,6 +1558,14 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the command network policy"
                     )
+                if (
+                    saved.executor_policy_digest is None
+                    and executor is not None
+                    and (executor._is_local or executor.writable_roots is not None)
+                ):
+                    raise ValueError(
+                        "Checkpoint and Environment must agree on the applied executor policy"
+                    )
             if native_agents is not None and (
                 executor is None
                 or set(executor.tools) != {"exec_command", "write_stdin", "apply_patch"}

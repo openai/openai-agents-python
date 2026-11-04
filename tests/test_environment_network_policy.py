@@ -336,8 +336,77 @@ async def test_checkpoint_requires_explicit_strict_writes_even_without_extra_roo
                 state=saved, environment=replace(selected, writable_roots=None)
             ):
                 pytest.fail("Opened a checkpoint with legacy write permissions")
+        extra = executor.root / "replacement"
+        extra.mkdir()
+        assert saved.executor_policy_digest is not None
+        incomplete = SessionState.from_json(
+            saved.model_copy(update={"executor_policy_digest": None}).to_json()
+        )
+        before = len(executor.requests)
+        with pytest.raises(ValueError, match="agree on the applied executor policy"):
+            async with agent.session(
+                state=incomplete, environment=replace(selected, writable_roots=[extra])
+            ):
+                pytest.fail("Opened a strict checkpoint without its policy identity")
+        assert len(executor.requests) == before
         async with agent.session(state=saved, environment=selected) as restored:
             assert restored.id == saved.source_session_id
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("recorded_mode", ["implicit", "strict", "legacy"])
+async def test_local_resume_matches_recorded_write_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recorded_mode: str
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile")
+        implicit = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+        )
+        strict = replace(implicit, writable_roots=[])
+        source, changed = (strict, implicit) if recorded_mode == "strict" else (implicit, strict)
+        model.respond(assistant_output("original"))
+        async with agent.session(storage=storage, environment=source) as session:
+            session_id = session.id
+            assert (await (await session.submit("Start.")).get_result()).final_output == "original"
+
+        async with agent.session(
+            storage=storage, resume=session_id, environment=source
+        ) as reopened:
+            assert reopened.id == session_id
+
+        [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
+        rows = [json.loads(line) for line in rollout.read_text().splitlines()]
+        [receipt] = [
+            row["payload"]["sdk_receipt"]
+            for row in rows
+            if row["type"] == "turn_context" and row["payload"].get("sdk_receipt")
+        ]
+        assert receipt["strict_executor_writes"] is (recorded_mode == "strict")
+        assert len(receipt["executors"]) == 1
+        if recorded_mode == "legacy":
+            # Pre-marker records can still reopen with the same applied profile.
+            del receipt["strict_executor_writes"]
+            rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            async with agent.session(
+                storage=storage, resume=session_id, environment=changed
+            ) as reopened:
+                assert reopened.id == session_id
+        else:
+            with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+                async with agent.session(storage=storage, resume=session_id, environment=changed):
+                    pytest.fail("Reopened a session with a different recorded write mode")
+        assert len(model.requests) == 1
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
@@ -653,6 +722,7 @@ async def test_checkpoint_without_network_policy_restores_only_with_the_default(
         async with agent.session() as session:
             encoded = (await session.save_state()).to_json()
         assert "network_policy_digest" not in encoded
+        assert "executor_policy_digest" not in encoded
         legacy = SessionState.from_json(encoded)
         async with agent.session(state=legacy) as restored:
             assert restored.id == legacy.source_session_id

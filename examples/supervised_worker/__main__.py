@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -48,6 +49,7 @@ from agents.observation import (
 )
 
 OutputT = TypeVar("OutputT")
+logger = logging.getLogger(__name__)
 
 ARTIFACT = "summary.txt"
 VERIFY_COMMAND = "cat -- summary.txt"
@@ -230,7 +232,10 @@ async def supervise(
         return pair[1]
     except BaseException:
         # Ending a passive wait does not stop native work. Join this owned turn.
-        await turn.cancel()
+        try:
+            await turn.cancel()
+        except BaseException:
+            logger.exception("Could not cancel the worker turn.")
         raise
     finally:
         trace.completion_ms = trace.elapsed_ms()

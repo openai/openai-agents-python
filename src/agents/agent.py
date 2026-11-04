@@ -590,7 +590,8 @@ class Agent(Generic[ContextT, OutputT]):
         ``state`` cannot be combined.
 
         Pass instruction_files to load trusted UTF-8 files as application
-        instructions. Each file's receipt identifies the exact bytes loaded.
+        instructions. Use files and parent directories that untrusted actors
+        cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
         from .session import Session, _close_after_error
 
