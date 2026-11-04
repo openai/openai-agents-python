@@ -323,7 +323,7 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 
 ### CodexAccount
 
-`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. The plan is saved login metadata, not a billing receipt or a live entitlement check. See [account identity, refresh, and usage](configuration.md#account-identity-refresh-and-usage).
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. `account_id` identifies the saved workspace. `plan_type` comes from saved login metadata. See [account identity, refresh, and usage](configuration.md#account-identity-refresh-and-usage).
 
 ### ModelSettings
 

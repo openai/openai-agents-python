@@ -63,7 +63,8 @@ async def main() -> None:
             account = session.codex_account
             if account is None:
                 raise RuntimeError("Expected a saved Codex login")
-            print("Saved login plan:", account.plan_type)
+            print("Saved workspace ID:", account.account_id)
+            print("Saved plan:", account.plan_type)
             turn = await session.submit(
                 "Write an is_prime(n: int) -> bool function and three unit tests."
             )
@@ -85,11 +86,11 @@ The example asks for code and tests in the answer. To execute commands or edit w
 
 #### Account identity, refresh, and usage
 
-`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. `account_id` identifies the saved ChatGPT workspace. `plan_type` comes from saved login metadata and may be `"unknown"`. Use the saved plan type to identify the login before submitting work. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. Check `account_id` to identify the saved ChatGPT workspace before submitting work. Pass the expected ID to `CodexLogin(account_id=...)` to check it when opening the Session. The saved `plan_type` may be `"unknown"`. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
 
 The native runtime refreshes the saved login for the same user and workspace. Portable restore and local conversation resume must use that same identity. If you switch users or workspaces, start a new conversation. See [save and restore](sessions.md#compact-save-and-restore).
 
-This mode uses HTTP on the standard Codex backend. Workspaces that require a separate backend need their own integration. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If the saved login fails, the SDK stops even when API keys or other credentials are set.
+This mode uses HTTPS on the standard Codex backend. Workspaces that require a separate backend need their own integration. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If the saved login fails, the SDK stops even when API keys or other credentials are set.
 
 ### Provider lifetime
 
