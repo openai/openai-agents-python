@@ -78,6 +78,8 @@ Follow the [account and refresh guidance](https://developers.openai.com/siwc/tok
 
 This mode uses HTTP server-sent events at `https://api.openai.com/v1/responses`. The SDK fixes the endpoint and disables WebSockets. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If sign-in, token retrieval, or inference fails, the SDK reports the error and keeps the selected billing mode. A stream that fails after it opens ends the operation without an automatic replay.
 
+For a plan usage failure after a stream opens, read `NativeError.code`. `subscription_sharing_usage_limit_exceeded` means the request hit a usage limit. `subscription_sharing_usage_unavailable` means OpenAI could not check usage availability. See the [Sign in with ChatGPT error recovery guide](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+
 Sign in with ChatGPT supports local function tools. It excludes programmatic tool calling, deferred tool loading, hosted Apps MCP, and `WebSearch`. See the official [inference guide](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) for the public Responses request contract.
 
 ### Provider lifetime
