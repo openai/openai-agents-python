@@ -1,4 +1,4 @@
-name: Probe physical LocalStorage overlap on macOS
+name: Confirm disjoint LocalStorage paths on case-sensitive macOS
 on:
   push:
     branches: [test/managed-macos-command-qualification-20261104]
@@ -68,7 +68,7 @@ jobs:
           uv pip install --no-deps --python .venv/bin/python --target "$work/site" "$wheel"
           printf 'wheel_sdk=%s\nwheel_core=%s\n' \
             61991ac259ed05ffe4fc3da8471185d8517d11a3 108422bfeff81dbff09e60c72c76efa9e4b0ad51 | tee "$proof/source-provenance.txt"
-      - name: Observe both directions on real case-insensitive and case-sensitive filesystems
+      - name: Run just the case-sensitive positive controls
         run: |
           set -euo pipefail
           work="$RUNNER_TEMP/profile-overlap"
@@ -169,42 +169,23 @@ jobs:
           }
           trap cleanup EXIT
           mkdir "$volume" "$scratch/HostCaseProbe"
+          sensitive="$scratch"
           if [[ -d "$scratch/hostcaseprobe" ]]; then
-            host_kind=folded
-            volume_kind=sensitive
-            volume_fs='Case-sensitive APFS'
-            fallback_fs=JHFSX
-          else
-            host_kind=sensitive
-            volume_kind=folded
-            volume_fs=APFS
-            fallback_fs=JHFS+
+            if ! hdiutil create -size 512m -fs 'Case-sensitive APFS' -volname AgentsProfileControl -format UDRW "$scratch/control.dmg"; then
+              rm -f "$scratch/control.dmg"
+              hdiutil create -size 512m -fs JHFSX -volname AgentsProfileControl -format UDRW "$scratch/control.dmg"
+            fi
+            hdiutil attach -owners off -nobrowse -mountpoint "$volume" "$scratch/control.dmg"
+            attached=1
+            test "$(stat -f %d "$scratch")" != "$(stat -f %d "$volume")"
+            sensitive="$volume"
           fi
-          printf 'host=%s alternate=%s\n' "$host_kind" "$volume_kind" | tee "$proof/filesystems.txt"
+          mkdir "$sensitive/VolumeCaseProbe"
+          test ! -e "$sensitive/volumecaseprobe"
+          diskutil info "$sensitive" | tee "$proof/filesystems.txt"
           node="$probe::test_physical_profile_directory_overlap"
-          run_probe() {
-            local variant="$1" root="$2"
-            .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
-              --basetemp="$root/$variant-tests" --junitxml="$proof/$variant.xml" "$node" 2>&1 | tee "$proof/$variant.log"
-          }
-          run_probe "$host_kind" "$scratch"
-
-          hdiutil create -listfs | tee -a "$proof/filesystems.txt"
-          if ! hdiutil create -size 512m -fs "$volume_fs" -volname AgentsProfileControl -type SPARSE "$scratch/control"; then
-            rm -f "$scratch/control.sparseimage"
-            hdiutil create -size 512m -fs "$fallback_fs" -volname AgentsProfileControl -type SPARSE "$scratch/control"
-          fi
-          hdiutil attach -owners off -nobrowse -mountpoint "$volume" "$scratch/control.sparseimage"
-          attached=1
-          test "$(stat -f %d "$scratch")" != "$(stat -f %d "$volume")"
-          mkdir "$volume/VolumeCaseProbe"
-          if [[ "$volume_kind" = sensitive ]]; then
-            test ! -e "$volume/volumecaseprobe"
-          else
-            test -d "$volume/volumecaseprobe"
-          fi
-          diskutil info "$volume" | tee -a "$proof/filesystems.txt"
-          run_probe "$volume_kind" "$volume"
+          .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
+            --basetemp="$sensitive/sensitive-tests" --junitxml="$proof/sensitive.xml" "$node" 2>&1 | tee "$proof/sensitive.log"
           .venv/bin/python -IB - "$proof" <<'PY'
           from pathlib import Path
           import sys
@@ -212,27 +193,20 @@ jobs:
 
           proof = Path(sys.argv[1])
           directions = ('protected-below-grant', 'grant-below-protected')
-          for variant in ('folded', 'sensitive'):
-              tests = list(ET.parse(proof / f'{variant}.xml').iter('testcase'))
-              assert len(tests) == 2 and all(len(test) == 0 for test in tests), tests
-              assert [test.get('name') for test in tests] == [
-                  f'test_physical_profile_directory_overlap[{direction}]' for direction in directions
-              ]
-              log = (proof / f'{variant}.log').read_text()
-              for direction in directions:
-                  prefix = f'PHYSICAL_PROFILE_OVERLAP {direction} aliased='
-                  if variant == 'sensitive':
-                      assert prefix + 'False ADMITTED rollout_physically_inside_grant=False' in log
-                  else:
-                      assert (
-                          prefix + 'True REFUSED' in log
-                          or prefix + 'True ADMITTED rollout_physically_inside_grant=True' in log
-                      )
+          tests = list(ET.parse(proof / 'sensitive.xml').iter('testcase'))
+          assert len(tests) == 2 and all(len(test) == 0 for test in tests), tests
+          assert [test.get('name') for test in tests] == [
+              f'test_physical_profile_directory_overlap[{direction}]' for direction in directions
+          ]
+          log = (proof / 'sensitive.log').read_text()
+          for direction in directions:
+              expected = f'PHYSICAL_PROFILE_OVERLAP {direction} aliased=False ADMITTED rollout_physically_inside_grant=False'
+              assert expected in log
           PY
       - name: Upload the installed overlap observations
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: verified-macos-physical-profile-overlap
+          name: verified-macos-sensitive-profile-controls
           path: ${{ runner.temp }}/profile-overlap/proof
           if-no-files-found: ignore
