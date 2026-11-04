@@ -203,6 +203,11 @@ def project_history(
                     }
                     turns[receipt_turn_id] = turn
                 turn["receipt"] = receipt
+            elif payload.get("sdk_receipt") is not None:
+                # A newer sample supersedes the earlier receipt even if we cannot read it.
+                receipt_turn_id = payload.get("turn_id")
+                if isinstance(receipt_turn_id, str) and receipt_turn_id in turns:
+                    turns[receipt_turn_id].pop("receipt", None)
         elif kind == "token_usage_record":
             usage[payload["turn_id"]] = _usage(payload["turn_token_usage"])
         elif kind == "response_item":

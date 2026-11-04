@@ -365,21 +365,36 @@ def test_latest_sampled_context_receipt_survives_inherited_turn_completion():
             },
         }
 
-    turns, _ = project_history(
-        [
-            event("task_started"),
-            context("t1", "first"),
-            context("t1", "last"),
-            event("task_complete"),
-            context("t2", "context-only"),
-        ],
-        "fork",
-        "child",
-    )
+    history = [
+        event("task_started"),
+        context("t1", "first"),
+        context("t1", "last"),
+        {"type": "turn_context", "payload": {"turn_id": "t1"}},
+        {"type": "turn_context", "payload": {"turn_id": "t1", "sdk_receipt": None}},
+        event("task_complete"),
+        context("t2", "context-only"),
+    ]
+    turns, _ = project_history(history, "fork", "child")
     assert turns[0]["status"] == "completed"
     assert turns[0]["receipt"] == {"turn_id": "t1", **receipt("last")}
     assert turns[1]["status"] == "in_progress"
     assert turns[1]["receipt"]["thread_id"] == "source"
+    other_turn = turns[1]
+
+    history.append(
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "t1", "sdk_receipt": {"version": 2, "turn_id": "t2"}},
+        }
+    )
+    turns, _ = project_history(history, "fork", "child")
+    assert turns[0]["status"] == "completed"
+    assert "receipt" not in turns[0]
+    assert turns[1] == other_turn
+
+    history.append(context("t1", "resampled"))
+    turns, _ = project_history(history, "fork", "child")
+    assert turns[0]["receipt"] == {"turn_id": "t1", **receipt("resampled")}
 
 
 def test_child_call_attribution_and_rollback_remove_only_discarded_turns():
