@@ -30,7 +30,7 @@ from ._events import SessionItem
 from ._function_tools import FunctionTool, Tool, ToolContext
 from ._history import project_history
 from ._native_async import _NativeCompletionError
-from ._projection import _error_code
+from ._projection import _error_code, project_execution_completion
 from .agent import (
     Agent,
     CodexAccount,
@@ -82,8 +82,10 @@ from .native_interception import (
     _NativeInterception,
 )
 from .observation import (
+    ApiRateLimitsUpdated,
     ContextCompacted,
     EventStream,
+    ExecutionItemCompleted,
     OutputTextDelta,
     SubagentLifecycle,
     ToolFinished,
@@ -93,6 +95,7 @@ from .observation import (
     UsageUpdated,
     _ObservationBuffer,
 )
+from .rate_limits import ApiRateLimits, _api_rate_limits
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
@@ -106,7 +109,8 @@ from .tools import (
     _CapturedFunction,
     _ToolCatalog,
 )
-from .turn import PendingRequests, Turn, _child_turn, _root_turn
+from .turn import PendingRequests, SteeringReceipt, Turn, _child_turn, _root_turn
+from .turn_receipt import _load_instruction_files, _redact_checkpoint_executor_receipts
 from .usage import TokenUsageInfo, _token_usage_info
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -401,6 +405,7 @@ class NativeError(RuntimeError):
     """
 
     _effects: Literal["not_started", "unknown", "recorded"] = "unknown"
+    _interrupted: bool = False
 
     def __init__(
         self,
@@ -1332,6 +1337,7 @@ class Session(Generic[ContextT, OutputT]):
         model: str | None = None,
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
+        instruction_files: Sequence[Path] = (),
         _captured_api_key: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
@@ -1384,6 +1390,9 @@ class Session(Generic[ContextT, OutputT]):
             )
         codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
+        instructions, instruction_receipts = _load_instruction_files(
+            agent.instructions, instruction_files
+        )
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
         checkpoint = None
@@ -1399,7 +1408,7 @@ class Session(Generic[ContextT, OutputT]):
             # Capture caller-owned data before the first await. The native
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
-            _check_checkpoint(saved, agent.instructions)
+            _check_checkpoint(saved, instructions)
             if (saved.codex_login_binding is not None) != (codex_login is not None):
                 raise ValueError("Checkpoint and Session must use the same authentication mode")
             # The binding still consumes its original idle/manual format.
@@ -1449,7 +1458,6 @@ class Session(Generic[ContextT, OutputT]):
                 )
         output = _prepare_spec(agent.output_type)
         mcp_names = _tool_names(allowed_mcp)
-        instructions = agent.instructions
         model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
@@ -1753,7 +1761,7 @@ class Session(Generic[ContextT, OutputT]):
                         {
                             "agents.enabled": True,
                             "features.multi_agent_v2": {
-                                "subagent_developer_instructions": agent.instructions,
+                                "subagent_developer_instructions": instructions,
                                 "enabled": True,
                                 "tool_namespace": "collaboration",
                                 "expose_spawn_agent_model_overrides": False,
@@ -1837,6 +1845,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                     **({"_sdk_resume_thread_id": resume} if resume is not None else {}),
                     "_application_instructions": instructions,
+                    "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
                     **(
                         {
@@ -2106,7 +2115,13 @@ class Session(Generic[ContextT, OutputT]):
                         raise NativeError("Native model update acknowledgement did not match")
                 if checkpoint is None:
                     if (
-                        await session._publish_startup(thread._update_instructions(instructions))
+                        await session._publish_startup(
+                            thread._update_instructions(
+                                instructions, json.dumps(instruction_receipts)
+                            )
+                            if instruction_receipts
+                            else thread._update_instructions(instructions)
+                        )
                         is not True
                     ):
                         raise NativeError("Native instruction update acknowledgement did not match")
@@ -2303,6 +2318,8 @@ class Session(Generic[ContextT, OutputT]):
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
         self._observations = _ObservationBuffer(self.id)
+        self._api_rate_limit_snapshot = ApiRateLimits()
+        self._rate_limit_parent: Session[Any, Any] | None = None
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
         self._reader = asyncio.create_task(self._read_events())
@@ -2331,16 +2348,21 @@ class Session(Generic[ContextT, OutputT]):
         """Read the saved Codex account and plan type selected at opening."""
         return self._codex_account
 
-    def events(self, *, after: int = 0) -> EventStream:
+    def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
         """Observe all turns until this Session ends.
 
         after is a retained global sequence, with zero replaying the retained
-        suffix. Gaps report unavailable observations. This reader never exposes
-        authority to answer a request; use interactions for live requests.
+        suffix. Gaps report unavailable observations. Use items() to recover
+        recorded completions, including completions after a turn settles.
+        Use interactions() for live requests that need an answer.
+        Set include_execution_details=True for a trusted reader that needs
+        command, patch, and MCP payloads. The default includes their IDs and status.
         """
         self._check_loop()
         self._check_callback_operation("observe its own Session")
-        return EventStream(self._observations, after=after)
+        return EventStream(
+            self._observations, after=after, _include_execution_details=include_execution_details
+        )
 
     async def pending_interactions(self) -> tuple[Interaction, ...]:
         """Read fresh, still-live requests from this Session and its children."""
@@ -2636,6 +2658,16 @@ class Session(Generic[ContextT, OutputT]):
                 return self._last_turn
         return None
 
+    def rate_limits(self) -> ApiRateLimits:
+        """Read the latest available limits reported by this API-key provider.
+
+        This includes requests that correct prompted output.
+        Missing values are unknown. This snapshot cannot determine account
+        plan limits, credit balances or whether the provider will admit work.
+        """
+        self._check_loop()
+        return self._api_rate_limit_snapshot
+
     @property
     def restored_turn(self) -> Turn[Any] | None:
         """The initially restored pending root, even after another turn starts.
@@ -2700,8 +2732,8 @@ class Session(Generic[ContextT, OutputT]):
         tools=None uses this Session's last accepted update, or opening defaults. An explicit
         sequence selects only already bound tools; [] permits no model tools. A new
         submit rejects busy work by default; if_busy="queue" registers FIFO new work.
-        if_busy="steer" disallows all overrides even when idle and awaits a real
-        steering receipt for the exact captured active root. It never retries.
+        if_busy="steer" disallows overrides and awaits native acceptance for
+        the captured active root. Use Turn.steer_exact to target one native root turn.
         New work returns before native admission; await Turn.get_result() for completion.
         before_step(turn, *, step_index) may narrow admitted tools before
         sampling. Return None to use the captured operation default, or a
@@ -2753,25 +2785,36 @@ class Session(Generic[ContextT, OutputT]):
             parts, output, tools=tools, before_step=before_step, enqueue=if_busy != "reject"
         )
 
-    async def _steer(self, turn: Turn[Any], input: UserInput) -> None:
+    async def _steer(
+        self, turn: Turn[Any], input: UserInput, *, expected_turn_id: str | None = None
+    ) -> SteeringReceipt | None:
         self._check_owner(turn)
         self._check_open()
         self._check_callback_operation("steer its own Session")
         self._check_graph_admission()
         if turn.child_id is not None:
+            if expected_turn_id is not None:
+                raise ValueError("Exact steering requires a root Turn")
             assert turn.instance_id is not None
             await self._submit_child_input(
                 turn.child_id, turn.instance_id, turn._native.incarnation, input, turn
             )
-            return
+            return None
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
-        if any(state.issued is turn for state, _ in self._pending):
+        if expected_turn_id is None and any(state.issued is turn for state, _ in self._pending):
             raise RuntimeError("Cannot steer queued work")
         parts = _native_input(input)
         while True:
             state = self._owned_submission(turn)
-            if state is None:
+            if state is None or (
+                expected_turn_id is not None
+                and (
+                    state.handle is None
+                    or state.handle.turn_id != expected_turn_id
+                    or state.terminal.done()
+                )
+            ):
                 raise StaleTurnError("Turn is no longer active")
             if state.stopping or state.failure.done() or state.restored_pending or state.repairing:
                 raise RuntimeError("Current turn cannot accept steering input")
@@ -2782,9 +2825,14 @@ class Session(Generic[ContextT, OutputT]):
                 raise RuntimeError("Current turn cannot accept steering input")
             # Revalidation above can wait for an owned successor before sending.
             # After sending, surface Core's receipt without retry or retarget.
-            encoded = json.dumps(
-                {"mode": "steer", "expected_turn_id": handle.turn_id, "input": parts}
-            )
+            request: dict[str, Any] = {
+                "mode": "steer",
+                "expected_turn_id": handle.turn_id,
+                "input": parts,
+            }
+            if expected_turn_id is not None:
+                request["exact_steering"] = True
+            encoded = json.dumps(request)
             try:
                 response = await self._native._submit(encoded)
             except RuntimeError as exc:
@@ -2798,7 +2846,12 @@ class Session(Generic[ContextT, OutputT]):
                 raise StaleTurnError("Native Turn no longer accepts this steering input")
             if receipt["status"] != "steered" or receipt["turn_id"] != handle.turn_id:
                 raise NativeError(f"Native input was not submitted: {receipt.get('reason')}")
-            return
+            if expected_turn_id is not None:
+                input_id = receipt.get("input_id")
+                if not isinstance(input_id, str) or not input_id:
+                    raise NativeError("Native steering acceptance did not include an input ID")
+                return SteeringReceipt(self.id, expected_turn_id, handle.submission_id, input_id)
+            return None
 
     async def _start_child(self, child: Subagent, input: UserInput) -> Turn[str]:
         if child._session is not self:
@@ -3339,6 +3392,7 @@ class Session(Generic[ContextT, OutputT]):
             options = json.loads(self._native_options)
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
+            options["_sdk_instruction_files"] = json.loads(change.options())["instruction_files"]
             opening = self._opening_agent.tools
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),
@@ -4174,8 +4228,13 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Child callback cleanup failed") from state.cleanup_error
                 if native_error is not None and state.terminal.done():
                     terminal = state.terminal.result()
-                    if terminal is not None and terminal.get("error"):
-                        native_error = _native_error(terminal["error"], str(native_error))
+                    if terminal is not None:
+                        if terminal.get("error"):
+                            native_error = _native_error(terminal["error"], str(native_error))
+                        elif terminal["type"] == "turn_aborted" and (
+                            terminal.get("reason") == "interrupted"
+                        ):
+                            native_error._interrupted = True
             if native_error is not None:
                 raise native_error
             return cast(
@@ -5196,6 +5255,7 @@ class Session(Generic[ContextT, OutputT]):
                 _expected_codex_login_binding=self._codex_login_binding,
             )
             repair._observations.repair_parent = (self._observations, handle.submission_id)
+            repair._rate_limit_parent = self
             try:
                 if state.graceful_requested:
                     raise asyncio.CancelledError()
@@ -5283,6 +5343,19 @@ class Session(Generic[ContextT, OutputT]):
         message = event["msg"]
         kind = message["type"]
         if kind == "token_count" and event["id"] == handle.turn_id:
+            if "api_rate_limits" in message:
+                snapshot = _api_rate_limits(message["api_rate_limits"])
+                if snapshot is not None:
+                    self._observations.append(
+                        ApiRateLimitsUpdated(
+                            session_id=self.id,
+                            turn_id=handle.turn_id,
+                            submission_id=handle.submission_id,
+                            snapshot=snapshot,
+                        )
+                    )
+                if message.get("info") is None and message.get("rate_limits") is None:
+                    return
             self._observations.append(
                 UsageUpdated(
                     session_id=self.id,
@@ -5292,7 +5365,14 @@ class Session(Generic[ContextT, OutputT]):
                 )
             )
         elif message.get("thread_id") == thread_id and message.get("turn_id") == handle.turn_id:
-            if kind == "agent_message_content_delta":
+            if kind == "item_completed" and self._observe_execution(
+                message,
+                thread_id=thread_id,
+                turn_id=handle.turn_id,
+                submission_id=handle.submission_id,
+            ):
+                return
+            elif kind == "agent_message_content_delta":
                 self._observations.append(
                     OutputTextDelta(
                         session_id=self.id,
@@ -5311,6 +5391,26 @@ class Session(Generic[ContextT, OutputT]):
                         item_id=message["item"]["id"],
                     )
                 )
+
+    def _observe_execution(
+        self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str | None
+    ) -> bool:
+        item = project_execution_completion(message, thread_id=thread_id, turn_id=turn_id)
+        if item is None:
+            return False
+        if submission_id is None:
+            # Canonical history still has the completion after the stream loses its owner.
+            self._observations._mark_gap()
+            return True
+        self._observations.append(
+            ExecutionItemCompleted(
+                session_id=self.id,
+                turn_id=turn_id,
+                submission_id=submission_id,
+                item=item,
+            )
+        )
+        return True
 
     def _observe_mcp(self, event: dict[str, Any], state: _CallbackState) -> None:
         handle = state.handle
@@ -5614,6 +5714,13 @@ class Session(Generic[ContextT, OutputT]):
         else:
             state = self._child_callback_state(event["subagent_id"], incarnation, turn_id)
         if state.completion.done():
+            if kind == "item_completed":
+                self._observe_execution(
+                    message,
+                    thread_id=event["subagent_id"],
+                    turn_id=turn_id,
+                    submission_id=state.handle.submission_id,
+                )
             return
         state.native_instance = event["subagent_instance_id"]
         if not state.observed.done():
@@ -5798,6 +5905,12 @@ class Session(Generic[ContextT, OutputT]):
                 if event is None:
                     break
                 message = event.get("msg", {})
+                if message.get("type") == "token_count" and "api_rate_limits" in message:
+                    snapshot = _api_rate_limits(message["api_rate_limits"])
+                    if snapshot is not None:
+                        self._api_rate_limit_snapshot = snapshot
+                        if self._rate_limit_parent is not None:
+                            self._rate_limit_parent._api_rate_limit_snapshot = snapshot
                 if message.get("type") == "elicitation_status":
                     key = (message["server_name"], message["request_id"])
                     url_question = self._url_completions.get(key)
@@ -5890,6 +6003,24 @@ class Session(Generic[ContextT, OutputT]):
                     await self._read_child_event(event)
                     continue
                 state = self._active
+                if (
+                    message.get("type") == "item_completed"
+                    and message.get("thread_id") == self.id
+                    and isinstance(late_turn_id := message.get("turn_id"), str)
+                    and (
+                        state is None
+                        or state.handle is None
+                        or state.handle.turn_id != late_turn_id
+                    )
+                ):
+                    started = self._observations.turn_started(late_turn_id)
+                    if self._observe_execution(
+                        message,
+                        thread_id=self.id,
+                        turn_id=late_turn_id,
+                        submission_id=started.submission_id if started is not None else None,
+                    ):
+                        continue
                 if self._startup_failure is not None and (state is None or state.handle is None):
                     if not self._startup_failure.done() and message.get("type") in {
                         "exec_approval_request",
@@ -6149,14 +6280,22 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.terminal.done()
                 and not state.failure.done()
             ):
-                state.failure.set_result(NativeError("Native event stream ended before settlement"))
+                state.failure.set_result(
+                    NativeError(
+                        "Native event stream ended before settlement", category="connection_failed"
+                    )
+                )
             if self._native_agents is not None:
                 cast(Any, self._native)._finish_child_event_reader()
                 for child in self._child_callbacks.values():
                     if not child.observed.done():
                         child.observed.set_result(None)
                     if not child.completion.done() and not child.failure.done():
-                        child.failure.set_result(NativeError("Native child event stream ended"))
+                        child.failure.set_result(
+                            NativeError(
+                                "Native child event stream ended", category="connection_failed"
+                            )
+                        )
             self._finish_failed_observations()
 
     async def _read_mcp_results(self) -> None:
@@ -7179,6 +7318,7 @@ class Session(Generic[ContextT, OutputT]):
             payload["network_policy_digest"] = (
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
+            _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions)
             raw = state.to_json()

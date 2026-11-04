@@ -422,6 +422,7 @@ params!(TurnParams {
     #[serde(default)] mode: Mode,
     expected_turn_id: Option<String>,
     expected_previous_turn_id: Option<String>,
+    #[serde(default)] exact_steering: bool,
 });
 
 fn rejection(reason: NotSubmittedReason) -> Value {
@@ -561,6 +562,10 @@ async fn start_with_params<'a>(
         &mut Option<tokio::sync::MutexGuard<'a, ()>>,
     )>,
 ) -> Result<Value> {
+    ensure!(
+        !p.exact_steering || (managed.is_some() && matches!(p.mode, Mode::Steer)),
+        "exact steering requires a managed steer"
+    );
     let input = if p.input.is_array() {
         TurnInput::UserInput {
             content: decode::<Vec<UserInput>>(p.input)?,
@@ -659,6 +664,7 @@ async fn start_with_params<'a>(
             let expected = p
                 .expected_turn_id
                 .context("steer requires expected_turn_id")?;
+            let mut input_id = None;
             if managed.is_some()
                 && let TurnInput::UserInput { client_id, .. } = &mut request.input
             {
@@ -667,12 +673,19 @@ async fn start_with_params<'a>(
                     .get::<crate::python_tools::PythonTools>()
                     .context("Managed steering lost its tool owner")?
                     .admission_ready(&expected)?;
-                *client_id = Some(receipt.steering_client_id());
+                let id = receipt.root_steering_client_id(p.exact_steering)?;
+                if p.exact_steering {
+                    input_id = Some(id.clone());
+                }
+                *client_id = Some(id);
             }
             Ok(match thread.steer_turn(request, expected).await? {
-                SteerSubmission::Steered { turn_id } => {
-                    json!({"status": "steered", "turn_id": turn_id})
-                }
+                SteerSubmission::Steered { turn_id } => match input_id {
+                    Some(input_id) => {
+                        json!({"status": "steered", "turn_id": turn_id, "input_id": input_id})
+                    }
+                    None => json!({"status": "steered", "turn_id": turn_id}),
+                },
                 SteerSubmission::NotSubmitted { reason } => rejection(reason),
             })
         }

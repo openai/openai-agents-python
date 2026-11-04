@@ -195,6 +195,11 @@ async def test_checkpoint_requires_the_current_effective_policy(
             model.respond(assistant_output("ready"))
             assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
             encoded = (await session.save_state()).to_json()
+            [receipt] = [turn["receipt"] async for turn in session.turns() if "receipt" in turn]
+            assert receipt["executors"]
+            network = receipt["executors"][0]["network_policy"]
+            assert network is not None and network["domains"] is not None
+            assert network["domains"]["a.example.invalid"] == "allow"
         for private_value in ("example.invalid", "192.0.2.1", executor.token, provider_key):
             assert private_value not in encoded
         saved = SessionState.from_json(encoded)
@@ -207,6 +212,9 @@ async def test_checkpoint_requires_the_current_effective_policy(
             state=saved, environment=replace(selected, network=equivalent)
         ) as restored:
             assert restored.id == saved.source_session_id
+            assert [turn["receipt"] async for turn in restored.turns() if "receipt" in turn] == [
+                {**receipt, "executors": None}
+            ]
         attempts = executor.attempts
         changes = [
             replace(policy, denied_domains=[]),

@@ -1,0 +1,48 @@
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -144,6 +144,7 @@
+ pub use persistence_metrics::RolloutPersistenceTelemetry;
+ pub use persistence_metrics::measure_and_filter_rollout_items;
+ pub use policy::into_persisted_rollout_items;
++pub use policy::persisted_event_msg;
+ pub use policy::persisted_rollout_item;
+ pub use policy::persisted_rollout_items;
+ pub use policy::should_persist_response_item;
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -124,7 +124,8 @@
+     }
+ }
+ 
+-fn persisted_event_msg(
++/// Returns the authoritative durable representation of an event.
++pub fn persisted_event_msg(
+     ev: &EventMsg,
+     history_mode: ThreadHistoryMode,
+ ) -> Option<Cow<'_, EventMsg>> {
+@@ -232,7 +233,13 @@
+     history_mode: ThreadHistoryMode,
+ ) -> Option<Cow<'a, EventMsg>> {
+     match history_mode {
+-        ThreadHistoryMode::Legacy => {
++        // The SDK also reads execution completions from legacy in-memory histories.
++        ThreadHistoryMode::Legacy
++            if !matches!(
++                event.item,
++                TurnItem::CommandExecution(_) | TurnItem::McpToolCall(_) | TurnItem::FileChange(_)
++            ) =>
++        {
+             // Legacy rollouts keep only items with no lossless raw ResponseItem or legacy
+             // equivalent.
+             (matches!(
+@@ -247,7 +254,7 @@
+             ))
+             .then_some(Cow::Borrowed(ev))
+         }
+-        ThreadHistoryMode::Paginated => match &event.item {
++        ThreadHistoryMode::Legacy | ThreadHistoryMode::Paginated => match &event.item {
+             TurnItem::CommandExecution(CommandExecutionItem {
+                 aggregated_output: Some(aggregated_output),
+                 ..
