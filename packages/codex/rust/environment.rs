@@ -931,9 +931,9 @@ pub(crate) async fn replace_writable_roots(
         );
         validate_environment_network_policy(network, &profile, platform)?;
     }
-    if platform == Platform::Macos {
-        // A detached process can outlive its tracked command with its original
-        // Seatbelt policy. Adding a root can also add read-only carveouts.
+    if platform == Platform::Macos && !local {
+        // A remote detached process can keep its original Seatbelt policy.
+        // Adding a root can also add read-only carveouts.
         ensure!(
             current.roots.values().collect::<HashSet<_>>()
                 == writes.roots.values().collect::<HashSet<_>>(),

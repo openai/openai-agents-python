@@ -316,8 +316,12 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 
-@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux write-root replacement")
-@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 async def test_local_write_root_replacement_survives_portable_resume(
     responses: ResponsesFixture, tmp_path: Path
 ) -> None:
@@ -383,8 +387,8 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
     selected = Environment.local(
         cwd=work, writable_roots=[first, second], tools=["exec_command"], network=network
     )
-    applied_roots = (second, first) if sys.platform == "darwin" else (third,)
-    excluded_roots = (third,) if sys.platform == "darwin" else (first, second)
+    applied_roots = (third,)
+    excluded_roots = (first, second)
     denials = {
         "blocked.example.invalid": (
             "domain is explicitly denied by policy and cannot be approved from this prompt"
@@ -466,8 +470,6 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
             assert set(receipts[after]["writable_roots"]) == {
                 path.resolve().as_uri() for path in (work, *applied_roots)
             }
-            if sys.platform == "darwin":
-                assert receipts[after] == receipts[before]
             assert receipts[inherited] == receipts[after]
             assert "permission_profile" not in receipts[after]
             assert receipts[before]["network_sandbox"] == receipts[after]["network_sandbox"]
@@ -484,9 +486,7 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
                 environment=replace(selected, writable_roots=excluded_roots),
             ):
                 pytest.fail("Reopen accepted different grants")
-        replacement = (
-            selected if sys.platform == "darwin" else replace(selected, writable_roots=[third])
-        )
+        replacement = replace(selected, writable_roots=[third])
         changed_network = replace(replacement, network=NetworkPolicy(allow_all_unix_sockets=True))
         request_count = len(responses.requests)
         with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
@@ -504,58 +504,12 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
                 if turn["id"] == inherited
             ]
             assert restored_policy == receipts[inherited]
-            if sys.platform == "linux":
-                await run_turn(
-                    session,
-                    "cleared",
-                    command(allow=(work,), deny=(first, second, third)),
-                    writable_roots=[],
-                )
-
-
-@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
-@pytest.mark.requires_native_macos_sandbox
-async def test_macos_refuses_to_change_roots_after_a_detached_command(
-    responses: ResponsesFixture, tmp_path: Path
-) -> None:
-    cwd, extra, sibling = (tmp_path / name for name in ("cwd", "extra", "sibling"))
-    for directory in (cwd, extra, sibling):
-        directory.mkdir()
-    release, witness = cwd / "release", extra / "witness"
-    detach = cwd / "detach"
-    subprocess.run(
-        [
-            "/usr/bin/cc",
-            str(Path(__file__).with_name("fixtures") / "detached_child.c"),
-            "-o",
-            str(detach),
-        ],
-        check=True,
-    )
-    cmd = "exec " + shlex.join([str(detach), str(release), str(witness)])
-    responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, "detach"))
-    responses.respond(assistant_output("parent exited"))
-    responses.respond(assistant_output("unexpectedly admitted"))
-    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
-    agent = Agent(instructions="Use the selected tools.", provider=provider)
-    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
-    async with timeout(40), provider, agent.session(environment=environment) as session:
-        try:
-            started = await session.submit("Detach a child.")
-            assert (await started.get_result()).final_output == "parent exited"
-            assert "Process exited with code 0" in tool_output(responses.requests[1], "detach")
-            for roots in ([], [extra.resolve(), sibling.resolve()]):
-                refused = await session.submit("Change roots.", writable_roots=roots)
-                with pytest.raises(
-                    NativeError, match="macOS executors require fixed writable roots"
-                ) as failure:
-                    await refused.get_result()
-                assert failure.value.effects == "not_started"
-                assert len(responses.requests) == 2
-        finally:
-            release.touch()
-        while not witness.exists() or witness.read_text() != "old grant":
-            await asyncio.sleep(0.01)
+            await run_turn(
+                session,
+                "cleared",
+                command(allow=(work,), deny=(first, second, third)),
+                writable_roots=[],
+            )
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
@@ -599,8 +553,9 @@ async def test_local_root_change_refuses_a_retargeted_working_directory(
 async def test_steer_twice_and_interrupt_running_local_command(
     responses: ResponsesFixture, tmp_path: Path
 ) -> None:
-    work = tmp_path / "work"
+    work, sibling = tmp_path / "work", tmp_path / "sibling"
     work.mkdir()
+    sibling.mkdir()
     heartbeat = work / "heartbeat"
     background = work / "background"
     selected = Environment.local(cwd=work, tools=["exec_command", "write_stdin"])
@@ -653,6 +608,11 @@ async def test_steer_twice_and_interrupt_running_local_command(
         await asyncio.sleep(0.25)
         assert heartbeat.read_bytes() == ticks
         assert len(background.read_bytes()) > len(background_ticks)
+        assert len(responses.requests) == 2
+        refused = await session.submit("Change write roots.", writable_roots=[sibling.resolve()])
+        with pytest.raises(NativeError, match="old executor work") as failure:
+            await refused.get_result()
+        assert failure.value.effects == "not_started"
         assert len(responses.requests) == 2
         responses.respond(assistant_output("New work."))
         successor = await session.submit("Start fresh.")
@@ -753,3 +713,64 @@ async def test_cancel_joins_local_process_before_its_result_is_accepted(
         assert len(responses.requests) == 2
         assert not _command_is_running(held, commands["held"])
         assert _command_is_running(returned, commands["returned"])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
+@pytest.mark.requires_native_macos_sandbox
+async def test_macos_session_close_stops_child_after_command_exit(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    cwd, extra = tmp_path / "cwd", tmp_path / "extra"
+    cwd.mkdir()
+    extra.mkdir()
+    ready, release, witness = cwd / "ready", cwd / "release", extra / "witness"
+    detach = cwd / f"detach-{uuid4().hex}"
+    subprocess.run(
+        [
+            "/usr/bin/cc",
+            str(Path(__file__).with_name("fixtures") / "detached_child.c"),
+            "-o",
+            str(detach),
+        ],
+        check=True,
+    )
+
+    def child_running(pid: int) -> bool:
+        result = subprocess.run(
+            ["/bin/ps", "-ww", "-p", str(pid), "-o", "stat=", "-o", "command="],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode == 1 and not result.stdout and not result.stderr:
+            return False
+        result.check_returncode()
+        state, command = result.stdout.split(maxsplit=1)
+        return not state.startswith("Z") and detach.name in command
+
+    cmd = "exec " + shlex.join([str(detach), str(release), str(witness), str(ready)])
+    responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, "detach"))
+    responses.respond(assistant_output("parent exited"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Use the selected tools.", provider=provider)
+    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
+    # The fixture's 30-second self-exit must never satisfy this test.
+    async with timeout(25), provider:
+        try:
+            async with agent.session(environment=environment) as session:
+                turn = await session.submit("Start the child.")
+                assert (await turn.get_result()).final_output == "parent exited"
+                assert "Process exited with code 0" in tool_output(responses.requests[1], "detach")
+                pid, detach_error = map(int, ready.read_text().split())
+                assert not witness.exists()
+            alive_at_close = child_running(pid)
+            release.touch()
+            async with timeout(5):
+                while child_running(pid):
+                    await asyncio.sleep(0.05)
+            assert not witness.exists(), (
+                f"child wrote after Session close (setsid errno {detach_error})"
+            )
+            assert not alive_at_close, f"child survived Session close (setsid errno {detach_error})"
+        finally:
+            release.touch()
