@@ -226,7 +226,13 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
             },
         }
     )
-    git_path = shlex.quote(git_executable)
+    sandbox_git = git_executable
+    if sys.platform == "darwin":
+        # Stage the Apple Git binary itself so Seatbelt does not have to load
+        # the Xcode shim or reach into Homebrew.
+        apple_git = subprocess.check_output(["/usr/bin/xcrun", "--find", "git"], text=True).strip()
+        sandbox_git = shutil.copy(apple_git, str(cache / "git"))
+    git_path = shlex.quote(sandbox_git)
     scratch_path = shlex.quote(str(scratch_file))
     command = (
         'set -e; test -z "${OPENAI_API_KEY+x}${CODEX_API_KEY+x}'
@@ -241,8 +247,9 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
         "(printf denied > escape) 2>/dev/null || true; "
         "if (printf denied > .agents/protected) 2>/dev/null; then exit 12; fi; "
         "if (printf denied >> .git) 2>/dev/null; then exit 13; fi; "
+        "export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_ATTR_NOSYSTEM=1; "
         f"{git_path} add result.txt; "
-        f"{git_path} -c user.name=Fixture -c user.email=fixture@example.invalid "
+        f"{git_path} -c user.name=Fixture -c user.email=fixture@example.invalid -c gc.auto=0 "
         "commit -qm local-change"
     )
     responses.respond(function_call("exec_command", {"cmd": command, "login": False}, "command"))
@@ -461,34 +468,18 @@ async def test_macos_refuses_to_change_roots_after_a_detached_command(
     cwd, extra, sibling = (tmp_path / name for name in ("cwd", "extra", "sibling"))
     for directory in (cwd, extra, sibling):
         directory.mkdir()
-    ready, release, witness = cwd / "ready", cwd / "release", extra / "witness"
-    # The child has a different session and no inherited output pipes. It
-    # exits when released or after a bounded wait, including on test failure.
-    script = """
-        my ($ready, $release, $witness) = @ARGV;
-        $SIG{HUP} = "IGNORE";
-        my $pid = fork();
-        die "fork: $!" unless defined $pid;
-        exit 0 if $pid;
-        setsid() >= 0 or die "setsid: $!";
-        close STDIN;
-        close STDOUT;
-        close STDERR;
-        open my $started, ">", $ready or die;
-        close $started or die;
-        for (1..300) {
-            if (-e $release) {
-                open my $out, ">", $witness or die;
-                print $out "old grant";
-                close $out or die;
-                exit 0;
-            }
-            select undef, undef, undef, 0.1;
-        }
-    """
-    cmd = shlex.join(
-        ["/usr/bin/perl", "-MPOSIX=setsid", "-e", script, *map(str, (ready, release, witness))]
+    release, witness = cwd / "release", extra / "witness"
+    detach = cwd / "detach"
+    subprocess.run(
+        [
+            "/usr/bin/cc",
+            str(Path(__file__).with_name("fixtures") / "detached_child.c"),
+            "-o",
+            str(detach),
+        ],
+        check=True,
     )
+    cmd = "exec " + shlex.join([str(detach), str(release), str(witness)])
     responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, "detach"))
     responses.respond(assistant_output("parent exited"))
     responses.respond(assistant_output("unexpectedly admitted"))
@@ -500,9 +491,6 @@ async def test_macos_refuses_to_change_roots_after_a_detached_command(
             started = await session.submit("Detach a child.")
             assert (await started.get_result()).final_output == "parent exited"
             assert "Process exited with code 0" in tool_output(responses.requests[1], "detach")
-            while not ready.exists():
-                await asyncio.sleep(0.01)
-
             for roots in ([], [extra.resolve(), sibling.resolve()]):
                 refused = await session.submit("Change roots.", writable_roots=roots)
                 with pytest.raises(
