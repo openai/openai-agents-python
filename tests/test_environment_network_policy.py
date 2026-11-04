@@ -472,7 +472,19 @@ async def test_local_resume_requires_explicit_strict_writes_even_without_extra_r
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
-@pytest.mark.parametrize("corruption", ["empty", "missing", "empty_downgrade"])
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "empty",
+        "missing",
+        "empty_downgrade",
+        "missing_policy_fields",
+        "identity_missing",
+        "identity_malformed",
+        "identity_replaced",
+        "identity_missing_with_only_executor_list",
+    ],
+)
 async def test_local_resume_rejects_incomplete_strict_executor_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
 ) -> None:
@@ -500,19 +512,37 @@ async def test_local_resume_rejects_incomplete_strict_executor_receipt(
 
         [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
         rows = [json.loads(line) for line in rollout.read_text().splitlines()]
-        latest = next(
+        receipts = [
             row["payload"]["sdk_receipt"]
-            for row in reversed(rows)
-            if row["type"] == "turn_context" and row["payload"].get("sdk_receipt")
-        )
+            for row in rows
+            if row["type"] == "turn_context"
+            and row["payload"].get("sdk_receipt", {}).get("thread_id") == session_id
+        ]
+        assert len(receipts) == 2
+        first, latest = receipts
         assert latest["strict_executor_writes"] is True
         assert latest["executors"]
-        if corruption == "missing":
+        if corruption.startswith("identity_"):
+            if corruption == "identity_missing":
+                del latest["thread_id"]
+            elif corruption == "identity_malformed":
+                latest["thread_id"] = 42
+            elif corruption == "identity_replaced":
+                latest["thread_id"] = "00000000-0000-4000-8000-000000000000"
+            else:
+                del latest["thread_id"]
+                del latest["codex_source_tree"]
+                del latest["strict_executor_writes"]
+        elif corruption in ("missing", "missing_policy_fields"):
             del latest["executors"]
+            if corruption == "missing_policy_fields":
+                del latest["strict_executor_writes"]
         else:
             latest["executors"] = []
             if corruption == "empty_downgrade":
                 latest["strict_executor_writes"] = False
+        if corruption.startswith("identity_") or corruption == "missing_policy_fields":
+            rows = [row for row in rows if row["payload"].get("sdk_receipt") is not first]
         rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
         for environment in (None, selected, replace(selected, writable_roots=None)):
@@ -522,6 +552,94 @@ async def test_local_resume_rejects_incomplete_strict_executor_receipt(
                 ):
                     pytest.fail("Reopened a Session with an incomplete strict executor receipt")
         assert len(model.requests) == 2
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize(
+    "history", ["strict", "strict_extra", "implicit", "model_only", "before_sampling", "empty"]
+)
+async def test_local_resume_without_executor_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, history: str
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile")
+        implicit = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+        )
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        strict = replace(implicit, writable_roots=[str(extra)] if history == "strict_extra" else [])
+        source: Environment[Any] | None = implicit
+        if history == "model_only":
+            source = None
+        elif history in ("strict", "strict_extra"):
+            source = strict
+        async with agent.session(storage=storage, environment=source) as session:
+            session_id = session.id
+            model.respond(assistant_output("Original"))
+            assert (await (await session.submit("Start.")).get_result()).final_output == "Original"
+
+        [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
+        rows = [json.loads(line) for line in rollout.read_text().splitlines()]
+        [receipt_index] = [
+            index
+            for index, row in enumerate(rows)
+            if row["type"] == "turn_context"
+            and row["payload"].get("sdk_receipt", {}).get("thread_id") == session_id
+        ]
+        if history == "empty":
+            assert rows[0]["type"] == "session_meta"
+            rows = rows[:1]
+        elif history == "before_sampling":
+            completion = next(
+                row
+                for row in rows
+                if row["type"] == "event_msg" and row["payload"]["type"] == "task_complete"
+            )
+            completion["payload"] = {
+                "type": "task_complete",
+                "turn_id": completion["payload"]["turn_id"],
+                "last_agent_message": None,
+                "error": {"message": "Failed before sampling"},
+            }
+            rows = [*rows[:receipt_index], completion]
+        else:
+            del rows[receipt_index]
+        rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        async def reopen(environment: Environment[Any] | None) -> None:
+            async with agent.session(
+                storage=storage, resume=session_id, environment=environment
+            ) as resumed:
+                assert resumed.id == session_id
+
+        policy_error = "recorded executor write and network policy"
+        for environment in (None, implicit):
+            if history == "strict_extra":
+                with pytest.raises(RuntimeError, match=policy_error):
+                    await reopen(environment)
+            else:
+                await reopen(environment)
+        if history == "implicit":
+            explicit_network = replace(implicit, network=NetworkPolicy(allow_all_unix_sockets=True))
+            with pytest.raises(RuntimeError, match=policy_error):
+                await reopen(explicit_network)
+        if history in ("before_sampling", "empty"):
+            await reopen(strict)
+        else:
+            with pytest.raises(RuntimeError, match=policy_error):
+                await reopen(strict)
+        assert len(model.requests) == 1
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
