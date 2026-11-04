@@ -1,75 +1,32 @@
-name: Reproduce local command shutdown on the earlier Python package
+name: Check ownership after exec of a system binary
 on:
   push:
     branches: [test/darwin-resource-ownership-20261104]
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  reproduce:
-    runs-on: macos-latest
-    timeout-minutes: 12
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          path: validation
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 024d0032cdd13fb930f85668539322c940f39386
-          path: sdk
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          artifact-ids: 13311065835
-          run-id: 41803603288
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/native-baseline
-          merge-multiple: true
-      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
-        with:
-          version: "0.11.14"
-          enable-cache: false
-          python-version: "3.14"
-      - name: Install the exact earlier wheel and add the focused test
-        working-directory: sdk
-        run: |
-          set -eu
-          test "$(git rev-parse HEAD)" = 024d0032cdd13fb930f85668539322c940f39386
-          cd "$RUNNER_TEMP/native-baseline"
-          wheel=openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl
-          printf '%s  %s\n' 107f32f33f18aa6f592437d93150ad31a36830385081c9693557a9f167b847de "$wheel" | shasum -a 256 -c -
-          export OPENAI_AGENTS_NATIVE_WHEEL="$PWD/$wheel"
-          cd "$GITHUB_WORKSPACE/sdk"
-          uv sync --frozen --group dev --no-install-project
-          uv pip install --python .venv/bin/python --no-deps "$OPENAI_AGENTS_NATIVE_WHEEL"
-          git apply --unidiff-zero --check ../validation/.github/qualification/darwin-resource-ownership/python-baseline.patch
-          git apply --unidiff-zero ../validation/.github/qualification/darwin-resource-ownership/python-baseline.patch
-      - name: Check for a write after Session exit
-        working-directory: sdk
-        env:
-          OPENAI_API_KEY: fake-for-tests
+      - name: Check process ownership as the runner user
         run: |
           set -eu
           sw_vers
-          result=0
-          .venv/bin/python -I -B - "$RUNNER_TEMP/baseline-result.xml" <<'PY' || result=$?
-          import os, pathlib, platform, sys, sysconfig
-          import agents._native, pytest
-          assert sys.platform == "darwin" and platform.machine() == "arm64"
-          assert pathlib.Path(agents._native.__file__).resolve().is_relative_to(pathlib.Path(sysconfig.get_path("platlib")).resolve())
-          sys.path.insert(0, os.getcwd())
-          sys.exit(pytest.main(["-q", "-rA", "tests/test_native_executor_local.py::test_macos_session_close_stops_child_after_command_exit", "--junitxml=" + sys.argv[1]]))
-          PY
-          test "$result" = 1
-          python3 - "$RUNNER_TEMP/baseline-result.xml" <<'PY'
-          import sys
-          import xml.etree.ElementTree as ET
-          cases = ET.parse(sys.argv[1]).findall(".//testcase")
-          assert len(cases) == 1 and cases[0].get("name") == "test_macos_session_close_stops_child_after_command_exit"
-          failure = cases[0].find("failure")
-          assert failure is not None and "child wrote after Session close (setsid errno 0)" in failure.get("message", "")
-          print("Confirmed the detached child wrote after the public Session context exited on the earlier wheel.")
-          PY
+          uname -m
+          user_id=$(id -u)
+          if /bin/launchctl print "gui/$user_id" >/dev/null 2>&1; then
+            domain=gui
+          else
+            domain=user
+          fi
+          python3 -u .github/qualification/darwin-resource-ownership/system/smoke.py "$domain"
