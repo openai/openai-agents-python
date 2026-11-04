@@ -1,4 +1,4 @@
-name: Check ownership after exec of a system binary
+name: Qualify the Rust command owner on Apple Silicon
 on:
   push:
     branches: [test/darwin-resource-ownership-20261104]
@@ -13,7 +13,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-latest]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 5
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -29,4 +29,22 @@ jobs:
           else
             domain=user
           fi
-          python3 -u .github/qualification/darwin-resource-ownership/system/smoke.py "$domain"
+          root=.github/qualification/darwin-resource-ownership
+          printf 'SDK_TEST_DOMAIN=%s\nSDK_TEST_ROOT=%s\n' "$domain" "$root" >> "$GITHUB_ENV"
+          python3 -u "$root/system/smoke.py" "$domain"
+      - name: Build the exact private Rust module
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 build --locked --manifest-path "$SDK_TEST_ROOT/rust-qualification/Cargo.toml"
+      - name: Reap a detached process and keep the other job running
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          python3 -u "$SDK_TEST_ROOT/rust-qualification/qualify.py" "$SDK_TEST_ROOT/rust-qualification/target/debug/sdk-coalition-qualification" "$SDK_TEST_DOMAIN" "$SDK_TEST_ROOT"
+      - name: Reap an Apple platform executable
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          python3 -u "$SDK_TEST_ROOT/rust-qualification/qualify.py" "$SDK_TEST_ROOT/rust-qualification/target/debug/sdk-coalition-qualification" "$SDK_TEST_DOMAIN" "$SDK_TEST_ROOT/system" --system-image

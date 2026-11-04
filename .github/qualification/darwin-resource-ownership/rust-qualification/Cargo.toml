@@ -1,0 +1,13 @@
+[package]
+name = "sdk-coalition-qualification"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[[bin]]
+name = "sdk-coalition-qualification"
+path = "driver.rs"
+
+[dependencies]
+libc = "=0.2.186"
