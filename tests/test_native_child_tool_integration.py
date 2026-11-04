@@ -235,27 +235,37 @@ def family_agent(
 
 
 @pytest.mark.parametrize(
-    ("programmatic_tool_calling", "execute"),
+    ("programmatic_tool_calling", "execute", "synthetic_denial"),
     [
-        pytest.param(False, False, id="direct-function-mcp"),
-        pytest.param(True, False, id="code-function-mcp"),
+        pytest.param(False, False, False, id="direct-function-mcp"),
+        pytest.param(True, False, False, id="code-function-mcp"),
+        pytest.param(True, True, True, id="code-function-mcp-fast-executor-denial"),
         pytest.param(
             True,
             True,
+            False,
             id="code-function-mcp-native-executor",
             marks=pytest.mark.requires_native_linux_sandbox,
         ),
     ],
 )
 async def test_two_children_can_use_context_and_mcp_after_root_finishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, programmatic_tool_calling: bool, execute: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    programmatic_tool_calling: bool,
+    execute: bool,
+    synthetic_denial: bool,
 ) -> None:
     memory = Memory()
     vault = Peer(names=("find-record", "excluded"), label="mcp-private-f126")
     async with (
         timeout(60),
         family_peer(programmatic_tool_calling=programmatic_tool_calling, execute=execute) as peer,
-        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        ExecutorPeer(
+            tmp_path / "remote",
+            synthetic_process_output="Permission denied" if synthetic_denial else None,
+            synthetic_sandbox_denied=synthetic_denial,
+        ).serve() as executor,
         vault.serve() as url,
     ):
         trust(executor, tmp_path, monkeypatch)
@@ -358,6 +368,7 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                         handle.turn_id,
                     )
                     assert command["argv"][-1:] == [f"printf {name} > ../{name}.txt"]
+                    assert command["call_id"] and command["call_id"] == command["id"]
                     assert command["exit_code"] == denied["exit_code"]
                     assert command["native_status"] == "failed"
                     output = denied["output"].lower()
@@ -367,6 +378,8 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 assert any(
                     request.get("method") == "process/start" for request in executor.requests
                 )
+            if synthetic_denial:
+                assert len(executor.synthetic_process_starts) == 2
             if not programmatic_tool_calling:
                 assert {ctx.call_id for ctx in memory.entries.values()} == {"shared-call-id"}
             wire = json.dumps(peer.requests, ensure_ascii=False)

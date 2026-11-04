@@ -112,6 +112,7 @@ class ExecutorPeer:
     drop_start_reply_after: Path | None = None
     start_reply_dropped: asyncio.Event = field(default_factory=asyncio.Event)
     synthetic_process_output: str | None = field(default=None, repr=False)
+    synthetic_sandbox_denied: bool = False
     synthetic_process_starts: list[str] = field(default_factory=list)
 
     async def wait_disconnected(self) -> None:
@@ -195,6 +196,8 @@ class ExecutorPeer:
                                                 method = value.get("method")
                                                 params = value.get("params", {})
                                                 process_id = params.get("processId")
+                                                sandbox_denied = self.synthetic_sandbox_denied
+                                                exit_code = int(sandbox_denied)
                                                 if method == "process/start":
                                                     assert (
                                                         isinstance(process_id, str) and process_id
@@ -202,15 +205,15 @@ class ExecutorPeer:
                                                     assert process_id not in synthetic_processes
                                                     synthetic_processes.add(process_id)
                                                     self.synthetic_process_starts.append(process_id)
-                                                    await downstream.send_json(
-                                                        {
-                                                            "id": value["id"],
-                                                            "result": {
-                                                                "processId": process_id,
-                                                                "sandboxType": "none",
-                                                            },
-                                                        }
-                                                    )
+                                                    start_reply = {
+                                                        "id": value["id"],
+                                                        "result": {
+                                                            "processId": process_id,
+                                                            "sandboxType": "none",
+                                                        },
+                                                    }
+                                                    if not sandbox_denied:
+                                                        await downstream.send_json(start_reply)
                                                     chunk = base64.b64encode(
                                                         self.synthetic_process_output.encode()
                                                     ).decode()
@@ -229,7 +232,12 @@ class ExecutorPeer:
                                                             {
                                                                 "processId": process_id,
                                                                 "seq": 2,
-                                                                "exitCode": 0,
+                                                                "exitCode": exit_code,
+                                                                **(
+                                                                    {"sandboxDenied": True}
+                                                                    if sandbox_denied
+                                                                    else {}
+                                                                ),
                                                             },
                                                         ),
                                                         (
@@ -243,6 +251,9 @@ class ExecutorPeer:
                                                                 "params": payload,
                                                             }
                                                         )
+                                                    if sandbox_denied:
+                                                        # Queue the exit before acknowledging start.
+                                                        await downstream.send_json(start_reply)
                                                     # Never forward a synthetic process/start.
                                                     continue
                                                 if process_id in synthetic_processes:
@@ -265,10 +276,10 @@ class ExecutorPeer:
                                                             "chunks": chunks,
                                                             "nextSeq": 3,
                                                             "exited": True,
-                                                            "exitCode": 0,
+                                                            "exitCode": exit_code,
                                                             "closed": True,
                                                             "failure": None,
-                                                            "sandboxDenied": False,
+                                                            "sandboxDenied": sandbox_denied,
                                                         }
                                                     elif method == "process/terminate":
                                                         reply = {"running": False}

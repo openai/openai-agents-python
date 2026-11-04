@@ -87,7 +87,11 @@
     {
       "path": "0022-sdk-local-network-receipts.patch",
       "sha256": "44d43b139d8d1f8a010dbab32a3bb7ae8e54f10a695e97026e63c93d73bb0fcf"
+    },
+    {
+      "path": "0023-retain-early-sandbox-denials.patch",
+      "sha256": "31eee8fd638f35abd56e216a18bbc70dad6b8b93f90fe2db16b2deaae1bd004f"
     }
   ],
-  "result_tree": "940cdeb7147a2f2bbdd9b6065c5cbdd73754167c"
+  "result_tree": "bfb3f0280e467a641999c4be006f4188bfc85734"
 }
