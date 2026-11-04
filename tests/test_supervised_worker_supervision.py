@@ -280,6 +280,7 @@ def test_worker_artifact_close_keeps_primary_read_error(tmp_path, monkeypatch, c
         assert any(record.exc_info and record.exc_info[1] is cleanup for record in caplog.records)
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Uses Unix directory fsync")
 async def test_prior_accepted_snapshot_remains_publishable(tmp_path, monkeypatch):
     from argparse import Namespace
 
