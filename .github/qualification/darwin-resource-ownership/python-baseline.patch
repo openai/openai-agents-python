@@ -1,0 +1,120 @@
+--- a/tests/test_native_executor_local.py
++++ b/tests/test_native_executor_local.py
+@@ -714,0 +715,61 @@
++
++
++@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
++@pytest.mark.requires_native_macos_sandbox
++async def test_macos_session_close_stops_child_after_command_exit(
++    responses: ResponsesFixture, tmp_path: Path
++) -> None:
++    cwd, extra = tmp_path / "cwd", tmp_path / "extra"
++    cwd.mkdir()
++    extra.mkdir()
++    ready, release, witness = cwd / "ready", cwd / "release", extra / "witness"
++    detach = cwd / f"detach-{uuid4().hex}"
++    subprocess.run(
++        [
++            "/usr/bin/cc",
++            str(Path(__file__).with_name("fixtures") / "detached_child.c"),
++            "-o",
++            str(detach),
++        ],
++        check=True,
++    )
++
++    def child_running(pid: int) -> bool:
++        result = subprocess.run(
++            ["/bin/ps", "-ww", "-p", str(pid), "-o", "stat=", "-o", "command="],
++            capture_output=True,
++            text=True,
++            check=False,
++        )
++        if result.returncode == 1 and not result.stdout and not result.stderr:
++            return False
++        result.check_returncode()
++        state, command = result.stdout.split(maxsplit=1)
++        return not state.startswith("Z") and detach.name in command
++
++    cmd = "exec " + shlex.join([str(detach), str(release), str(witness), str(ready)])
++    responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, "detach"))
++    responses.respond(assistant_output("parent exited"))
++    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
++    agent = Agent(instructions="Use the selected tools.", provider=provider)
++    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
++    # The fixture's 30-second self-exit must never satisfy this test.
++    async with timeout(25), provider:
++        try:
++            async with agent.session(environment=environment) as session:
++                turn = await session.submit("Start the child.")
++                assert (await turn.get_result()).final_output == "parent exited"
++                assert "Process exited with code 0" in tool_output(responses.requests[1], "detach")
++                pid, detach_error = map(int, ready.read_text().split())
++                assert not witness.exists()
++            alive_at_close = child_running(pid)
++            release.touch()
++            async with timeout(5):
++                while child_running(pid):
++                    await asyncio.sleep(0.05)
++            assert not witness.exists(), (
++                f"child wrote after Session close (setsid errno {detach_error})"
++            )
++            assert not alive_at_close, f"child survived Session close (setsid errno {detach_error})"
++        finally:
++            release.touch()
+--- /dev/null
++++ b/tests/fixtures/detached_child.c
+@@ -0,0 +1,53 @@
++#include <errno.h>
++#include <signal.h>
++#include <stdio.h>
++#include <unistd.h>
++
++int main(int argc, char **argv) {
++    int ready[2];
++    if ((argc != 3 && argc != 4) || pipe(ready) == -1 || signal(SIGHUP, SIG_IGN) == SIG_ERR) {
++        return 1;
++    }
++    pid_t child = fork();
++    if (child == -1) {
++        return 1;
++    }
++    if (child > 0) {
++        // The tracked command exits successfully only after the child is ready.
++        close(ready[1]);
++        char started;
++        return read(ready[0], &started, 1) == 1 ? 0 : 1;
++    }
++    close(ready[0]);
++    close(STDIN_FILENO);
++    close(STDOUT_FILENO);
++    close(STDERR_FILENO);
++    int detach_error = setsid() == -1 ? errno : 0;
++    if (detach_error != 0 && (argc == 3 || (detach_error != EPERM && detach_error != EACCES))) {
++        return 1;
++    }
++    if (argc == 4) {
++        FILE *status = fopen(argv[3], "w");
++        if (status == NULL || fprintf(status, "%ld %d\n", (long)getpid(), detach_error) < 0 ||
++            fclose(status) != 0) {
++            return 1;
++        }
++    }
++    if (write(ready[1], "1", 1) != 1) {
++        return 1;
++    }
++    close(ready[1]);
++
++    // Exit within 30 seconds even if the test never releases the child.
++    for (int attempt = 0; attempt < 300; ++attempt) {
++        if (access(argv[1], F_OK) == 0) {
++            FILE *witness = fopen(argv[2], "w");
++            if (witness == NULL || fputs("old grant", witness) == EOF) {
++                return 1;
++            }
++            return fclose(witness) == 0 ? 0 : 1;
++        }
++        usleep(100000);
++    }
++    return 1;
++}
