@@ -349,17 +349,24 @@ def project_history(
                 item_id = f"{item_id}:{index}"
             item["id"] = item_id
             cursor_ids.add(item_id)
-        if item["type"] == "function_call" and not occurrence.native:
+        if item["type"] == "function_call":
             output = occurrence.output
-            recorded_turn = turns.get(item["turn_id"])
-            terminal = recorded_turn["status"] if recorded_turn is not None else None
-            item["status"] = (
-                output.value["status"]
-                if output
-                else "incomplete"
-                if terminal and terminal != "in_progress"
-                else "in_progress"
-            )
+            if not occurrence.native:
+                recorded_turn = turns.get(item["turn_id"])
+                terminal = recorded_turn["status"] if recorded_turn is not None else None
+                item["status"] = (
+                    output.value["status"]
+                    if output
+                    else "incomplete"
+                    if terminal and terminal != "in_progress"
+                    else "in_progress"
+                )
+            elif (
+                item["status"] in ("in_progress", "incomplete")
+                and output is not None
+                and "reconciliation" in output.value
+            ):
+                item["status"] = output.value["status"]
         if (
             uncertain_calls is not None
             and item["type"] == "function_call"

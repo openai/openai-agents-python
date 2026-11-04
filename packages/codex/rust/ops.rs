@@ -538,7 +538,11 @@ async fn prepare_write_selection(
     if selection != &replacement {
         ensure!(
             thread.active_turn_environment_selections().await.is_none()
-                && thread.list_background_terminals().await.is_empty(),
+                && thread.list_background_terminals().await.is_empty()
+                && !thread
+                    .thread_extension_data()
+                    .get::<crate::native_interception::Control>()
+                    .is_some_and(|control| control.has_unsettled_code_cells()),
             "Cannot change writable roots while old executor work is still active"
         );
     }

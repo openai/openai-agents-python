@@ -35,6 +35,8 @@ async def _worker() -> None:
     @function_tool
     async def record(context: ToolContext[str], key: str) -> str:
         """Record one application effect."""
+        if mode == "unknown-before-effect":
+            os._exit(67)
         with (directory / "effects").open("a") as stream:
             stream.write(context.context + ":" + key + "\n")
             stream.flush()
@@ -240,13 +242,48 @@ def test_unknown_custom_call_preserves_exact_input(custom_input: str) -> None:
     assert item["arguments"] == native_arguments
 
 
-async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(responses, tmp_path):
+@pytest.mark.parametrize(
+    ("outcome", "native_start"), [("applied", False), ("applied", True), ("not_applied", True)]
+)
+async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(
+    responses, tmp_path, outcome, native_start
+):
     responses.respond(function_call("record", {"key": "unknown-effect"}, "missing-receipt"))
-    crashed = await _start(responses, tmp_path, "unknown")
+    mode = "unknown" if outcome == "applied" else "unknown-before-effect"
+    crashed = await _start(responses, tmp_path, mode)
     code, rows, err = await _collect(crashed)
     assert code == 67 and rows and "opened" in rows[0], (rows, err)
     thread_id = rows[0]["opened"]
     storage = LocalStorage(tmp_path / "profile")
+    if native_start:
+        # Keep the model call and add a native start without a matching completion.
+        (rollout,) = (tmp_path / "profile").rglob(f"*{thread_id}.jsonl")
+        history = [json.loads(line) for line in rollout.read_text().splitlines()]
+        context = next(row for row in reversed(history) if row["type"] == "turn_context")
+        with rollout.open("a") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "timestamp": history[-1]["timestamp"],
+                        "ordinal": history[-1]["ordinal"] + 1,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_started",
+                            "thread_id": thread_id,
+                            "turn_id": context["payload"]["turn_id"],
+                            "started_at_ms": 0,
+                            "item": {
+                                "type": "DynamicToolCall",
+                                "id": "missing-receipt",
+                                "tool": "record",
+                                "status": "in_progress",
+                                "arguments": {"key": "unknown-effect"},
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
     invoked = []
 
     @function_tool
@@ -264,25 +301,34 @@ async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(respo
         (call,) = missing.value.calls
         assert (call.thread_id, call.call_id, call.name) == (thread_id, "missing-receipt", "record")
         assert call.arguments == {"key": "unknown-effect"}
-        assert (tmp_path / "effects").read_text() == "unknown:unknown-effect\n"
+        if native_start:
+            (invocation,) = [
+                item for item in missing.value.items if item["type"] == "function_call"
+            ]
+            assert invocation["arguments"] == {"key": "unknown-effect"}
+        effects = tmp_path / "effects"
+        if outcome == "applied":
+            assert effects.read_text() == "unknown:unknown-effect\n"
+        else:
+            assert not effects.exists()
         assert len(responses.requests) == 1
 
         with pytest.raises(ValueError, match="confirmed outcome and a text result"):
             call.reconcile(outcome="unknown", result="Outcome is still unknown")
         with pytest.raises(ValueError, match="confirmed outcome and a text result"):
             call.reconcile(outcome="applied", result={"confirmed": True})
-        confirmed = call.reconcile(outcome="applied", result="Confirmed application record")
+        confirmed = call.reconcile(outcome=outcome, result="Confirmed application record")
         from_journal = ReconciledCall(
             thread_id=thread_id,
             turn_id=call.turn_id,
             call_id=call.call_id,
-            outcome="applied",
+            outcome=outcome,
             result="Confirmed application record",
         )
         assert confirmed == from_journal
         # Repeating the same application receipt after a reconnect must be
         # safe. The same native call ID must stay fenced across later opens.
-        for receipts in ([confirmed], [from_journal], []):
+        for receipts in ([confirmed], [], [from_journal]):
             async with agent.session(
                 storage=storage, resume=thread_id, reconciled_calls=receipts
             ) as session:
@@ -293,7 +339,7 @@ async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(respo
                 ]
                 assert len(recorded) == 1
                 assert recorded[0]["turn_id"] == call.turn_id
-                assert recorded[0]["reconciliation"] == "applied"
+                assert recorded[0]["reconciliation"] == outcome
         assert len(responses.requests) == 1
         responses.respond(function_call("record", {"key": "duplicate"}, call.call_id))
         async with agent.session(storage=storage, resume=thread_id) as session:

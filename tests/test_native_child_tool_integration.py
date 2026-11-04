@@ -333,7 +333,9 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 if execute and not any(item["type"] == "command_execution" for item in execution):
                     # Core can publish the command receipt after the child stream closes.
                     assert isinstance(events[-1], TurnFinished)
-                    async with aclosing(session.events(after=events[-1].sequence)) as late:
+                    async with aclosing(
+                        session.events(after=events[-1].sequence, include_execution_details=True)
+                    ) as late:
                         async for event in late:
                             assert not isinstance(event, EventGap)
                             if (
