@@ -95,8 +95,15 @@ async def test_worker_preserves_primary_error_when_joining_turn(
 
 @pytest.mark.parametrize(
     ("failure", "output_suffix"),
-    [(None, ""), ("session", ""), ("provider", ""), ("cancel", ""), (None, "\n")],
-    ids=["success", "session-close", "provider-close", "cancel-close", "stale-check"],
+    [(None, ""), ("session", ""), ("provider", ""), ("cancel", ""), (None, "\n"), ("retarget", "")],
+    ids=[
+        "success",
+        "session-close",
+        "provider-close",
+        "cancel-close",
+        "stale-check",
+        "retarget-directory",
+    ],
 )
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Uses Unix artifact flags")
 async def test_worker_accepts_only_after_owned_resources_close(
@@ -185,6 +192,11 @@ async def test_worker_accepts_only_after_owned_resources_close(
         turn_timeout=5,
         instruction_file=[],
     )
+    other = tmp_path / "bravo"
+    if failure == "retarget":
+        other.mkdir()
+        args.directory = tmp_path / "worker-link"
+        args.directory.symlink_to(directory, target_is_directory=True)
     task = asyncio.create_task(worker.run_worker(args))
     try:
         await asyncio.wait_for(closing.wait(), 5)
@@ -194,6 +206,9 @@ async def test_worker_accepts_only_after_owned_resources_close(
             worker.main()
         assert publication.value.code == 2
         assert worker.read_record(directory, "published") is None
+        if failure == "retarget":
+            args.directory.unlink()
+            args.directory.symlink_to(other, target_is_directory=True)
         if failure == "cancel":
             task.cancel()
         else:
@@ -201,7 +216,7 @@ async def test_worker_accepts_only_after_owned_resources_close(
         if failure == "cancel":
             with pytest.raises(asyncio.CancelledError):
                 await task
-        elif failure:
+        elif failure in {"session", "provider"}:
             with pytest.raises(RuntimeError) as caught:
                 await task
             assert caught.value is cleanup
@@ -213,8 +228,10 @@ async def test_worker_accepts_only_after_owned_resources_close(
                     key: value for key, value in result.items() if key != "status"
                 }
         assert order == ["session", "provider"]
-        if failure or output_suffix:
+        if failure in {"session", "provider", "cancel"} or output_suffix:
             assert worker.read_record(directory, "accepted") is None
+        if failure == "retarget":
+            assert worker.read_record(other, "accepted") is None
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
