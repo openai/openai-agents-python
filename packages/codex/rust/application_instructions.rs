@@ -450,7 +450,10 @@ impl ContextContributor for Contributor {
                 codex_revision: include_str!("../CODEX_REVISION").trim(),
                 codex_source_tree: CODEX_SOURCE_TREE.as_str(),
                 sha256,
-                strict_executor_writes: false,
+                strict_executor_writes: input
+                    .thread_store
+                    .get::<crate::environment::StrictExecutorWrites>()
+                    .is_some(),
                 application: accepted
                     .as_ref()
                     .map(|accepted| SdkApplicationInstructions {

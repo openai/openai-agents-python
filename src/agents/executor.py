@@ -1,4 +1,4 @@
-"""Declarations for native tools on an application-owned remote executor."""
+"""Declarations for native tools on local and remote executors."""
 
 from __future__ import annotations
 
@@ -11,10 +11,11 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from ipaddress import IPv6Address
+from os import PathLike, fspath
 from pathlib import PurePosixPath, PureWindowsPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeAlias, get_origin
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Literal, TypeAlias, get_origin
+from urllib.parse import unquote, urlsplit
 
 from typing_extensions import TypeVar
 
@@ -147,7 +148,7 @@ class ExecutorContext(Generic[ContextT_co]):
 
 @dataclass(frozen=True, kw_only=True)
 class Environment(Generic[ContextT_contra]):
-    """Connect one authenticated WSS executor to a Session.
+    """Select one authenticated WSS executor or use :meth:`local` for local work.
 
     The application owns the endpoint, credentials and remote workspace.
     By default no process or file tools are granted to the model. The connection
@@ -159,7 +160,7 @@ class Environment(Generic[ContextT_contra]):
     replace its connection. The SDK never falls back to executing these tools on
     the application host.
 
-    capability_directories selects discovery roots only at the remote executor.
+    capability_directories selects discovery roots on the selected executor.
     None omits the native override; an empty sequence explicitly selects no
     roots. Restore uses only its current Environment, never host or saved roots.
 
@@ -167,6 +168,12 @@ class Environment(Generic[ContextT_contra]):
     The native runtime requests write access only there, with protected native
     metadata and restricted networking. The application owns remote isolation
     and must choose an executor that enforces the required OS and tenant limits.
+
+    ``writable_roots`` grants additional directories on the executor. The working
+    directory is always writable under the same metadata protections. An empty
+    sequence keeps only that directory and enables strict write enforcement.
+    Omitting this setting on a remote executor keeps its legacy approval behavior.
+    Strict write enforcement requires a Linux or macOS executor.
 
     With ``exec_command``, set ``network`` to a NetworkPolicy or a dictionary with
     the same fields. Omit the policy to keep the executor's default restricted
@@ -222,6 +229,7 @@ class Environment(Generic[ContextT_contra]):
     identity to select different application behavior for each.
     """
 
+    _is_local: ClassVar[bool] = False
     url: str = field(repr=False)
     cwd: str
     tools: Sequence[ExecutorToolName] = ()
@@ -242,8 +250,71 @@ class Environment(Generic[ContextT_contra]):
     ) = field(default=None, repr=False)
     policy_timeout: float = 30
     network: NetworkPolicy | RuntimeNetworkPolicy | None = None
+    writable_roots: Sequence[str | PathLike[str]] | None = None
+
+    @classmethod
+    def local(
+        cls,
+        *,
+        cwd: str | PathLike[str],
+        tools: Sequence[ExecutorToolName] = (),
+        writable_roots: Sequence[str | PathLike[str]] = (),
+        network: NetworkPolicy | RuntimeNetworkPolicy | None = None,
+        capability_directories: Sequence[str] | None = None,
+        approval: (
+            Callable[
+                [ExecutorContext[ContextT_contra], Any],
+                bool | StopTurn | Awaitable[bool | StopTurn],
+            ]
+            | None
+        ) = None,
+        transform_arguments: (
+            Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None
+        ) = None,
+        transform_result: (
+            Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None
+        ) = None,
+        policy_timeout: float = 30,
+    ) -> Environment[ContextT_contra]:
+        """Run selected tools locally through the SDK's native sandbox.
+
+        Use an existing absolute working directory on Linux or macOS.
+        Additional roots must be existing directories on this executor.
+        The URL identifies the working directory as a file URI.
+        Model commands start with a system executable search path and receive
+        no ambient environment variables. They can read the working directory,
+        additional writable roots, and platform runtime paths. Run the executor
+        on an isolated job host if those paths contain sensitive data.
+        Keep the SDK, its native helpers, and LocalStorage profiles outside
+        the working directory and additional writable roots.
+        """
+        path = fspath(cwd)
+        return _LocalEnvironment(
+            url=_path_uri(path),
+            cwd=path,
+            tools=tools,
+            writable_roots=writable_roots,
+            network=network,
+            capability_directories=capability_directories,
+            approval=approval,
+            transform_arguments=transform_arguments,
+            transform_result=transform_result,
+            policy_timeout=policy_timeout,
+        )
 
     def __post_init__(self) -> None:
+        if self._is_local:
+            if self.headers or self.connect_timeout is not None:
+                raise ValueError("A local executor does not accept connection settings")
+        else:
+            self._validate_remote_url()
+        if self.writable_roots is not None:
+            object.__setattr__(self, "writable_roots", _writable_roots(self.writable_roots))
+        self._validate_settings()
+        if self._is_local:
+            object.__setattr__(self, "url", _path_uri(self.cwd))
+
+    def _validate_remote_url(self) -> None:
         if not isinstance(self.url, str):
             raise TypeError("Executor URL must be a string")
         try:
@@ -265,6 +336,8 @@ class Environment(Generic[ContextT_contra]):
             valid_url = False
         if not valid_url:
             raise ValueError("Executor URL must use wss:// without userinfo, query or fragment")
+
+    def _validate_settings(self) -> None:
         if not isinstance(self.cwd, str):
             raise TypeError("Executor cwd must be an absolute path or file URI")
         try:
@@ -383,11 +456,16 @@ class Environment(Generic[ContextT_contra]):
 
     def _to_native(self) -> RuntimeEnvironment:
         result: RuntimeEnvironment = {
-            "url": self.url,
             "cwd": _path_uri(self.cwd),
             "headers": dict(self.headers),
             "connect_timeout": self.connect_timeout,
         }
+        if self._is_local:
+            result["local"] = True
+        else:
+            result["url"] = self.url
+        if self.writable_roots is not None:
+            result["writable_roots"] = [fspath(root) for root in self.writable_roots]
         if self.capability_directories is not None:
             result["capability_directories"] = [
                 _path_uri(root) for root in self.capability_directories
@@ -395,6 +473,11 @@ class Environment(Generic[ContextT_contra]):
         if isinstance(self.network, NetworkPolicy):
             result["network"] = self.network._to_native()
         return result
+
+
+@dataclass(frozen=True, kw_only=True)
+class _LocalEnvironment(Environment[ContextT_contra]):
+    _is_local = True
 
 
 EnvironmentSource: TypeAlias = (
@@ -407,3 +490,36 @@ def _path_uri(value: str) -> str:
         return value
     path = PurePosixPath(value) if value.startswith("/") else PureWindowsPath(value)
     return path.as_uri()
+
+
+def _writable_roots(values: Sequence[str | PathLike[str]]) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes, bytearray)) or not isinstance(values, Sequence):
+        raise TypeError("writable_roots must be a sequence of absolute executor paths")
+    roots = set()
+    for value in values:
+        raw = fspath(value)
+        if not isinstance(raw, str):
+            raise TypeError("writable_roots must contain text paths")
+        if raw.startswith("file:") and (
+            re.search(r"[\x00-\x20\x7f]", raw) or re.search(r"%(?![0-9a-fA-F]{2})", raw)
+        ):
+            raise ValueError("writable_roots must contain valid file URIs")
+        try:
+            uri = urlsplit(_path_uri(raw))
+            path = PurePosixPath(unquote(uri.path, errors="strict"))
+            valid = (
+                uri.scheme == "file"
+                and uri.netloc in ("", "localhost")
+                and not (uri.query or uri.fragment)
+                and path.is_absolute()
+                and path.anchor == "/"
+                and len(path.parts) > 1
+                and ".." not in path.parts
+                and "\0" not in str(path)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError("writable_roots must contain absolute executor directories")
+        roots.add(path.as_uri())
+    return tuple(sorted(roots))

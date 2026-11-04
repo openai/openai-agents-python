@@ -384,7 +384,7 @@ async def test_destination_roots_exclude_host_unselected_and_source_after_restor
                     chosen.as_uri() in params or other.as_uri() in params for params in discovery
                 )
         except RuntimeError as error:
-            if not entered and str(error) == "remote executor failed to become ready":
+            if not entered and str(error).startswith("remote executor failed to become ready:"):
                 try:
                     log_bytes = (peer.root / ".fixture-config" / "exec-server.log").read_bytes()
                 except OSError:

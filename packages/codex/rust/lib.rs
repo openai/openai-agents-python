@@ -12,6 +12,8 @@ mod environment;
 mod extensions;
 mod goals;
 mod live;
+mod local_reconciliation;
+mod local_sandbox;
 mod manual_checkpoint;
 mod mcp_result_control;
 mod mcp_roster;
@@ -153,11 +155,9 @@ async fn close_engine_owner(owner: Arc<std::sync::Mutex<EngineOwner>>) -> PyResu
         inner.release_native_threads();
         let mut state = owner.lock().map_err(py_error)?;
         if state.live.is_some() {
-            state.remote_drain = inner
-                .manager
-                .environment_manager()
-                .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                .and_then(|environment| environment.subscribe_connection_state());
+            state.remote_drain =
+                environment::selected_executor(&inner.manager.environment_manager())
+                    .and_then(|environment| environment.subscribe_connection_state());
             state.live.take();
         }
     }
@@ -393,11 +393,9 @@ impl Engine {
                 inner.release_native_threads();
                 let mut state = owner.lock().map_err(py_error)?;
                 if state.live.is_some() {
-                    state.remote_drain = inner
-                        .manager
-                        .environment_manager()
-                        .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                        .and_then(|environment| environment.subscribe_connection_state());
+                    state.remote_drain =
+                        environment::selected_executor(&inner.manager.environment_manager())
+                            .and_then(|environment| environment.subscribe_connection_state());
                     state.live.take();
                 }
             }
@@ -1375,6 +1373,27 @@ impl NativeThread {
         })
     }
 
+    fn _validate_local_executor_policy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            local_reconciliation::validate_executor_policy(&inner)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _executor_policies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let policies = local_reconciliation::executor_policies(&inner)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&policies).map_err(py_error)
+        })
+    }
+
     // Managed ingress: the SDK holds its single active owner until terminal
     // settlement. Keep raw Compact blocked because it replaces active work.
     fn _compact<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -2316,14 +2335,9 @@ impl NativeThread {
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
-            if inner
-                .engine
-                .manager
-                .environment_manager()
-                .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                .is_none()
+            if environment::selected_executor(&inner.engine.manager.environment_manager()).is_none()
             {
-                return Err(py_error("Session has no remote executor"));
+                return Err(py_error("Session has no executor"));
             }
             let tools = inner
                 .thread
