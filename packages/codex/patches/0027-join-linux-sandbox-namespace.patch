@@ -1,0 +1,378 @@
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 5f664bfdc216d394cda83b0b03bc189b3132c535..279771ce849ab666ba3591d827ae7aef9ca90e9c 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -1,5 +1,9 @@
+ #![allow(clippy::module_inception)]
+ 
++#[cfg(target_os = "linux")]
++use std::net::Shutdown;
++#[cfg(target_os = "linux")]
++use std::os::unix::net::UnixStream;
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+@@ -101,10 +105,18 @@ enum ProcessHandle {
+     ExecServer(Arc<dyn ExecProcess>),
+ }
+ 
++#[cfg(target_os = "linux")]
++struct LinuxSandboxCancellation {
++    socket: UnixStream,
++    exit_unconfirmed: AtomicBool,
++}
++
+ /// Unified wrapper over directly spawned PTY sessions and exec-server-backed
+ /// processes.
+ pub(crate) struct UnifiedExecProcess {
+     process_handle: ProcessHandle,
++    #[cfg(target_os = "linux")]
++    sandbox_cancel: Option<LinuxSandboxCancellation>,
+     output_tx: broadcast::Sender<Vec<u8>>,
+     output: OutputHandles,
+     output_drained: Arc<Notify>,
+@@ -149,6 +161,8 @@ impl UnifiedExecProcess {
+ 
+         Self {
+             process_handle,
++            #[cfg(target_os = "linux")]
++            sandbox_cancel: None,
+             output_tx,
+             output,
+             output_drained,
+@@ -247,7 +261,17 @@ impl UnifiedExecProcess {
+ 
+     pub(super) fn terminate(&self) {
+         match &self.process_handle {
+-            ProcessHandle::Local(process_handle) => process_handle.terminate(),
++            ProcessHandle::Local(process_handle) => {
++                #[cfg(target_os = "linux")]
++                if let Some(cancel) = &self.sandbox_cancel
++                    && !process_handle.has_exited()
++                {
++                    // Once the wrapper can be killed, its exit cannot confirm
++                    // the namespace has finished shutting down.
++                    cancel.exit_unconfirmed.store(true, Ordering::Release);
++                }
++                process_handle.terminate();
++            }
+             ProcessHandle::ExecServer(process_handle) => {
+                 let process_handle = Arc::clone(process_handle);
+                 tokio::spawn(async move {
+@@ -259,6 +283,15 @@ impl UnifiedExecProcess {
+     }
+ 
+     pub(super) async fn terminate_confirmed(&self) -> Result<(), UnifiedExecError> {
++        if self.uses_managed_linux_sandbox() {
++            if !self.terminate_and_join().await {
++                return Err(UnifiedExecError::process_failed(
++                    "could not join the local sandbox command".to_string(),
++                ));
++            }
++            self.finish_termination();
++            return Ok(());
++        }
+         match &self.process_handle {
+             ProcessHandle::Local(process_handle) => process_handle.terminate(),
+             ProcessHandle::ExecServer(process_handle) => {
+@@ -273,10 +306,28 @@ impl UnifiedExecProcess {
+         Ok(())
+     }
+ 
++    pub(super) fn uses_managed_linux_sandbox(&self) -> bool {
++        #[cfg(target_os = "linux")]
++        return self.sandbox_cancel.is_some();
++        #[cfg(not(target_os = "linux"))]
++        false
++    }
++
++    fn request_local_termination(&self, process: &ExecCommandSession) {
++        #[cfg(target_os = "linux")]
++        if let Some(cancel) = &self.sandbox_cancel {
++            // EOF stops the namespace init and leaves its wrappers alive to
++            // reap it. A wrapper killed first can exit before the command.
++            let _ = cancel.socket.shutdown(Shutdown::Write);
++            return;
++        }
++        process.request_terminate();
++    }
++
+     /// Request a stop without ending the output watcher that confirms exit.
+     pub(super) fn request_terminate(&self) {
+         match &self.process_handle {
+-            ProcessHandle::Local(process) => process.request_terminate(),
++            ProcessHandle::Local(process) => self.request_local_termination(process),
+             ProcessHandle::ExecServer(process) => {
+                 let process = Arc::clone(process);
+                 tokio::spawn(async move {
+@@ -290,7 +341,7 @@ impl UnifiedExecProcess {
+         let mut state = self.state_rx.clone();
+         let stopped = tokio::time::timeout(Duration::from_secs(5), async {
+             match &self.process_handle {
+-                ProcessHandle::Local(process) => process.request_terminate(),
++                ProcessHandle::Local(process) => self.request_local_termination(process),
+                 ProcessHandle::ExecServer(process) => {
+                     if process.terminate().await.is_err() {
+                         return false;
+@@ -306,6 +357,15 @@ impl UnifiedExecProcess {
+                 .is_ok()
+         })
+         .await;
++        #[cfg(target_os = "linux")]
++        if let Some(cancel) = &self.sandbox_cancel {
++            if stopped.is_err() {
++                self.terminate();
++            }
++            if cancel.exit_unconfirmed.load(Ordering::Acquire) {
++                return false;
++            }
++        }
+         stopped.unwrap_or(false)
+     }
+ 
+@@ -399,7 +459,15 @@ impl UnifiedExecProcess {
+         sandbox_type: SandboxType,
+         spawn_lifecycle: SpawnLifecycleHandle,
+     ) -> Result<Self, UnifiedExecError> {
+-        Self::from_spawned_with_output_policy(spawned, sandbox_type, spawn_lifecycle, false).await
++        Self::from_spawned_with_output_policy(
++            spawned,
++            sandbox_type,
++            spawn_lifecycle,
++            false,
++            #[cfg(target_os = "linux")]
++            None,
++        )
++        .await
+     }
+ 
+     pub(super) async fn from_spawned_with_output_policy(
+@@ -407,6 +475,7 @@ impl UnifiedExecProcess {
+         sandbox_type: SandboxType,
+         spawn_lifecycle: SpawnLifecycleHandle,
+         controlled: bool,
++        #[cfg(target_os = "linux")] sandbox_cancel: Option<UnixStream>,
+     ) -> Result<Self, UnifiedExecError> {
+         let SpawnedPty {
+             session: process_handle,
+@@ -423,6 +492,13 @@ impl UnifiedExecProcess {
+         if controlled {
+             managed.withhold_output_diagnostics();
+         }
++        #[cfg(target_os = "linux")]
++        {
++            managed.sandbox_cancel = sandbox_cancel.map(|socket| LinuxSandboxCancellation {
++                socket,
++                exit_unconfirmed: AtomicBool::new(false),
++            });
++        }
+         managed.output_task = Some(Self::spawn_local_output_task(
+             output_rx,
+             managed.output_handles().clone(),
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 6d5dee73be4159fdb620147addfad5e9eb57bdad..bdd2eb02f501be307492395a1ebadebf9792282e 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -1481,8 +1481,51 @@ impl UnifiedExecProcessManager {
+             } else {
+                 None
+             };
++        let command = request.command.as_slice();
++        #[cfg(target_os = "linux")]
++        let (cancel_reader, cancel_writer) = {
++            // Only isolated bubblewrap has a namespace init that can acknowledge
++            // shutdown. The trusted helper flags precede the model's command.
++            let flags = command.iter().skip(1).take_while(|arg| *arg != "--");
++            let joins_local_commands = environment
++                .local_runtime_paths()
++                .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt);
++            if request.sandbox == codex_sandboxing::SandboxType::LinuxSeccomp
++                && joins_local_commands
++                && !flags.clone().any(|arg| {
++                    matches!(
++                        arg.as_str(),
++                        "--inherit-pid-namespace" | "--use-legacy-landlock"
++                    )
++                })
++                && (flags.clone().any(|arg| arg == "--managed-network")
++                    || !request
++                        .permission_profile
++                        .file_system_sandbox_policy()
++                        .has_full_disk_write_access())
++            {
++                let (reader, writer) = std::os::unix::net::UnixStream::pair()
++                    .map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
++                (Some(reader), Some(writer))
++            } else {
++                (None, None)
++            }
++        };
++        #[cfg(target_os = "linux")]
++        let mut inherited_fds = inherited_fds;
++        #[cfg(target_os = "linux")]
++        let sandbox_command = cancel_reader.as_ref().map(|reader| {
++            use std::os::fd::AsRawFd;
++            let fd = reader.as_raw_fd();
++            inherited_fds.push(fd);
++            let mut command = command.to_vec();
++            command.splice(1..1, ["--cancel-fd".to_string(), fd.to_string()]);
++            command
++        });
++        #[cfg(target_os = "linux")]
++        let command = sandbox_command.as_deref().unwrap_or(command);
+         let spawn_result = codex_sandboxing::spawn_process(codex_sandboxing::SpawnRequest {
+-            command: &request.command,
++            command,
+             cwd: native_cwd.as_path(),
+             env: &request.env,
+             arg0: &request.arg0,
+@@ -1493,6 +1536,8 @@ impl UnifiedExecProcessManager {
+             inherited_fds: codex_utils_pty::ChildFds::Inherited(&inherited_fds),
+         })
+         .await;
++        #[cfg(target_os = "linux")]
++        drop(cancel_reader);
+         spawn_lifecycle.after_spawn();
+         let spawned =
+             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
+@@ -1501,6 +1546,8 @@ impl UnifiedExecProcessManager {
+             request.sandbox,
+             spawn_lifecycle,
+             controlled,
++            #[cfg(target_os = "linux")]
++            cancel_writer,
+         )
+         .await
+     }
+@@ -1974,7 +2021,9 @@ impl UnifiedExecProcessManager {
+             (Arc::clone(&entry.process), entry.process.has_exited())
+         };
+ 
+-        if !already_exited && process.terminate_confirmed().await.is_err() {
++        if (process.uses_managed_linux_sandbox() || !already_exited)
++            && process.terminate_confirmed().await.is_err()
++        {
+             return false;
+         }
+ 
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main.rs b/codex-rs/linux-sandbox/src/linux_run_main.rs
+index fd0b8a3052be13bc08753ba9a48aa26923096db5..e74a5ecee3c5bba05830de337d5b4395384265ba 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -153,6 +153,10 @@ pub struct LandlockCommand {
+     #[arg(long = "inherit-pid-namespace", hide = true)]
+     pub inherit_pid_namespace: bool,
+ 
++    /// Sandbox end of an owned local executor cancellation socket.
++    #[arg(long, hide = true, value_parser = clap::value_parser!(i32).range(3..))]
++    cancel_fd: Option<i32>,
++
+     /// Full command args to run under the Linux sandbox helper.
+     #[arg(trailing_var_arg = true)]
+     pub command: Vec<String>,
+@@ -177,6 +181,7 @@ pub fn run_main() -> ! {
+         verify_fd_mounts,
+         no_proc,
+         inherit_pid_namespace,
++        cancel_fd,
+         command,
+     } = LandlockCommand::parse();
+     let allow_network_for_proxy = managed_network.is_some();
+@@ -195,6 +200,18 @@ pub fn run_main() -> ! {
+     } = resolve_permission_profile(permission_profile).unwrap_or_else(|err| panic!("{err}"));
+     ensure_legacy_landlock_mode_supports_policy(use_legacy_landlock, &file_system_sandbox_policy);
+ 
++    let cancel = cancel_fd.map(|fd| {
++        // The local executor owns this descriptor and passes it to this helper.
++        // Exclude it from incidental execs such as the bubblewrap preflight.
++        if unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
++            panic!(
++                "invalid sandbox cancellation descriptor: {}",
++                std::io::Error::last_os_error()
++            );
++        }
++        unsafe { File::from_raw_fd(fd) }
++    });
++
+     // Inner stage: apply seccomp/no_new_privs after bubblewrap has already
+     // established the filesystem view.
+     if apply_seccomp_then_exec {
+@@ -245,6 +262,9 @@ pub fn run_main() -> ! {
+             panic!("error applying Linux sandbox restrictions: {e:?}");
+         }
+ 
++        if cancel.is_some() && unsafe { libc::getpid() } != 1 {
++            panic!("sandbox cancellation requires an isolated PID namespace");
++        }
+         let signal_mask = ForwardedSignalMask::block();
+         let command_pid = unsafe { libc::fork() };
+         if command_pid < 0 {
+@@ -253,6 +273,7 @@ pub fn run_main() -> ! {
+         }
+ 
+         if command_pid == 0 {
++            drop(cancel);
+             reset_forwarded_signal_handlers_to_default();
+             signal_mask.restore();
+             exec_or_panic(command);
+@@ -260,6 +281,14 @@ pub fn run_main() -> ! {
+ 
+         let signal_forwarders = install_bwrap_signal_forwarders(command_pid);
+         signal_mask.restore();
++        if let Some(mut cancel) = cancel {
++            thread::spawn(move || {
++                // The executor closes its end when it cancels. Exiting PID 1
++                // makes the kernel kill and reap the rest of the namespace.
++                let _ = cancel.read_exact(&mut [0]);
++                std::process::exit(128 + libc::SIGKILL);
++            });
++        }
+         loop {
+             let mut status = 0;
+             let reaped_pid = unsafe { libc::waitpid(-1, &mut status, 0) };
+@@ -353,6 +382,7 @@ pub fn run_main() -> ! {
+             options,
+             inner,
+             proxy_controls,
++            cancel,
+         );
+     }
+ 
+@@ -432,8 +462,9 @@ fn run_bwrap_with_proc_fallback(
+     command_cwd: Option<&Path>,
+     file_system_sandbox_policy: &FileSystemSandboxPolicy,
+     mut options: BwrapOptions,
+-    inner: Vec<String>,
+-    proxy_controls: Vec<File>,
++    mut inner: Vec<String>,
++    mut preserved_files: Vec<File>,
++    cancel: Option<File>,
+ ) -> ! {
+     let command_cwd = command_cwd.unwrap_or(sandbox_policy_cwd);
+ 
+@@ -446,6 +477,10 @@ fn run_bwrap_with_proc_fallback(
+         options.mount_proc = false;
+     }
+ 
++    let cancel_fd = cancel.as_ref().map(|cancel| cancel.as_raw_fd().to_string());
++    if let Some(fd) = &cancel_fd {
++        inner.splice(1..1, ["--cancel-fd".to_string(), fd.clone()]);
++    }
+     let mut bwrap_args = build_bwrap_argv(
+         inner,
+         file_system_sandbox_policy,
+@@ -454,7 +489,13 @@ fn run_bwrap_with_proc_fallback(
+         options,
+     )
+     .unwrap_or_else(|err| exit_with_bwrap_build_error(err));
+-    bwrap_args.preserved_files.extend(proxy_controls);
++    if let Some(fd) = cancel_fd {
++        // --as-pid-1 preserves --sync-fd for the inner helper and makes
++        // bubblewrap wait for the kernel to reap the namespace init.
++        bwrap_args.args.splice(1..1, ["--sync-fd".to_string(), fd]);
++    }
++    preserved_files.extend(cancel);
++    bwrap_args.preserved_files.extend(preserved_files);
+     apply_inner_command_argv0(&mut bwrap_args.args);
+     run_or_exec_bwrap(bwrap_args);
+ }

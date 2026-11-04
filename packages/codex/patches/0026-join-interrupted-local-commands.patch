@@ -1,0 +1,947 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+index 3e0392f2ed56bb978c333f05a532ad2be1d26022..aac630ae6dbc90b15bd2e94f628de55716a5962f 100644
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -37,6 +37,7 @@ pub use codex_core::EnvironmentMcpPolicy;
+ pub use codex_core::EnvironmentNetworkPolicy;
+ pub use codex_core::ForkSnapshot;
+ pub use codex_core::LoadedAgentsMd;
++pub use codex_core::ManagedLocalExecCancelFailure;
+ pub use codex_core::McpManager;
+ pub use codex_core::NetworkDomainPermission;
+ pub use codex_core::NetworkDomainPermissionEntry;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 69d70003b60b93c831089efb5ab8539be3c8fbc5..c72af6e0d6fa01bec1f66ff10cc9f035a01454b7 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -233,6 +233,10 @@ pub struct BackgroundTerminalInfo {
+     pub cwd: PathUri,
+ }
+ 
++/// The SDK-local command cleanup could not prove that the named turn stopped.
++#[derive(Clone, Debug)]
++pub struct ManagedLocalExecCancelFailure(pub(crate) String);
++
+ /// Conduit for the bidirectional stream of messages that compose a thread
+ /// (formerly called a conversation) in Codex.
+ impl CodexThread {
+@@ -809,6 +813,13 @@ impl CodexThread {
+         self.session.terminate_background_terminal(process_id).await
+     }
+ 
++    /// Read after the native interrupt has finished for the named SDK turn.
++    pub fn managed_local_exec_cancel_failed(&self, turn_id: &str) -> bool {
++        self.thread_extension_data()
++            .get::<ManagedLocalExecCancelFailure>()
++            .is_some_and(|failure| failure.0 == turn_id)
++    }
++
+     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
+         self.io.agent_status.clone()
+     }
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index e60b6eb6d6d80fad43b48545e398506598dfb91d..5a5ae1d2c56ba260486336404a586652845a300e 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -49,6 +49,7 @@ pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
++pub use codex_thread::ManagedLocalExecCancelFailure;
+ mod owned_question;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+ pub use codex_thread::ConfigRefreshOutcome;
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index 55e1df40e1a7ef292394a99db84dec0815ccef47..e569a81dda0bac9cba4a13759f714943ad9c13d6 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -1,6 +1,8 @@
+ use super::TurnInput as PendingTurnInput;
+ use super::session::Session;
+ use super::turn_context::TurnContext;
++use crate::tools::parallel::DirectToolResult;
++use crate::unified_exec::PendingLocalExec;
+ use codex_analytics::ImagePreparationMetadata;
+ use codex_features::Feature;
+ use codex_history::CodexHarnessMetadata;
+@@ -124,7 +126,38 @@ impl Session {
+         model_info: &ModelInfo,
+         items: Vec<ResponseItemEnvelope>,
+     ) {
+-        if items.iter().all(|item| item.metadata.is_none()) {
++        self.record_annotated_items_with_exec(
++            turn_context,
++            model_info,
++            items,
++            /*pending_exec*/ None,
++        )
++        .await;
++    }
++
++    pub(crate) async fn record_tool_result(
++        &self,
++        turn_context: &TurnContext,
++        model_info: &ModelInfo,
++        result: DirectToolResult,
++    ) {
++        self.record_annotated_items_with_exec(
++            turn_context,
++            model_info,
++            vec![result.envelope],
++            result.pending_exec,
++        )
++        .await;
++    }
++
++    async fn record_annotated_items_with_exec(
++        &self,
++        turn_context: &TurnContext,
++        model_info: &ModelInfo,
++        items: Vec<ResponseItemEnvelope>,
++        pending_exec: Option<PendingLocalExec>,
++    ) {
++        if pending_exec.is_none() && items.iter().all(|item| item.metadata.is_none()) {
+             let items = items
+                 .into_iter()
+                 .map(ResponseItemEnvelope::into_item)
+@@ -142,6 +175,7 @@ impl Session {
+             model_info,
+             annotated_items,
+             image_preparations,
++            pending_exec,
+         )
+         .await;
+     }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 3f6f3e5254498e7dad20856e6fa0c84af5540902..787322e570eeb7be1432300cac44242849211b42 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -3519,6 +3519,7 @@ impl Session {
+             model_info,
+             items,
+             image_preparations,
++            /*pending_exec*/ None,
+         )
+         .await;
+     }
+@@ -3529,6 +3530,7 @@ impl Session {
+         model_info: &ModelInfo,
+         mut items: Vec<ResponseItemEnvelope>,
+         image_preparations: Vec<ImagePreparationMetadata>,
++        pending_exec: Option<crate::unified_exec::PendingLocalExec>,
+     ) {
+         // Save the originating history budget for replay.
+         // Preserve any existing tool-specific override.
+@@ -3617,6 +3619,10 @@ impl Session {
+             state
+                 .history
+                 .record_annotated_items(&mut items, model_info.truncation_policy.into());
++            // History now owns the tool result, even if rollout or notification awaits are cancelled.
++            if let Some(pending_exec) = pending_exec {
++                pending_exec.mark_delivered();
++            }
+         }
+         for image in image_preparations {
+             self.services
+@@ -5007,6 +5013,7 @@ impl Session {
+             model_info,
+             prepared_items,
+             image_preparations,
++            /*pending_exec*/ None,
+         )
+         .await;
+         user_message_item.client_id = client_id;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index f214991ca929490d0b45b6a94db24abbd345061f..8f2ef3e3f8c09a4b353d0fc7ac0b74c4f1ff1570 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2484,19 +2484,15 @@ async fn drain_in_flight(
+     let turn_context = &step_context.turn;
+     while let Some(res) = in_flight.next().await {
+         match res {
+-            Ok(envelope) => {
++            Ok(result) => {
+                 mark_thread_memory_mode_polluted_if_external_context(
+                     sess.as_ref(),
+                     turn_context.as_ref(),
+-                    &envelope.item,
+-                )
+-                .await;
+-                sess.record_annotated_conversation_items(
+-                    turn_context,
+-                    &step_context.settings.model_info,
+-                    vec![envelope],
++                    &result.envelope.item,
+                 )
+                 .await;
++                sess.record_tool_result(turn_context, &step_context.settings.model_info, result)
++                    .await;
+             }
+             Err(err) => {
+                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 20ea780e990fadb308e15f1b5f907c6ec6144c49..611357dbdbdb7d0a7e1a64986091895f86ea3128 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -2,7 +2,6 @@ use std::pin::Pin;
+ use std::sync::Arc;
+ 
+ use codex_extension_api::ExtensionData;
+-use codex_history::ResponseItemEnvelope;
+ use codex_protocol::ResponseItemId;
+ use codex_protocol::config_types::ModeKind;
+ use codex_protocol::items::TurnItem;
+@@ -15,6 +14,7 @@ use crate::session::session::Session;
+ use crate::session::step_context::StepContext;
+ use crate::session::turn_context::TurnContext;
+ use crate::tools::call_trace;
++use crate::tools::parallel::DirectToolResult;
+ use crate::tools::parallel::ToolCallRuntime;
+ use crate::tools::router::ToolRouter;
+ use codex_memories_read::citations::parse_memory_citation;
+@@ -217,7 +217,7 @@ async fn record_stage1_output_usage_for_memory_citation(
+ /// queuing any tool execution futures. This records items immediately so
+ /// history and rollout stay in sync even if the turn is later cancelled.
+ pub(crate) type InFlightFuture<'f> =
+-    Pin<Box<dyn Future<Output = Result<ResponseItemEnvelope>> + Send + 'f>>;
++    Pin<Box<dyn Future<Output = Result<DirectToolResult>> + Send + 'f>>;
+ 
+ #[derive(Default)]
+ pub(crate) struct OutputItemResult {
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index aec39664b303cc937958d10381b695faf3fcb5b8..16da08675bfcf69ebe8f33e200a5c6fc36a72004 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -370,7 +370,7 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+     // Await in reverse order: each result must already own its record before history attachment.
+     let mut outputs = Vec::new();
+     for (arguments, future) in pending.into_iter().rev() {
+-        let envelope = future.await.expect("plan result");
++        let envelope = future.await.expect("plan result").envelope;
+         let item = &envelope.item;
+         let ResponseItem::FunctionCallOutput {
+             call_id: output_call_id,
+@@ -428,7 +428,8 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+     let result = pending
+         .remove(0)
+         .await
+-        .expect("plan result after capture disabled");
++        .expect("plan result after capture disabled")
++        .envelope;
+     assert!(result.item.executed_tool_call_metadata().is_none());
+     session
+         .services
+@@ -450,7 +451,8 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         .pop()
+         .expect("call prepared before disable")
+         .await
+-        .expect("plan result after capture re-enabled");
++        .expect("plan result after capture re-enabled")
++        .envelope;
+     assert!(result.item.executed_tool_call_metadata().is_none());
+ }
+ 
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 55cc888a346638ed01128cb8dbaabe3858a32b33..97ea422f0a98d423cdf43787b68ec7377a317605 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -25,6 +25,7 @@ use tracing::trace_span;
+ use tracing::warn;
+ 
+ use crate::codex_thread::BackgroundTerminalInfo;
++use crate::codex_thread::ManagedLocalExecCancelFailure;
+ use crate::config::Config;
+ use crate::context::ContextualUserFragment;
+ use crate::hook_runtime::run_turn_interrupt_hooks;
+@@ -931,7 +932,22 @@ impl Session {
+         error: Option<ErrorEvent>,
+     ) {
+         let sub_id = task.turn_context.sub_id.clone();
++        let join_local_commands = reason == TurnAbortReason::Interrupted
++            && self
++                .services
++                .turn_environments
++                .environment_manager()
++                .try_local_environment()
++                .is_some_and(|environment| {
++                    environment
++                        .local_runtime_paths()
++                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++                });
+         if task.cancellation_token.is_cancelled() {
++            if join_local_commands {
++                self.join_interrupted_local_commands(task.handle, &task.turn_context)
++                    .await;
++            }
+             if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+                 warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+             }
+@@ -967,7 +983,12 @@ impl Session {
+             }
+         }
+ 
+-        task.handle.abort();
++        if join_local_commands {
++            self.join_interrupted_local_commands(task.handle, &task.turn_context)
++                .await;
++        } else {
++            task.handle.abort();
++        }
+         if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+             warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+         }
+@@ -1034,6 +1055,32 @@ impl Session {
+             warn!("failed to flush rollout after emitting terminal turn event: {err}");
+         }
+     }
++
++    async fn join_interrupted_local_commands(
++        &self,
++        task: AbortOnDropHandle<()>,
++        turn: &TurnContext,
++    ) {
++        // A cancelled initial call can still be returning its process from spawn.
++        // Stop the task before reading the process store so it cannot add entries
++        // after this cleanup. Previously returned terminal handles remain live.
++        task.abort();
++        let task_joined = match tokio::time::timeout(Duration::from_secs(5), task).await {
++            Ok(Ok(())) => true,
++            Ok(Err(error)) => error.is_cancelled(),
++            Err(_) => false,
++        };
++        let commands_joined = self
++            .services
++            .unified_exec_manager
++            .join_unreturned_local_commands(&turn.extension_data)
++            .await;
++        if !task_joined || !commands_joined {
++            let failure = ManagedLocalExecCancelFailure(turn.sub_id.clone());
++            turn.extension_data.insert(failure.clone());
++            self.services.thread_extension_data.insert(failure);
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/core/src/tools/builtin_result_policy.rs b/codex-rs/core/src/tools/builtin_result_policy.rs
+index f4457a8fee6a2e60f9d8e9d0efab184b64ab1da2..cb911e429eeb7eab0f7efae3fcfcc871d08ecab7 100644
+--- a/codex-rs/core/src/tools/builtin_result_policy.rs
++++ b/codex-rs/core/src/tools/builtin_result_policy.rs
+@@ -1,6 +1,7 @@
+ //! Whole-result policy for the three native Environment tools only.
+ use crate::function_tool::FunctionCallError;
+ use crate::tools::context::ToolInvocation;
++use crate::unified_exec::PendingLocalExec;
+ use codex_extension_api::{BuiltinToolResultInput, ExtensionData, ToolLifecycleContributor};
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::models::ResponseInputItem;
+@@ -135,11 +136,42 @@ pub(crate) fn failure() -> FunctionCallError {
+     FunctionCallError::RespondToModel(WITHHELD.into())
+ }
+ 
++pub(crate) fn tracks_local_exec(invocation: &ToolInvocation) -> bool {
++    invocation
++        .session
++        .services
++        .turn_environments
++        .environment_manager()
++        .try_local_environment()
++        .is_some_and(|environment| {
++            environment
++                .local_runtime_paths()
++                .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++        })
++}
++
++pub(crate) async fn pending_local_exec(
++    invocation: &ToolInvocation,
++    raw_result: &Value,
++) -> Option<PendingLocalExec> {
++    let process_id = raw_result.get("session_id")?.as_i64()?.try_into().ok()?;
++    invocation
++        .session
++        .services
++        .unified_exec_manager
++        .pending_local_exec(
++            process_id,
++            &invocation.call_id,
++            &invocation.turn.extension_data,
++        )
++        .await
++}
++
+ pub(crate) async fn accept(
+     invocation: &ToolInvocation,
+     owner: &dyn ToolLifecycleContributor,
+     raw: Box<dyn ToolOutput>,
+-) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++) -> Result<(Box<dyn ToolOutput>, Option<PendingLocalExec>), FunctionCallError> {
+     let hook_input = raw.post_tool_use_input(&invocation.payload);
+     let hook_id = raw.post_tool_use_id(&invocation.call_id);
+     let hook_response = raw
+@@ -150,6 +182,12 @@ pub(crate) async fn accept(
+     let token_limit = raw.fallback_token_limit_override();
+     let value = raw.code_mode_result(&invocation.payload);
+     drop(raw);
++    let pending_exec =
++        if invocation.tool_name.name == "exec_command" && tracks_local_exec(invocation) {
++            pending_local_exec(invocation, &value).await
++        } else {
++            None
++        };
+     let source = super::lifecycle::extension_tool_call_source(invocation.source.clone());
+     let outer_call_id = if matches!(source, codex_tools::ToolCallSource::CodeMode { .. }) {
+         invocation
+@@ -175,17 +213,24 @@ pub(crate) async fn accept(
+         })
+         .await
+         .map_err(|_| failure())?;
++    // A transform can preserve the original numeric handle while replacing other content.
++    let pending_exec = pending_exec.filter(|pending| {
++        accepted.get("session_id").and_then(Value::as_i64) == Some(i64::from(pending.process_id))
++    });
+     let mut inner = JsonToolOutput::with_success(accepted, Some(success));
+     if external {
+         inner = inner.with_external_context();
+     }
+-    Ok(Box::new(AcceptedOutput {
+-        inner,
+-        hook_input,
+-        hook_id,
+-        hook_response,
+-        token_limit,
+-    }))
++    Ok((
++        Box::new(AcceptedOutput {
++            inner,
++            hook_input,
++            hook_id,
++            hook_response,
++            token_limit,
++        }),
++        pending_exec,
++    ))
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/core/src/tools/code_mode/delegate.rs b/codex-rs/core/src/tools/code_mode/delegate.rs
+index be574714ac3856d1eba80f1fabeb8847bb814c70..d01d02667f3f79a29c49a6e016a9244b2a41ab18 100644
+--- a/codex-rs/core/src/tools/code_mode/delegate.rs
++++ b/codex-rs/core/src/tools/code_mode/delegate.rs
+@@ -616,7 +616,17 @@ impl CodeModeSessionDelegate for CodeModeCellDelegate {
+                 }
+             })?;
+             tokio::select! {
+-                result = response => result.map_err(|_| "code mode nested tool dispatcher stopped".to_string())?,
++                result = response => {
++                    let result = result.map_err(|_| "code mode nested tool dispatcher stopped".to_string())??;
++                    // The broker can join a completed dispatch after closing the cell. A live
++                    // process handle belongs to the cell only when the caller accepts the reply.
++                    if result.pending_exec.is_some()
++                        && (cancellation.is_cancelled() || self.receipt.closed.is_cancelled())
++                    {
++                        return Err("code mode nested tool call cancelled".to_string());
++                    }
++                    Ok(result.code_mode_result())
++                }
+                 _ = cancellation.cancelled() => Err("code mode nested tool call cancelled".to_string()),
+             }
+         })
+diff --git a/codex-rs/core/src/tools/code_mode/mod.rs b/codex-rs/core/src/tools/code_mode/mod.rs
+index 2e634fe6a1a708e7c100a829ea43d3a838e63397..ef80e8fa51696fb1beab835c5a028bf1b2f71b65 100644
+--- a/codex-rs/core/src/tools/code_mode/mod.rs
++++ b/codex-rs/core/src/tools/code_mode/mod.rs
+@@ -38,6 +38,7 @@ use crate::tools::context::FunctionToolOutput;
+ use crate::tools::context::SharedTurnDiffTracker;
+ use crate::tools::context::ToolPayload;
+ use crate::tools::parallel::ToolCallRuntime;
++use crate::tools::registry::AnyToolResult;
+ use crate::tools::router::ToolCall;
+ use crate::tools::router::ToolCallSource;
+ use crate::unified_exec::resolve_max_tokens;
+@@ -413,7 +414,7 @@ fn submit_nested_tool(
+     call_id: String,
+     cancellation_token: CancellationToken,
+ ) -> Result<
+-    impl std::future::Future<Output = Result<JsonValue, FunctionCallError>> + Send + 'static,
++    impl std::future::Future<Output = Result<AnyToolResult, FunctionCallError>> + Send + 'static,
+     FunctionCallError,
+ > {
+     let CodeModeNestedToolCall {
+@@ -472,7 +473,7 @@ fn submit_nested_tool(
+             call_id: call.call_id.clone(),
+             cell_id: cell_id.to_string(),
+         });
+-    let result = tool_runtime.handle_tool_call_with_source(
++    Ok(tool_runtime.handle_tool_call_with_source(
+         step_context,
+         call,
+         ToolCallSource::CodeMode {
+@@ -481,8 +482,7 @@ fn submit_nested_tool(
+         },
+         cancellation_token,
+         Arc::default(),
+-    );
+-    Ok(async move { Ok(result.await?.code_mode_result()) })
++    ))
+ }
+ 
+ fn build_nested_tool_payload(
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index fb26fd6e8fbd79257d90fc8ba6f298eb65fdfa85..d58f23756ec43a7bd3608fdf75606d6f371f67b0 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -26,6 +26,7 @@ use crate::tools::registry::AnyToolResult;
+ use crate::tools::registry::ToolArgumentDiffConsumer;
+ use crate::tools::router::ToolCall;
+ use crate::tools::router::ToolCallSource;
++use crate::unified_exec::PendingLocalExec;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::models::ResponseInputItem;
+@@ -41,6 +42,11 @@ struct ToolCallTimingGuard {
+     extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
+ }
+ 
++pub(crate) struct DirectToolResult {
++    pub(crate) envelope: ResponseItemEnvelope,
++    pub(crate) pending_exec: Option<PendingLocalExec>,
++}
++
+ #[derive(Clone)]
+ pub(crate) struct ToolCallRuntime {
+     session: Arc<Session>,
+@@ -111,7 +117,7 @@ impl ToolCallRuntime {
+         self,
+         call: ToolCall,
+         cancellation_token: CancellationToken,
+-    ) -> impl std::future::Future<Output = Result<ResponseItemEnvelope, CodexErr>> {
++    ) -> impl std::future::Future<Output = Result<DirectToolResult, CodexErr>> {
+         let error_call = call.clone();
+         let source = call.direct_source();
+         let recorder = self.session.services.executed_tool_calls.clone();
+@@ -129,19 +135,21 @@ impl ToolCallRuntime {
+             let result = future.await;
+             let mut recorded_call =
+                 recorded_call.filter(|(_, recording)| recording.strong_count() > 0);
+-            let mut response = match result {
+-                Ok(result) => {
++            let (mut response, pending_exec) = match result {
++                Ok(mut result) => {
+                     if let Some((call, _)) = recorded_call.as_mut()
+                         && let Some(metadata) = result.result.tool_result_metadata()
+                     {
+                         call.set_tool_result_metadata(ToolResultMetadata::new(metadata));
+                     }
+-                    result.into_response()
++                    let pending_exec = result.pending_exec.take();
++                    (result.into_response(), pending_exec)
+                 }
+                 Err(FunctionCallError::Fatal(message)) => return Err(CodexErr::Fatal(message)),
+-                Err(other) => {
+-                    ResponseItemEnvelope::new(Self::failure_response(error_call, other).into())
+-                }
++                Err(other) => (
++                    ResponseItemEnvelope::new(Self::failure_response(error_call, other).into()),
++                    None,
++                ),
+             };
+             if let Some(text) = call_state.delivered_assistant_message.get() {
+                 response
+@@ -150,7 +158,10 @@ impl ToolCallRuntime {
+                     .delivered_assistant_message = Some(text.clone());
+             }
+             recorder.attach_direct_call_to_output(&mut response.item, recorded_call);
+-            Ok(response)
++            Ok(DirectToolResult {
++                envelope: response,
++                pending_exec,
++            })
+         }
+     }
+ 
+@@ -368,6 +379,7 @@ impl ToolCallRuntime {
+                 message: Self::abort_message(call, secs),
+             }),
+             post_tool_use_payload: None,
++            pending_exec: None,
+         }
+     }
+ 
+@@ -845,5 +857,5 @@ mod tests {
+         };
+         assert_eq!(
+             ResponseItemEnvelope::new(expected_response.into()),
+-            response
++            response.envelope
+         );
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 73f7b89f263db8d0e81a9ac5be174e46cee67cc0..462c76ea7dcacfe1e8e8a9904fd76785491fe995 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -25,6 +25,7 @@ use crate::tools::lifecycle::notify_tool_finish;
+ use crate::tools::lifecycle::notify_tool_start;
+ use crate::tools::router::tool_log_payload;
+ use crate::tools::tool_dispatch_trace::ToolDispatchTrace;
++use crate::unified_exec::PendingLocalExec;
+ use crate::util::error_or_panic;
+ use codex_analytics::ControlToolCallStatus;
+ use codex_extension_api::ToolCallOutcome;
+@@ -198,6 +199,7 @@ pub(crate) struct AnyToolResult {
+     pub(crate) payload: ToolPayload,
+     pub(crate) result: Box<dyn ToolOutput>,
+     pub(crate) post_tool_use_payload: Option<PostToolUsePayload>,
++    pub(crate) pending_exec: Option<PendingLocalExec>,
+ }
+ 
+ impl AnyToolResult {
+@@ -220,9 +222,16 @@ impl AnyToolResult {
+ 
+     pub(crate) fn code_mode_result(self) -> serde_json::Value {
+         let Self {
+-            payload, result, ..
++            payload,
++            result,
++            pending_exec,
++            ..
+         } = self;
+-        result.code_mode_result(&payload)
++        let result = result.code_mode_result(&payload);
++        if let Some(pending_exec) = pending_exec {
++            pending_exec.mark_delivered();
++        }
++        result
+     }
+ }
+ 
+@@ -826,10 +835,22 @@ async fn handle_any_tool(
+ ) -> Result<AnyToolResult, FunctionCallError> {
+     let call_id = invocation.call_id.clone();
+     let payload = invocation.payload.clone();
+-    let output = match tool.handle(invocation.clone()).await {
++    let (output, pending_exec) = match tool.handle(invocation.clone()).await {
+         Ok(output) => match result_owner {
+             Some(owner) => super::builtin_result_policy::accept(&invocation, owner, output).await?,
+-            None => output,
++            None => {
++                let pending_exec = if !tool.is_third_party_tool()
++                    && invocation.tool_name.is_default_namespace()
++                    && invocation.tool_name.name == "exec_command"
++                    && super::builtin_result_policy::tracks_local_exec(&invocation)
++                {
++                    let value = output.code_mode_result(&invocation.payload);
++                    super::builtin_result_policy::pending_local_exec(&invocation, &value).await
++                } else {
++                    None
++                };
++                (output, pending_exec)
++            }
+         },
+         Err(_) if result_owner.is_some() => return Err(super::builtin_result_policy::failure()),
+         Err(error) => return Err(error),
+@@ -841,6 +862,7 @@ async fn handle_any_tool(
+         payload,
+         result: output,
+         post_tool_use_payload,
++        pending_exec,
+     };
+     super::user_messaging::capture_delivery(&result, call_state);
+     if result.result.contains_external_context()
+diff --git a/codex-rs/core/src/tools/registry_tests.rs b/codex-rs/core/src/tools/registry_tests.rs
+index 895d8d4b997d5fbd3d5401855f4088ef3d6cfb3a..8a486b5f9c6163f7748c3a209268a26f882520b0 100644
+--- a/codex-rs/core/src/tools/registry_tests.rs
++++ b/codex-rs/core/src/tools/registry_tests.rs
+@@ -622,6 +622,7 @@ fn post_tool_use_feedback_output_preserves_fallback_token_limit_override(
+             ),
+         }),
+         post_tool_use_payload: None,
++        pending_exec: None,
+     };
+ 
+     assert_eq!(
+@@ -656,6 +657,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
+             ),
+         }),
+         post_tool_use_payload: None,
++        pending_exec: None,
+     };
+ 
+     assert_eq!(
+@@ -686,6 +688,7 @@ fn post_tool_use_feedback_output_keeps_code_mode_result_typed() {
+             ),
+         }),
+         post_tool_use_payload: None,
++        pending_exec: None,
+     };
+ 
+     assert_eq!(
+diff --git a/codex-rs/core/src/tools/user_messaging_tests.rs b/codex-rs/core/src/tools/user_messaging_tests.rs
+index 6a46eb3c188f2729ce69f18131af02c84b236ded..87b139c31d1f277d11d7700998b78976c98816d8 100644
+--- a/codex-rs/core/src/tools/user_messaging_tests.rs
++++ b/codex-rs/core/src/tools/user_messaging_tests.rs
+@@ -52,5 +52,6 @@ fn messaging_result(name: &str, input: Value, success: bool) -> AnyToolResult {
+             tool_input: input,
+             tool_response: json!({}),
+         }),
++        pending_exec: None,
+     }
+ }
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 187ff33b9672f252307bc82aa40a17b56960e226..4a24c77005a041019171b809cd3ed10981e901e7 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -53,6 +53,7 @@ mod head_tail_buffer;
+ mod oneshot;
+ mod process;
+ mod process_manager;
++pub(crate) use process_manager::PendingLocalExec;
+ mod process_state;
+ mod shell_snapshot;
+ mod stdin_approval;
+@@ -196,6 +197,7 @@ struct ProcessEntry {
+     process_id: i32,
+     cwd: PathUri,
+     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
++    initial_exec_command_returned: Arc<std::sync::atomic::AtomicBool>,
+     hook_command: String,
+     tty: bool,
+     environment_id: String,
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+index 3552ffd28f9fc65984c5674baad927f61a9659f5..e9cd20b29b7fd382ccb6bedad6a26200dd0bb415 100644
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -144,6 +144,7 @@ async fn exec_command_with_tty(
+             process_id,
+             cwd: cwd.clone().into(),
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
++            initial_exec_command_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             hook_command: cmd.to_string(),
+             tty,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+@@ -621,6 +622,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+             process_id,
+             cwd: cwd.into(),
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
++            initial_exec_command_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             hook_command: "sleep 60".to_string(),
+             tty: true,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+@@ -708,6 +710,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+             process_id,
+             cwd: cwd.into(),
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++            initial_exec_command_returned: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+             hook_command: "sleep 60".to_string(),
+             tty: true,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index ae6f00d1ac4f4640fd9fb7eab6024e290d3aa51f..5f664bfdc216d394cda83b0b03bc189b3132c535 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -273,6 +273,42 @@ impl UnifiedExecProcess {
+         Ok(())
+     }
+ 
++    /// Request a stop without ending the output watcher that confirms exit.
++    pub(super) fn request_terminate(&self) {
++        match &self.process_handle {
++            ProcessHandle::Local(process) => process.request_terminate(),
++            ProcessHandle::ExecServer(process) => {
++                let process = Arc::clone(process);
++                tokio::spawn(async move {
++                    let _ = process.terminate().await;
++                });
++            }
++        }
++    }
++
++    pub(super) async fn terminate_and_join(&self) -> bool {
++        let mut state = self.state_rx.clone();
++        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
++            match &self.process_handle {
++                ProcessHandle::Local(process) => process.request_terminate(),
++                ProcessHandle::ExecServer(process) => {
++                    if process.terminate().await.is_err() {
++                        return false;
++                    }
++                }
++            }
++            state
++                .wait_for(|state| match &self.process_handle {
++                    ProcessHandle::Local(process) => process.has_exited(),
++                    ProcessHandle::ExecServer(_) => state.has_exited,
++                })
++                .await
++                .is_ok()
++        })
++        .await;
++        stopped.unwrap_or(false)
++    }
++
+     pub(super) async fn interrupt(&self) -> Result<(), UnifiedExecError> {
+         match &self.process_handle {
+             ProcessHandle::Local(process_handle) => process_handle
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 55d39c46d1eaff030fb9f303077d807f12c7fe85..6d5dee73be4159fdb620147addfad5e9eb57bdad 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -268,6 +268,27 @@ struct PreparedProcessHandles {
+     tty: bool,
+ }
+ 
++/// A live local exec can outlast the invocation only after its handle is delivered.
++pub(crate) struct PendingLocalExec {
++    pub(crate) process_id: i32,
++    process: Arc<UnifiedExecProcess>,
++    returned: Arc<AtomicBool>,
++}
++
++impl PendingLocalExec {
++    pub(crate) fn mark_delivered(self) {
++        self.returned.store(true, Ordering::Release);
++    }
++}
++
++impl Drop for PendingLocalExec {
++    fn drop(&mut self) {
++        if !self.returned.load(Ordering::Acquire) && !self.process.has_exited() {
++            self.process.request_terminate();
++        }
++    }
++}
++
+ struct InitialExecCommandGuard {
+     active: Option<Arc<AtomicBool>>,
+     metrics_sidecar: Option<PluginMetricsSidecar>,
+@@ -625,6 +646,7 @@ impl UnifiedExecProcessManager {
+         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+         let mut initial_exec_command_guard = if process_started_alive {
+             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
++            let initial_exec_command_returned = Arc::new(AtomicBool::new(false));
+             self.store_process(
+                 Arc::clone(&process),
+                 context,
+@@ -642,6 +664,7 @@ impl UnifiedExecProcessManager {
+                 metrics_sidecar,
+                 Arc::clone(&output_buffer),
+                 Arc::clone(&initial_exec_command_active),
++                initial_exec_command_returned,
+             )
+             .await;
+             InitialExecCommandGuard {
+@@ -1240,6 +1263,7 @@ impl UnifiedExecProcessManager {
+         metrics_sidecar: Option<PluginMetricsSidecar>,
+         output_buffer: Arc<tokio::sync::Mutex<OutputBuffers>>,
+         initial_exec_command_active: Arc<AtomicBool>,
++        initial_exec_command_returned: Arc<AtomicBool>,
+     ) {
+         let plugin_metrics_sidecar =
+             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+@@ -1251,6 +1275,7 @@ impl UnifiedExecProcessManager {
+             process_id,
+             cwd: cwd.clone(),
+             initial_exec_command_active,
++            initial_exec_command_returned,
+             hook_command,
+             tty,
+             environment_id,
+@@ -1863,6 +1888,54 @@ impl UnifiedExecProcessManager {
+         }
+     }
+ 
++    pub(crate) async fn pending_local_exec(
++        &self,
++        process_id: i32,
++        call_id: &str,
++        turn_store: &Arc<codex_extension_api::ExtensionData>,
++    ) -> Option<PendingLocalExec> {
++        let store = self.process_store.lock().await;
++        let entry = store.processes.get(&process_id)?;
++        (entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++            && entry.call_id == call_id
++            && entry
++                .output_policy_store
++                .as_ref()
++                .is_some_and(|owner| Arc::ptr_eq(owner, turn_store)))
++        .then(|| PendingLocalExec {
++            process_id,
++            process: Arc::clone(&entry.process),
++            returned: Arc::clone(&entry.initial_exec_command_returned),
++        })
++    }
++
++    pub(crate) async fn join_unreturned_local_commands(
++        &self,
++        turn: &Arc<codex_extension_api::ExtensionData>,
++    ) -> bool {
++        let processes = {
++            let store = self.process_store.lock().await;
++            store
++                .processes
++                .values()
++                .filter(|entry| {
++                    entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++                        && !entry.initial_exec_command_returned.load(Ordering::Acquire)
++                        && entry
++                            .output_policy_store
++                            .as_ref()
++                            .is_some_and(|owner| Arc::ptr_eq(owner, turn))
++                })
++                .map(|entry| Arc::clone(&entry.process))
++                .collect::<Vec<_>>()
++        };
++        // Send every stop request before waiting for an exit.
++        futures::future::join_all(processes.iter().map(|process| process.terminate_and_join()))
++            .await
++            .into_iter()
++            .all(|exited| exited)
++    }
++
+     /// Resolves stdin's target from the host-owned terminal, not model-supplied metadata.
+     pub(crate) async fn environment_id_for_process(&self, process_id: i32) -> Option<String> {
+         self.process_store
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 29563c68b61e0734137b1bb640e1c348262d227d..cf802f05fdc0b6974dc9ca810a5d7c5ef6963102 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -648,6 +648,7 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+                 process_id,
+                 cwd: cwd.clone(),
+                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
++                initial_exec_command_returned: Arc::new(AtomicBool::new(true)),
+                 hook_command: format!("command-{process_id}"),
+                 tty: false,
+                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+diff --git a/codex-rs/exec-server/src/runtime_options.rs b/codex-rs/exec-server/src/runtime_options.rs
+index 9e3d66addb353fe83e7dcbd7d9b8fa6a3095b45c..651e091f39329a5280d868d2862f48c2eea4ed6f 100644
+--- a/codex-rs/exec-server/src/runtime_options.rs
++++ b/codex-rs/exec-server/src/runtime_options.rs
+@@ -17,6 +17,8 @@ pub struct ExecServerRuntimeOptions {
+     pub linux_sandbox_pid_namespace: LinuxSandboxPidNamespace,
+     /// Trusted startup routing; request policy still controls destination access.
+     pub proxy_private_ips_via_upstream: bool,
++    /// Join local commands that have not yielded a process handle on turn interrupt.
++    pub join_unreturned_local_exec_on_interrupt: bool,
+     /// Use the platform runtime paths without implicit scratch and application access.
+     #[cfg(target_os = "macos")]
+     pub restricted_macos_process_sandbox: bool,
+@@ -46,6 +48,7 @@ impl ExecServerRuntimeOptions {
+         Ok(Self {
+             linux_sandbox_pid_namespace: LinuxSandboxPidNamespace::default(),
+             proxy_private_ips_via_upstream: false,
++            join_unreturned_local_exec_on_interrupt: false,
+             codex_self_exe: absolute_path(codex_self_exe)?,
+             codex_linux_sandbox_exe: codex_linux_sandbox_exe.map(absolute_path).transpose()?,
+             #[cfg(target_os = "macos")]
+@@ -67,6 +70,11 @@ impl ExecServerRuntimeOptions {
+         self
+     }
+ 
++    pub fn with_join_unreturned_local_exec_on_interrupt(mut self) -> Self {
++        self.join_unreturned_local_exec_on_interrupt = true;
++        self
++    }
++
+     /// Restricts the platform defaults to runtime access for an SDK-owned local executor.
+     #[cfg(target_os = "macos")]
+     pub fn with_restricted_macos_process_sandbox(mut self) -> Self {
