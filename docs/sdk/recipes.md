@@ -26,7 +26,7 @@ Before accepting a reply, verify that the authenticated caller can answer that e
 
 ## Rate limits and token budget
 
-Limit accepted and queued application work separately from provider rate limits. [Usage and deadlines](troubleshooting.md) report consumption and let you cancel work, but neither enforces a strict token or cost limit. Enforce strict limits outside the SDK.
+Read the [API-key rate-limit snapshot](configuration.md#read-api-key-rate-limits) and set your own limits on accepted and queued work. Use [usage and deadlines](troubleshooting.md) to report consumption and stop work. Enforce strict token or cost limits in your application.
 
 ## Runnable task examples
 
@@ -57,6 +57,14 @@ These examples require `OPENAI_API_KEY`, make model requests, and can incur char
 | [`image_input`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/image_input.py) | Sends a synthetic PNG as inline data and prints a typed answer. Local paths, PDFs, and remote URLs are unsupported. Model confidence is not a calibrated probability. |
 | [`retrieval`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/retrieval.py) | Searches tenant-scoped text and checks returned source IDs against retrieved IDs. A matching ID does not prove that the source supports the answer. |
 | [`programmatic_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/programmatic_tools.py) | Generated JavaScript aggregates regional sales and prints tool calls and history. Pending code cells and their runtime state need an open Session. |
+
+## Run supervised workers
+
+The [supervised worker example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/supervised_worker/README.md) runs two local processes with separate workspaces and native histories. Each worker owns its Session. A status client can disconnect, then read the same job and its accepted result from application storage.
+
+For an API-key worker that needs different write grants on different turns, use a supported local executor or Linux WSS executor. With macOS WSS, set the worker's write roots in its Environment before opening the Session. See [executor write roots](tools.md#replace-write-roots-between-turns).
+
+The worker checks the actual artifact and the retained command result before accepting a draft. It can request revisions in the same conversation. An explicit publish action uses the accepted record to write a local marker once. The example also shows how to reconcile a simulated handoff after a crash and how to measure session startup, first tool result, turn completion, and revision times separately.
 
 ## Start a local browser application
 
