@@ -515,6 +515,7 @@ def main() -> None:
         math.isfinite(value) and value > 0 for value in (args.startup_timeout, args.turn_timeout)
     ):
         parser.error("Deadlines must be finite positive numbers of seconds.")
+    args.directory = args.directory.resolve()
 
     status: dict[str, Any]
     if args.command == "status":
