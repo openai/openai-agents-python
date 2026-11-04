@@ -1,0 +1,39 @@
+diff --git a/codex-rs/exec-server/src/client.rs b/codex-rs/exec-server/src/client.rs
+index 0369bb7185d4a68d5ad77c47f06c2524c249aa35..77a54c492c956bd8777a7ef0b32cf4333714a4d1 100644
+--- a/codex-rs/exec-server/src/client.rs
++++ b/codex-rs/exec-server/src/client.rs
+@@ -440,8 +440,8 @@ impl LazyRemoteExecServerClient {
+         let client = self.clone();
+         Some(AbortOnDropHandle::new(tokio::spawn(
+             async move {
+-                if let Err(error) = client.wait_until_ready().await {
+-                    debug!(%error, "exec-server environment startup failed");
++                if client.wait_until_ready().await.is_err() {
++                    debug!("exec-server environment startup failed");
+                 }
+             }
+             .in_current_span()
+diff --git a/codex-rs/exec-server/src/environment.rs b/codex-rs/exec-server/src/environment.rs
+index 2bf43abb8c389fd6c7273666decf7bacca3ae6c8..d9d651491ce0dcf385db157f81bea0f063a3e921 100644
+--- a/codex-rs/exec-server/src/environment.rs
++++ b/codex-rs/exec-server/src/environment.rs
+@@ -1043,7 +1043,7 @@ impl Environment {
+                 };
+                 match discover().await {
+                     Err(error) if crate::client::is_retryable_recovery_error(&error) => {
+-                        tracing::warn!(%error, "replaying capability discovery after executor recovery");
++                        tracing::warn!("replaying capability discovery after executor recovery");
+                         let recovered =
+                             tokio::time::timeout(std::time::Duration::from_secs(8), async {
+                                 loop {
+@@ -1107,8 +1107,8 @@ impl Environment {
+             let client = client.clone();
+             *startup_task = Some(AbortOnDropHandle::new(tokio::spawn(
+                 async move {
+-                    if let Err(error) = client.wait_until_ready().await {
+-                        tracing::debug!(%error, "exec-server environment startup failed");
++                    if client.wait_until_ready().await.is_err() {
++                        tracing::debug!("exec-server environment startup failed");
+                     }
+                 }
+                 .in_current_span()

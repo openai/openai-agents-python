@@ -79,7 +79,43 @@
     {
       "path": "0020-sdk-turn-receipts.patch",
       "sha256": "2e7b19c453c96c609fd5dafba2836eafe802776f02274ea45f6320a04d60a67c"
+    },
+    {
+      "path": "0021-redact-executor-startup-tracing.patch",
+      "sha256": "2febc726d78dd113512306c3bd59d9eaf4b233ff18cba8559af20e94c918b7a0"
+    },
+    {
+      "path": "0022-sdk-local-network-receipts.patch",
+      "sha256": "44d43b139d8d1f8a010dbab32a3bb7ae8e54f10a695e97026e63c93d73bb0fcf"
+    },
+    {
+      "path": "0023-retain-early-sandbox-denials.patch",
+      "sha256": "31eee8fd638f35abd56e216a18bbc70dad6b8b93f90fe2db16b2deaae1bd004f"
+    },
+    {
+      "path": "0024-restrict-local-macos-sandbox-defaults.patch",
+      "sha256": "b397bbd1e5d6104d0a308dadef045049d3d10ef8b7015c27135cf81ddc6c428c"
+    },
+    {
+      "path": "0025-mount-sandbox-reentry-helper.patch",
+      "sha256": "d1e3ce174262a157028fd0c7ea99bbb9d500722462282420bea26cd358ac6eba"
+    },
+    {
+      "path": "0026-join-interrupted-local-commands.patch",
+      "sha256": "090301b67c4442820a9fb01977b546caf1e772bb8c0c4cd7d5b9f845bc42aab3"
+    },
+    {
+      "path": "0027-join-linux-sandbox-namespace.patch",
+      "sha256": "ed695b5e678fa85ce4472fc0d533830ed007298c888b540f1830deab5fe5b93e"
+    },
+    {
+      "path": "0028-own-managed-local-launch-before-payload.patch",
+      "sha256": "9ceb1de13400e03331bf5fd97ec407cca776dfdc454d493fb047ace030ba4628"
+    },
+    {
+      "path": "0029-own-managed-darwin-command-cohort.patch",
+      "sha256": "c396cfdaead91f902fe5952a80e91445469036461cacf17e84931faf1ea69ac8"
     }
   ],
-  "result_tree": "6ff5f1b941c506337570089657c8c20e34c5a51c"
+  "result_tree": "b37a0851ccab813f064a4a14fefda386f1c19332"
 }
