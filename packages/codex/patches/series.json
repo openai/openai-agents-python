@@ -78,7 +78,7 @@
     },
     {
       "path": "0020-sdk-turn-receipts.patch",
-      "sha256": "3207d476fc24f6b3234f77ba057eaaa1589a920c49cbfe5e69de88c18ec3ce16"
+      "sha256": "2e7b19c453c96c609fd5dafba2836eafe802776f02274ea45f6320a04d60a67c"
     },
     {
       "path": "0021-redact-executor-startup-tracing.patch",
@@ -99,7 +99,11 @@
     {
       "path": "0025-mount-sandbox-reentry-helper.patch",
       "sha256": "d1e3ce174262a157028fd0c7ea99bbb9d500722462282420bea26cd358ac6eba"
+    },
+    {
+      "path": "0026-join-interrupted-local-commands.patch",
+      "sha256": "fe3b91705b0ae3047a139097362c8ced796aeb25c3cf7363917b90ec80f49f06"
     }
   ],
-  "result_tree": "79d92735b209904c3f4e3ef50365ead3b47551a5"
+  "result_tree": "ce6360bc3e081ea7d7ede2d768160211df0be4c6"
 }

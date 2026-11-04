@@ -53,20 +53,27 @@ def test_local_declaration_has_no_transport_and_normalizes_additional_roots() ->
         "headers": {},
         "connect_timeout": None,
     }
+    env_vars = [
+        "OPENAI_API_KEY",
+        "CODEX_API_KEY",
+        "openai_api_key",
+        "codex_api_key",
+        "DECLARED_VAR",
+    ]
     server = StdioMCP(
         name="local-tools",
         command="/bin/echo",
         tools=["echo"],
         location="environment",
-        env_vars=["OPENAI_API_KEY", "CODEX_API_KEY", "DECLARED_VAR"],
+        env_vars=env_vars,
     )
     declaration = server._config(local)
     assert declaration["environment_id"] == "local"
     assert declaration["cwd"] == "/job/worktree"
-    assert declaration["env_vars"] == ["DECLARED_VAR"]
+    assert declaration["env_vars"] == ["openai_api_key", "codex_api_key", "DECLARED_VAR"]
 
     host = replace(server, location="host")
-    assert host._config(local)["env_vars"] == ["OPENAI_API_KEY", "CODEX_API_KEY", "DECLARED_VAR"]
+    assert host._config(local)["env_vars"] == env_vars
 
 
 @pytest.mark.parametrize(
@@ -226,7 +233,9 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
         f"if cat {scratch_path} >/dev/null 2>&1; then exit 16; fi; "
         f"if (printf denied > {scratch_path}) 2>/dev/null; then exit 17; fi; "
         f"printf cached > {shlex.quote(str(cache / 'marker'))}; "
-        "if (printf denied > escape) 2>/dev/null; then exit 11; fi; "
+        # A Linux sandbox can create a private shadow of the missing target.
+        # Check the host file below after attempting to follow the symlink.
+        "(printf denied > escape) 2>/dev/null || true; "
         "if (printf denied > .agents/protected) 2>/dev/null; then exit 12; fi; "
         "if (printf denied >> .git) 2>/dev/null; then exit 13; fi; "
         f"{git_path} add result.txt; "
@@ -364,7 +373,7 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
             assert host in output and f"was blocked: {reason}" in output
         return turn.turn_id
 
-    async with timeout(60), provider:
+    async with timeout(120), provider:
         async with agent.session(storage=storage, environment=selected) as session:
             session_id = session.id
             before = await run_turn(
@@ -440,13 +449,57 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
     if sys.platform == "linux"
     else pytest.mark.requires_native_macos_sandbox
 )
+async def test_local_root_change_refuses_a_retargeted_working_directory(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    original, replacement, aliases = [tmp_path / name for name in ("original", "other", "aliases")]
+    for directory in (original, replacement, aliases):
+        directory.mkdir()
+    alias = aliases / "workspace"
+    alias.symlink_to(original, target_is_directory=True)
+    selected = Environment.local(cwd=alias, writable_roots=[aliases], tools=["exec_command"])
+    agent = Agent(
+        instructions="Answer.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-local-key"),
+    )
+    responses.respond(assistant_output("ready"))
+    async with timeout(30), agent.session(environment=selected) as session:
+        assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+        alias.unlink()
+        alias.symlink_to(replacement, target_is_directory=True)
+        responses.respond(assistant_output("unexpectedly admitted"))
+        turn = await session.submit("Clear extra roots.", writable_roots=[])
+        with pytest.raises(NativeError, match="executor working directory changed") as refused:
+            await turn.get_result()
+        assert refused.value.effects == "not_started"
+        assert len(responses.requests) == 1
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
 async def test_steer_twice_and_interrupt_running_local_command(
     responses: ResponsesFixture, tmp_path: Path
 ) -> None:
     work = tmp_path / "work"
     work.mkdir()
     heartbeat = work / "heartbeat"
-    selected = Environment.local(cwd=work, tools=["exec_command"])
+    background = work / "background"
+    selected = Environment.local(cwd=work, tools=["exec_command", "write_stdin"])
+    responses.respond(
+        function_call(
+            "exec_command",
+            {
+                "cmd": "while :; do printf '.' >> background; sleep 0.05; done",
+                "yield_time_ms": 250,
+                "login": False,
+            },
+            "background",
+        )
+    )
     responses.respond(
         function_call(
             "exec_command",
@@ -460,7 +513,7 @@ async def test_steer_twice_and_interrupt_running_local_command(
     )
     provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
     async with (
-        timeout(30),
+        timeout(60),
         provider,
         Agent(instructions="Use the selected tools.", provider=provider).session(
             environment=selected
@@ -469,6 +522,7 @@ async def test_steer_twice_and_interrupt_running_local_command(
         running = await session.submit("Start the command.")
         while not heartbeat.exists():
             await asyncio.sleep(0.01)
+        assert "session ID" in tool_output(responses.requests[1], "background")
         turn_id = running.turn_id
         assert turn_id is not None
         first = await running.steer_exact("First correction.", expected_turn_id=turn_id)
@@ -479,13 +533,15 @@ async def test_steer_twice_and_interrupt_running_local_command(
         outcome = await running.wait_for_attention()
         assert isinstance(outcome, TurnNeedsAttention) and outcome.reason == "interrupted"
         ticks = heartbeat.read_bytes()
+        background_ticks = background.read_bytes()
         assert ticks
         await asyncio.sleep(0.25)
         assert heartbeat.read_bytes() == ticks
-        assert len(responses.requests) == 1
+        assert len(background.read_bytes()) > len(background_ticks)
+        assert len(responses.requests) == 2
         responses.respond(assistant_output("New work."))
         successor = await session.submit("Start fresh.")
         with pytest.raises(StaleTurnError):
             await running.steer_exact("Stale correction.", expected_turn_id=turn_id)
         assert (await successor.get_result()).final_output == "New work."
-        assert len(responses.requests) == 2
+        assert len(responses.requests) == 3

@@ -1,0 +1,356 @@
+diff --git a/codex-rs/core-api/src/lib.rs b/codex-rs/core-api/src/lib.rs
+index 3e0392f..aac630a 100644
+--- a/codex-rs/core-api/src/lib.rs
++++ b/codex-rs/core-api/src/lib.rs
+@@ -37,6 +37,7 @@ pub use codex_core::EnvironmentMcpPolicy;
+ pub use codex_core::EnvironmentNetworkPolicy;
+ pub use codex_core::ForkSnapshot;
+ pub use codex_core::LoadedAgentsMd;
++pub use codex_core::ManagedLocalExecCancelFailure;
+ pub use codex_core::McpManager;
+ pub use codex_core::NetworkDomainPermission;
+ pub use codex_core::NetworkDomainPermissionEntry;
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 69d7000..c72af6e 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -233,6 +233,10 @@ pub struct BackgroundTerminalInfo {
+     pub cwd: PathUri,
+ }
+ 
++/// The SDK-local command cleanup could not prove that the named turn stopped.
++#[derive(Clone, Debug)]
++pub struct ManagedLocalExecCancelFailure(pub(crate) String);
++
+ /// Conduit for the bidirectional stream of messages that compose a thread
+ /// (formerly called a conversation) in Codex.
+ impl CodexThread {
+@@ -809,6 +813,13 @@ impl CodexThread {
+         self.session.terminate_background_terminal(process_id).await
+     }
+ 
++    /// Read after the native interrupt has finished for the named SDK turn.
++    pub fn managed_local_exec_cancel_failed(&self, turn_id: &str) -> bool {
++        self.thread_extension_data()
++            .get::<ManagedLocalExecCancelFailure>()
++            .is_some_and(|failure| failure.0 == turn_id)
++    }
++
+     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
+         self.io.agent_status.clone()
+     }
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index e60b6eb..5a5ae1d 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -49,6 +49,7 @@ pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+ pub use codex_protocol::protocol::EnvironmentConfig;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
++pub use codex_thread::ManagedLocalExecCancelFailure;
+ mod owned_question;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+ pub use codex_thread::ConfigRefreshOutcome;
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 55cc888..97ea422 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -25,6 +25,7 @@ use tracing::trace_span;
+ use tracing::warn;
+ 
+ use crate::codex_thread::BackgroundTerminalInfo;
++use crate::codex_thread::ManagedLocalExecCancelFailure;
+ use crate::config::Config;
+ use crate::context::ContextualUserFragment;
+ use crate::hook_runtime::run_turn_interrupt_hooks;
+@@ -931,7 +932,22 @@ impl Session {
+         error: Option<ErrorEvent>,
+     ) {
+         let sub_id = task.turn_context.sub_id.clone();
++        let join_local_commands = reason == TurnAbortReason::Interrupted
++            && self
++                .services
++                .turn_environments
++                .environment_manager()
++                .try_local_environment()
++                .is_some_and(|environment| {
++                    environment
++                        .local_runtime_paths()
++                        .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt)
++                });
+         if task.cancellation_token.is_cancelled() {
++            if join_local_commands {
++                self.join_interrupted_local_commands(task.handle, &task.turn_context)
++                    .await;
++            }
+             if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+                 warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+             }
+@@ -967,7 +983,12 @@ impl Session {
+             }
+         }
+ 
+-        task.handle.abort();
++        if join_local_commands {
++            self.join_interrupted_local_commands(task.handle, &task.turn_context)
++                .await;
++        } else {
++            task.handle.abort();
++        }
+         if let Err(cleanup_error) = self.end_owned_child_stdio(&task.turn_context).await {
+             warn!("Child stdio cleanup failed while aborting: {cleanup_error}");
+         }
+@@ -1034,6 +1055,32 @@ impl Session {
+             warn!("failed to flush rollout after emitting terminal turn event: {err}");
+         }
+     }
++
++    async fn join_interrupted_local_commands(
++        &self,
++        task: AbortOnDropHandle<()>,
++        turn: &TurnContext,
++    ) {
++        // A cancelled initial call can still be returning its process from spawn.
++        // Stop the task before reading the process store so it cannot add entries
++        // after this cleanup. Previously returned terminal handles remain live.
++        task.abort();
++        let task_joined = match tokio::time::timeout(Duration::from_secs(5), task).await {
++            Ok(Ok(())) => true,
++            Ok(Err(error)) => error.is_cancelled(),
++            Err(_) => false,
++        };
++        let commands_joined = self
++            .services
++            .unified_exec_manager
++            .join_unreturned_local_commands(&turn.extension_data)
++            .await;
++        if !task_joined || !commands_joined {
++            let failure = ManagedLocalExecCancelFailure(turn.sub_id.clone());
++            turn.extension_data.insert(failure.clone());
++            self.services.thread_extension_data.insert(failure);
++        }
++    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 187ff33..c76ae9f 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -196,6 +196,7 @@ struct ProcessEntry {
+     process_id: i32,
+     cwd: PathUri,
+     initial_exec_command_active: Arc<std::sync::atomic::AtomicBool>,
++    initial_exec_command_returned: Arc<std::sync::atomic::AtomicBool>,
+     hook_command: String,
+     tty: bool,
+     environment_id: String,
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+index 3552ffd..e9cd20b 100644
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -144,6 +144,7 @@ async fn exec_command_with_tty(
+             process_id,
+             cwd: cwd.clone().into(),
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
++            initial_exec_command_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             hook_command: cmd.to_string(),
+             tty,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+@@ -621,6 +622,7 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+             process_id,
+             cwd: cwd.into(),
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(true)),
++            initial_exec_command_returned: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             hook_command: "sleep 60".to_string(),
+             tty: true,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+@@ -708,6 +710,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+             process_id,
+             cwd: cwd.into(),
+             initial_exec_command_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++            initial_exec_command_returned: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+             hook_command: "sleep 60".to_string(),
+             tty: true,
+             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index ae6f00d..175d0ab 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -273,6 +273,29 @@ impl UnifiedExecProcess {
+         Ok(())
+     }
+ 
++    pub(super) async fn terminate_and_join(&self) -> bool {
++        let mut state = self.state_rx.clone();
++        let stopped = tokio::time::timeout(Duration::from_secs(5), async {
++            match &self.process_handle {
++                ProcessHandle::Local(process) => process.request_terminate(),
++                ProcessHandle::ExecServer(process) => {
++                    if process.terminate().await.is_err() {
++                        return false;
++                    }
++                }
++            }
++            state
++                .wait_for(|state| match &self.process_handle {
++                    ProcessHandle::Local(process) => process.has_exited(),
++                    ProcessHandle::ExecServer(_) => state.has_exited,
++                })
++                .await
++                .is_ok()
++        })
++        .await;
++        stopped.unwrap_or(false)
++    }
++
+     pub(super) async fn interrupt(&self) -> Result<(), UnifiedExecError> {
+         match &self.process_handle {
+             ProcessHandle::Local(process_handle) => process_handle
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 55d39c4..0624f96 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -270,6 +270,7 @@ struct PreparedProcessHandles {
+ 
+ struct InitialExecCommandGuard {
+     active: Option<Arc<AtomicBool>>,
++    returned: Option<Arc<AtomicBool>>,
+     metrics_sidecar: Option<PluginMetricsSidecar>,
+ }
+ 
+@@ -625,6 +626,7 @@ impl UnifiedExecProcessManager {
+         let process_started_alive = !process.has_exited() && process.exit_code().is_none();
+         let mut initial_exec_command_guard = if process_started_alive {
+             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
++            let initial_exec_command_returned = Arc::new(AtomicBool::new(false));
+             self.store_process(
+                 Arc::clone(&process),
+                 context,
+@@ -642,15 +644,18 @@ impl UnifiedExecProcessManager {
+                 metrics_sidecar,
+                 Arc::clone(&output_buffer),
+                 Arc::clone(&initial_exec_command_active),
++                Arc::clone(&initial_exec_command_returned),
+             )
+             .await;
+             InitialExecCommandGuard {
+                 active: Some(initial_exec_command_active),
++                returned: Some(initial_exec_command_returned),
+                 metrics_sidecar: None,
+             }
+         } else {
+             InitialExecCommandGuard {
+                 active: None,
++                returned: None,
+                 metrics_sidecar,
+             }
+         };
+@@ -869,6 +874,12 @@ impl UnifiedExecProcessManager {
+             hook_command: Some(request.hook_command.clone()),
+         };
+ 
++        if response.process_id.is_some()
++            && !context.cancellation_token.is_cancelled()
++            && let Some(returned) = initial_exec_command_guard.returned.as_ref()
++        {
++            returned.store(true, Ordering::Release);
++        }
+         Ok(response)
+     }
+ 
+@@ -1240,6 +1251,7 @@ impl UnifiedExecProcessManager {
+         metrics_sidecar: Option<PluginMetricsSidecar>,
+         output_buffer: Arc<tokio::sync::Mutex<OutputBuffers>>,
+         initial_exec_command_active: Arc<AtomicBool>,
++        initial_exec_command_returned: Arc<AtomicBool>,
+     ) {
+         let plugin_metrics_sidecar =
+             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+@@ -1251,6 +1263,7 @@ impl UnifiedExecProcessManager {
+             process_id,
+             cwd: cwd.clone(),
+             initial_exec_command_active,
++            initial_exec_command_returned,
+             hook_command,
+             tty,
+             environment_id,
+@@ -1863,6 +1876,33 @@ impl UnifiedExecProcessManager {
+         }
+     }
+ 
++    pub(crate) async fn join_unreturned_local_commands(
++        &self,
++        turn: &Arc<codex_extension_api::ExtensionData>,
++    ) -> bool {
++        let processes = {
++            let store = self.process_store.lock().await;
++            store
++                .processes
++                .values()
++                .filter(|entry| {
++                    entry.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
++                        && !entry.initial_exec_command_returned.load(Ordering::Acquire)
++                        && entry
++                            .output_policy_store
++                            .as_ref()
++                            .is_some_and(|owner| Arc::ptr_eq(owner, turn))
++                })
++                .map(|entry| Arc::clone(&entry.process))
++                .collect::<Vec<_>>()
++        };
++        // Send every stop request before waiting for an exit.
++        futures::future::join_all(processes.iter().map(|process| process.terminate_and_join()))
++            .await
++            .into_iter()
++            .all(|exited| exited)
++    }
++
+     /// Resolves stdin's target from the host-owned terminal, not model-supplied metadata.
+     pub(crate) async fn environment_id_for_process(&self, process_id: i32) -> Option<String> {
+         self.process_store
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 29563c6..cf802f0 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -648,6 +648,7 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+                 process_id,
+                 cwd: cwd.clone(),
+                 initial_exec_command_active: Arc::new(AtomicBool::new(false)),
++                initial_exec_command_returned: Arc::new(AtomicBool::new(true)),
+                 hook_command: format!("command-{process_id}"),
+                 tty: false,
+                 environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+diff --git a/codex-rs/exec-server/src/runtime_options.rs b/codex-rs/exec-server/src/runtime_options.rs
+index 9e3d66a..651e091 100644
+--- a/codex-rs/exec-server/src/runtime_options.rs
++++ b/codex-rs/exec-server/src/runtime_options.rs
+@@ -17,6 +17,8 @@ pub struct ExecServerRuntimeOptions {
+     pub linux_sandbox_pid_namespace: LinuxSandboxPidNamespace,
+     /// Trusted startup routing; request policy still controls destination access.
+     pub proxy_private_ips_via_upstream: bool,
++    /// Join local commands that have not yielded a process handle on turn interrupt.
++    pub join_unreturned_local_exec_on_interrupt: bool,
+     /// Use the platform runtime paths without implicit scratch and application access.
+     #[cfg(target_os = "macos")]
+     pub restricted_macos_process_sandbox: bool,
+@@ -46,6 +48,7 @@ impl ExecServerRuntimeOptions {
+         Ok(Self {
+             linux_sandbox_pid_namespace: LinuxSandboxPidNamespace::default(),
+             proxy_private_ips_via_upstream: false,
++            join_unreturned_local_exec_on_interrupt: false,
+             codex_self_exe: absolute_path(codex_self_exe)?,
+             codex_linux_sandbox_exe: codex_linux_sandbox_exe.map(absolute_path).transpose()?,
+             #[cfg(target_os = "macos")]
+@@ -67,6 +70,11 @@ impl ExecServerRuntimeOptions {
+         self
+     }
+ 
++    pub fn with_join_unreturned_local_exec_on_interrupt(mut self) -> Self {
++        self.join_unreturned_local_exec_on_interrupt = true;
++        self
++    }
++
+     /// Restricts the platform defaults to runtime access for an SDK-owned local executor.
+     #[cfg(target_os = "macos")]
+     pub fn with_restricted_macos_process_sandbox(mut self) -> Self {

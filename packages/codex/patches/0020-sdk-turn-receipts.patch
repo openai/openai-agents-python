@@ -164,22 +164,109 @@ index ea999374a39c488a7a619962e39d1702f00cb094..55e1df40e1a7ef292394a99db84dec08
          if let Some(active_turn) = active.as_mut() {
              self.input_queue
 diff --git a/codex-rs/core/src/session/rollout_reconstruction.rs b/codex-rs/core/src/session/rollout_reconstruction.rs
-index ab20e5b30ef4a363d12d12ee9d5c1375b985a825..2e58389433b5081e426ad43de2976b18b1418025 100644
+index ab20e5b30ef4a363d12d12ee9d5c1375b985a825..404412549fc370ad134d9e5cbb6fecc6d7c52118 100644
 --- a/codex-rs/core/src/session/rollout_reconstruction.rs
 +++ b/codex-rs/core/src/session/rollout_reconstruction.rs
-@@ -290,6 +290,10 @@ impl Session {
+@@ -4,6 +4,7 @@ use crate::context_manager::is_user_turn_boundary;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::protocol::SessionContextWindow;
+ use codex_protocol::protocol::ThreadHistoryMode;
++use serde::Deserialize;
+ use uuid::Uuid;
+ 
+ // Return value of `Session::reconstruct_history_from_rollout`, bundling the rebuilt history with
+@@ -165,6 +166,59 @@ fn finalize_active_segment<'a>(
+     }
+ }
+ 
++// A sampling record copies the frozen context for a turn whose canonical context
++// was already written. Live sampling may change summary, realtime, or the
++// effective settings inside the receipt. Those observations are not baselines.
++fn sdk_sampling_context_indexes(replay_items: &[RolloutItem]) -> HashSet<usize> {
++    let mut observations = HashSet::new();
++    let mut baseline: Option<&TurnContextItem> = None;
++    for (index, item) in replay_items.iter().enumerate() {
++        match item {
++            RolloutItem::TurnContext(context) => {
++                if baseline.is_some_and(|baseline| is_sdk_sampling_context(context, baseline)) {
++                    observations.insert(index);
++                } else {
++                    baseline = Some(context);
++                }
++            }
++            RolloutItem::Compacted(_)
++            | RolloutItem::EventMsg(
++                EventMsg::TurnStarted(_) | EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_),
++            ) => baseline = None,
++            _ => {}
++        }
++    }
++    observations
++}
++
++fn is_sdk_sampling_context(context: &TurnContextItem, baseline: &TurnContextItem) -> bool {
++    let Some(receipt) = context.sdk_receipt.as_ref() else {
++        return false;
++    };
++    if context.turn_id.is_none()
++        || context.turn_id != baseline.turn_id
++        || receipt.get("version").and_then(serde_json::Value::as_u64) != Some(1)
++        || !receipt
++            .get("thread_id")
++            .and_then(serde_json::Value::as_str)
++            .is_some_and(|id| ThreadId::from_string(id).is_ok())
++        || !receipt
++            .get("model")
++            .and_then(serde_json::Value::as_str)
++            .is_some_and(|model| !model.is_empty())
++        || !receipt
++            .get("approval_policy")
++            .is_some_and(|policy| AskForApproval::deserialize(policy).is_ok())
++    {
++        return false;
++    }
++    let mut baseline = baseline.clone();
++    baseline.sdk_receipt.clone_from(&context.sdk_receipt);
++    baseline.realtime_active = context.realtime_active;
++    baseline.summary = context.summary;
++    &baseline == context
++}
++
+ impl Session {
+     pub(super) async fn reconstruct_history_from_rollout(
+         &self,
+@@ -227,6 +281,7 @@ impl Session {
+         // we hit its matching `TurnStarted`, at which point the segment can be finalized.
+         let mut active_segment: Option<ActiveReplaySegment<'_>> = None;
+ 
++        let sdk_sampling_contexts = sdk_sampling_context_indexes(replay_items);
+         for (index, item) in replay_items.iter().enumerate().rev() {
+             match item {
+                 RolloutItem::Compacted(compacted) => {
+@@ -290,6 +345,9 @@ impl Session {
                      active_segment.counts_as_user_turn = true;
                  }
                  RolloutItem::TurnContext(ctx) => {
-+                    if ctx.sdk_receipt.is_some() {
-+                        // SDK sampling evidence does not advance the context baseline.
++                    if sdk_sampling_contexts.contains(&index) {
 +                        continue;
 +                    }
                      let active_segment =
                          active_segment.get_or_insert_with(ActiveReplaySegment::default);
                      // `TurnContextItem` can attach metadata to an existing segment, but only a
+@@ -311,8 +369,10 @@ impl Session {
+                             active_segment.reference_context_item,
+                             TurnReferenceContextItem::NeverSet
+                         ) {
++                            let mut reference = ctx.clone();
++                            reference.sdk_receipt = None;
+                             active_segment.reference_context_item =
+-                                TurnReferenceContextItem::Latest(Box::new(ctx.clone()));
++                                TurnReferenceContextItem::Latest(Box::new(reference));
+                         }
+                     }
+                 }
 diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
-index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504a8d3944b 100644
+index 7b280be1205f785b8770729b0976ec8109bd0d12..9feb0790280d1baac1d5252fc9c5d0aabee573e4 100644
 --- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 +++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
 @@ -437,6 +437,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
@@ -198,7 +285,80 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
          disabled_plugin_ids: None,
-@@ -907,6 +909,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
+@@ -576,6 +578,72 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
+     );
+ }
+ 
++#[tokio::test]
++async fn sdk_sampling_metadata_cannot_discard_the_durable_turn_context() {
++    let (session, turn_context) = make_session_and_context().await;
++    let canonical = turn_context.to_turn_context_item();
++    let turn_id = canonical.turn_id.clone().expect("native turn id");
++    let receipt = json!({
++        "version": 1,
++        "thread_id": ThreadId::new(),
++        "model": "step-model",
++        "reasoning_effort": null,
++        "instruction_revision": null,
++        "developer_instructions_sha256": null,
++        "instruction_files": [],
++        "user_config_applied": false,
++        "codex_revision": "a".repeat(40),
++        "codex_source_tree": "b".repeat(40),
++        "approval_policy": "never",
++        "executors": null,
++    });
++
++    for (attached, include_sample) in [
++        (Some(json!({"invalid": true})), false),
++        (Some(receipt.clone()), false),
++        (None, true),
++    ] {
++        let mut restored_context = canonical.clone();
++        restored_context.sdk_receipt = attached;
++        let mut rollout = vec![
++            RolloutItem::EventMsg(EventMsg::TurnStarted(
++                codex_protocol::protocol::TurnStartedEvent {
++                    turn_id: turn_id.clone(),
++                    root_turn_id: None,
++                    trace_id: None,
++                    started_at: None,
++                    model_context_window: Some(128_000),
++                    collaboration_mode_kind: ModeKind::Default,
++                },
++            )),
++            RolloutItem::EventMsg(EventMsg::UserMessage(
++                codex_protocol::protocol::UserMessageEvent {
++                    message: "seed".to_string(),
++                    ..Default::default()
++                },
++            )),
++            RolloutItem::TurnContext(restored_context),
++        ];
++        if include_sample {
++            let mut sampled = canonical.clone();
++            sampled.sdk_receipt = Some(receipt.clone());
++            sampled.realtime_active = Some(!turn_context.realtime_active);
++            rollout.push(RolloutItem::TurnContext(sampled));
++        }
++        let restored = session
++            .reconstruct_history_from_rollout(&turn_context, &rollout)
++            .await;
++        assert_eq!(restored.reference_context_item.as_ref(), Some(&canonical));
++        assert_eq!(
++            restored
++                .previous_turn_settings
++                .as_ref()
++                .map(|settings| settings.model.as_str()),
++            Some(canonical.model.as_str())
++        );
++    }
++}
++
+ #[tokio::test]
+ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_completed_turns() {
+     let (session, turn_context) = make_session_and_context().await;
+@@ -907,6 +975,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
          RolloutItem::ResponseItem(standalone_assistant.into()),
          RolloutItem::WorldState(WorldStateItem::full(object!({}))),
          RolloutItem::TurnContext(TurnContextItem {
@@ -206,7 +366,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
              turn_id: Some(standalone_turn_id.clone()),
              ..first_context_item.clone()
          }),
-@@ -961,6 +964,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
+@@ -961,6 +1030,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
          .expect("turn context should have turn_id");
      let assistant_turn_id = "assistant-instruction-turn".to_string();
      let assistant_turn_context = TurnContextItem {
@@ -214,7 +374,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          turn_id: Some(assistant_turn_id.clone()),
          ..first_context_item.clone()
      };
-@@ -1915,6 +1919,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+@@ -1915,6 +1985,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -222,7 +382,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: Some("root-turn".to_string()),
          disabled_plugin_ids: None,
-@@ -2017,6 +2022,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+@@ -2017,6 +2088,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
          serde_json::to_value(session.reference_context_item().await)
              .expect("serialize seeded reference context item"),
          serde_json::to_value(Some(TurnContextItem {
@@ -230,7 +390,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
              turn_id: Some(turn_context.sub_id.clone()),
              root_turn_id: Some("root-turn".to_string()),
              disabled_plugin_ids: None,
-@@ -2053,6 +2059,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
+@@ -2053,6 +2125,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -238,7 +398,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
          disabled_plugin_ids: None,
-@@ -2198,6 +2205,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+@@ -2198,6 +2271,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
      let current_turn_id = "current-turn".to_string();
      let unmatched_abort_turn_id = "other-turn".to_string();
      let current_context_item = TurnContextItem {
@@ -246,7 +406,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          turn_id: Some(current_turn_id.clone()),
          root_turn_id: None,
          disabled_plugin_ids: None,
-@@ -2334,6 +2342,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
+@@ -2334,6 +2408,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {
@@ -254,7 +414,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          turn_id: Some(turn_context.sub_id.clone()),
          root_turn_id: None,
          disabled_plugin_ids: None,
-@@ -2521,6 +2530,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
+@@ -2521,6 +2596,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
      let (session, turn_context) = make_session_and_context().await;
      let previous_model = "previous-rollout-model";
      let previous_context_item = TurnContextItem {

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ use codex_core::{
     config::validate_environment_network_policy, windows_sandbox::WindowsSandboxLevelExt,
 };
 use codex_core_api::{
-    CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
+    AbsolutePathBuf, CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
     EnvironmentNetworkPolicy, NetworkDomainPermission, NetworkDomainPermissionEntry,
     NetworkDomainPermissions, NetworkProxySpec,
 };
@@ -46,7 +46,7 @@ use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
 
 pub async fn for_unattached_threads(
     config: &Config,
-    _sdk_local: bool,
+    sdk_local: bool,
 ) -> Result<(EnvironmentManager, Option<String>)> {
     // An explicitly absent helper supports model-only clients. Native MCP
     // admits servers against the actual manager at session selection time.
@@ -60,9 +60,11 @@ pub async fn for_unattached_threads(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
-    #[cfg(target_os = "macos")]
-    let paths = if _sdk_local {
-        paths.with_restricted_macos_process_sandbox()
+    let paths = if sdk_local {
+        let paths = paths.with_join_unreturned_local_exec_on_interrupt();
+        #[cfg(target_os = "macos")]
+        let paths = paths.with_restricted_macos_process_sandbox();
+        paths
     } else {
         paths
     };
@@ -222,7 +224,7 @@ impl EnvironmentOptions {
                 )
             })?;
             let info = executor_info(&environment).await?;
-            let profile = self.profile(&environment, &info).await?;
+            let (profile, _) = self.profile(&environment, &info).await?;
             self.check_network_target(&info, &profile)?;
             probe_local_sandbox(&environment, &self.cwd, profile).await?;
             return Ok(manager);
@@ -253,7 +255,7 @@ impl EnvironmentOptions {
             .map_err(remote_startup_error)?;
         if self.strict_writes() || self.network.is_some() {
             let info = executor_info(&environment).await?;
-            let profile = self.profile(&environment, &info).await?;
+            let (profile, _) = self.profile(&environment, &info).await?;
             self.check_network_target(&info, &profile)?;
         }
         Ok(manager)
@@ -383,7 +385,7 @@ impl EnvironmentOptions {
         &self,
         environment: &Environment,
         info: &EnvironmentInfo,
-    ) -> Result<PermissionProfile> {
+    ) -> Result<(PermissionProfile, PathUri)> {
         if self.strict_writes() {
             strict_write_profile(
                 environment,
@@ -394,7 +396,10 @@ impl EnvironmentOptions {
             )
             .await
         } else {
-            Ok(workspace_profile(std::slice::from_ref(&self.cwd)))
+            Ok((
+                workspace_profile(std::slice::from_ref(&self.cwd)),
+                self.cwd.clone(),
+            ))
         }
     }
 
@@ -410,13 +415,21 @@ impl EnvironmentOptions {
         let needs_info = self.strict_writes()
             || self.network.is_some()
             || self.cwd.infer_path_convention() == Some(PathConvention::Windows);
-        let (profile, windows_executor) = if needs_info {
+        let (profile, workspace_root, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
-            let profile = self.profile(&environment, &info).await?;
+            let (profile, workspace_root) = self.profile(&environment, &info).await?;
             self.check_network_target(&info, &profile)?;
-            (profile, info.platform_os.as_deref() == Some("windows"))
+            (
+                profile,
+                workspace_root,
+                info.platform_os.as_deref() == Some("windows"),
+            )
         } else {
-            (workspace_profile(std::slice::from_ref(&self.cwd)), false)
+            (
+                workspace_profile(std::slice::from_ref(&self.cwd)),
+                self.cwd.clone(),
+                false,
+            )
         };
         let permissions = &config.permissions;
         let windows_sandbox_type = config.windows_sandbox_type_from_config();
@@ -432,7 +445,7 @@ impl EnvironmentOptions {
             configured => configured,
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
-        let workspace_roots = vec![self.cwd.clone()];
+        let workspace_roots = vec![workspace_root];
         let shell_environment_policy = if self.local {
             ShellEnvironmentPolicy {
                 inherit: ShellEnvironmentPolicyInherit::None,
@@ -616,7 +629,7 @@ async fn strict_write_profile(
     cwd: &PathUri,
     additional: &[PathUri],
     local: bool,
-) -> Result<PermissionProfile> {
+) -> Result<(PermissionProfile, PathUri)> {
     ensure!(
         matches!(
             Platform::from_platform_os(info.platform_os.as_deref()),
@@ -681,9 +694,13 @@ async fn strict_write_profile(
         entry.access != FileSystemAccessMode::Read
             || !matches!(&entry.path, FileSystemPath::Path { path } if roots.contains(path))
     });
-    Ok(PermissionProfile::from_runtime_permissions(
-        &filesystem_policy,
-        NetworkSandboxPolicy::Restricted,
+    // The first resolved root is always the implicit working directory grant.
+    Ok((
+        PermissionProfile::from_runtime_permissions(
+            &filesystem_policy,
+            NetworkSandboxPolicy::Restricted,
+        ),
+        roots[0].clone(),
     ))
 }
 
@@ -733,15 +750,58 @@ fn check_local_helper_write_roots(environment: &Environment, roots: &[PathUri]) 
         .chain(system_search)
         .chain(system_bwraps.iter().map(|path| path.as_path()))
     {
-        for ancestor in path.ancestors() {
-            let canonical = std::fs::canonicalize(ancestor)
-                .map_err(|_| anyhow::anyhow!("could not verify the local executor helper path"))?;
-            ensure!(
-                roots
-                    .iter()
-                    .all(|root| !canonical.starts_with(root.as_path())),
-                "local executor writable roots must stay outside the native helper installation"
-            );
+        ensure!(
+            path.is_absolute(),
+            "local executor helpers must have absolute paths"
+        );
+        let mut links_left = 40;
+        check_local_helper_path(&roots, path, &mut PathBuf::new(), &mut links_left)?;
+    }
+    Ok(())
+}
+
+fn check_local_helper_path(
+    roots: &[AbsolutePathBuf],
+    path: &Path,
+    resolved: &mut PathBuf,
+    links_left: &mut usize,
+) -> Result<()> {
+    for part in path.components() {
+        match part {
+            Component::CurDir => continue,
+            Component::ParentDir => {
+                resolved.pop();
+                continue;
+            }
+            _ => resolved.push(part),
+        }
+        let is_symlink = matches!(part, Component::Normal(_))
+            && resolved
+                .symlink_metadata()
+                .context("could not resolve a local sandbox helper path")?
+                .is_symlink();
+        if matches!(part, Component::Normal(_)) && !is_symlink {
+            *resolved = resolved
+                .canonicalize()
+                .context("could not resolve a local sandbox helper path")?;
+        }
+        // Protect each directory entry before following it. A writable link
+        // can redirect the launch even when its current target is trusted.
+        ensure!(
+            !roots
+                .iter()
+                .any(|root| resolved.starts_with(root.as_path())),
+            "local executor writable roots must stay outside the native helper installation"
+        );
+        if is_symlink {
+            *links_left = links_left
+                .checked_sub(1)
+                .context("could not resolve a local sandbox helper path")?;
+            let target = resolved
+                .read_link()
+                .context("could not resolve a local sandbox helper path")?;
+            resolved.pop();
+            check_local_helper_path(roots, &target, resolved, links_left)?;
         }
     }
     Ok(())
@@ -765,8 +825,12 @@ pub async fn replace_writable_roots(
         .get_environment(&selection.environment_id)
         .context("selected executor was not registered")?;
     let info = executor_info(&environment).await?;
-    let profile =
+    let (profile, workspace_root) =
         strict_write_profile(&environment, &info, &selection.cwd, &writable_roots, local).await?;
+    ensure!(
+        selection.workspace_roots.as_slice() == std::slice::from_ref(&workspace_root),
+        "executor working directory changed since Session startup"
+    );
     let local_network = if local {
         local_session_network_policy(config)
     } else {
@@ -1126,6 +1190,41 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_helper_refuses_a_writable_intermediate_symlink() -> anyhow::Result<()> {
+        use std::fs;
+        use std::os::unix::fs::symlink;
+
+        use super::{EnvironmentManager, ExecServerRuntimeOptions, PathUri};
+
+        let fixture = tempfile::tempdir()?;
+        let workspace = fixture.path().join("workspace");
+        let launcher = fixture.path().join("packaged/bin/codex-sdk-runtime");
+        let trusted = fixture.path().join("trusted/bin/codex-sdk-runtime");
+        fs::create_dir(&workspace)?;
+        fs::create_dir_all(launcher.parent().unwrap())?;
+        fs::create_dir_all(trusted.parent().unwrap())?;
+        fs::write(&trusted, b"trusted helper")?;
+        symlink(
+            "../trusted/bin/codex-sdk-runtime",
+            workspace.join("launcher"),
+        )?;
+        symlink("../../workspace/launcher", &launcher)?;
+        let paths = ExecServerRuntimeOptions::new(launcher, None)?;
+        let manager = EnvironmentManager::create_for_tests(None, Some(paths)).await;
+        let environment = manager.try_local_environment().unwrap();
+        let write_root = PathUri::from_host_native_path(workspace.canonicalize()?)?;
+
+        assert_eq!(
+            super::check_local_helper_write_roots(&environment, &[write_root])
+                .unwrap_err()
+                .to_string(),
+            "local executor writable roots must stay outside the native helper installation"
+        );
+        Ok(())
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[tokio::test]

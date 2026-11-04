@@ -262,7 +262,7 @@ class StdioMCP(_MCP[ContextT_contra]):
                 config["env_vars"] = [
                     name
                     for name in self.env_vars
-                    if name.upper() not in {"OPENAI_API_KEY", "CODEX_API_KEY"}
+                    if name not in {"OPENAI_API_KEY", "CODEX_API_KEY"}
                 ]
             else:
                 config["environment_id"] = "remote"

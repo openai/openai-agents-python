@@ -733,6 +733,10 @@ impl PythonTools {
         // Capturing before acknowledgement can capture the preceding receipt.
         let receipt = self.admission_ready(expected_turn_id)?;
         receipt.probe_idle(thread).await;
+        ensure!(
+            !thread.managed_local_exec_cancel_failed(expected_turn_id),
+            "Interrupted local command cleanup did not finish"
+        );
         Ok(())
     }
 

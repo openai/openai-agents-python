@@ -16,7 +16,7 @@ from aiohttp import ClientTimeout, web
 from aiohttp.test_utils import RawTestServer, TestClient
 
 import agents
-from agents import Agent, Environment, LocalStorage, NetworkPolicy
+from agents import Agent, Environment, LocalStorage, NativeError, NetworkPolicy
 from agents._options import RuntimeNetworkPolicy
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -310,6 +310,59 @@ async def test_local_resume_requires_explicit_strict_writes_even_without_extra_r
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("corruption", ["empty", "missing", "empty_downgrade"])
+async def test_local_resume_rejects_incomplete_strict_executor_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile")
+        selected = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[],
+        )
+        async with agent.session(storage=storage, environment=selected) as session:
+            session_id = session.id
+            for text in ("First", "Second"):
+                model.respond(assistant_output(text))
+                assert (await (await session.submit(text)).get_result()).final_output == text
+
+        [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
+        rows = [json.loads(line) for line in rollout.read_text().splitlines()]
+        latest = next(
+            row["payload"]["sdk_receipt"]
+            for row in reversed(rows)
+            if row["type"] == "turn_context" and row["payload"].get("sdk_receipt")
+        )
+        assert latest["strict_executor_writes"] is True
+        assert latest["executors"]
+        if corruption == "missing":
+            del latest["executors"]
+        else:
+            latest["executors"] = []
+            if corruption == "empty_downgrade":
+                latest["strict_executor_writes"] = False
+        rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+        for environment in (None, selected):
+            with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+                async with agent.session(
+                    storage=storage, resume=session_id, environment=environment
+                ):
+                    pytest.fail("Reopened a Session with an incomplete strict executor receipt")
+        assert len(model.requests) == 2
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
 @pytest.mark.parametrize("explicit_network", [False, True])
 async def test_local_resume_allows_implicit_remote_workspace_to_move(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_network: bool
@@ -435,6 +488,18 @@ async def test_local_resume_can_drop_an_implicit_remote_executor(
                 tool.get("name") for tool in model.requests[-1].get("tools", [])
             }
 
+        with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+            async with agent.session(
+                storage=storage,
+                resume=session_id,
+                environment=replace(selected, writable_roots=[]),
+            ):
+                pytest.fail("Reopened a model-only Session with strict write grants")
+        model.respond(assistant_output("still model-only"))
+        async with agent.session(storage=storage, resume=session_id) as resumed:
+            result = await (await resumed.submit("Continue without an executor.")).get_result()
+            assert result.final_output == "still model-only"
+
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
 @pytest.mark.parametrize("retarget_cwd", [False, True], ids=["additional-root", "workspace"])
@@ -458,16 +523,24 @@ async def test_supplied_compaction_keeps_the_applied_write_policy_after_retarget
             cwd=str(alias if retarget_cwd else executor.root),
             tools=["exec_command"],
             headers={"Authorization": "Bearer " + executor.token},
-            writable_roots=[] if retarget_cwd else [alias],
+            writable_roots=[executor.root] if retarget_cwd else [alias],
         )
         agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
         model.respond(assistant_output("ready"))
         model.respond(assistant_output("continued"))
         async with agent.session(environment=selected) as session:
-            assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+            initial = await session.submit("Start.", writable_roots=selected.writable_roots)
+            assert (await initial.get_result()).final_output == "ready"
             alias.unlink()
             alias.symlink_to(replacement, target_is_directory=True)
             if retarget_cwd:
+                with pytest.raises(
+                    NativeError, match="executor working directory changed"
+                ) as refused:
+                    await (
+                        await session.submit("Clear extra roots.", writable_roots=[])
+                    ).get_result()
+                assert refused.value.effects == "not_started"
                 with pytest.raises(RuntimeError, match="compaction cannot change the applied"):
                     await session.compact(summary="A caller supplied this summary.")
             else:
@@ -482,9 +555,7 @@ async def test_supplied_compaction_keeps_the_applied_write_policy_after_retarget
                 if "receipt" in turn and turn["receipt"]["executors"]
             ]
             assert len(policies) == 2
-            expected_roots = {original.resolve().as_uri()}
-            if not retarget_cwd:
-                expected_roots.add(executor.root.resolve().as_uri())
+            expected_roots = {original.resolve().as_uri(), executor.root.resolve().as_uri()}
             assert set(policies[0]["writable_roots"]) == expected_roots
             assert policies[1] == policies[0]
 

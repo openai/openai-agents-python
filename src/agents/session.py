@@ -5102,9 +5102,9 @@ class Session(Generic[ContextT, OutputT]):
                         # TurnAborted precedes Core's final abort cleanup. Keep
                         # this active slot until its exact named receipt is idle.
                         await self._native._finish_graceful_interrupt(state.handle.turn_id)
-                except BaseException:  # native interruption can fail during shutdown
+                except BaseException as interruption_error:
                     self._broken = True
-                    await self._native.close()
+                    await _close_after_error(interruption_error, self._native.close)
                     raise
                 finally:
                     try:

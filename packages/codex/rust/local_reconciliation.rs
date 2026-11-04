@@ -171,7 +171,7 @@ async fn validate_recorded_executor_policy(
     history: &[RolloutItem],
     thread_id: &str,
 ) -> Result<()> {
-    let Some((previous, strict_writes)) = history.iter().rev().find_map(|record| {
+    let mut recorded_policies = history.iter().rev().filter_map(|record| {
         let RolloutItem::TurnContext(context) = record else {
             return None;
         };
@@ -179,29 +179,42 @@ async fn validate_recorded_executor_policy(
         if receipt["thread_id"].as_str() != Some(thread_id) {
             return None;
         }
-        Some((
-            receipt.get("executors")?,
-            receipt.get("strict_executor_writes"),
-        ))
-    }) else {
+        let executors = receipt.get("executors");
+        let strict_writes = receipt.get("strict_executor_writes");
+        // Legacy non-strict receipts without executor evidence carry no policy.
+        if executors.is_none() && strict_writes.is_none_or(|value| value.as_bool() == Some(false)) {
+            return None;
+        }
+        Some((executors, strict_writes))
+    });
+    let Some((previous, strict_writes)) = recorded_policies.next() else {
         return Ok(());
     };
     let policy_error = "Local resume requires the recorded executor write and network policy";
-    let previous = previous.as_array().context(policy_error)?;
+    let previous = previous.and_then(Value::as_array).context(policy_error)?;
     let strict_writes = match strict_writes {
         None => false,
         Some(strict) => strict.as_bool().context(policy_error)?,
     };
-    // A model-only turn has no executor policy to carry into the next Session.
-    if previous.is_empty() {
-        return Ok(());
-    }
     let current_strict_writes = state
         .thread
         .thread_extension_data()
         .get::<crate::environment::StrictExecutorWrites>()
         .is_some();
     let current = executor_policies(state).await?;
+    if previous.is_empty() {
+        // A model-only turn cannot replace a recorded strict policy or start an
+        // executor during reopen.
+        ensure!(
+            !strict_writes
+                && !current_strict_writes
+                && current.is_empty()
+                && !recorded_policies
+                    .any(|(_, strict)| strict.and_then(Value::as_bool) == Some(true)),
+            "{policy_error}"
+        );
+        return Ok(());
+    }
     let matches = if strict_writes || current_strict_writes {
         (!strict_writes || current_strict_writes) && previous == &current
     } else if current.is_empty() {

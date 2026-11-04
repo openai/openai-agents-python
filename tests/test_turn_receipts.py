@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from agents import Agent, NativeAgents
+from agents.state import SessionState
 from agents.turn_receipt import (
     _load_instruction_files,
     _project_turn_receipt,
@@ -191,6 +192,48 @@ async def test_native_receipt_matches_provider_input_and_survives_restore(tmp_pa
                     receipts[-1]["developer_instructions_sha256"]
                     == hashlib.sha256(b"Use the new instructions.").hexdigest()
                 )
+
+
+@pytest.mark.parametrize("receipt_kind", ["malformed", "foreign"])
+async def test_portable_receipt_metadata_cannot_replace_the_canonical_context(
+    receipt_kind: str,
+) -> None:
+    async with timeout(30), peer() as provider:
+        agent = Agent(instructions="Remember atlas.", model="gpt-5.5", provider=provider.provider())
+        async with agent.session() as source:
+            provider.replies.append(message("Remembered.", "first"))
+            turn = await source.submit("Remember atlas.")
+            await turn.get_result()
+            raw = json.loads((await source.save_state()).to_json())
+
+        contexts = [
+            record["payload"]
+            for record in raw["history"]
+            if record["type"] == "turn_context" and record["payload"].get("turn_id") == turn.turn_id
+        ]
+        [canonical] = [context for context in contexts if context.get("sdk_receipt") is None]
+        [sample] = [context["sdk_receipt"] for context in contexts if context.get("sdk_receipt")]
+        # Distinguish the last turn's settings from the earlier startup context.
+        previous_comp_hash = "previous-model-computation"
+        for context in contexts:
+            context["comp_hash"] = previous_comp_hash
+        if receipt_kind == "malformed":
+            canonical["sdk_receipt"] = {"version": 1}
+        else:
+            canonical["sdk_receipt"] = {
+                **sample,
+                "thread_id": "0ba91311-1b76-4322-aa56-32d55b6c35e7",
+            }
+
+        state = SessionState.from_json(json.dumps(raw))
+        async with agent.session(state=state) as resumed:
+            provider.replies.append(message("A native summary of atlas.", "summary"))
+            await resumed.compact()
+            history = (await resumed.save_state()).history
+        latest = next(item["payload"] for item in reversed(history) if item["type"] == "compacted")
+        assert (
+            latest["resume_metadata"]["previous_turn_settings"]["comp_hash"] == previous_comp_hash
+        )
 
 
 async def test_native_child_receipt_records_only_sampled_instruction_files(
