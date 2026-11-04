@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from agents import Agent, HttpMCP, NativeError, ReplaceArguments, StopTurn, ToolRef
+from agents.observation import ExecutionItemCompleted, TurnFinished
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -295,7 +296,9 @@ async def test_first_executor_call_after_root_completion_uses_original_cell_owne
         ) as run,
     ):
         try:
+            live_turn = run.first.events(include_execution_details=True)
             await finish_and_compact(run, responses)
+            [terminal] = [event async for event in live_turn if isinstance(event, TurnFinished)]
             assert not approvals and not arguments_contexts and not contexts
             assert not any(req.get("method") == "process/start" for req in run.peer.requests)
             later = pending = None
@@ -337,6 +340,36 @@ async def test_first_executor_call_after_root_completion_uses_original_cell_owne
                 not any(item.get("call_id") == OUTER for item in request["input"])
                 for request in new_requests
             )
+            late_events = run.session.events(
+                after=terminal.sequence, include_execution_details=True
+            )
+            try:
+                async for event in late_events:
+                    if (
+                        isinstance(event, ExecutionItemCompleted)
+                        and event.submission_id == run.first.submission_id
+                        and event.item["type"] == "command_execution"
+                    ):
+                        completion = event
+                        break
+                else:
+                    pytest.fail("The Session ended before the late command completion")
+            finally:
+                await late_events.aclose()
+            assert completion.sequence > terminal.sequence
+            assert completion.item["turn_id"] == run.first.turn_id
+            assert completion.item["thread_id"] == run.session.id
+            assert completion.item["exit_code"] == 0
+            assert any("completed-effect" in arg for arg in completion.item["argv"])
+            assert str(run.peer.root) in completion.item["cwd"]
+            assert await anext(live_turn, None) is None
+            assert completion in [
+                event
+                async for event in run.first.events(
+                    after=terminal.sequence, include_execution_details=True
+                )
+            ]
+            assert completion.item in [item async for item in run.session.items()]
             await no_private_output(run, responses)
         finally:
             release.set()
