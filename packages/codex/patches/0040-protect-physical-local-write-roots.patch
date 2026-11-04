@@ -1,0 +1,207 @@
+diff --git a/codex-rs/sandboxing/src/local_write_roots.rs b/codex-rs/sandboxing/src/local_write_roots.rs
+index 32f30b560220ff7cd359713d2fae2a1851a1c41d..c823db8a7a4d2588ec5763049fa36a78469a9d72 100644
+--- a/codex-rs/sandboxing/src/local_write_roots.rs
++++ b/codex-rs/sandboxing/src/local_write_roots.rs
+@@ -11,9 +11,11 @@ use std::os::unix::fs::MetadataExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+ 
+-/// Canonical local write grants and the Linux mount entries they expose.
++/// Canonical local write grants, their filesystem identities, and Linux mounts.
+ pub struct LocalWriteRoots<'a> {
+     roots: &'a [AbsolutePathBuf],
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    physical: PhysicalWriteRoots,
+     #[cfg(target_os = "linux")]
+     mounts: WritableMounts,
+ }
+@@ -28,12 +30,14 @@ impl<'a> LocalWriteRoots<'a> {
+         };
+         Ok(Self {
+             roots,
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            physical: PhysicalWriteRoots::new(roots)?,
+             #[cfg(target_os = "linux")]
+             mounts,
+         })
+     }
+ 
+-    /// Includes a bind alias of this entry, or a mounted alias beneath a grant.
++    /// Includes alternate paths to the same filesystem entries and Linux mounts.
+     pub fn contains_entry(&self, path: &Path) -> io::Result<bool> {
+         if self
+             .roots
+@@ -42,6 +46,10 @@ impl<'a> LocalWriteRoots<'a> {
+         {
+             return Ok(true);
+         }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if self.physical.contains_entry(path)? {
++            return Ok(true);
++        }
+         #[cfg(target_os = "linux")]
+         return self.mounts.contains_entry(path);
+         #[cfg(not(target_os = "linux"))]
+@@ -96,7 +104,7 @@ impl<'a> LocalWriteRoots<'a> {
+         Ok(false)
+     }
+ 
+-    /// Also includes mounts of existing children of the protected directory.
++    /// Includes physical ancestors of a grant and mounts below the protected path.
+     pub fn has_root_at_or_below(&self, path: &Path) -> io::Result<bool> {
+         if self
+             .roots
+@@ -105,6 +113,10 @@ impl<'a> LocalWriteRoots<'a> {
+         {
+             return Ok(true);
+         }
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if self.physical.has_root_at_or_below(path)? {
++            return Ok(true);
++        }
+         #[cfg(target_os = "linux")]
+         return self.mounts.contains_descendant(path);
+         #[cfg(not(target_os = "linux"))]
+@@ -112,9 +124,53 @@ impl<'a> LocalWriteRoots<'a> {
+     }
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ type EntryIdentity = (u64, u64);
+ 
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[derive(Default)]
++struct PhysicalWriteRoots {
++    roots: HashSet<EntryIdentity>,
++    ancestors: HashSet<EntryIdentity>,
++}
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++impl PhysicalWriteRoots {
++    fn new(roots: &[AbsolutePathBuf]) -> io::Result<Self> {
++        let mut physical = Self::default();
++        for root in roots {
++            physical.roots.insert(write_root_identity(root.as_path())?);
++            for ancestor in root.as_path().ancestors().skip(1) {
++                physical.ancestors.extend(entry_identity(ancestor)?);
++            }
++        }
++        Ok(physical)
++    }
++
++    fn contains_entry(&self, path: &Path) -> io::Result<bool> {
++        if self.roots.is_empty() {
++            return Ok(false);
++        }
++        // An alternate spelling can hide a grant even when only an ancestor
++        // of the proposed path already exists.
++        for ancestor in path.ancestors() {
++            if entry_identity(ancestor)?.is_some_and(|identity| self.roots.contains(&identity)) {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
++
++    fn has_root_at_or_below(&self, path: &Path) -> io::Result<bool> {
++        if self.roots.is_empty() {
++            return Ok(false);
++        }
++        Ok(entry_identity(path)?.is_some_and(|identity| {
++            self.roots.contains(&identity) || self.ancestors.contains(&identity)
++        }))
++    }
++}
++
+ #[cfg(target_os = "linux")]
+ struct Mount {
+     destination: PathBuf,
+@@ -167,10 +223,7 @@ impl WritableMounts {
+             });
+         }
+         for root in roots {
+-            let identity = entry_identity(root.as_path())?.ok_or_else(|| {
+-                io::Error::new(io::ErrorKind::NotFound, "local writable root disappeared")
+-            })?;
+-            grants.insert(root.as_path(), identity);
++            grants.insert(root.as_path(), write_root_identity(root.as_path())?);
+         }
+         for index in 0..grants.mounts.len() {
+             let destination = &grants.mounts[index].destination;
+@@ -279,7 +332,13 @@ fn join_mount_relative(path: &Path, relative: &Path) -> PathBuf {
+     }
+ }
+ 
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++fn write_root_identity(path: &Path) -> io::Result<EntryIdentity> {
++    entry_identity(path)?
++        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "local writable root disappeared"))
++}
++
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ fn entry_identity(path: &Path) -> io::Result<Option<EntryIdentity>> {
+     match fs::symlink_metadata(path) {
+         Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+@@ -324,6 +383,44 @@ pub fn decode_mountinfo_path(encoded: &[u8]) -> io::Result<PathBuf> {
+ mod tests {
+     use super::*;
+ 
++    #[test]
++    fn requires_an_existing_grant_when_capturing_physical_identities() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let root = AbsolutePathBuf::from_absolute_path(temp.path().join("missing"))?;
++        let error = PhysicalWriteRoots::new(&[root])
++            .err()
++            .expect("grant identity must exist");
++        assert_eq!(error.kind(), io::ErrorKind::NotFound);
++        Ok(())
++    }
++
++    #[test]
++    fn alternate_directory_paths_include_actual_grant_ancestors_and_descendants() -> io::Result<()>
++    {
++        let temp = tempfile::tempdir()?;
++        let real = temp.path().join("real");
++        let root = real.join("workspace/grant");
++        let sibling = real.join("workspace/sibling");
++        fs::create_dir_all(&root)?;
++        fs::create_dir(&sibling)?;
++        fs::write(root.join("existing"), "local state")?;
++        let alias = temp.path().join("alias");
++        std::os::unix::fs::symlink(&real, &alias)?;
++        let alternate = alias.join("workspace");
++        let roots = [AbsolutePathBuf::from_absolute_path(&root)?];
++        let grants = LocalWriteRoots::new(&roots)?;
++
++        assert!(grants.contains_entry(&alternate.join("grant/existing"))?);
++        assert!(grants.contains_entry(&alternate.join("grant/missing/child"))?);
++        assert!(!grants.contains_entry(&alternate)?);
++        assert!(grants.has_root_at_or_below(&alternate)?);
++        assert!(grants.has_root_at_or_below(&alternate.join("grant"))?);
++        assert!(!grants.has_root_at_or_below(&alternate.join("grant/missing"))?);
++        assert!(!grants.contains_entry(&alternate.join("sibling"))?);
++        assert!(!grants.has_root_at_or_below(&alternate.join("sibling"))?);
++        Ok(())
++    }
++
+     #[test]
+     fn ordinary_hard_link_to_a_helper_must_be_inside_a_grant() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;
+@@ -366,6 +463,7 @@ mod tests {
+         let roots = [AbsolutePathBuf::from_absolute_path(&workspace)?];
+         let grants = LocalWriteRoots {
+             roots: &roots,
++            physical: PhysicalWriteRoots::new(&roots)?,
+             mounts: WritableMounts::new(&roots, mountinfo.as_bytes())?,
+         };
+ 
+@@ -412,6 +510,7 @@ mod tests {
+         let roots = [AbsolutePathBuf::from_absolute_path(&workspace)?];
+         let grants = LocalWriteRoots {
+             roots: &roots,
++            physical: PhysicalWriteRoots::new(&roots)?,
+             mounts: WritableMounts::new(&roots, mountinfo.as_bytes())?,
+         };
+         assert!(grants.contains_entry(&helper)?);

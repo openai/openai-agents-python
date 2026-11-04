@@ -155,7 +155,11 @@
     {
       "path": "0039-resume-trusted-darwin-wrapper-during-shutdown.patch",
       "sha256": "2136f3fbf487e6446e60587cdca30fb1cf909adcb4db3e18d0c242f7b6cbae6e"
+    },
+    {
+      "path": "0040-protect-physical-local-write-roots.patch",
+      "sha256": "8f6395a1b8d253170db019319cdaeff855ce1798efcc20eed704689fe070d994"
     }
   ],
-  "result_tree": "cb24aab4e2ab11a1f6488452e0c06a6349993ba1"
+  "result_tree": "508adc6a0777c6b61a2abbeeafbc24a5f2e39914"
 }
