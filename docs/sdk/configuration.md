@@ -74,6 +74,8 @@ async with NativeProvider(
 
 When your application opens a Session, the SDK calls the callback once and keeps that token for the Session, including retries and repairs. To use a renewed token, save an idle Session, close it, and open a new Session with the saved state. Keep the same ChatGPT registration. See [save and restore](sessions.md#compact-save-and-restore). API-key Sessions and Sign in with ChatGPT Sessions cannot restore each other's saved state.
 
+When `DeferredTools.start()` restores a deferred job, it opens a new Session and obtains a current token for the same ChatGPT registration.
+
 Follow the [account and refresh guidance](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). Serialize refreshes for the same credential record. Store the latest rotating refresh token with the updated access token. Keep tokens out of logs and conversation state. Link your application's usage page to [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage), where users can review usage and manage access.
 
 This mode uses HTTP server-sent events at `https://api.openai.com/v1/responses`. The SDK fixes the endpoint and disables WebSockets. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If sign-in, token retrieval, or inference fails, the SDK reports the error and keeps the selected billing mode. A stream that fails after it opens ends the operation without an automatic replay.
