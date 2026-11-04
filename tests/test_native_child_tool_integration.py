@@ -7,7 +7,7 @@ import json
 import os
 import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ from agents import (
     function_tool,
 )
 from agents.observation import (
+    EventGap,
     ExecutionItemCompleted,
     OutputTextDelta,
     SessionEnded,
@@ -234,27 +235,37 @@ def family_agent(
 
 
 @pytest.mark.parametrize(
-    ("programmatic_tool_calling", "execute"),
+    ("programmatic_tool_calling", "execute", "synthetic_denial"),
     [
-        pytest.param(False, False, id="direct-function-mcp"),
-        pytest.param(True, False, id="code-function-mcp"),
+        pytest.param(False, False, False, id="direct-function-mcp"),
+        pytest.param(True, False, False, id="code-function-mcp"),
+        pytest.param(True, True, True, id="code-function-mcp-fast-executor-denial"),
         pytest.param(
             True,
             True,
+            False,
             id="code-function-mcp-native-executor",
             marks=pytest.mark.requires_native_linux_sandbox,
         ),
     ],
 )
 async def test_two_children_can_use_context_and_mcp_after_root_finishes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, programmatic_tool_calling: bool, execute: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    programmatic_tool_calling: bool,
+    execute: bool,
+    synthetic_denial: bool,
 ) -> None:
     memory = Memory()
     vault = Peer(names=("find-record", "excluded"), label="mcp-private-f126")
     async with (
         timeout(60),
         family_peer(programmatic_tool_calling=programmatic_tool_calling, execute=execute) as peer,
-        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        ExecutorPeer(
+            tmp_path / "remote",
+            synthetic_process_output="Permission denied" if synthetic_denial else None,
+            synthetic_sandbox_denied=synthetic_denial,
+        ).serve() as executor,
         vault.serve() as url,
     ):
         trust(executor, tmp_path, monkeypatch)
@@ -319,6 +330,23 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 execution = [
                     event.item for event in events if isinstance(event, ExecutionItemCompleted)
                 ]
+                if execute and not any(item["type"] == "command_execution" for item in execution):
+                    # Core can publish the command receipt after the child stream closes.
+                    assert isinstance(events[-1], TurnFinished)
+                    async with aclosing(
+                        session.events(after=events[-1].sequence, include_execution_details=True)
+                    ) as late:
+                        async for event in late:
+                            assert not isinstance(event, EventGap)
+                            if (
+                                isinstance(event, ExecutionItemCompleted)
+                                and event.submission_id == handle.submission_id
+                                and event.item["type"] == "command_execution"
+                                and event.item["thread_id"] == handle.child_id
+                                and event.item["turn_id"] == handle.turn_id
+                            ):
+                                execution.append(event.item)
+                                break
                 [mcp] = [item for item in execution if item["type"] == "mcp_call"]
                 assert (mcp["thread_id"], mcp["turn_id"]) == (handle.child_id, handle.turn_id)
                 assert "accepted-mcp:" + handle.child_id in str(mcp["output"])
@@ -326,8 +354,8 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 assert [
                     item
                     async for item in session.items(subagent_id=handle.child_id)
-                    if item["type"] == "mcp_call"
-                ] == [mcp]
+                    if item["type"] in {"mcp_call", "command_execution"}
+                ] == execution
                 if execute:
                     assert (executor.root.parent / f"{name}.txt").read_text() == f"protected-{name}"
                     response = code_output(peer.child_requests[name][-1], "shared-exec-id")
@@ -336,6 +364,15 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                     assert separator, response
                     denied = json.loads(printed)
                     assert type(denied["exit_code"]) is int and denied["exit_code"] > 0, denied
+                    [command] = [item for item in execution if item["type"] == "command_execution"]
+                    assert (command["thread_id"], command["turn_id"]) == (
+                        handle.child_id,
+                        handle.turn_id,
+                    )
+                    assert command["argv"][-1:] == [f"printf {name} > ../{name}.txt"]
+                    assert command["call_id"] and command["call_id"] == command["id"]
+                    assert command["exit_code"] == denied["exit_code"]
+                    assert command["native_status"] == "failed"
                     output = denied["output"].lower()
                     assert "permission denied" in output or "read-only file system" in output
             assert memory.entries["alpha"].submission != memory.entries["beta"].submission
@@ -343,6 +380,8 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 assert any(
                     request.get("method") == "process/start" for request in executor.requests
                 )
+            if synthetic_denial:
+                assert len(executor.synthetic_process_starts) == 2
             if not programmatic_tool_calling:
                 assert {ctx.call_id for ctx in memory.entries.values()} == {"shared-call-id"}
             wire = json.dumps(peer.requests, ensure_ascii=False)
