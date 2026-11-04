@@ -154,7 +154,7 @@
     },
     {
       "path": "0039-resume-trusted-darwin-wrapper-during-shutdown.patch",
-      "sha256": "8e51ed328d871fa82532f9a8a4d2bfd33134852e936c0c092387c871adc8a049"
+      "sha256": "2136f3fbf487e6446e60587cdca30fb1cf909adcb4db3e18d0c242f7b6cbae6e"
     },
     {
       "path": "0040-stop-owned-auto-compaction.patch",
@@ -165,5 +165,5 @@
       "sha256": "922d61467fdac4dac29f2ae66e8d433740586ad4d20f3dc46cc3cece20481e2b"
     }
   ],
-  "result_tree": "7782cb898a13f3a9883a6a33d3041f95ca9cf600"
+  "result_tree": "108422bfeff81dbff09e60c72c76efa9e4b0ad51"
 }

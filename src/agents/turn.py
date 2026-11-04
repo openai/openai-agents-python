@@ -153,6 +153,10 @@ class Turn(Generic[OutputT]):
         """Observe owned steps with their native IDs. Gaps remain Session-global.
 
         TurnFinished describes an actual native step; get_result() is overall completion.
+        The iterator ends when the owned steps settle. For a yielded cell or background
+        command that completes later, keep reading Session.events(). To replay a late
+        completion still in the buffer, open a new turn cursor and pass the last
+        sequence you read as after.
         Set include_execution_details=True for a trusted reader that needs
         command, patch, and MCP payloads. The default includes their IDs and status.
         """

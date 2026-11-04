@@ -54,12 +54,27 @@ pub struct Accepted {
     files: Vec<InstructionFile>,
 }
 
+impl Accepted {
+    pub(crate) fn with_current_files(mut self, files: Option<Vec<InstructionFile>>) -> Self {
+        self.files = files.unwrap_or(self.files);
+        self
+    }
+}
+
 #[derive(Default)]
 pub struct Instructions(Mutex<Option<Accepted>>);
 
 impl Instructions {
     pub fn restored(accepted: Accepted) -> Self {
         Self(Mutex::new(Some(accepted)))
+    }
+
+    pub(crate) fn files(&self) -> Option<Vec<InstructionFile>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|accepted| accepted.files.clone())
     }
 
     fn current(&self) -> Option<Accepted> {
@@ -365,13 +380,14 @@ pub(crate) async fn publish_with_files(
             .get_or_insert_with(Default::default)
             .sdk_instruction_files = Some(serde_json::to_value(files)?);
     }
-    publish_item(thread, envelope).await
+    publish_item(thread, envelope, None).await
 }
 
-/// Publish an existing validated receipt on restore without allocating a revision.
+/// Confirm the published envelope before assigning the file sources for future sampling.
 pub(crate) async fn publish_item(
     thread: &CodexThread,
     envelope: ResponseItemEnvelope,
+    current_files: Option<Vec<InstructionFile>>,
 ) -> Result<()> {
     let owner = thread
         .thread_extension_data()
@@ -405,7 +421,8 @@ pub(crate) async fn publish_item(
                 .and_then(|value| value.sdk_instruction_files.as_ref()),
         "native application instruction file receipt was not confirmed"
     );
-    *owner.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(accepted);
+    *owner.0.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some(accepted.with_current_files(current_files));
     Ok(())
 }
 

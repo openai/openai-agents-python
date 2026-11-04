@@ -24,12 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 251946e1d2d84411bab5d2171e14b429b53ed957
+          ref: 61991ac259ed05ffe4fc3da8471185d8517d11a3
           persist-credentials: false
       - name: Verify exact SDK checkout
         run: |
-          test "$(git rev-parse HEAD)" = '251946e1d2d84411bab5d2171e14b429b53ed957'
-          test "$(git rev-parse HEAD^{tree})" = '2a8e8ffd96cef992c8c9b2aabda3e14f973bc6ae'
+          test "$(git rev-parse HEAD)" = '61991ac259ed05ffe4fc3da8471185d8517d11a3'
+          test "$(git rev-parse HEAD^{tree})" = 'b24fe99ccedd69fd0978653f699001a74df983d2'
           git show -s --format='%H %T %s' HEAD
       - name: Select shared Cargo directories
         run: |
@@ -541,6 +541,113 @@ jobs:
                               process.signal_if_current(signal.SIGKILL)
           DARWIN_WRAPPER_PROBE
           printf '%s  %s\n' '1a42de6c9b5be9c17494ddaeb9ad23695994c4264a3637a28e5ab667c700323c' 'tests/test_darwin_paused_wrapper.py' | shasum -a 256 -c -
+          cat > tests/test_darwin_starting_wrapper.py <<'DARWIN_STARTING_WRAPPER_PROBE'
+          """Close a real local command while the tool result is still pending."""
+
+          import asyncio
+          import json
+          import shlex
+          import signal
+          import sys
+          import time
+          from contextlib import AsyncExitStack
+          from pathlib import Path
+
+          import pytest
+          from tests._asyncio import timeout
+          from tests.native_fixtures import (
+              ResponsesFixture,
+              function_call,
+              responses as responses,
+          )
+          from tests.test_darwin_paused_wrapper import _owned_process, _wrapper_process
+
+          from agents import Agent, Environment, NativeProvider
+
+
+          @pytest.mark.skipif(sys.platform != "darwin", reason="requires managed macOS commands")
+          @pytest.mark.requires_native_macos_sandbox
+          async def test_macos_session_close_drains_paused_wrapper_before_tool_return(
+              responses: ResponsesFixture, tmp_path: Path
+          ) -> None:
+              marker = tmp_path / "starting-heartbeat"
+              pid_file = tmp_path / "starting-pid"
+              command = (
+                  f'printf "%s\\n" "$$" > {shlex.quote(str(pid_file))}; '
+                  'i=0; while [ "$i" -lt 180 ]; do '
+                  f"printf x >> {shlex.quote(str(marker))}; /bin/sleep 0.25; i=$((i + 1)); done"
+              )
+              responses.respond(
+                  function_call("exec_command", {"cmd": command, "yield_time_ms": 10000}, "pending")
+              )
+              provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+              agent = Agent(instructions="Run the scripted local command.", provider=provider)
+              wrapper = payload = result = None
+              async with timeout(32), provider, AsyncExitStack() as owner:
+                  try:
+                      session = await owner.enter_async_context(
+                          agent.session(environment=Environment.local(cwd=tmp_path, tools=["exec_command"]))
+                      )
+                      turn = await session.submit("Start the bounded heartbeat.")
+                      result = asyncio.create_task(turn.get_result())
+                      async with timeout(6):
+                          while (  # noqa: ASYNC110
+                              not marker.exists() or not pid_file.exists() or pid_file.stat().st_size == 0
+                          ):
+                              await asyncio.sleep(0.025)
+                      assert len(responses.requests) == 1 and not result.done()
+                      payload = _owned_process(int(pid_file.read_text()), str(marker))
+                      wrapper = _wrapper_process()
+                      wrapper.signal_if_current(signal.SIGSTOP)
+                      async with timeout(2):
+                          while not (wrapper.state() or "").startswith("T"):  # noqa: ASYNC110
+                              await asyncio.sleep(0.025)
+                          paused_marker = marker.stat().st_size
+                          while marker.stat().st_size <= paused_marker:  # noqa: ASYNC110
+                              await asyncio.sleep(0.025)
+                      assert len(responses.requests) == 1 and not result.done()
+
+                      started = time.monotonic()
+                      close_error = None
+                      try:
+                          async with timeout(16):
+                              await owner.aclose()
+                      except Exception as error:
+                          close_error = error
+                      duration = time.monotonic() - started
+                      wrapper_at_close = wrapper.state()
+                      payload_at_close = payload.state()
+                      at_close = marker.stat().st_size
+                      await asyncio.sleep(0.6)
+                      after_close = marker.stat().st_size
+                      print(
+                          "Python Darwin paused wrapper before tool return",
+                          json.dumps(
+                              {
+                                  "close_error": repr(close_error) if close_error else None,
+                                  "close_seconds": duration,
+                                  "provider_requests": len(responses.requests),
+                                  "wrapper_at_close": wrapper_at_close,
+                                  "payload_at_close": payload_at_close,
+                                  "at_close": at_close,
+                                  "after_close": after_close,
+                              }
+                          ),
+                      )
+                      assert close_error is None
+                      assert wrapper_at_close is None and payload_at_close is None
+                      assert at_close == after_close
+                      assert len(responses.requests) == 1
+                  finally:
+                      if wrapper:
+                          wrapper.signal_if_current(signal.SIGCONT)
+                      if payload:
+                          payload.signal_if_current(signal.SIGKILL)
+                      if result:
+                          result.cancel()
+                          await asyncio.gather(result, return_exceptions=True)
+          DARWIN_STARTING_WRAPPER_PROBE
+          printf '%s  %s\n' '311689c33a20e23baa26882d6bc84fdbae9ab222aa71919b4b71c7d5c4b56977' 'tests/test_darwin_starting_wrapper.py' | shasum -a 256 -c -
           env -u PYTHONPATH -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B - "$RUNNER_TEMP/local-session.xml" <<'PYTEST'
           import hashlib, os, pathlib, platform, sys, sysconfig, xml.etree.ElementTree as ET
           import agents._native, agents.session, pytest
@@ -548,7 +655,7 @@ jobs:
           installed = pathlib.Path(sysconfig.get_path('platlib')).resolve()
           for module in (agents, agents._native, agents.session):
               assert pathlib.Path(module.__file__).resolve().is_relative_to(installed), module.__file__
-          assert hashlib.sha256(pathlib.Path(agents.session.__file__).read_bytes()).hexdigest() == '985c33dc0987d290a69216bb0763b52671d8af1966346e7d3742aa4ada3e5801'
+          assert hashlib.sha256(pathlib.Path(agents.session.__file__).read_bytes()).hexdigest() == '2542a90a74dc099b36bcdde9a94a3498b192dc4a1db05b17eed4835b5377579e'
           assert installed.is_relative_to(pathlib.Path(os.environ['RUNNER_TEMP']).resolve())
           os.environ['OPENAI_AGENTS_DISPOSABLE_SITE'] = str(installed)
           helper = pathlib.Path(agents.__file__).parent / 'bin' / 'codex-code-mode-host'
@@ -561,6 +668,7 @@ jobs:
               '-q', '-rA', '--junitxml=' + junit,
               'tests/test_native_executor_local.py',
               'tests/test_native_yielded_executor_owner.py',
+              'tests/test_darwin_starting_wrapper.py::test_macos_session_close_drains_paused_wrapper_before_tool_return',
               'tests/test_darwin_paused_wrapper.py::test_macos_session_close_drains_paused_wrapper',
               'tests/test_native_executor_policies.py::test_force_stop_fences_sampling_before_executor_result_settles',
               'tests/test_native_compaction_admission.py::test_stop_during_compaction_setup_fences_provider_admission',
@@ -572,6 +680,7 @@ jobs:
           if status:
               sys.exit(status)
           required = {
+              'test_macos_session_close_drains_paused_wrapper_before_tool_return',
               'test_macos_session_close_drains_paused_wrapper',
               'test_installed_darwin_helper_alias',
               'test_macos_session_close_stops_child_after_command_exit',
@@ -582,6 +691,10 @@ jobs:
               'test_local_write_roots_cannot_overlap_native_runtime_home',
               'test_stop_during_compaction_setup_fences_provider_admission[False]',
               'test_stop_during_compaction_setup_fences_provider_admission[True]',
+              'test_local_open_rejects_a_storage_database_hard_link[profile]',
+              'test_local_open_rejects_a_storage_database_hard_link[relocated]',
+              'test_local_replacement_rejects_a_private_file_hard_link[relocated-wal]',
+              'test_local_replacement_rejects_a_private_file_hard_link[runtime-goal]',
               'test_two_workers_revise_reconnect_recover_and_publish_once',
           }
           required.update(
@@ -604,3 +717,15 @@ jobs:
             ${{ runner.temp }}/local-session.xml
           if-no-files-found: error
           retention-days: 7
+      - name: Verify prepared Darwin readiness tests
+        timeout-minutes: 12
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          core=packages/codex/.upstream/codex/codex-rs/exec-server
+          test -f "$core/src/darwin_command.rs"
+          grep -F 'async fn shutdown_waits_for_queued_wrapper_identity' "$core/src/darwin_command.rs"
+          cargo test --manifest-path "$core/Cargo.toml" --release --locked --lib \
+            darwin_command::shutdown_tests -- --nocapture | tee "$RUNNER_TEMP/darwin-core-readiness.log"
+          grep -F 'test darwin_command::shutdown_tests::shutdown_waits_for_queued_wrapper_identity ... ok' \
+            "$RUNNER_TEMP/darwin-core-readiness.log"

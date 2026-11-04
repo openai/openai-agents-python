@@ -750,7 +750,7 @@ async def test_force_stop_fences_sampling_before_executor_result_settles(
                         async with timeout(2):
                             while len(model.requests) == request_count:
                                 await asyncio.sleep(0.01)
-                    except TimeoutError:
+                    except asyncio.TimeoutError:
                         pass
                     assert len(model.requests) == request_count, "Cancelled turn sampled again"
             finally:

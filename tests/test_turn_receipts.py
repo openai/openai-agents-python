@@ -271,6 +271,90 @@ async def test_native_receipt_matches_provider_input_and_survives_restore(tmp_pa
                 )
 
 
+@pytest.mark.parametrize("restore_source", ["different-file", "inline", "legacy-inline"])
+@pytest.mark.parametrize("after_turn", [False, True], ids=["zero-turn", "sampled"])
+async def test_restored_receipt_uses_the_current_instruction_source(
+    tmp_path, restore_source, after_turn
+):
+    source = tmp_path / "original.md"
+    alternate = tmp_path / "alternate.md"
+    text = "Answer concisely.\r\n"
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    for path in [source, alternate]:
+        path.write_bytes(text.encode())
+
+    legacy = restore_source == "legacy-inline"
+    async with timeout(30), peer() as provider:
+        agent = Agent(instructions=text if legacy else "", provider=provider.provider())
+        async with agent.session(instruction_files=[] if legacy else [source]) as original:
+            unopened = await original.save_state()
+            provider.replies.append(message("first", "first-message"))
+            await (await original.submit("Start")).get_result()
+            sampled = await original.save_state()
+            [first] = [row["receipt"] async for row in original.turns() if "receipt" in row]
+
+        restored_inline = restore_source == "inline"
+        destination = Agent(
+            instructions=text if restored_inline else "", provider=provider.provider()
+        )
+        state = sampled if after_turn else unopened
+        if legacy:
+            # Format 2 keeps the original accepted inline publication without file metadata.
+            payload = json.loads(state.to_json())
+            payload.update(format_version=2, output_version=None, output_fingerprint=None)
+            payload.get("agent_options", {}).pop("_sdk_default_tools", None)
+            state = SessionState.from_json(json.dumps(payload))
+        saved = state.to_json()
+        async with destination.session(
+            state=state, instruction_files=[] if restored_inline else [alternate]
+        ) as restored:
+            provider.replies.append(message("resumed", "resumed-message"))
+            assert (await (await restored.submit("Resume")).get_result()).final_output == "resumed"
+            receipts = [row["receipt"] async for row in restored.turns() if "receipt" in row]
+            assert receipts[:-1] == ([first] if after_turn else [])
+            assert application_texts(provider.requests[-1]) == [text]
+            assert receipts[-1]["instruction_revision"] == first["instruction_revision"]
+            assert receipts[-1]["developer_instructions_sha256"] == digest
+            assert receipts[-1]["instruction_files"] == (
+                []
+                if restored_inline
+                else [
+                    {
+                        "path": str(alternate.resolve()),
+                        "source": "application_file",
+                        "sha256": digest,
+                    }
+                ]
+            )
+            if after_turn and restore_source == "different-file":
+                alternate.unlink()
+                await restored.compact(summary="The session started.")
+                provider.replies.append(message("compacted", "compacted-message"))
+                await (await restored.submit("Continue after compaction")).get_result()
+                compacted = [row["receipt"] async for row in restored.turns() if "receipt" in row]
+                assert compacted[:-1] == receipts
+                assert application_texts(provider.requests[-1])[-1] == text
+                assert compacted[-1]["instruction_revision"] == first["instruction_revision"]
+                assert compacted[-1]["instruction_files"] == receipts[-1]["instruction_files"]
+        assert state.to_json() == saved
+
+
+async def test_supplied_compaction_keeps_instruction_files_cleared_after_an_update(tmp_path):
+    text = "Answer concisely."
+    source = tmp_path / "original.md"
+    source.write_text(text, encoding="utf-8")
+    async with timeout(30), peer() as provider:
+        agent = Agent(instructions="", provider=provider.provider())
+        async with agent.session(instruction_files=[source]) as session:
+            await session.update(instructions=text)
+            await session.compact(summary="The session started.")
+            provider.replies.append(message("sampled"))
+            await (await session.submit("Continue")).get_result()
+            assert application_texts(provider.requests[-1])[-1] == text
+            [receipt] = [row["receipt"] async for row in session.turns() if "receipt" in row]
+            assert receipt["instruction_files"] == []
+
+
 @pytest.mark.parametrize(
     "invalid_fields",
     [{"model": None}, {"instruction_files": 5}],

@@ -106,7 +106,7 @@ async def test_stop_during_compaction_setup_fences_provider_admission(
                     async with timeout(2):
                         while len(model.requests) == 1:
                             await asyncio.sleep(0.01)
-                except TimeoutError:
+                except asyncio.TimeoutError:
                     pass
                 assert len(model.requests) == 1, "Stopped turn admitted late compaction"
             finally:

@@ -131,8 +131,15 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
 
 impl Change {
     pub fn options(&self) -> Value {
+        let instruction_files = self
+            .state
+            .thread
+            .thread_extension_data()
+            .get::<crate::application_instructions::Instructions>()
+            .and_then(|instructions| instructions.files());
         json!({
             "instructions": self.instructions,
+            "instruction_files": instruction_files,
             "settings": self.settings,
             "executor_writable_roots": self.executor_policy.as_ref().map(|policy| &policy["writable_roots"]),
         })
