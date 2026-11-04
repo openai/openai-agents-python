@@ -5,6 +5,7 @@ import json
 import pytest
 
 from agents import Agent, ReplaceArguments
+from agents.observation import ExecutionItemCompleted
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, function_call
@@ -74,3 +75,44 @@ async def test_environment_interleaved_message_and_call_ids(tmp_path, monkeypatc
             assert public_calls[0]["id"] == calls[0]["id"] == received_call["id"]
             assert any(i.get("id") == message["item"]["id"] for i in public)
             assert model.connections == 1 and not model.http_requests and not model.errors
+
+
+async def test_environment_provider_id_can_equal_native_execution_id(tmp_path, monkeypatch):
+    async with (
+        timeout(35),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        websocket_peer() as model,
+    ):
+        trust(executor, tmp_path, monkeypatch)
+        call_id = "fc_sharedIdentity"
+        call = function_call("exec_command", {"cmd": "printf executed"}, call_id)
+        call["item"]["id"] = call_id
+        model.respond(call)
+        model.respond(assistant_output("finished"))
+        agent = Agent(instructions="Use environment tools.", tools=[], provider=model.provider())
+        async with agent.session(environment=declaration(executor)) as session:
+            turn = await session.submit("Check")
+            assert (await turn.get_result()).final_output == "finished"
+            [reference] = [
+                event.item
+                async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert reference["id"] == reference["call_id"] == call_id
+            assert "output" not in reference
+            [completion] = [
+                event.item
+                async for event in turn.events(include_execution_details=True)
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert completion["id"] == completion["call_id"] == call_id
+
+            history = [item async for item in session.items()]
+            [original] = [item for item in history if item["type"] == "function_call"]
+            [execution] = [item for item in history if item["type"] == "command_execution"]
+            assert original["id"] == original["call_id"] == call_id
+            assert original["arguments"] == call["item"]["arguments"]
+            assert len({item["id"] for item in history}) == len(history)
+            assert execution["call_id"] == reference["call_id"]
+            assert {**execution, "id": completion["id"]} == completion
+            assert [item async for item in session.items()] == history

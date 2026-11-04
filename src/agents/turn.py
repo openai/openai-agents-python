@@ -149,16 +149,27 @@ class Turn(Generic[OutputT]):
         """
         await self._session._cancel_turn(self, mode)
 
-    def events(self, *, after: int = 0) -> EventStream:
+    def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
         """Observe owned steps with their native IDs. Gaps remain Session-global.
 
         TurnFinished describes an actual native step; get_result() is overall completion.
+        The iterator ends when the owned steps settle. For a yielded cell or background
+        command that completes later, keep reading Session.events(). To replay a late
+        completion still in the buffer, open a new turn cursor and pass the last
+        sequence you read as after.
+        Set include_execution_details=True for a trusted reader that needs
+        command, patch, and MCP payloads. The default includes their IDs and status.
         """
         from .observation import EventStream
 
         self._session._check_owner(self)
         self._session._check_callback_operation("observe its own Session")
-        return EventStream(self._session._observations, after=after, _turn=self)
+        return EventStream(
+            self._session._observations,
+            after=after,
+            _turn=self,
+            _include_execution_details=include_execution_details,
+        )
 
     def _steps(self) -> Iterator[Turn[OutputT]]:
         step = self

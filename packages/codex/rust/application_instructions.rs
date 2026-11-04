@@ -1,20 +1,23 @@
 //! One application instruction owner, published through Core's native history.
 
-use std::sync::{Mutex, PoisonError};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 use anyhow::{Context, Result, ensure};
 use codex_core_api::CodexThread;
 use codex_extension_api::{
     ContextContributor, ExtensionFuture, PreviousWorldStateSection, RenderedWorldStateFragment,
-    WorldStateContributionInput, WorldStateSectionContribution,
+    SdkApplicationInstructions, SdkTurnReceiptSeed, WorldStateContributionInput,
+    WorldStateSectionContribution,
 };
-use codex_history::RolloutItem;
+use codex_history::{CodexHarnessMetadata, ResponseItemEnvelope, RolloutItem};
 use codex_protocol::models::{
     ContentItem, ContentItemKind, InternalChatMessageMetadataPassthrough, ResponseItem,
 };
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::{ResponseItemId, ThreadId};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const SECTION: &str = "sdk_application";
 const ACCEPTED: &str = "sdk_application.accepted";
@@ -24,10 +27,38 @@ const MARKERS: (&str, &str) = ("<application_instructions>", "</application_inst
 const REVISION: &str = "Native instruction revision: ";
 const NOTICE: &str = "The following application instructions replace all earlier application instructions. An empty value clears them.\n";
 
+static CODEX_SOURCE_TREE: LazyLock<String> = LazyLock::new(|| {
+    let manifest: Value = serde_json::from_str(include_str!("../patches/series.json"))
+        .expect("embedded Codex patch manifest must be valid");
+    manifest["result_tree"]
+        .as_str()
+        .expect("embedded Codex manifest must record the reviewed tree")
+        .to_owned()
+});
+
+#[derive(Clone, Deserialize, Serialize)]
+pub(crate) struct InstructionFile {
+    path: String,
+    source: String,
+    sha256: String,
+}
+
+fn sha256(text: &str) -> String {
+    format!("{:x}", Sha256::digest(text.as_bytes()))
+}
+
 #[derive(Clone)]
 pub struct Accepted {
     id: ResponseItemId,
     pub(crate) text: String,
+    files: Vec<InstructionFile>,
+}
+
+impl Accepted {
+    pub(crate) fn with_current_files(mut self, files: Option<Vec<InstructionFile>>) -> Self {
+        self.files = files.unwrap_or(self.files);
+        self
+    }
 }
 
 #[derive(Default)]
@@ -36,6 +67,14 @@ pub struct Instructions(Mutex<Option<Accepted>>);
 impl Instructions {
     pub fn restored(accepted: Accepted) -> Self {
         Self(Mutex::new(Some(accepted)))
+    }
+
+    pub(crate) fn files(&self) -> Option<Vec<InstructionFile>> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|accepted| accepted.files.clone())
     }
 
     fn current(&self) -> Option<Accepted> {
@@ -111,6 +150,7 @@ fn accepted(item: &ResponseItem) -> Result<Option<Accepted>> {
     Ok(Some(Accepted {
         id: id.clone(),
         text: text.to_owned(),
+        files: Vec::new(),
     }))
 }
 
@@ -123,12 +163,27 @@ pub fn validate(history: &[RolloutItem], expected: &str) -> Result<Accepted> {
     Ok(latest)
 }
 
+fn accepted_envelope(envelope: &ResponseItemEnvelope) -> Result<Option<Accepted>> {
+    let Some(mut accepted) = accepted(&envelope.item)? else {
+        return Ok(None);
+    };
+    if let Some(files) = envelope
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.sdk_instruction_files.clone())
+    {
+        accepted.files =
+            serde_json::from_value(files).context("invalid native instruction file receipt")?;
+    }
+    Ok(Some(accepted))
+}
+
 /// Only original accepted items change authority. Compaction copies never do.
 pub(crate) fn latest(history: &[RolloutItem]) -> Result<Accepted> {
     let mut originals: Vec<(&ResponseItem, Accepted)> = Vec::new();
     for row in history {
         if let RolloutItem::ResponseItem(item) = row {
-            if let Some(accepted) = accepted(&item.item)? {
+            if let Some(accepted) = accepted_envelope(item)? {
                 ensure!(
                     !originals
                         .iter()
@@ -227,7 +282,7 @@ pub(crate) fn take_initial_receipt(
     history: &mut Vec<RolloutItem>,
     latest: &Accepted,
     root: ThreadId,
-) -> Option<ResponseItem> {
+) -> Option<ResponseItemEnvelope> {
     let mut receipt_index = None;
     for (index, row) in history.iter().enumerate() {
         match row {
@@ -236,8 +291,15 @@ pub(crate) fn take_initial_receipt(
                 if event.thread_id == Some(root) => {}
             RolloutItem::ResponseItem(envelope)
                 if receipt_index.is_none()
-                    && envelope.metadata.is_none()
-                    && envelope.item.id() == Some(&latest.id) =>
+                    && envelope.item.id() == Some(&latest.id)
+                    && envelope.metadata.as_ref().is_none_or(|metadata| {
+                        metadata.sdk_instruction_files.is_some()
+                            && *metadata
+                                == CodexHarnessMetadata {
+                                    sdk_instruction_files: metadata.sdk_instruction_files.clone(),
+                                    ..Default::default()
+                                }
+                    }) =>
             {
                 receipt_index = Some(index);
             }
@@ -245,7 +307,7 @@ pub(crate) fn take_initial_receipt(
         }
     }
     match history.remove(receipt_index?) {
-        RolloutItem::ResponseItem(envelope) => Some(envelope.item),
+        RolloutItem::ResponseItem(envelope) => Some(envelope),
         _ => unreachable!("receipt_index identifies a response item"),
     }
 }
@@ -254,6 +316,7 @@ pub(crate) fn publication(text: &str) -> ResponseItem {
     let accepted = Accepted {
         id: ResponseItemId::new(ID_PREFIX),
         text: text.to_owned(),
+        files: Vec::new(),
     };
     ResponseItem::Message {
         id: Some(accepted.id.clone()),
@@ -301,33 +364,92 @@ fn receipt<'a>(
 
 /// The caller holds the existing native operation and idle mutation gates.
 pub async fn publish(thread: &CodexThread, text: String) -> Result<()> {
-    publish_item(thread, publication(&text)).await
+    publish_with_files(thread, text, Vec::new()).await
 }
 
-/// Publish an existing validated receipt on restore without allocating a revision.
-pub(crate) async fn publish_item(thread: &CodexThread, item: ResponseItem) -> Result<()> {
+pub(crate) async fn publish_with_files(
+    thread: &CodexThread,
+    text: String,
+    files: Vec<InstructionFile>,
+) -> Result<()> {
+    let item = publication(&text);
+    let mut envelope = thread.annotate_client_response_item(item);
+    if !files.is_empty() {
+        envelope
+            .metadata
+            .get_or_insert_with(Default::default)
+            .sdk_instruction_files = Some(serde_json::to_value(files)?);
+    }
+    publish_item(thread, envelope, None).await
+}
+
+/// Confirm the published envelope before assigning the file sources for future sampling.
+pub(crate) async fn publish_item(
+    thread: &CodexThread,
+    envelope: ResponseItemEnvelope,
+    current_files: Option<Vec<InstructionFile>>,
+) -> Result<()> {
     let owner = thread
         .thread_extension_data()
         .get::<Instructions>()
         .context("application instruction updates require a managed Session")?;
-    let accepted = accepted(&item)?.context("missing application instructions publication")?;
-    thread.inject_response_items(vec![item.clone()]).await?;
+    let accepted =
+        accepted_envelope(&envelope)?.context("missing application instructions publication")?;
+    thread
+        .inject_response_item_envelopes(vec![envelope.clone()])
+        .await?;
     thread.flush_rollout().await?;
     let live = thread.conversation_history_snapshot().await;
-    receipt(live.items(), &item)?;
+    receipt(live.items(), &envelope.item)?;
     let stored = thread.load_history(true).await?;
-    receipt(
-        stored.items.iter().filter_map(|row| match row {
-            RolloutItem::ResponseItem(item) => Some(&item.item),
-            _ => None,
-        }),
-        &item,
-    )?;
-    *owner.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(accepted);
+    let mut stored_items = stored.items.iter().filter_map(|row| match row {
+        RolloutItem::ResponseItem(item) => Some(item),
+        _ => None,
+    });
+    receipt(stored_items.clone().map(|item| &item.item), &envelope.item)?;
+    let recorded = stored_items
+        .find(|item| item.item.id() == envelope.item.id())
+        .context("missing native application instruction receipt")?;
+    ensure!(
+        recorded
+            .metadata
+            .as_ref()
+            .and_then(|value| value.sdk_instruction_files.as_ref())
+            == envelope
+                .metadata
+                .as_ref()
+                .and_then(|value| value.sdk_instruction_files.as_ref()),
+        "native application instruction file receipt was not confirmed"
+    );
+    *owner.0.lock().unwrap_or_else(PoisonError::into_inner) =
+        Some(accepted.with_current_files(current_files));
     Ok(())
 }
 
 pub struct Contributor;
+
+pub(crate) fn retain_child_files(
+    store: &codex_extension_api::ExtensionData,
+    config: &codex_core_api::Config,
+    files: &[InstructionFile],
+) {
+    if !files.is_empty()
+        && let Some(text) = config.developer_instructions.as_ref()
+        && !text.is_empty()
+        && config
+            .multi_agent_v2
+            .subagent_developer_instructions
+            .as_ref()
+            == Some(text)
+    {
+        store.insert(SdkApplicationInstructions {
+            revision: None,
+            rendered: text.clone(),
+            developer_sha256: sha256(text),
+            files: files.iter().map(|file| serde_json::json!(file)).collect(),
+        });
+    }
+}
 
 impl ContextContributor for Contributor {
     fn contribute_world_state<'a>(
@@ -335,12 +457,38 @@ impl ContextContributor for Contributor {
         input: WorldStateContributionInput<'a>,
     ) -> ExtensionFuture<'a, Vec<WorldStateSectionContribution>> {
         Box::pin(async move {
-            let Some(owner) = input.thread_store.get::<Instructions>() else {
-                return Vec::new();
-            };
             // Initial publication must become durable before this cache can
             // contribute. Otherwise Core's injection preparation emits it twice.
-            let Some(accepted) = owner.current() else {
+            let accepted = input
+                .thread_store
+                .get::<Instructions>()
+                .and_then(|owner| owner.current());
+            input.step_store.insert(SdkTurnReceiptSeed {
+                codex_revision: include_str!("../CODEX_REVISION").trim(),
+                codex_source_tree: CODEX_SOURCE_TREE.as_str(),
+                sha256,
+                strict_executor_writes: false,
+                application: accepted
+                    .as_ref()
+                    .map(|accepted| SdkApplicationInstructions {
+                        revision: Some(accepted.id.to_string()),
+                        rendered: rendered(accepted),
+                        developer_sha256: sha256(&accepted.text),
+                        files: accepted
+                            .files
+                            .iter()
+                            .map(|file| serde_json::json!(file))
+                            .collect(),
+                    })
+                    .or_else(|| {
+                        input
+                            .thread_store
+                            .get::<SdkApplicationInstructions>()
+                            .as_deref()
+                            .cloned()
+                    }),
+            });
+            let Some(accepted) = accepted else {
                 return Vec::new();
             };
             let exact = rendered(&accepted);

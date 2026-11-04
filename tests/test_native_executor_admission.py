@@ -391,16 +391,20 @@ async def test_schema_invalid_values_fail_before_effect_and_do_not_replay(
                 assert (peer.root / "recovered.txt").read_text() == "recovered"
                 assert not (peer.root / "forbidden.txt").exists()
                 assert effects == ["recovered"]
-                accepted = [
+                recorded = [
                     item
                     for item in [item async for item in session.items()]
                     if item.get("call_id") == "valid-recovery"
                 ]
+                accepted = [item for item in recorded if item["type"] != "command_execution"]
                 assert len(accepted) == 2
                 call = accepted[0]
                 assert call["type"] == "function_call"
                 assert call["arguments"] == good["item"]["arguments"]
                 assert accepted[1]["type"] == "function_call_output"
+                [execution] = [item for item in recorded if item["type"] == "command_execution"]
+                assert execution["turn_id"] == call["turn_id"]
+                assert execution["exit_code"] == 0
                 assert len(model.requests) == 3
 
 
