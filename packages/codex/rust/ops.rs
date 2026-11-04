@@ -548,6 +548,11 @@ async fn prepare_write_selection(
         state.engine.native_storage_home(),
     )
     .await?;
+    if selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
+        && let Some(store) = &state.engine.local_checklist_store
+    {
+        writes.check_local_rollout_path(&store.live_rollout_path(state.id).await?)?;
+    }
     if selection != &replacement {
         ensure!(
             thread.active_turn_environment_selections().await.is_none()
