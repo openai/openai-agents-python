@@ -154,8 +154,8 @@
     },
     {
       "path": "0039-resume-trusted-darwin-wrapper-during-shutdown.patch",
-      "sha256": "8e51ed328d871fa82532f9a8a4d2bfd33134852e936c0c092387c871adc8a049"
+      "sha256": "2136f3fbf487e6446e60587cdca30fb1cf909adcb4db3e18d0c242f7b6cbae6e"
     }
   ],
-  "result_tree": "b4a5550a1ef384beb86c114acd231c9fb83c5927"
+  "result_tree": "cb24aab4e2ab11a1f6488452e0c06a6349993ba1"
 }
