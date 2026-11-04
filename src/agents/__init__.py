@@ -60,6 +60,11 @@ if TYPE_CHECKING:
         ApiRateLimits as ApiRateLimits,
         ApiRateLimitWindow as ApiRateLimitWindow,
     )
+    from .recovery import (
+        LocalRecoveryRequired as LocalRecoveryRequired,
+        ReconciledCall as ReconciledCall,
+        UncertainCall as UncertainCall,
+    )
     from .schema import (
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
@@ -148,6 +153,9 @@ _MODULES = {
     "OutputValidationError": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "LocalRecoveryRequired": ".recovery",
+    "ReconciledCall": ".recovery",
+    "UncertainCall": ".recovery",
     "ApiRateLimits": ".rate_limits",
     "ApiRateLimitWindow": ".rate_limits",
     "InputImage": ".input",
