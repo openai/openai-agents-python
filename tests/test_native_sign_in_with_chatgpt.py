@@ -431,8 +431,21 @@ async def test_explicit_api_key_provider_still_uses_the_original_responses_path(
     assert responses.request_headers[0]["authorization"] == "Bearer synthetic-existing-key"
 
 
-async def test_chatgpt_provider_quota_failure_does_not_fall_back_to_api_key(
-    responses, siwc_endpoint
+@pytest.mark.parametrize(
+    ("code", "expected_code"),
+    [
+        (
+            "subscription_sharing_usage_limit_exceeded",
+            "subscription_sharing_usage_limit_exceeded",
+        ),
+        ("subscription_sharing_usage_unavailable", "subscription_sharing_usage_unavailable"),
+        ("synthetic_provider_error", "synthetic_provider_error"),
+        ("not a valid code", None),
+        (None, None),
+    ],
+)
+async def test_chatgpt_provider_stream_failure_preserves_code_and_does_not_replay(
+    responses, siwc_endpoint, code, expected_code
 ):
     calls = 0
 
@@ -447,8 +460,8 @@ async def test_chatgpt_provider_quota_failure_does_not_fall_back_to_api_key(
             "response": {
                 "error": {
                     "type": "invalid_request_error",
-                    "code": "subscription_sharing_usage_limit_exceeded",
-                    "message": "Synthetic ChatGPT quota exhausted",
+                    **({"code": code} if code is not None else {}),
+                    "message": "Synthetic ChatGPT stream failure",
                 }
             },
         }
@@ -458,8 +471,10 @@ async def test_chatgpt_provider_quota_failure_does_not_fall_back_to_api_key(
         provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=access_token)),
     )
     async with timeout(30), agent.session() as session:
-        with pytest.raises(NativeError, match="Synthetic ChatGPT quota exhausted"):
+        with pytest.raises(NativeError, match="Synthetic ChatGPT stream failure") as failure:
             await (await session.submit("This request is denied.")).get_result()
+    assert failure.value.code == expected_code
+    assert failure.value.status_code is None
     assert calls == 1
     assert len(responses.requests) == 1
     _assert_sse_requests(responses, _token("denied"))

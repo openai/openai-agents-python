@@ -67,7 +67,11 @@
     {
       "path": "0017-native-policy-expiry-admission.patch",
       "sha256": "4406a07b8bcd9769595ba9295e10986311e8b3fd96bcfeda3d9dfe13a3095048"
+    },
+    {
+      "path": "0018-native-stream-error-code.patch",
+      "sha256": "3a65c5ff9032aadb5903d56be4909267bdf569337129e456a0b20fa8eab3b750"
     }
   ],
-  "result_tree": "66f4dc7319790001e362f9dc425916708efe4729"
+  "result_tree": "945f75862b2156e0dbce0685c59646c2e93b8246"
 }

@@ -171,6 +171,11 @@ def _siwc_binding(token: object) -> str | None:
 class SignInWithChatGPT:
     """Experimental ChatGPT plan authentication for native Sessions.
 
+    Plan usage is a limited preview for eligible open-source or personal
+    tools that run locally and selected private applications. Paid or
+    remotely hosted apps need approval. See the
+    [Sign in with ChatGPT guide](https://developers.openai.com/siwc/token-sharing-open-source).
+
     Supply an async callback that returns an access token from the app's
     Sign in with ChatGPT registration. Keep the callback bound to the user's
     selected account and workspace. The app owns sign-in and refresh.

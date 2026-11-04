@@ -1,0 +1,156 @@
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index abf0bf0d7041d3ce2c5b3e4a5f8f5535e064e31b..741f1366299c76497c71fc3e63010e90315c83da 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -52,7 +52,14 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+         ApiError::ContextWindowExceeded => CodexErr::ContextWindowExceeded,
+         ApiError::QuotaExceeded => CodexErr::QuotaExceeded,
+         ApiError::UsageNotIncluded => CodexErr::UsageNotIncluded,
+-        ApiError::Retryable { message, .. } => CodexErr::Stream(message),
++        ApiError::Retryable {
++            message,
++            provider_code,
++            ..
++        } => CodexErr::new(CodexErrorDetails::Stream {
++            message,
++            provider_code,
++        }),
+         ApiError::RateLimitExceeded { message, .. } => {
+             CodexErr::new(CodexErrorDetails::RateLimitExceeded(message))
+         }
+diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
+index 9c4cd1be080d828ed4bb751ea00ff929c2f46d1a..5fa588b9abee5cf2dae21249688f5df14985b27a 100644
+--- a/codex-rs/codex-api/src/api_bridge_tests.rs
++++ b/codex-rs/codex-api/src/api_bridge_tests.rs
+@@ -39,6 +39,7 @@ async fn map_api_error_preserves_retry_delay() {
+             ApiError::Retryable {
+                 message: "retry later".to_string(),
+                 retry_after: Some(retry_after),
++                provider_code: None,
+             },
+             CodexErrorInfo::Other,
+             "stream disconnected before completion: retry later",
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 9e79edda926c5c5a8d233d56162705451931d0c4..7872aa6d368479960c4ab309df96451351082f6b 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -645,6 +645,7 @@ fn map_wrapped_websocket_error_event(
+                 .clone()
+                 .unwrap_or_else(|| fallback_message.to_string()),
+             retry_after: None,
++            provider_code: None,
+         });
+     }
+ 
+@@ -1149,6 +1150,7 @@ mod tests {
+         let ApiError::Retryable {
+             message,
+             retry_after,
++            ..
+         } = api_error
+         else {
+             panic!("expected ApiError::Retryable");
+diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
+index 2834137129e73709ed4349bd2bcd2b3ec97d4e93..b8e9c937037a95466c9fbfd6fea103ae71880e44 100644
+--- a/codex-rs/codex-api/src/error.rs
++++ b/codex-rs/codex-api/src/error.rs
+@@ -26,6 +26,7 @@ pub enum ApiError {
+     Retryable {
+         message: String,
+         retry_after: Option<RetryAfter>,
++        provider_code: Option<String>,
+     },
+     #[error("rate limit exceeded: {message}")]
+     RateLimitExceeded {
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 0b14cdb03906e2d203c3f77097a4021212516d9e..63ffba10afd03fd77633d310f1698e23e646525c 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -1169,6 +1169,7 @@ mod tests {
+                         Err(ApiError::Retryable {
+                             message: actual,
+                             retry_after,
++                            ..
+                         }),
+                     ],
+                 ) => {
+diff --git a/codex-rs/codex-api/src/sse/responses_error.rs b/codex-rs/codex-api/src/sse/responses_error.rs
+index 890f45ab6bc4c54e958fae3ffbb3403ecf9bd149..542dd99cd7b7d5828dbbb568d9949bebc503a1f9 100644
+--- a/codex-rs/codex-api/src/sse/responses_error.rs
++++ b/codex-rs/codex-api/src/sse/responses_error.rs
+@@ -39,6 +39,7 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+             Some(_) => ApiError::Retryable {
+                 message,
+                 retry_after: retry_after_header,
++                provider_code: None,
+             },
+             None => ApiError::Stream(message),
+         };
+@@ -98,6 +99,7 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+         _ => ApiError::Retryable {
+             message: error.message.unwrap_or_default(),
+             retry_after: retry_after_header,
++            provider_code: error.code,
+         },
+     }
+ }
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index 4a89f709db2368c74efc007dc0c6d922accd72c3..73a69bb7e073342f4cf1f96e948cf6770116f2a5 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -92,8 +92,11 @@ pub enum CodexErrorDetails {
+     /// handshake has succeeded but **before** it finished emitting `response.completed`.
+     ///
+     /// The Session loop treats this as a transient error and will automatically retry the turn.
+-    #[error("stream disconnected before completion: {0}")]
+-    Stream(String),
++    #[error("stream disconnected before completion: {message}")]
++    Stream {
++        message: String,
++        provider_code: Option<String>,
++    },
+     /// A response stopped by the content filter. Sampling retries need developer guidance.
+     #[error(
+         "stream disconnected before completion: Incomplete response returned, reason: content_filter"
+@@ -212,7 +215,7 @@ impl From<&CodexErr> for CodexErrKind {
+ impl fmt::Debug for CodexErr {
+     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+         match &self.details {
+-            CodexErrorDetails::Stream(message) => formatter
++            CodexErrorDetails::Stream { message, .. } => formatter
+                 .debug_tuple("Stream")
+                 .field(message)
+                 .field(&self.server_retry_delay())
+@@ -342,7 +345,6 @@ impl CodexErr {
+     );
+ 
+     codex_err_tuple_constructors!(
+-        Stream(message: String),
+         ThreadNotFound(thread_id: ThreadId),
+         UnexpectedStatus(error: UnexpectedResponseError),
+         InvalidRequest(message: String),
+@@ -364,6 +366,15 @@ impl CodexErr {
+         EnvVar(error: EnvVarError),
+     );
+ 
++    #[allow(non_snake_case)]
++    pub fn Stream(message: String) -> Self {
++        CodexErrorDetails::Stream {
++            message,
++            provider_code: None,
++        }
++        .into()
++    }
++
+     // TODO(anp): Remove this compatibility constructor once callers construct
+     // `CodexErrorDetails` directly.
+     #[doc(hidden)]
+@@ -416,7 +427,7 @@ impl CodexErr {
+             CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
+                 self.server_retry_delay()
+             }
+-            CodexErrorDetails::Stream(..)
++            CodexErrorDetails::Stream { .. }
+             | CodexErrorDetails::ContentFilter
+             | CodexErrorDetails::RateLimitExceeded(_)
+             | CodexErrorDetails::Timeout
