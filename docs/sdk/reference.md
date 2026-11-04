@@ -305,11 +305,19 @@ Supplies application context, the owning Python Session and Agent, and the actua
 ### NativeProvider
 
 ```text
-NativeProvider(*, base_url=None, api_key=None, supports_websockets=None)
+NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=None)
 await provider.aclose() -> None
 ```
 
 Connection defaults, WebSocket selection and provider lifetime follow [provider configuration](configuration.md#provider-connection). Custom endpoints require Responses support. `aclose()` runs after every Session using the provider closes.
+
+### SignInWithChatGPT
+
+```text
+SignInWithChatGPT(*, get_access_token: Callable[[], Awaitable[str]])
+```
+
+Import `SignInWithChatGPT` from `agents` and pass it as `NativeProvider(auth=...)`. The async callback returns the selected registration's OAuth access token when your app opens a Session. Your application owns sign-in and refresh. See [experimental Sign in with ChatGPT configuration](configuration.md#sign-in-with-chatgpt-experimental) for eligibility, token lifetime, and unsupported features. The feature may change or be removed. The public beta and general availability of the Agents SDK may ship without it.
 
 ### ModelSettings
 

@@ -24,13 +24,61 @@ The Session records Python and manual tool names and pairs of MCP server names a
 
 Pass `NativeProvider(base_url=..., api_key=...)` for a native Responses connection. The SDK uses Codex's built-in model client, not an `openai.OpenAI` or `openai.AsyncOpenAI` instance. Custom endpoints must support Responses. Chat Completions compatibility alone is insufficient.
 
-Connection defaults are:
+API-key connections use these defaults.
 
 - `base_url=None` sends model requests to `https://api.openai.com/v1`. The SDK does not read `OPENAI_BASE_URL`. To use it, import `os` and pass `base_url=os.environ["OPENAI_BASE_URL"]`.
 - An omitted key reads `OPENAI_API_KEY` when the Session opens. Keep credentials in current application configuration, outside saved conversation state.
 - `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
 
 The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
+
+### Sign in with ChatGPT (experimental)
+
+Sign in with ChatGPT lets an eligible application use a user's ChatGPT plan for model requests. API-key authentication remains the default.
+
+!!! warning "Experimental"
+    This feature may change or be removed. The public beta and general availability of the Agents SDK may ship without this feature.
+
+Check the official [eligibility and approval guidance](https://developers.openai.com/siwc/quickstart) before choosing this mode. The [ChatGPT plan usage guide](https://developers.openai.com/siwc/token-sharing-open-source) covers open-source and locally hosted apps. Use its interest form for paid or remotely hosted apps. A successful identity sign-in alone does not authorize ChatGPT plan usage.
+
+Your application owns OAuth sign-in, account selection, protected credential storage, and token refresh. Follow the [registration and sign-in guide](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) to validate the user's identity and granted permissions. Keep each registration's issued client ID, selected account and workspace, and credentials together. Keep the host identifier stable for that host.
+
+Pass an async callback with no arguments to `SignInWithChatGPT`. The callback must return the selected registration's OAuth access token as a string. The token must authorize the public Responses API and include `chatgpt.tokens.use.direct`. The callback must keep using the same selected account and workspace for this Agent's conversation.
+
+This fragment uses your application's `selected_account` credential manager. Its `get_valid_access_token()` method refreshes credentials when needed and returns the current access token. Set `selected_model` to a model available to the selected account. The SDK requires a model whose native catalog marks it as supporting Responses Lite, the protocol it uses to send tool declarations.
+
+```python
+from agents import Agent, NativeProvider, SignInWithChatGPT
+
+
+async def get_access_token() -> str:
+    return await selected_account.get_valid_access_token()
+
+
+async with NativeProvider(
+    auth=SignInWithChatGPT(get_access_token=get_access_token),
+) as provider:
+    agent = Agent(instructions="Answer clearly.", model=selected_model, provider=provider)
+    async with agent.session() as session:
+        turn = await session.submit("Hello.")
+        result = await turn.get_result()
+        print(result.final_output)
+        state = await session.save_state()
+
+    # A new Session obtains a current token for the same registration.
+    async with agent.session(state=state) as session:
+        turn = await session.submit("Continue our conversation.")
+        result = await turn.get_result()
+        print(result.final_output)
+```
+
+When your application opens a Session, the SDK calls the callback once and keeps that token for the Session, including retries and repairs. To use a renewed token, save an idle Session, close it, and open a new Session with the saved state. Keep the same ChatGPT registration. See [save and restore](sessions.md#compact-save-and-restore). API-key Sessions and Sign in with ChatGPT Sessions cannot restore each other's saved state.
+
+Follow the [account and refresh guidance](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). Serialize refreshes for the same credential record. Store the latest rotating refresh token with the updated access token. Keep tokens out of logs and conversation state. Link your application's usage page to [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage), where users can review usage and manage access.
+
+This mode uses HTTP server-sent events at `https://api.openai.com/v1/responses`. The SDK fixes the endpoint and disables WebSockets. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If sign-in, token retrieval, or inference fails, the SDK reports the error and keeps the selected billing mode. A stream that fails after it opens ends the operation without an automatic replay.
+
+Sign in with ChatGPT supports local function tools. It excludes programmatic tool calling, deferred tool loading, hosted Apps MCP, and `WebSearch`. See the official [inference guide](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) for the public Responses request contract.
 
 ### Provider lifetime
 
