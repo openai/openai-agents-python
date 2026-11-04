@@ -1,0 +1,98 @@
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 6fbac2a3d6801a855b7960d7deb8cc4cd9b9f1ce..c1f3e98d8d071a1048a21507527bfdffab9826ad 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -2205,7 +2205,7 @@ impl UnifiedExecProcessManager {
+ 
+         for entry in entries {
+             unregister_network_approval_for_entry(&entry).await;
+-            if entry.process.uses_darwin_supervisor() {
++            if entry.process.uses_managed_local_sandbox() {
+                 starting.push((None, entry.process));
+             } else {
+                 entry.process.terminate();
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index ba2667ea4c2b5eecfa5d147a1a1b1519d5ccea65..14eec7a955ece7e72759d68dc27c4bd1e66a2126 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -835,3 +835,80 @@ async fn interrupt_joins_owned_start_and_fences_late_acknowledgement() {
+     assert!(!store.starting_processes.contains_key(&owned_id));
+     assert!(!store.reserved_process_ids.contains_key(&owned_id));
+ }
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn shutdown_joins_published_managed_linux_process() {
++    use std::io::Read;
++    use std::os::unix::net::UnixStream;
++
++    let (_, turn) = crate::session::tests::make_session_and_context().await;
++    let manager = UnifiedExecProcessManager::default();
++
++    for confirmed in [true, false] {
++        let (host, mut sandbox) = UnixStream::pair().expect("create sandbox control socket");
++        sandbox.set_nonblocking(true).expect("set nonblocking");
++        // Keep the wrapper alive until the test lets it exit or forces a stop.
++        let spawned = codex_utils_pty::spawn_pipe_process(
++            "/bin/sh",
++            &["-c".to_string(), "read -r release".to_string()],
++            std::path::Path::new("/"),
++            &HashMap::new(),
++            &None,
++            &[],
++        )
++        .await
++        .expect("spawn wrapper");
++        let process = Arc::new(UnifiedExecProcess::from_spawned_with_output_policy(
++            spawned,
++            codex_sandboxing::SandboxType::LinuxSeccomp,
++            Box::new(crate::unified_exec::NoopSpawnLifecycle),
++            /*controlled*/ false,
++            Some(host),
++        ));
++        manager.process_store.lock().await.processes.insert(
++            1000,
++            ProcessEntry {
++                output_policy_store: None,
++                process: Arc::clone(&process),
++                plugin_metrics_sidecar: None,
++                call_id: "published".to_string(),
++                process_id: 1000,
++                cwd: PathUri::parse("file:///tmp").expect("test cwd should be valid"),
++                initial_exec_command_active: Arc::new(AtomicBool::new(false)),
++                initial_exec_command_returned: Arc::new(AtomicBool::new(true)),
++                hook_command: "read -r release".to_string(),
++                tty: false,
++                environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
++                permissions: super::super::TerminalPermissions::for_launch(
++                    turn.initial_environments
++                        .primary()
++                        .expect("turn environment"),
++                    &turn,
++                    super::super::TerminalSandboxSource::Native,
++                    crate::sandboxing::SandboxPermissions::UseDefault,
++                    /*additional_permissions*/ None,
++                    /*internal_permissions*/ None,
++                ),
++                network_approval: None,
++                session: std::sync::Weak::new(),
++                last_used: Instant::now(),
++            },
++        );
++
++        let shutdown = manager.terminate_all_processes();
++        tokio::pin!(shutdown);
++        assert!(futures::poll!(shutdown.as_mut()).is_pending());
++        assert_eq!(
++            sandbox.read(&mut [0]).expect("sandbox shutdown requested"),
++            0
++        );
++
++        if confirmed {
++            process.write(b"release\n").await.expect("release wrapper");
++        } else {
++            process.terminate();
++        }
++        assert_eq!(shutdown.await, confirmed);
++    }
++}
