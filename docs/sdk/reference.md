@@ -22,7 +22,8 @@ agent.run_sync(input, *, context=None, on_interaction=None,
                provider=None, model=None, model_settings=None, environment=None,
                tools=None, before_step=None, state=None, return_state=False) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
-              model_settings=None, environment=None, tools=None)
+              model_settings=None, environment=None, tools=None,
+              instruction_files=(), reconciled_calls=())
               -> async context manager[Session]
 ```
 
@@ -47,7 +48,8 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject")` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. `Turn.steer()` targets one specific Turn. |
+| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](tools.md#replace-write-roots-between-turns) to replace grants for new work. |
+| `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0)` | Observe the Session until it ends, using the retained global observation sequence. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
 | `await session.pending_interactions()` | Snapshot tuple of pending live requests. Inspection leaves them available for reply. |
@@ -65,8 +67,8 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 | `await session.fork()` | Return independent `SessionState`, leaving the source usable. Workspace files are not copied. See [save and restore](sessions.md#compact-save-and-restore) for storage, descendant and programmatic-state limits. |
 | `await session.suspend()` | Capture a supported manual boundary and retire the Session. See [manual suspension](sessions.md#saving-a-settled-manual-request). |
 | `await session.checkpoint_status(*, kind)` | Return `CheckpointStatus` with `status` (`"ready"`, `"not_ready"`, or `"unknown"`) and `reasons` for `kind="idle"` or `"manual_wait"`. It reserves nothing. Capture checks readiness again. |
-| `session.items(*, subagent_id=None)` | Async iterator over a snapshot of recorded items. |
-| `session.turns(*, subagent_id=None)` | Async iterator over a snapshot of recorded turns. |
+| `session.items(*, subagent_id=None)` | Async iterator over a snapshot of recorded items, including provider call and output rows and [typed execution completions](sessions.md#inspect-completed-execution). |
+| `session.turns(*, subagent_id=None)` | Async iterator over recorded turns and any [settings receipts](sessions.md#check-applied-instructions-and-settings). |
 | `session.subagents()` | Async iterator over captured Subagent records. |
 
 History and descendant iterators have no pagination arguments.
@@ -97,7 +99,9 @@ A root Turn's `get_result()` follows accepted continuations. A captured child Tu
 | `await turn.get_result()` | Stable result, unchanged by later submissions or Session closure. Cancelling the wait leaves work running. |
 | `turn.events(*, after=0)` | Observations for this Turn. |
 | `await turn.wait_for_request_or_result()` | `Completed` or `PendingRequests`. Its `requests` tuple contains this Turn's live requests without claiming ownership. See the [reply loop](sessions.md#observation-details). |
+| `await turn.wait_for_attention()` | `Completed`, `PendingRequests`, or `TurnNeedsAttention`. See [supervisory waits](sessions.md#wait-for-a-decision-or-a-result). |
 | `await turn.steer(prompt)` | Steer the captured active root or child turn. It cannot target another turn or revive a closed child. |
+| `await turn.steer_exact(prompt, expected_turn_id=...)` | Steer the exact native root turn and return a `SteeringReceipt` upon acceptance. See [strict steering](sessions.md#steer-one-exact-root-turn). |
 | `await turn.cancel(*, mode="force")` | Stop the root or withdraw it from the queue. Children use `Subagent.try_cancel`. See [interruption](sessions.md#interrupt-work) for its boolean result and cleanup limits. |
 
 Turn calls use the Session's opening event loop. After `run_sync()`, that loop has closed, so use `Completed` directly. IDs alone grant no control. See [Turn lifetime](sessions.md#conversations-events-and-state).
@@ -160,7 +164,9 @@ Import `LocalStorage` from `agents` and construct it with a `pathlib.Path`, for 
 
 After closing the Session, reopen the conversation with `agent.session(storage=profile, resume=saved_id)` using the original profile directory and current tools, context and provider. Only one native writer can own the conversation at a time.
 
-`resume` requires `storage`. Neither can be used with portable `state`. A Session using local storage cannot export portable state through `save_state()`, `suspend()` or `fork()`. Reopening fails if saved history contains a function call with an unknown outcome or an active child whose runtime cannot be restored. It does not retry those tools automatically. See [local recovery limits](sessions.md#reopen-a-conversation-from-local-storage).
+`resume` requires `storage`. Neither can be used with portable `state`. A Session using local storage cannot export portable state through `save_state()`, `suspend()` or `fork()`. An unknown call outcome raises `LocalRecoveryRequired`. Supply `reconciled_calls` to reopen the original conversation after verifying the effects of its unresolved root calls. An active child whose runtime cannot be restored still blocks reopening. See [local recovery](sessions.md#recover-after-interruption).
+
+Import `LocalRecoveryRequired` from `agents`. The exception carries `calls`, `turns`, and `items`. Each `UncertainCall` has a `reconcile(outcome=..., result=...)` method that carries over the original thread, turn, and call IDs. Set `outcome` to `"applied"` or `"not_applied"` after you verify the effect. Supply text for `result`. If you saved a confirmation in a journal, reconstruct it with `ReconciledCall` using the original IDs, outcome, and result.
 
 ## Tools and connection data
 
@@ -261,14 +267,17 @@ Supplies application context, native submission identity, `call_id`, `server_nam
 
 ### Environment
 
-Connects the Session to an application-owned executor. Pass it to `agent.session()` or a one-shot run, outside the Agent's tools.
+Configures a local SDK executor or an application-owned WSS executor. Pass it to `agent.session()` or a one-shot run, outside the Agent's tools.
 
 These calls accept an `EnvironmentSource`: either a borrowed `Environment` descriptor or an async context manager that yields one. See [managed executor lifetimes](tools.md#manage-the-executor-lifetime) for acquisition, cleanup and restore rules.
 
 ```text
 Environment(*, url: str, cwd: str, tools=(), headers={}, connect_timeout=None,
-            approval=None, transform_arguments=None, transform_result=None,
-            policy_timeout=30, capability_directories=None, network=None)
+            capability_directories=None, approval=None, transform_arguments=None,
+            transform_result=None, policy_timeout=30, network=None, writable_roots=None)
+Environment.local(*, cwd, tools=(), writable_roots=(), network=None,
+                  capability_directories=None, approval=None, transform_arguments=None,
+                  transform_result=None, policy_timeout=30) -> Environment
 ```
 
 Environment options have these limits:
@@ -276,10 +285,12 @@ Environment options have these limits:
 - `tools` selects any combination of `exec_command`, `write_stdin` and `apply_patch`, defaulting to none. `write_stdin` requires `exec_command`.
 - `approval` returns bool or `StopTurn`, without a transform deadline. It sees original arguments. Denial skips `transform_arguments`. `policy_timeout` bounds only transforms.
 - Result transforms support default-mode direct calls and generated calls with `Agent(programmatic_tool_calling=True)`. See [executor policies](tools.md#executor-policies).
-- `capability_directories` contains absolute paths or `file:` URIs on the remote executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots.
+- `capability_directories` contains absolute paths or `file:` URIs on the selected executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots.
 - `network` accepts immutable `NetworkPolicy` or a same-field dictionary. Explicit policies require `"exec_command"` and a compatible Linux or macOS managed-proxy executor. Windows rejects them in this revision. The Python controller may run on another OS. See [network and local socket access](tools.md#network-and-local-socket-access).
 
-For a Windows x64 job-local named pipe, `network=None` and `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](tools.md#windows-named-pipes-in-an-offline-job) and [remote execution](tools.md#remote-execution).
+Use [`Environment.local()`](tools.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in `cwd`. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](tools.md#replace-write-roots-between-turns) for policy changes and restore.
+
+For a Windows x64 job-local named pipe, omit `network` and `writable_roots`. `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](tools.md#windows-named-pipes-in-an-offline-job) and [remote execution](tools.md#remote-execution).
 
 ### NetworkPolicy
 
