@@ -12,9 +12,9 @@ use codex_core::{
     config::validate_environment_network_policy, windows_sandbox::WindowsSandboxLevelExt,
 };
 use codex_core_api::{
-    CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
+    AbsolutePathBuf, CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
     EnvironmentNetworkPolicy, NetworkDomainPermission, NetworkDomainPermissionEntry,
-    NetworkDomainPermissions, NetworkProxySpec,
+    NetworkDomainPermissions, NetworkProxySpec, SqliteConfig,
 };
 use codex_exec_server::{
     Environment, EnvironmentInfo, ExecParams, ExecProcessEvent, ExecServerError,
@@ -707,18 +707,7 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
-        if let Some(home) = storage_home {
-            check_local_write_root_overlap(
-                home,
-                &roots,
-                "local executor writable roots must stay outside native SDK storage",
-            )?;
-        }
-        check_local_write_root_overlap(
-            codex_home,
-            &roots,
-            "local executor writable roots must stay outside the native SDK runtime home",
-        )?;
+        check_local_private_write_roots(&roots, codex_home, storage_home)?;
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -750,6 +739,49 @@ async fn strict_write_profile(
         roots[0].clone(),
         writes,
     ))
+}
+
+fn check_local_private_write_roots(
+    roots: &LocalWriteRoots<'_>,
+    codex_home: &Path,
+    storage_home: Option<&Path>,
+) -> Result<()> {
+    let storage_home = storage_home
+        .map(|home| {
+            check_local_write_root_overlap(
+                home,
+                roots,
+                "local executor writable roots must stay outside native SDK storage",
+            )
+        })
+        .transpose()?;
+    let runtime_home = check_local_write_root_overlap(
+        codex_home,
+        roots,
+        "local executor writable roots must stay outside the native SDK runtime home",
+    )?;
+    let mut protected_files = storage_home
+        .as_deref()
+        .map(|home| relocated_database_files(home, roots))
+        .transpose()?
+        .unwrap_or_default();
+    // A restored goal store may share the runtime home.
+    let private_dirs = match storage_home {
+        Some(home) if runtime_home.starts_with(&home) => vec![home],
+        Some(home) if !home.starts_with(&runtime_home) => vec![runtime_home, home],
+        _ => vec![runtime_home],
+    };
+    protected_files.extend(
+        linked_private_files(private_dirs)
+            .context("could not check native SDK storage and runtime home for hard links")?,
+    );
+    ensure!(
+        !roots.contains_hard_link_to_any(&protected_files).context(
+            "could not check writable roots for native SDK hard links; use readable writable roots"
+        )?,
+        "local executor writable roots contain a hard link to a private native SDK file"
+    );
+    Ok(())
 }
 
 fn check_local_helper_write_roots(
@@ -840,14 +872,84 @@ fn check_local_write_root_overlap(
     home: &Path,
     roots: &LocalWriteRoots<'_>,
     overlap: &str,
-) -> Result<()> {
+) -> Result<PathBuf> {
     let mut resolved = PathBuf::new();
     resolve_local_path(home, &mut resolved, &mut 40, true, &|entry| {
         ensure!(!roots.contains_entry(entry)?, "{overlap}");
         Ok(())
     })?;
     ensure!(!roots.has_root_at_or_below(&resolved)?, "{overlap}");
-    Ok(())
+    Ok(resolved)
+}
+
+fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
+    let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::from_absolute_path(home)?);
+    let overlap = "local executor writable roots must stay outside native SDK storage";
+    let mut files = Vec::new();
+    for database in sqlite.runtime_db_paths() {
+        match database.path.symlink_metadata() {
+            Ok(metadata) if metadata.is_symlink() => {}
+            Ok(_) => continue,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(_) => anyhow::bail!("could not check native SDK storage databases"),
+        }
+        let target = check_local_write_root_overlap(&database.path, roots, overlap)?;
+        // SQLite opens journals beside the resolved database, including when
+        // the profile's database entry points outside the profile directory.
+        let companions = ["-wal", "-shm", "-journal"].map(|suffix| {
+            let mut name = target.as_os_str().to_os_string();
+            name.push(suffix);
+            PathBuf::from(name)
+        });
+        for file in std::iter::once(target).chain(companions) {
+            match file.symlink_metadata() {
+                Ok(metadata) if metadata.is_file() => {
+                    ensure!(!roots.contains_entry(&file)?, "{overlap}");
+                    files.push(file);
+                }
+                Ok(_) => {}
+                Err(error) if error.kind() == ErrorKind::NotFound => {}
+                Err(_) => anyhow::bail!("could not check native SDK storage databases"),
+            }
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(unix)]
+fn linked_private_files(mut directories: Vec<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+    use std::os::unix::fs::MetadataExt;
+
+    let mut files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            // A fresh profile may not exist, and live storage may remove files.
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        for entry in entries {
+            let entry = entry?;
+            // DirEntry::metadata does not follow symlinks. Only visit contents
+            // of the verified private directories.
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if metadata.is_dir() {
+                directories.push(entry.path());
+            } else if metadata.is_file() && metadata.nlink() > 1 {
+                files.push(entry.path());
+            }
+        }
+    }
+    Ok(files)
+}
+
+#[cfg(not(unix))]
+fn linked_private_files(_directories: Vec<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+    Ok(Vec::new())
 }
 
 fn resolve_local_path(

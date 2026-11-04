@@ -32,6 +32,7 @@ from agents import (
     StdioMCP,
     TurnNeedsAttention,
 )
+from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -40,6 +41,7 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
+from tests.native_planning_fixtures import legacy_goal
 
 
 def test_local_declaration_has_no_transport_and_normalizes_additional_roots() -> None:
@@ -167,6 +169,112 @@ async def test_local_write_roots_cannot_overlap_native_storage(
     else:
         assert not profile.exists()
     assert responses.requests == []
+
+
+def _relocate_database(database: Path, directory: Path) -> Path:
+    directory.mkdir()
+    target = database.rename(directory / database.name)
+    database.symlink_to(target)
+    return target
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@pytest.mark.parametrize("relocate", [False, True], ids=["profile", "relocated"])
+async def test_local_open_rejects_a_storage_database_hard_link(
+    responses: ResponsesFixture, tmp_path: Path, relocate: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    storage = LocalStorage(tmp_path / "profile")
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Answer.", provider=provider)
+
+    async with provider:
+        async with agent.session(storage=storage):
+            pass
+        (database,) = storage.path.glob("state_*.sqlite")
+        if relocate:
+            database = _relocate_database(database, tmp_path / "relocated")
+            selected = Environment.local(cwd=workspace, writable_roots=[database.parent])
+            with pytest.raises(
+                RuntimeError, match="writable roots must stay outside native SDK storage"
+            ):
+                async with agent.session(storage=storage, environment=selected):
+                    pytest.fail("A write grant directly included the relocated database")
+        (workspace / "ordinary-name").hardlink_to(database)
+        with pytest.raises(RuntimeError, match="writable roots contain a hard link"):
+            async with agent.session(storage=storage, environment=Environment.local(cwd=workspace)):
+                pytest.fail("A write grant could modify the private database through its alias")
+
+    assert responses.requests == []
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+@pytest.mark.parametrize("private_file", ["relocated-wal", "runtime-goal"])
+async def test_local_replacement_rejects_a_private_file_hard_link(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    private_file: str,
+) -> None:
+    workspace, grant, disjoint, runtime_parent = (
+        tmp_path / name for name in ("workspace", "grant", "disjoint", "runtime")
+    )
+    for directory in (workspace, grant, disjoint, runtime_parent):
+        directory.mkdir()
+    monkeypatch.setenv("TMPDIR", str(runtime_parent))
+    storage = LocalStorage(tmp_path / "profile") if private_file == "relocated-wal" else None
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Answer.", provider=provider)
+    selected = Environment.local(
+        cwd=workspace, tools=["exec_command", "write_stdin", "apply_patch"]
+    )
+
+    async with timeout(30), provider:
+        state = None
+        if storage is not None:
+            async with agent.session(storage=storage):
+                pass
+            (database,) = storage.path.glob("state_*.sqlite")
+            database = _relocate_database(database, tmp_path / "relocated")
+            source = database.with_name(database.name + "-wal")
+        else:
+            async with agent.session(environment=selected) as original:
+                checkpoint = json.loads((await original.save_state()).to_json())
+                checkpoint["root_goal"] = legacy_goal(original.id)
+            state = SessionState.from_json(json.dumps(checkpoint))
+            source = None
+        async with agent.session(storage=storage, state=state, environment=selected) as session:
+            if source is None:
+                (source,) = runtime_parent.glob("native-agent-*/goals_*.sqlite")
+                assert (await session.save_state()).root_goal is not None
+            (disjoint / "backup").hardlink_to(source)
+            alias = grant / "nested" / "ordinary-name"
+            alias.parent.mkdir()
+            alias.hardlink_to(source)
+
+            responses.respond(assistant_output("allowed"))
+            refused = await session.submit(
+                "Do not grant a private alias.", writable_roots=[grant.resolve()]
+            )
+            with pytest.raises(NativeError, match="writable roots contain a hard link") as error:
+                await refused.get_result()
+            assert error.value.effects == "not_started"
+            assert responses.requests == []
+
+            alias.unlink()
+            ordinary_file = disjoint / "ordinary-file"
+            ordinary_file.write_text("ordinary workspace content")
+            alias.hardlink_to(ordinary_file)
+            allowed = await session.submit(
+                "Grant an ordinary alias.", writable_roots=[grant.resolve()]
+            )
+            assert (await allowed.get_result()).final_output == "allowed"
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
