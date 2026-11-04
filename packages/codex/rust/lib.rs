@@ -13,6 +13,7 @@ mod extensions;
 mod goals;
 mod live;
 mod local_reconciliation;
+mod local_sandbox;
 mod manual_checkpoint;
 mod mcp_result_control;
 mod mcp_roster;

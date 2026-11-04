@@ -9,8 +9,9 @@ from decimal import Decimal
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
+from pydantic import BaseModel
 
-from agents import Agent, NativeError, NativeProvider, TurnNeedsAttention
+from agents import Agent, NativeError, NativeProvider, PromptedOutput, TurnNeedsAttention
 from agents.observation import ApiRateLimitsUpdated, EventStream
 from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
 from tests._asyncio import timeout
@@ -143,6 +144,93 @@ async def test_websocket_response_headers_supply_sparse_rate_limits() -> None:
                 await stream.aclose()
         assert peer.upgrades
         assert not peer.http_requests
+
+
+@pytest.mark.parametrize("blocked", [False, True], ids=["completed", "rate-limited"])
+async def test_output_correction_updates_the_parent_rate_limits(blocked: bool) -> None:
+    class Result(BaseModel):
+        label: str
+
+    calls = 0
+    finish_correction = asyncio.Event()
+
+    async def handle(request: web.Request) -> web.StreamResponse:
+        nonlocal calls
+        await request.read()
+        calls += 1
+        correction = calls > 1
+        if correction and blocked:
+            return web.json_response(
+                {
+                    "error": {
+                        "type": "rate_limit_error",
+                        "code": "rate_limit_exceeded",
+                        "message": "Synthetic correction limit",
+                    }
+                },
+                status=429,
+                headers={"Retry-After": "0"},
+            )
+        response = web.StreamResponse(
+            headers={
+                "Content-Type": "text/event-stream",
+                "X-RateLimit-Remaining-Requests": "2" if correction else "9",
+            }
+        )
+        await response.prepare(request)
+        await response.write(b'data: {"type":"response.created","response":{"id":"repair"}}\n\n')
+        if correction:
+            await finish_correction.wait()
+        for payload in (
+            assistant_output('{"label":"fixed"}' if correction else "bad"),
+            {"type": "response.completed", "response": {"id": "repair"}},
+        ):
+            await response.write(f"data: {json.dumps(payload)}\n\n".encode())
+        await response.write_eof()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", handle)
+    async with timeout(30), TestServer(app) as server:
+        provider = NativeProvider(
+            base_url=str(server.make_url("/v1")),
+            api_key="synthetic-correction-key",
+            supports_websockets=False,
+        )
+        agent = Agent(
+            instructions="Return a label.",
+            provider=provider,
+            output_type=PromptedOutput(Result, max_retries=1),
+        )
+        async with provider, agent.session() as session:
+            stream = session.events()
+            turn = await session.submit("Return a label.")
+            try:
+                initial = await _next_limits(stream)
+                assert initial.snapshot == ApiRateLimits(requests=ApiRateLimitWindow(remaining=9))
+                if blocked:
+                    attention = await turn.wait_for_attention()
+                    assert isinstance(attention, TurnNeedsAttention)
+                    assert attention.reason == "rate_limited"
+                    assert (
+                        attention.rate_limits
+                        == session.rate_limits()
+                        == ApiRateLimits(retry_after_seconds=0)
+                    )
+                else:
+                    observed = await _next_limits(stream)
+                    assert observed.parent_submission_id == turn.submission_id
+                    assert (
+                        observed.snapshot
+                        == session.rate_limits()
+                        == ApiRateLimits(requests=ApiRateLimitWindow(remaining=2))
+                    )
+            finally:
+                finish_correction.set()
+                await stream.aclose()
+            if not blocked:
+                assert (await turn.get_result()).final_output == Result(label="fixed")
+                assert session.rate_limits() == observed.snapshot
 
 
 @pytest.mark.parametrize(

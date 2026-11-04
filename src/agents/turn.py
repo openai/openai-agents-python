@@ -104,7 +104,9 @@ class Turn(Generic[OutputT]):
         except TurnStoppedError as error:
             return TurnNeedsAttention("interrupted", error, self._session.rate_limits())
         except NativeError as error:
-            if error.category == "connection_failed":
+            if error._interrupted:
+                reason = "interrupted"
+            elif error.category == "connection_failed":
                 reason = "connection_lost"
             elif error.category == "rate_limit_exceeded":
                 reason = "rate_limited"

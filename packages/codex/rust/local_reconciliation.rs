@@ -9,8 +9,9 @@ use codex_protocol::models::{
     InternalChatMessageMetadataPassthrough, ResponseItem,
 };
 use codex_protocol::protocol::sdk_executor_policy_receipt;
+use codex_utils_path_uri::PathUri;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::engine::ThreadState;
 
@@ -113,6 +114,23 @@ pub(crate) async fn executor_policies(state: &ThreadState) -> Result<Vec<Value>>
         .collect()
 }
 
+fn implicit_remote_authority(receipt: &Value) -> Option<Map<String, Value>> {
+    let mut authority = receipt.as_object()?.clone();
+    if authority.get("transport")?.as_str()? != "remote" {
+        return None;
+    }
+    let cwd: PathUri = serde_json::from_value(authority.remove("cwd")?).ok()?;
+    let roots = std::slice::from_ref(&cwd);
+    let profile = crate::environment::workspace_profile(roots);
+    // Ignore the paths only when the entire recorded write policy came from cwd.
+    if authority.remove("writable_roots")? != serde_json::to_value(roots).ok()?
+        || authority.remove("permission_profile")? != serde_json::to_value(profile).ok()?
+    {
+        return None;
+    }
+    Some(authority)
+}
+
 pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> {
     let receipts: Vec<ReconciledCall> = serde_json::from_str(encoded)
         .map_err(|_| anyhow::anyhow!("Invalid local reconciliation receipt"))?;
@@ -145,14 +163,23 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
         ))
     }) && !previous.is_empty()
     {
+        let current_strict_writes = state
+            .thread
+            .thread_extension_data()
+            .get::<crate::environment::StrictExecutorWrites>()
+            .is_some();
+        let current = executor_policies(state).await?;
+        // Like portable restore, implicit remote workspaces can move.
+        let matches = previous == &current
+            || (!strict_writes
+                && !current_strict_writes
+                && previous.len() == current.len()
+                && previous.iter().zip(&current).all(|(old, new)| {
+                    implicit_remote_authority(old)
+                        .is_some_and(|old| Some(old) == implicit_remote_authority(new))
+                }));
         ensure!(
-            (!strict_writes
-                || state
-                    .thread
-                    .thread_extension_data()
-                    .get::<crate::environment::StrictExecutorWrites>()
-                    .is_some())
-                && previous == &executor_policies(state).await?,
+            (!strict_writes || current_strict_writes) && matches,
             "Local resume requires the recorded executor write and network policy"
         );
     }

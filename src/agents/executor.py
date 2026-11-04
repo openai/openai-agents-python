@@ -281,8 +281,11 @@ class Environment(Generic[ContextT_contra]):
         Use an existing absolute working directory on Linux or macOS.
         Additional roots must be existing directories on this executor.
         The URL identifies the working directory as a file URI.
-        Model commands receive the local shell environment with the SDK's
-        model API key variables removed.
+        Model commands start with a system executable search path and receive
+        no ambient environment variables. They can read the working directory,
+        additional writable roots, and platform runtime paths. Run the executor
+        on an isolated job host if those paths contain sensitive data.
+        Install the SDK and its native helpers outside the writable roots.
         """
         path = fspath(cwd)
         return _LocalEnvironment(

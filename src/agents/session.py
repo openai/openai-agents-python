@@ -406,6 +406,7 @@ class NativeError(RuntimeError):
     """
 
     _effects: Literal["not_started", "unknown", "recorded"] = "unknown"
+    _interrupted: bool = False
 
     def __init__(
         self,
@@ -1833,6 +1834,7 @@ class Session(Generic[ContextT, OutputT]):
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
+                            "_native_agent_instruction_files": instruction_receipts,
                         }
                         if native_agents is not None
                         else {}
@@ -2060,9 +2062,12 @@ class Session(Generic[ContextT, OutputT]):
                             if item["type"] == "function_call"
                             and item["status"] in ("in_progress", "incomplete")
                         )
-                    if unknown and (
-                        not reconciliation or any(call.thread_id != session.id for call in unknown)
-                    ):
+                    if any(call.thread_id != session.id for call in unknown):
+                        raise RuntimeError(
+                            "Native local history has an unknown tool outcome in a descendant; "
+                            "local recovery cannot reconcile descendant calls"
+                        )
+                    if unknown and not reconciliation:
                         raise LocalRecoveryRequired(
                             tuple(unknown),
                             tuple(turn for turns in recorded.values() for turn in turns),
@@ -2326,6 +2331,7 @@ class Session(Generic[ContextT, OutputT]):
         self._close_task: asyncio.Task[None] | None = None
         self._observations = _ObservationBuffer(self.id)
         self._api_rate_limit_snapshot = ApiRateLimits()
+        self._rate_limit_parent: Session[Any, Any] | None = None
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
         self._reader = asyncio.create_task(self._read_events())
@@ -2658,6 +2664,7 @@ class Session(Generic[ContextT, OutputT]):
     def rate_limits(self) -> ApiRateLimits:
         """Read the latest available limits reported by this API-key provider.
 
+        This includes requests that correct prompted output.
         Missing values are unknown. This snapshot cannot determine account
         plan limits, credit balances or whether the provider will admit work.
         """
@@ -2729,6 +2736,7 @@ class Session(Generic[ContextT, OutputT]):
         output_type: None = None,
         tools: None = None,
         before_step: None = None,
+        writable_roots: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -4266,8 +4274,13 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Child callback cleanup failed") from state.cleanup_error
                 if native_error is not None and state.terminal.done():
                     terminal = state.terminal.result()
-                    if terminal is not None and terminal.get("error"):
-                        native_error = _native_error(terminal["error"], str(native_error))
+                    if terminal is not None:
+                        if terminal.get("error"):
+                            native_error = _native_error(terminal["error"], str(native_error))
+                        elif terminal["type"] == "turn_aborted" and (
+                            terminal.get("reason") == "interrupted"
+                        ):
+                            native_error._interrupted = True
             if native_error is not None:
                 raise native_error
             return cast(
@@ -5288,6 +5301,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise state.failure.result()
             repair = await Session._open(declaration, _captured_api_key=self._model_api_key)
             repair._observations.repair_parent = (self._observations, handle.submission_id)
+            repair._rate_limit_parent = self
             try:
                 if state.graceful_requested:
                     raise asyncio.CancelledError()
@@ -5941,6 +5955,8 @@ class Session(Generic[ContextT, OutputT]):
                     snapshot = _api_rate_limits(message["api_rate_limits"])
                     if snapshot is not None:
                         self._api_rate_limit_snapshot = snapshot
+                        if self._rate_limit_parent is not None:
+                            self._rate_limit_parent._api_rate_limit_snapshot = snapshot
                 if message.get("type") == "elicitation_status":
                     key = (message["server_name"], message["request_id"])
                     url_question = self._url_completions.get(key)

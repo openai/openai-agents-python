@@ -217,10 +217,8 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
             assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
             assert len(peer.requests) == original_count + 2
         else:
-            assert code != 0 and new and "unknown tool outcome" in new[0].get("message", ""), (
-                new,
-                err,
-            )
+            assert code != 0 and new and new[0]["error"] == "RuntimeError", (new, err)
+            assert "cannot reconcile descendant calls" in new[0]["message"]
             assert len(peer.requests) == original_count
             assert (tmp_path / "effects").read_text() == old_effect
             retried = await start(
@@ -233,10 +231,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
                 no_children=no_children,
             )
             code, again, err = await _collect(retried)
-            assert code != 0 and again and "unknown tool outcome" in again[0].get("message", ""), (
-                again,
-                err,
-            )
+            assert code != 0 and again == new, (again, err)
             assert len(peer.requests) == original_count
             assert (tmp_path / "effects").read_text() == old_effect
 

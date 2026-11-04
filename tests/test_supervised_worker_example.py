@@ -259,6 +259,30 @@ async def test_two_workers_revise_reconnect_recover_and_publish_once(
         assert reopened_client["accepted"]["sha256"] == left["sha256"]
         assert reopened_client["published"] is None
 
+        responses.respond(assistant_output(EFFECT_RESULT))
+        unverified = await invoke(
+            "effect", alpha, responses.url, "--mcp-url", alpha_mcp, *method_options
+        )
+        assert unverified == {
+            "status": "rejected",
+            "stage": "turn",
+            "reason": "The application journal did not confirm this turn's handoff.",
+        }
+        assert not (alpha / "effect.json").exists()
+
+        other.respond(function_call("record_effect", {}, "bravo-handoff"))
+        other.respond(assistant_output("This text is not the application result."))
+        confirmed = await invoke("effect", bravo, other.url, "--mcp-url", bravo_mcp)
+        assert confirmed == {
+            "status": "completed",
+            "session_id": right["session_id"],
+            "result": EFFECT_RESULT,
+        }
+        prior_effect = (bravo / "effect.json").read_bytes()
+        other.respond(assistant_output(EFFECT_RESULT))
+        assert await invoke("effect", bravo, other.url, "--mcp-url", bravo_mcp) == unverified
+        assert (bravo / "effect.json").read_bytes() == prior_effect
+
         responses.respond(function_call("record_effect", {}, "one-handoff"))
         async with process(
             "effect",

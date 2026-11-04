@@ -411,6 +411,29 @@ pub(crate) async fn publish_item(
 
 pub struct Contributor;
 
+pub(crate) fn retain_child_files(
+    store: &codex_extension_api::ExtensionData,
+    config: &codex_core_api::Config,
+    files: &[InstructionFile],
+) {
+    if !files.is_empty()
+        && let Some(text) = config.developer_instructions.as_ref()
+        && !text.is_empty()
+        && config
+            .multi_agent_v2
+            .subagent_developer_instructions
+            .as_ref()
+            == Some(text)
+    {
+        store.insert(SdkApplicationInstructions {
+            revision: None,
+            rendered: text.clone(),
+            developer_sha256: sha256(text),
+            files: files.iter().map(|file| serde_json::json!(file)).collect(),
+        });
+    }
+}
+
 impl ContextContributor for Contributor {
     fn contribute_world_state<'a>(
         &'a self,
@@ -431,14 +454,25 @@ impl ContextContributor for Contributor {
                     .thread_store
                     .get::<crate::environment::StrictExecutorWrites>()
                     .is_some(),
-                application: accepted.as_ref().map(|accepted| SdkApplicationInstructions {
-                    revision: accepted.id.to_string(),
-                    rendered: rendered(accepted),
-                    developer_sha256: sha256(&accepted.text),
-                    files: accepted.files.iter().map(|file| {
-                        serde_json::json!({"path": file.path, "source": file.source, "sha256": file.sha256})
-                    }).collect(),
-                }),
+                application: accepted
+                    .as_ref()
+                    .map(|accepted| SdkApplicationInstructions {
+                        revision: Some(accepted.id.to_string()),
+                        rendered: rendered(accepted),
+                        developer_sha256: sha256(&accepted.text),
+                        files: accepted
+                            .files
+                            .iter()
+                            .map(|file| serde_json::json!(file))
+                            .collect(),
+                    })
+                    .or_else(|| {
+                        input
+                            .thread_store
+                            .get::<SdkApplicationInstructions>()
+                            .as_deref()
+                            .cloned()
+                    }),
             });
             let Some(accepted) = accepted else {
                 return Vec::new();

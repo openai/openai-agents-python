@@ -446,6 +446,21 @@ async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
             result = await supervise(worker, turn, trace, timeout=args.turn_timeout)
             if isinstance(result, TurnNeedsAttention):
                 return {"status": result.reason, "stage": stage}
+            if args.command == "effect":
+                effect = read_record(directory, "effect")
+                if (
+                    effect is None
+                    or result.turn.turn_id is None
+                    or effect.get("session_id") != session.id
+                    or effect.get("turn_id") != result.turn.turn_id
+                    or effect.get("result") != EFFECT_RESULT
+                ):
+                    return {
+                        "status": "rejected",
+                        "stage": stage,
+                        "reason": "The application journal did not confirm this turn's handoff.",
+                    }
+                return {"status": "completed", "session_id": session.id, "result": EFFECT_RESULT}
             return {"status": "completed", "session_id": session.id, "result": result.final_output}
     except LocalRecoveryRequired:
         return {"status": "recovery_required", "stage": stage}

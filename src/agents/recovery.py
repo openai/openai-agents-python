@@ -62,7 +62,7 @@ class ReconciledCall:
 
 
 class LocalRecoveryRequired(RuntimeError):
-    """Local recovery stopped before model work because tool outcomes are unknown."""
+    """Local recovery stopped before model work because root tool outcomes are unknown."""
 
     def __init__(
         self,

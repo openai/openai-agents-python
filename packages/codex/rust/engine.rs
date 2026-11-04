@@ -291,7 +291,7 @@ impl EngineState {
                 EnvironmentManager::without_environments(config.http_client_factory()),
                 None,
             ),
-            None => crate::environment::for_unattached_threads(&config).await?,
+            None => crate::environment::for_unattached_threads(&config, /*sdk_local*/ false).await?,
         };
         let environment = Arc::new(environment);
         let installation_id = ThreadId::new().to_string();

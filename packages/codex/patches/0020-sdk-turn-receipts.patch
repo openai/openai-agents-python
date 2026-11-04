@@ -263,7 +263,7 @@ index 7b280be1205f785b8770729b0976ec8109bd0d12..d66d9c8acae37760a9cab417cb74a504
          root_turn_id: None,
          disabled_plugin_ids: None,
 diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
-index 53e295061c291d02677873d8eb581a891b950f02..ef2ed3ad924bfb95d245ed155215c919859b8480 100644
+index 53e295061c291d02677873d8eb581a891b950f02..09b77f6dedc0daaaf84ceb473e970ca13ad5dab6 100644
 --- a/codex-rs/core/src/session/step_context.rs
 +++ b/codex-rs/core/src/session/step_context.rs
 @@ -13,11 +13,17 @@ use crate::tools::router::ToolRouter;
@@ -337,7 +337,7 @@ index 53e295061c291d02677873d8eb581a891b950f02..ef2ed3ad924bfb95d245ed155215c919
 +            "thread_id": thread_id,
 +            "model": model.slug,
 +            "reasoning_effort": reasoning_effort,
-+            "instruction_revision": application.map(|value| value.revision.as_str()),
++            "instruction_revision": application.and_then(|value| value.revision.as_deref()),
 +            "developer_instructions_sha256": developer_sha256,
 +            "instruction_files": files,
 +            "user_config_applied": user_config_applied,
@@ -429,10 +429,10 @@ index fd53c8cfe22a7611d91db05c2b53f3408b718974..19f7b60887adda327e1c7f41c00e827c
          root_turn_id: None,
          disabled_plugin_ids: None,
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 4e48e52d715d0f455977a35f1296b79161018ebf..135ab0ff561a870b810882b7d3ee70992a66fcb2 100644
+index 4e48e52d715d0f455977a35f1296b79161018ebf..ea9ac3fb1101cf4ba94ea8dde938d2062368351f 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -124,3 +124,20 @@ pub use model_request::ModelResponseInterceptor;
+@@ -124,3 +124,21 @@ pub use model_request::ModelResponseInterceptor;
  pub use model_request::ModelResponseStream;
  pub use model_request::ModelToolAdmission;
  pub use model_request::ResponseEvent;
@@ -446,9 +446,10 @@ index 4e48e52d715d0f455977a35f1296b79161018ebf..135ab0ff561a870b810882b7d3ee7099
 +    pub application: Option<SdkApplicationInstructions>,
 +}
 +
-+/// An accepted SDK instruction revision to verify against the model context.
++/// SDK instruction provenance to verify against the model context.
++#[derive(Clone)]
 +pub struct SdkApplicationInstructions {
-+    pub revision: String,
++    pub revision: Option<String>,
 +    pub rendered: String,
 +    pub developer_sha256: String,
 +    pub files: Vec<serde_json::Value>,

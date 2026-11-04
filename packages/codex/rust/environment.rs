@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::io::ErrorKind;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -21,9 +22,13 @@ use codex_exec_server::{
     ProcessId, REMOTE_ENVIRONMENT_ID, RemoteEnvironmentOptions,
 };
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
-use codex_protocol::config_types::{EnvironmentVariablePattern, WindowsSandboxLevel};
+use codex_protocol::config_types::{
+    ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit, WindowsSandboxLevel,
+};
 use codex_protocol::models::{PermissionProfile, PermissionProfileSnapshot};
-use codex_protocol::permissions::{FileSystemAccessMode, FileSystemPath, NetworkSandboxPolicy};
+use codex_protocol::permissions::{
+    FileSystemAccessMode, FileSystemPath, FileSystemSpecialPath, NetworkSandboxPolicy,
+};
 use codex_protocol::protocol::{
     AskForApproval, EnvironmentConfig, EnvironmentConfigState, GranularApprovalConfig, Op,
     ThreadSettingsOverrides, TurnEnvironmentSelection, TurnEnvironmentSelections,
@@ -37,8 +42,11 @@ use sha2::{Digest, Sha256};
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
+use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
+
 pub async fn for_unattached_threads(
     config: &Config,
+    _sdk_local: bool,
 ) -> Result<(EnvironmentManager, Option<String>)> {
     // An explicitly absent helper supports model-only clients. Native MCP
     // admits servers against the actual manager at session selection time.
@@ -52,6 +60,12 @@ pub async fn for_unattached_threads(
         config.codex_self_exe.clone(),
         config.codex_linux_sandbox_exe.clone(),
     )?;
+    #[cfg(target_os = "macos")]
+    let paths = if _sdk_local {
+        paths.with_restricted_macos_process_sandbox()
+    } else {
+        paths
+    };
     // The pinned public constructor reads a file; never read or replace the caller's home.
     // Shared Codex sessions may admit a current local MCP roster after manager
     // construction. Reserve its lazy executor here: only configured MCP starts
@@ -197,7 +211,7 @@ impl EnvironmentOptions {
                 "a local executor does not accept connection settings"
             );
             check_local_helpers(config)?;
-            let (manager, _) = for_unattached_threads(config).await?;
+            let (manager, _) = for_unattached_threads(config, /*sdk_local*/ true).await?;
             let environment = manager
                 .try_local_environment()
                 .context("local executor requires the native process helper")?;
@@ -223,7 +237,7 @@ impl EnvironmentOptions {
                     )
             });
         let manager = if needs_local_mcp {
-            let (manager, _) = for_unattached_threads(config).await?;
+            let (manager, _) = for_unattached_threads(config, /*sdk_local*/ false).await?;
             ensure!(
                 manager.try_local_environment().is_some(),
                 "local stdio MCP requires the native process helper"
@@ -376,6 +390,7 @@ impl EnvironmentOptions {
                 info,
                 &self.cwd,
                 self.writable_roots.as_deref().unwrap_or_default(),
+                self.local,
             )
             .await
         } else {
@@ -418,24 +433,15 @@ impl EnvironmentOptions {
         };
         let selected_capability_roots = self.capability_roots().unwrap_or_default();
         let workspace_roots = vec![self.cwd.clone()];
-        let mut shell_environment_policy = permissions.shell_environment_policy.clone();
-        if self.local {
-            let model_key_names = [
-                codex_login::OPENAI_API_KEY_ENV_VAR,
-                codex_login::CODEX_API_KEY_ENV_VAR,
-            ];
-            shell_environment_policy.exclude.extend(
-                model_key_names
-                    .into_iter()
-                    .map(EnvironmentVariablePattern::new_case_insensitive),
-            );
-            shell_environment_policy.r#set.retain(|name, _| {
-                !model_key_names
-                    .iter()
-                    .any(|key| key.eq_ignore_ascii_case(name))
-            });
-            shell_environment_policy.use_profile = false;
-        }
+        let shell_environment_policy = if self.local {
+            ShellEnvironmentPolicy {
+                inherit: ShellEnvironmentPolicyInherit::None,
+                r#set: local_shell_env(),
+                ..Default::default()
+            }
+        } else {
+            permissions.shell_environment_policy.clone()
+        };
         Ok(TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
@@ -535,7 +541,7 @@ pub(crate) fn local_session_network_policy(config: &Config) -> Option<Environmen
         .filter(|policy| policy.requires_proxy)
 }
 
-fn workspace_profile(roots: &[PathUri]) -> PermissionProfile {
+pub(crate) fn workspace_profile(roots: &[PathUri]) -> PermissionProfile {
     PermissionProfile::workspace_write_with_path_uris(
         &[],
         NetworkSandboxPolicy::Restricted,
@@ -609,6 +615,7 @@ async fn strict_write_profile(
     info: &EnvironmentInfo,
     cwd: &PathUri,
     additional: &[PathUri],
+    local: bool,
 ) -> Result<PermissionProfile> {
     ensure!(
         matches!(
@@ -650,6 +657,23 @@ async fn strict_write_profile(
         }
     }
     let mut filesystem_policy = workspace_profile(&roots).file_system_sandbox_policy();
+    if local {
+        check_local_helper_write_roots(environment, &roots)?;
+        for entry in &mut filesystem_policy.entries {
+            if entry.access == FileSystemAccessMode::Read
+                && matches!(
+                    entry.path,
+                    FileSystemPath::Special {
+                        value: FileSystemSpecialPath::Root
+                    }
+                )
+            {
+                entry.path = FileSystemPath::Special {
+                    value: FileSystemSpecialPath::Minimal,
+                };
+            }
+        }
+    }
     // A caller may explicitly grant a linked worktree's gitdir or common dir.
     // Remove only default carveouts at those exact paths. Core still adds
     // read-only carveouts for protected metadata under every granted root.
@@ -661,6 +685,66 @@ async fn strict_write_profile(
         &filesystem_policy,
         NetworkSandboxPolicy::Restricted,
     ))
+}
+
+fn check_local_helper_write_roots(environment: &Environment, roots: &[PathUri]) -> Result<()> {
+    let paths = environment
+        .local_runtime_paths()
+        .context("local executor requires native helper paths")?;
+    let roots = roots
+        .iter()
+        .map(PathUri::to_abs_path)
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let packaged_helpers = std::iter::once(&paths.codex_self_exe)
+        .chain(paths.codex_linux_sandbox_exe.as_ref())
+        .map(|helper| helper.as_path());
+    for alias in packaged_helpers.clone() {
+        let resolved = std::fs::canonicalize(alias)
+            .map_err(|_| anyhow::anyhow!("could not verify the local executor helper path"))?;
+        // Protect the helper, its package directory (including bundled resources),
+        // and each ancestor of a configured symlink path.
+        for path in [alias, resolved.as_path()] {
+            let install = path
+                .parent()
+                .and_then(Path::parent)
+                .context("local executor helpers must have an installation directory")?;
+            let install = std::fs::canonicalize(install)
+                .map_err(|_| anyhow::anyhow!("could not verify the local executor helper path"))?;
+            ensure!(
+                roots
+                    .iter()
+                    .all(|root| !root.as_path().starts_with(&install)),
+                "local executor writable roots must stay outside the native helper installation"
+            );
+        }
+    }
+    // Bubblewrap may run before isolation to report its supported options.
+    // Protect its fixed search directories even when they lack a bwrap file.
+    let system_search = SYSTEM_EXECUTABLE_PATH
+        .split(':')
+        .filter(|_| cfg!(target_os = "linux"))
+        .map(Path::new);
+    let system_bwraps = system_search
+        .clone()
+        .map(|directory| directory.join("bwrap"))
+        .filter(|path| path.symlink_metadata().is_ok())
+        .collect::<Vec<_>>();
+    for path in packaged_helpers
+        .chain(system_search)
+        .chain(system_bwraps.iter().map(|path| path.as_path()))
+    {
+        for ancestor in path.ancestors() {
+            let canonical = std::fs::canonicalize(ancestor)
+                .map_err(|_| anyhow::anyhow!("could not verify the local executor helper path"))?;
+            ensure!(
+                roots
+                    .iter()
+                    .all(|root| !canonical.starts_with(root.as_path())),
+                "local executor writable roots must stay outside the native helper installation"
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Replace just the write profile of the currently selected executor.
@@ -682,7 +766,7 @@ pub async fn replace_writable_roots(
         .context("selected executor was not registered")?;
     let info = executor_info(&environment).await?;
     let profile =
-        strict_write_profile(&environment, &info, &selection.cwd, &writable_roots).await?;
+        strict_write_profile(&environment, &info, &selection.cwd, &writable_roots, local).await?;
     let local_network = if local {
         local_session_network_policy(config)
     } else {
@@ -726,6 +810,10 @@ fn check_local_helpers(config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn local_shell_env() -> HashMap<String, String> {
+    HashMap::from([("PATH".to_owned(), SYSTEM_EXECUTABLE_PATH.to_owned())])
+}
+
 async fn probe_local_sandbox(
     environment: &Environment,
     cwd: &PathUri,
@@ -733,12 +821,6 @@ async fn probe_local_sandbox(
 ) -> Result<()> {
     // The direct local backend has no transport handshake. A fixed command
     // verifies that this process can launch the requested sandbox.
-    // The Linux helper needs PATH to locate system bubblewrap. Keep other host
-    // environment variables, including model credentials, out of the probe.
-    let env = match std::env::var("PATH") {
-        Ok(path) if cfg!(target_os = "linux") => HashMap::from([("PATH".to_owned(), path)]),
-        _ => HashMap::new(),
-    };
     let params = ExecParams {
         process_id: ProcessId::new("sdk-local-sandbox-readiness"),
         metadata: None,
@@ -746,7 +828,7 @@ async fn probe_local_sandbox(
         cwd: cwd.clone(),
         env_policy: None,
         shell_snapshot: None,
-        env,
+        env: local_shell_env(),
         tty: false,
         pipe_stdin: false,
         arg0: None,

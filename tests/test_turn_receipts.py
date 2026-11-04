@@ -4,19 +4,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from agents import Agent
+from agents import Agent, NativeAgents
 from agents.turn_receipt import (
     _load_instruction_files,
     _project_turn_receipt,
     _redact_checkpoint_executor_receipts,
 )
 from tests._asyncio import timeout
+from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_fixtures import assistant_output
 from tests.test_native_agent_checkpoints import message, peer
+from tests.test_native_child_agents import (
+    collaboration,
+    handles,
+    metadata,
+    trust,
+)
+from tests.test_native_child_tool_integration import Memory, family_agent, family_peer
+from tests.test_native_executor_tools import declaration
 from tests.test_native_instruction_updates import application_texts
+from tests.test_native_mcp_tools import Peer
 
 
 def test_file_loader_hashes_the_exact_bytes_in_order(tmp_path):
@@ -179,3 +191,101 @@ async def test_native_receipt_matches_provider_input_and_survives_restore(tmp_pa
                     receipts[-1]["developer_instructions_sha256"]
                     == hashlib.sha256(b"Use the new instructions.").hexdigest()
                 )
+
+
+async def test_native_child_receipt_records_only_sampled_instruction_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "method.md"
+    content = b"Use the supplied application method.\r\n"
+    source.write_bytes(content)
+    memory = Memory()
+    vault = Peer(names=("find-record",))
+    async with (
+        timeout(30),
+        family_peer(programmatic_tool_calling=False, grandchildren=True) as provider,
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        vault.serve() as url,
+    ):
+        trust(executor, tmp_path, monkeypatch)
+        root_response = provider.response
+
+        def response():
+            request = provider.requests[-1]
+            identity = metadata(request, provider.request_headers[-1])
+            if identity["agent_name"] == "/root":
+                return root_response()
+            name = identity["agent_name"].rsplit("/", 1)[-1]
+            requests = provider.child_requests.setdefault(name, [])
+            requests.append(request)
+            provider.child_metadata.setdefault(name, []).append(identity)
+            if name == "alpha" and len(requests) == 1:
+                return [
+                    collaboration(
+                        "spawn_agent",
+                        {"task_name": "grandchild", "message": "Read.", "fork_turns": "none"},
+                        "spawn-grandchild",
+                    )
+                ]
+            return [assistant_output("Finished")]
+
+        monkeypatch.setattr(provider, "response", response)
+        agent = family_agent(provider, executor, url, memory)
+        instructions = agent.instructions
+        assert isinstance(instructions, str)
+        inherited = instructions + "\n\n" + content.decode().strip()
+        (native_agents,) = (tool for tool in agent.tools if isinstance(tool, NativeAgents))
+        (role,) = native_agents.additional_roles
+        # A role that supplies the same text still has its own provenance.
+        agent = replace(
+            agent,
+            tools=[
+                *(tool for tool in agent.tools if tool is not native_agents),
+                replace(
+                    native_agents,
+                    max_children=3,
+                    max_depth=2,
+                    additional_roles=[replace(role, instructions=inherited)],
+                ),
+            ],
+        )
+        async with agent.session(
+            context=memory, environment=declaration(executor), instruction_files=[source]
+        ) as session:
+            await (await session.submit("Delegate the work")).get_result()
+            for child in await handles(session, 3):
+                await child.get_result()
+
+            receipts = {}
+            for name, requests in provider.child_requests.items():
+                child_id = provider.child_metadata[name][0]["thread_id"]
+                [receipt] = [row["receipt"] async for row in session.turns(subagent_id=child_id)]
+                developer_parts = [
+                    part["text"]
+                    for item in requests[0]["input"]
+                    if item.get("role") == "developer"
+                    for part in item.get("content", [])
+                    if part.get("type") == "input_text"
+                ]
+                receipts[name] = (receipt, developer_parts)
+
+            files = [
+                {
+                    "path": str(source.resolve()),
+                    "source": "application_file",
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+            ]
+            for name in ("alpha", "grandchild"):
+                receipt, parts = receipts[name]
+                assert inherited in parts
+                assert (
+                    receipt["developer_instructions_sha256"]
+                    == hashlib.sha256(inherited.encode()).hexdigest()
+                )
+                assert receipt["instruction_revision"] is None
+                assert receipt["instruction_files"] == files
+
+            role_receipt, role_parts = receipts["beta"]
+            assert inherited in role_parts
+            assert role_receipt["instruction_files"] == []

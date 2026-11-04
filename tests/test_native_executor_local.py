@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 
 import pytest
 
+import agents
 from agents import (
     Agent,
     Environment,
@@ -61,6 +65,9 @@ def test_local_declaration_has_no_transport_and_normalizes_additional_roots() ->
     assert declaration["cwd"] == "/job/worktree"
     assert declaration["env_vars"] == ["DECLARED_VAR"]
 
+    host = replace(server, location="host")
+    assert host._config(local)["env_vars"] == ["OPENAI_API_KEY", "CODEX_API_KEY", "DECLARED_VAR"]
+
 
 @pytest.mark.parametrize(
     "path", ["relative", "/", "/work/../cache", "file:///work/%2e%2e/cache", "file:///work/%00"]
@@ -89,13 +96,60 @@ async def test_missing_local_root_refuses_session_before_model(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+async def test_local_write_roots_cannot_include_the_native_helper_installation(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    installation = Path(agents.__file__).resolve().parent
+    alias = tmp_path / "helper-installation"
+    alias.symlink_to(installation, target_is_directory=True)
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    with pytest.raises(RuntimeError, match="writable roots must stay outside the native helper"):
+        async with agent.session(
+            environment=Environment.local(cwd=tmp_path, writable_roots=[alias])
+        ):
+            pytest.fail("A writable native helper installation opened a Session")
+    assert responses.requests == []
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux system helper paths")
+@pytest.mark.parametrize("system_root", ["/bin", "/usr"])
+async def test_local_write_roots_cannot_include_system_sandbox_helper_paths(
+    responses: ResponsesFixture, tmp_path: Path, system_root: str
+) -> None:
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    with pytest.raises(RuntimeError, match="writable roots must stay outside the native helper"):
+        async with agent.session(
+            environment=Environment.local(cwd=tmp_path, writable_roots=[system_root])
+        ):
+            pytest.fail("A writable system helper path opened a Session")
+    assert responses.requests == []
+
+
+@pytest.fixture
+def undeclared_scratch() -> Iterator[Path]:
+    # The process Seatbelt defaults otherwise expose /private/tmp, independent
+    # of pytest's (usually per-user) temporary directory on macOS.
+    with TemporaryDirectory(dir="/tmp") as directory:
+        yield Path(directory)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
 @(
     pytest.mark.requires_native_linux_sandbox
     if sys.platform == "linux"
     else pytest.mark.requires_native_macos_sandbox
 )
 async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
-    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    undeclared_scratch: Path,
 ) -> None:
     git_executable = shutil.which("git")
     assert git_executable is not None
@@ -103,6 +157,8 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("OPENAI_API_KEY", "synthetic-local-model-key")
     monkeypatch.setenv("CODEX_API_KEY", "synthetic-local-codex-key")
+    monkeypatch.setenv("AWS_SESSION_TOKEN", "synthetic-local-aws-token")
+    monkeypatch.setenv("DATABASE_URL", "synthetic-local-database-url")
 
     def git(cwd: Path, *args: str) -> str:
         return subprocess.check_output([git_executable, "-C", str(cwd), *args], text=True).strip()
@@ -131,6 +187,15 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     common = origin / ".git"
     outside = tmp_path / "outside"
     outside.write_text("protected")
+    scratch_file = undeclared_scratch / "outside"
+    scratch_file.write_text("protected")
+    untrusted_bin = tmp_path / "bin"
+    untrusted_bin.mkdir()
+    bwrap = untrusted_bin / "bwrap"
+    bwrap_ran = tmp_path / "untrusted-bwrap-ran"
+    bwrap.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(bwrap_ran))}\nexit 1\n")
+    bwrap.chmod(0o755)
+    monkeypatch.setenv("PATH", str(untrusted_bin), prepend=os.pathsep)
     (linked / "escape").symlink_to(outside)
     (linked / ".agents").mkdir()
     (linked / ".agents" / "protected").write_text("metadata")
@@ -152,8 +217,14 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
         }
     )
     git_path = shlex.quote(git_executable)
+    scratch_path = shlex.quote(str(scratch_file))
     command = (
-        'set -e; test -z "${OPENAI_API_KEY+x}${CODEX_API_KEY+x}"; '
+        'set -e; test -z "${OPENAI_API_KEY+x}${CODEX_API_KEY+x}'
+        '${AWS_SESSION_TOKEN+x}${DATABASE_URL+x}"; '
+        f"if cat {shlex.quote(str(outside))} >/dev/null 2>&1; then exit 14; fi; "
+        "if cat escape >/dev/null 2>&1; then exit 15; fi; "
+        f"if cat {scratch_path} >/dev/null 2>&1; then exit 16; fi; "
+        f"if (printf denied > {scratch_path}) 2>/dev/null; then exit 17; fi; "
         f"printf cached > {shlex.quote(str(cache / 'marker'))}; "
         "if (printf denied > escape) 2>/dev/null; then exit 11; fi; "
         "if (printf denied > .agents/protected) 2>/dev/null; then exit 12; fi; "
@@ -178,6 +249,8 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert git(linked, "show", "HEAD:result.txt") == "changed"
     assert (cache / "marker").read_text() == "cached"
     assert outside.read_text() == "protected"
+    assert scratch_file.read_text() == "protected"
+    assert not bwrap_ran.exists()
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 

@@ -78,7 +78,7 @@
     },
     {
       "path": "0020-sdk-turn-receipts.patch",
-      "sha256": "de462b9b82de958fa52b350cf17da9c8a6a1200005ba6a12c64d0cb4d0d70d94"
+      "sha256": "3207d476fc24f6b3234f77ba057eaaa1589a920c49cbfe5e69de88c18ec3ce16"
     },
     {
       "path": "0021-redact-executor-startup-tracing.patch",
@@ -91,7 +91,15 @@
     {
       "path": "0023-retain-early-sandbox-denials.patch",
       "sha256": "31eee8fd638f35abd56e216a18bbc70dad6b8b93f90fe2db16b2deaae1bd004f"
+    },
+    {
+      "path": "0024-restrict-local-macos-sandbox-defaults.patch",
+      "sha256": "b397bbd1e5d6104d0a308dadef045049d3d10ef8b7015c27135cf81ddc6c428c"
+    },
+    {
+      "path": "0025-mount-sandbox-reentry-helper.patch",
+      "sha256": "d1e3ce174262a157028fd0c7ea99bbb9d500722462282420bea26cd358ac6eba"
     }
   ],
-  "result_tree": "bfb3f0280e467a641999c4be006f4188bfc85734"
+  "result_tree": "79d92735b209904c3f4e3ef50365ead3b47551a5"
 }

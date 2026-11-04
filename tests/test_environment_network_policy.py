@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shlex
 import sys
 from contextlib import AsyncExitStack
@@ -306,6 +307,76 @@ async def test_local_resume_requires_explicit_strict_writes_even_without_extra_r
             ):
                 pytest.fail("Reopened a Session with legacy write permissions")
         assert len(model.requests) == 2
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("explicit_network", [False, True])
+async def test_local_resume_allows_implicit_remote_workspace_to_move(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_network: bool
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile")
+        network = NetworkPolicy(allow_all_unix_sockets=True) if explicit_network else None
+        original = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            network=network,
+        )
+        relocated = executor.root / "relocated"
+        relocated.mkdir()
+        current = replace(original, cwd=str(relocated))
+        model.respond(assistant_output("ready"))
+        model.respond(assistant_output("reopened"))
+        async with agent.session(storage=storage, environment=original) as session:
+            session_id = session.id
+            assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+
+        changed_network = None if explicit_network else NetworkPolicy(allow_all_unix_sockets=True)
+        with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+            async with agent.session(
+                storage=storage,
+                resume=session_id,
+                environment=replace(current, network=changed_network),
+            ):
+                pytest.fail("Reopened a Session with different network authority")
+
+        [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
+        history = rollout.read_text()
+        rows = [json.loads(line) for line in history.splitlines()]
+        [recorded] = [
+            row["payload"]["sdk_receipt"]["executors"][0]
+            for row in rows
+            if row["type"] == "turn_context" and row["payload"].get("sdk_receipt")
+        ]
+        # A later receipt format may add authority fields. Only a known,
+        # cwd-derived policy may move with the workspace.
+        for mapping in (recorded, recorded["permission_profile"]):
+            mapping["future_authority"] = "requires-review"
+            rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+                async with agent.session(storage=storage, resume=session_id, environment=current):
+                    pytest.fail("Reopened a Session with unknown executor authority")
+            del mapping["future_authority"]
+        rollout.write_text(history)
+
+        async with agent.session(
+            storage=storage, resume=session_id, environment=current
+        ) as resumed:
+            assert resumed.id == session_id
+            result = await (await resumed.submit("Continue.")).get_result()
+            assert result.final_output == "reopened"
+            receipts = [turn["receipt"] async for turn in resumed.turns() if "receipt" in turn]
+            assert receipts[-1]["executors"]
+            assert receipts[-1]["executors"][0]["cwd"] == relocated.resolve().as_uri()
 
 
 async def test_checkpoint_without_network_policy_restores_only_with_the_default() -> None:
