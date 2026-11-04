@@ -1,11 +1,10 @@
-name: Compare the managed command before and after launchd port isolation
+name: Qualify macOS supervisor path protection
 on:
   push:
     branches: [test/darwin-resource-ownership-20261104]
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
   verify:
@@ -14,68 +13,21 @@ jobs:
       matrix:
         runner: [macos-15, macos-latest]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          path: validation
           persist-credentials: false
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          ref: 024d0032cdd13fb930f85668539322c940f39386
-          path: sdk
-          persist-credentials: false
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
-        with:
-          artifact-ids: 13311065835
-          run-id: 41803603288
-          github-token: ${{ github.token }}
-          path: ${{ runner.temp }}/native-baseline
-          merge-multiple: true
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           version: "0.11.14"
           enable-cache: false
           python-version: "3.14"
-      - name: Build the unchanged and isolated command wrappers
-        run: |
-          set -eu
-          rustup toolchain install 1.95.0 --profile minimal
-          pair="$GITHUB_WORKSPACE/validation/.github/qualification/darwin-resource-ownership/bootstrap-port-qualification"
-          CARGO_TARGET_DIR="$pair/target" sh "$pair/build-pair.sh"
-          printf 'SDK_WRAPPER_STOCK=%s\nSDK_WRAPPER_CLEARED=%s\n' "$pair/target/debug/bootstrap-stock" "$pair/target/debug/bootstrap-cleared" >> "$GITHUB_ENV"
-      - name: Install the exact earlier wheel and add the focused test
-        working-directory: sdk
-        run: |
-          set -eu
-          test "$(git rev-parse HEAD)" = 024d0032cdd13fb930f85668539322c940f39386
-          cd "$RUNNER_TEMP/native-baseline"
-          wheel=openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl
-          printf '%s  %s\n' 107f32f33f18aa6f592437d93150ad31a36830385081c9693557a9f167b847de "$wheel" | shasum -a 256 -c -
-          export OPENAI_AGENTS_NATIVE_WHEEL="$PWD/$wheel"
-          cd "$GITHUB_WORKSPACE/sdk"
-          uv sync --frozen --group dev --no-install-project
-          uv pip install --python .venv/bin/python --no-deps "$OPENAI_AGENTS_NATIVE_WHEEL"
-          mkdir -p tests/sdk_bootstrap_qualification
-          pair="../validation/.github/qualification/darwin-resource-ownership/bootstrap-port-qualification"
-          cp "$pair/probe.c" "$pair/test_sdk_seatbelt.py" "$pair/"*.sbpl tests/sdk_bootstrap_qualification/
-      - name: Check sandboxed launchd and helper access
-        working-directory: sdk
-        env:
-          OPENAI_API_KEY: fake-for-tests
+      - name: Check exact supervisor rule with a writable temporary root
+        working-directory: .github/qualification/darwin-resource-ownership/bootstrap-port-qualification
         run: |
           set -eu
           sw_vers
-          if /bin/launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
-            export SDK_SEATBELT_DOMAIN=gui
-          else
-            export SDK_SEATBELT_DOMAIN=user
-          fi
-          .venv/bin/python -I -B - <<'PYTEST'
-          import os, pathlib, platform, sys, sysconfig
-          import agents._native, pytest
-          assert sys.platform == "darwin" and platform.machine() == "arm64"
-          assert pathlib.Path(agents._native.__file__).resolve().is_relative_to(pathlib.Path(sysconfig.get_path("platlib")).resolve())
-          sys.path.insert(0, os.getcwd())
-          sys.exit(pytest.main(["-q", "-rA", "-s", "tests/sdk_bootstrap_qualification/test_sdk_seatbelt.py"]))
-          PYTEST
+          rustup toolchain install 1.95.0 --profile minimal
+          cargo +1.95.0 build --locked --features clear-bootstrap
+          uv run --no-project --python 3.14 python -I -B probe_supervisor.py "$PWD/target/debug/sdk-darwin-bootstrap-entry"

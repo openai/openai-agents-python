@@ -53,6 +53,13 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::ensure;
+
+mod seatbelt_daemon;
+
+#[derive(Debug)]
+enum SeatbeltPreparationError {
+    FileSystem(String),
+}
 use tokio::sync::mpsc;
 
 async fn collect(mut receiver: mpsc::Receiver<Vec<u8>>) -> Vec<u8> {
@@ -97,6 +104,14 @@ async fn run(tty: bool, cwd: &Path, command: &[String]) -> Result<i32> {
 fn main() -> Result<()> {
     arg0::dispatch();
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if let [mode, directory] = args.as_slice()
+        && mode == "supervisor-policy"
+    {
+        let rules = seatbelt_daemon::protection_policy(Path::new(directory))
+            .map_err(|SeatbeltPreparationError::FileSystem(error)| anyhow::anyhow!(error))?;
+        println!("{rules}");
+        return Ok(());
+    }
     let [mode, cwd, command @ ..] = args.as_slice() else {
         anyhow::bail!("expected tty/pipe mode, cwd, and prepared argv");
     };
