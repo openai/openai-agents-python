@@ -115,7 +115,17 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
 
 impl Change {
     pub fn options(&self) -> Value {
-        json!({"instructions": self.instructions, "settings": self.settings})
+        let instruction_files = self
+            .state
+            .thread
+            .thread_extension_data()
+            .get::<crate::application_instructions::Instructions>()
+            .and_then(|instructions| instructions.files());
+        json!({
+            "instructions": self.instructions,
+            "instruction_files": instruction_files,
+            "settings": self.settings,
+        })
     }
 
     pub async fn validate_candidate(&self, candidate: &ThreadState) -> anyhow::Result<()> {

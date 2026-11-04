@@ -58,6 +58,8 @@ pub struct ThreadOptions {
     sdk_history: Option<Vec<ResponseItem>>,
     #[serde(rename = "_application_instructions")]
     pub(crate) application_instructions: Option<String>,
+    #[serde(rename = "_sdk_instruction_files")]
+    pub(crate) sdk_instruction_files: Option<Vec<crate::application_instructions::InstructionFile>>,
     #[serde(rename = "_manual_tool_slots")]
     pub(crate) manual_tool_slots: Vec<usize>,
     // The public native-agent declaration; the same owner guards root and children.
@@ -65,8 +67,6 @@ pub struct ThreadOptions {
     native_agent_roles: Option<Vec<String>>,
     #[serde(rename = "_native_agent_max_depth")]
     native_agent_max_depth: Option<usize>,
-    #[serde(rename = "_native_agent_instruction_files")]
-    native_agent_instruction_files: Vec<crate::application_instructions::InstructionFile>,
     #[serde(rename = "_canonical_rules")]
     canonical_rules: bool,
     config: Map<String, Value>,
@@ -244,7 +244,7 @@ impl ThreadOptions {
                 .insert(crate::native_agents::Policy {
                     roles,
                     max_depth,
-                    instruction_files: self.native_agent_instruction_files,
+                    instruction_files: self.sdk_instruction_files.unwrap_or_default(),
                     allowed: Default::default(),
                 });
         }
