@@ -295,7 +295,7 @@ jobs:
 
   typecheck:
     needs: native-linux
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     steps:
       - name: Checkout repository
@@ -336,7 +336,7 @@ jobs:
 
   mypy-win32:
     needs: native-linux
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     steps:
       - name: Checkout repository
@@ -381,7 +381,7 @@ jobs:
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.native-linux.result == 'skipped') ||
       (needs.changes.outputs.code == 'true' && needs.native-linux.result == 'success'))
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     strategy:
       fail-fast: false
@@ -547,7 +547,7 @@ jobs:
 
   tests-windows:
     needs: native-windows
-    runs-on: windows-latest
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
     strategy:
       fail-fast: false
@@ -593,7 +593,7 @@ jobs:
         run: echo "Skipping tests for non-code changes."
 
   build-docs:
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     env:
       UV_NO_SYNC: "1"
