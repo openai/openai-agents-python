@@ -10,7 +10,19 @@ from pathlib import Path
 
 import pytest
 
-from agents import Agent, FunctionTool, LocalStorage, NativeProvider, ToolContext, function_tool
+from agents import (
+    Agent,
+    FunctionTool,
+    LocalRecoveryRequired,
+    LocalStorage,
+    NativeError,
+    NativeProvider,
+    ReconciledCall,
+    ToolContext,
+    UncertainCall,
+    function_tool,
+)
+from agents._history import project_history
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import LookupArgs, next_request, provider
@@ -23,6 +35,8 @@ async def _worker() -> None:
     @function_tool
     async def record(context: ToolContext[str], key: str) -> str:
         """Record one application effect."""
+        if mode == "unknown-before-effect":
+            os._exit(67)
         with (directory / "effects").open("a") as stream:
             stream.write(context.context + ":" + key + "\n")
             stream.flush()
@@ -175,6 +189,165 @@ async def test_unknown_local_receipt_never_replays_or_starts_model(responses, tm
     code, rows, err = await _collect(retried)
     assert code != 0 and rows and "unknown tool outcome" in rows[0]["message"], (rows, err)
     assert len(responses.requests) == request_count
+
+
+@pytest.mark.parametrize("custom_input", ["null", "42", "{}", "", '  "quoted"\n'])
+def test_unknown_custom_call_preserves_exact_input(custom_input: str) -> None:
+    history = [
+        {"type": "turn_context", "payload": {"turn_id": "original-turn"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "id": "original-item",
+                "call_id": "missing-custom-result",
+                "name": "apply_patch",
+                "input": custom_input,
+            },
+        },
+    ]
+    uncertain: list[UncertainCall] = []
+    _, items = project_history(history, "original-thread", uncertain_calls=uncertain)
+    (call,) = uncertain
+    assert call.arguments == custom_input
+    (item,) = items
+    assert item["type"] == "function_call"
+    assert item["arguments"] == custom_input
+
+    # The native event can replace the projected item and use the call ID
+    # as its item ID. Recovery still needs the original custom tool input.
+    native_arguments = {"normalized": True}
+    history.append(
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_started",
+                "turn_id": "original-turn",
+                "item": {
+                    "type": "DynamicToolCall",
+                    "id": "missing-custom-result",
+                    "tool": "apply_patch",
+                    "status": "in_progress",
+                    "arguments": native_arguments,
+                },
+            },
+        }
+    )
+    uncertain.clear()
+    _, items = project_history(history, "original-thread", uncertain_calls=uncertain)
+    (call,) = uncertain
+    assert call.arguments == custom_input
+    (item,) = items
+    assert item["type"] == "function_call"
+    assert item["arguments"] == native_arguments
+
+
+@pytest.mark.parametrize(
+    ("outcome", "native_start"), [("applied", False), ("applied", True), ("not_applied", True)]
+)
+async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(
+    responses, tmp_path, outcome, native_start
+):
+    responses.respond(function_call("record", {"key": "unknown-effect"}, "missing-receipt"))
+    mode = "unknown" if outcome == "applied" else "unknown-before-effect"
+    crashed = await _start(responses, tmp_path, mode)
+    code, rows, err = await _collect(crashed)
+    assert code == 67 and rows and "opened" in rows[0], (rows, err)
+    thread_id = rows[0]["opened"]
+    storage = LocalStorage(tmp_path / "profile")
+    if native_start:
+        # Keep the model call and add a native start without a matching completion.
+        (rollout,) = (tmp_path / "profile").rglob(f"*{thread_id}.jsonl")
+        history = [json.loads(line) for line in rollout.read_text().splitlines()]
+        context = next(row for row in reversed(history) if row["type"] == "turn_context")
+        with rollout.open("a") as stream:
+            stream.write(
+                json.dumps(
+                    {
+                        "timestamp": history[-1]["timestamp"],
+                        "ordinal": history[-1]["ordinal"] + 1,
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "item_started",
+                            "thread_id": thread_id,
+                            "turn_id": context["payload"]["turn_id"],
+                            "started_at_ms": 0,
+                            "item": {
+                                "type": "DynamicToolCall",
+                                "id": "missing-receipt",
+                                "tool": "record",
+                                "status": "in_progress",
+                                "arguments": {"key": "unknown-effect"},
+                            },
+                        },
+                    }
+                )
+                + "\n"
+            )
+    invoked = []
+
+    @function_tool
+    async def record(key: str) -> str:
+        """Record one application effect."""
+        invoked.append(key)
+        return key
+
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-reconciled-worker")
+    agent = Agent(instructions="Use record for requested work.", tools=[record], provider=provider)
+    async with timeout(40), provider:
+        with pytest.raises(LocalRecoveryRequired) as missing:
+            async with agent.session(storage=storage, resume=thread_id):
+                pytest.fail("Reopen accepted an unknown outcome")
+        (call,) = missing.value.calls
+        assert (call.thread_id, call.call_id, call.name) == (thread_id, "missing-receipt", "record")
+        assert call.arguments == {"key": "unknown-effect"}
+        if native_start:
+            (invocation,) = [
+                item for item in missing.value.items if item["type"] == "function_call"
+            ]
+            assert invocation["arguments"] == {"key": "unknown-effect"}
+        effects = tmp_path / "effects"
+        if outcome == "applied":
+            assert effects.read_text() == "unknown:unknown-effect\n"
+        else:
+            assert not effects.exists()
+        assert len(responses.requests) == 1
+
+        with pytest.raises(ValueError, match="confirmed outcome and a text result"):
+            call.reconcile(outcome="unknown", result="Outcome is still unknown")
+        with pytest.raises(ValueError, match="confirmed outcome and a text result"):
+            call.reconcile(outcome="applied", result={"confirmed": True})
+        confirmed = call.reconcile(outcome=outcome, result="Confirmed application record")
+        from_journal = ReconciledCall(
+            thread_id=thread_id,
+            turn_id=call.turn_id,
+            call_id=call.call_id,
+            outcome=outcome,
+            result="Confirmed application record",
+        )
+        assert confirmed == from_journal
+        # Repeating the same application receipt after a reconnect must be
+        # safe. The same native call ID must stay fenced across later opens.
+        for receipts in ([confirmed], [], [from_journal]):
+            async with agent.session(
+                storage=storage, resume=thread_id, reconciled_calls=receipts
+            ) as session:
+                recorded = [
+                    item
+                    async for item in session.items()
+                    if item["type"] == "function_call_output" and item["call_id"] == call.call_id
+                ]
+                assert len(recorded) == 1
+                assert recorded[0]["turn_id"] == call.turn_id
+                assert recorded[0]["reconciliation"] == outcome
+        assert len(responses.requests) == 1
+        responses.respond(function_call("record", {"key": "duplicate"}, call.call_id))
+        async with agent.session(storage=storage, resume=thread_id) as session:
+            reuse = await session.submit("Check the existing effect")
+            with pytest.raises(NativeError, match="Cannot reuse an original call identity"):
+                await reuse.get_result()
+        assert invoked == []
+        assert "Confirmed application record" in json.dumps(responses.requests[1]["input"])
 
 
 async def test_local_cannot_export_portable_state(responses, tmp_path):
