@@ -1819,6 +1819,7 @@ class Session(Generic[ContextT, OutputT]):
                     },
                     **({"_sdk_resume_thread_id": resume} if resume is not None else {}),
                     "_application_instructions": instructions,
+                    "_sdk_instruction_files": instruction_receipts,
                     "_manual_tool_slots": manual_slots,
                     **(
                         {
@@ -1826,7 +1827,6 @@ class Session(Generic[ContextT, OutputT]):
                                 role.name for role in native_agents.additional_roles
                             ],
                             "_native_agent_max_depth": native_agents.max_depth,
-                            "_native_agent_instruction_files": instruction_receipts,
                         }
                         if native_agents is not None
                         else {}
@@ -3351,6 +3351,7 @@ class Session(Generic[ContextT, OutputT]):
             options = json.loads(self._native_options)
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
+            options["_sdk_instruction_files"] = json.loads(change.options())["instruction_files"]
             opening = self._opening_agent.tools
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),

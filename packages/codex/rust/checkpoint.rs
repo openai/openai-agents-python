@@ -774,6 +774,7 @@ pub async fn restore(
         .as_deref()
         .map(|expected| crate::application_instructions::validate(&checkpoint.history, expected))
         .transpose()?;
+    let mut current_files = options.sdk_instruction_files.clone();
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
     // Snapshot data is not authority to enable model-facing goal tools. The
@@ -832,7 +833,9 @@ pub async fn restore(
     if initial_receipt.is_none() {
         if let Some(accepted) = application_instructions {
             startup.thread_extension_init.insert(
-                crate::application_instructions::Instructions::restored(accepted),
+                crate::application_instructions::Instructions::restored(
+                    accepted.with_current_files(current_files.take()),
+                ),
             );
         }
     }
@@ -922,7 +925,8 @@ pub async fn restore(
                 .map_err(anyhow::Error::msg)?;
         }
         if let Some(item) = initial_receipt {
-            crate::application_instructions::publish_item(&state.thread, item).await?;
+            crate::application_instructions::publish_item(&state.thread, item, current_files)
+                .await?;
         }
         anyhow::Ok(native)
     }
