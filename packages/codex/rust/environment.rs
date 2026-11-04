@@ -12,14 +12,14 @@ use codex_core::{
     config::validate_environment_network_policy, windows_sandbox::WindowsSandboxLevelExt,
 };
 use codex_core_api::{
-    AbsolutePathBuf, CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
+    CodexThread, CodexThreadSettingsOverrides, Config, EnvironmentManager,
     EnvironmentNetworkPolicy, NetworkDomainPermission, NetworkDomainPermissionEntry,
     NetworkDomainPermissions, NetworkProxySpec,
 };
 use codex_exec_server::{
     Environment, EnvironmentInfo, ExecParams, ExecProcessEvent, ExecServerError,
     ExecServerRuntimeOptions, FileSystemSandboxContext, GetMetadataOptions, LOCAL_ENVIRONMENT_ID,
-    ProcessId, REMOTE_ENVIRONMENT_ID, RemoteEnvironmentOptions,
+    LocalWriteRoots, ProcessId, REMOTE_ENVIRONMENT_ID, RemoteEnvironmentOptions,
 };
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
 use codex_protocol::config_types::{
@@ -705,6 +705,7 @@ async fn strict_write_profile(
             .iter()
             .map(PathUri::to_abs_path)
             .collect::<std::io::Result<Vec<_>>>()?;
+        let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
         if let Some(home) = storage_home {
             check_local_write_root_overlap(
@@ -753,7 +754,7 @@ async fn strict_write_profile(
 
 fn check_local_helper_write_roots(
     environment: &Environment,
-    roots: &[AbsolutePathBuf],
+    roots: &LocalWriteRoots<'_>,
 ) -> Result<()> {
     let paths = environment
         .local_runtime_paths()
@@ -774,9 +775,7 @@ fn check_local_helper_write_roots(
             let install = std::fs::canonicalize(install)
                 .map_err(|_| anyhow::anyhow!("could not verify the local executor helper path"))?;
             ensure!(
-                roots
-                    .iter()
-                    .all(|root| !root.as_path().starts_with(&install)),
+                !roots.has_root_at_or_below(&install)?,
                 "local executor writable roots must stay outside the native helper installation"
             );
         }
@@ -807,7 +806,7 @@ fn check_local_helper_write_roots(
             /*allow_missing*/ false,
             &|entry| {
                 ensure!(
-                    roots.iter().all(|root| !entry.starts_with(root.as_path())),
+                    !roots.contains_entry(entry)?,
                     "local executor writable roots must stay outside the native helper installation"
                 );
                 Ok(())
@@ -819,23 +818,15 @@ fn check_local_helper_write_roots(
 
 fn check_local_write_root_overlap(
     home: &Path,
-    roots: &[AbsolutePathBuf],
+    roots: &LocalWriteRoots<'_>,
     overlap: &str,
 ) -> Result<()> {
     let mut resolved = PathBuf::new();
     resolve_local_path(home, &mut resolved, &mut 40, true, &|entry| {
-        ensure!(
-            roots.iter().all(|root| !entry.starts_with(root.as_path())),
-            "{overlap}"
-        );
+        ensure!(!roots.contains_entry(entry)?, "{overlap}");
         Ok(())
     })?;
-    ensure!(
-        roots
-            .iter()
-            .all(|root| !root.as_path().starts_with(&resolved)),
-        "{overlap}"
-    );
+    ensure!(!roots.has_root_at_or_below(&resolved)?, "{overlap}");
     Ok(())
 }
 
@@ -1321,10 +1312,11 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn local_helper_refuses_a_writable_intermediate_symlink() -> anyhow::Result<()> {
+        use codex_core_api::AbsolutePathBuf;
         use std::fs;
         use std::os::unix::fs::symlink;
 
-        use super::{AbsolutePathBuf, EnvironmentManager, ExecServerRuntimeOptions};
+        use super::{EnvironmentManager, ExecServerRuntimeOptions, LocalWriteRoots};
 
         let fixture = tempfile::tempdir()?;
         let workspace = fixture.path().join("workspace");
@@ -1344,8 +1336,9 @@ mod tests {
         let environment = manager.try_local_environment().unwrap();
         let write_root = AbsolutePathBuf::try_from(workspace.canonicalize()?)?;
 
+        let roots = [write_root];
         assert_eq!(
-            super::check_local_helper_write_roots(&environment, &[write_root])
+            super::check_local_helper_write_roots(&environment, &LocalWriteRoots::new(&roots)?)
                 .unwrap_err()
                 .to_string(),
             "local executor writable roots must stay outside the native helper installation"

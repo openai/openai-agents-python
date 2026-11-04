@@ -121,9 +121,25 @@
       "sha256": "fbc98457cdfd3749088dbd32370eef5e1d3c4bc9fcbd7ca6ac3e9b4fb7cea713"
     },
     {
-      "path": "0031-stop-owned-auto-compaction.patch",
+      "path": "0031-protect-local-helper-mount-aliases.patch",
+      "sha256": "b269ec3e3a8d2a737494732696f4b9ecd94c2fbe0458c4a6eccdb543a6692059"
+    },
+    {
+      "path": "0032-join-published-linux-sandbox-shutdown.patch",
+      "sha256": "7222d3929d79347cd0e3822885d6e85a201a46eeebab45f80ada6a8be6aae564"
+    },
+    {
+      "path": "0033-confirm-darwin-terminal-release.patch",
+      "sha256": "7852dcd5333147fc4b5cca18cd865bda66d9c1f1ed83ca49c7776d6371f4ebd0"
+    },
+    {
+      "path": "0034-stop-owned-auto-compaction.patch",
       "sha256": "c4b0c94c11802793558a561f6afdd1fbbe1f3dd154fadc7bea435cda8687b2cb"
+    },
+    {
+      "path": "0035-sdk-provider-compaction-admission.patch",
+      "sha256": "922d61467fdac4dac29f2ae66e8d433740586ad4d20f3dc46cc3cece20481e2b"
     }
   ],
-  "result_tree": "c0e88964b0e1a3f10c0f76abbae73e5c6353d40f"
+  "result_tree": "1ad348f758e76831a0f4d25081f87aee2f4ca16c"
 }

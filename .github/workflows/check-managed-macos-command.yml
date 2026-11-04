@@ -24,12 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 18678197938664250c94ad585c791f484aed1295
+          ref: 4ae0b987da5ad27b30c8e4e6878c680cbc3224b0
           persist-credentials: false
       - name: Verify exact SDK checkout
         run: |
-          test "$(git rev-parse HEAD)" = '18678197938664250c94ad585c791f484aed1295'
-          test "$(git rev-parse HEAD^{tree})" = '9a9ba0f4002f46bbd8a554e6f906236a53c3c205'
+          test "$(git rev-parse HEAD)" = '4ae0b987da5ad27b30c8e4e6878c680cbc3224b0'
+          test "$(git rev-parse HEAD^{tree})" = '9c7c48dc1bbc94595919d36ceb0625b939d8ea0c'
           git show -s --format='%H %T %s' HEAD
       - name: Select shared Cargo directories
         run: |
@@ -224,6 +224,7 @@ jobs:
               'tests/test_native_executor_local.py',
               'tests/test_native_yielded_executor_owner.py',
               'tests/test_native_executor_policies.py::test_force_stop_fences_sampling_before_executor_result_settles',
+              'tests/test_native_compaction_admission.py::test_stop_during_compaction_setup_fences_provider_admission',
               'tests/test_supervised_worker_example.py::test_two_workers_revise_reconnect_recover_and_publish_once',
           ])
           if status:
@@ -233,7 +234,10 @@ jobs:
               'test_macos_local_command_cannot_delegate_execution_to_launchd',
               'test_local_write_root_replacement_survives_portable_resume',
               'test_turn_write_policy_and_reopen_checks_the_applied_policy',
+              'test_steer_twice_and_interrupt_running_local_command',
               'test_local_write_roots_cannot_overlap_native_runtime_home',
+              'test_stop_during_compaction_setup_fences_provider_admission[False]',
+              'test_stop_during_compaction_setup_fences_provider_admission[True]',
               'test_two_workers_revise_reconnect_recover_and_publish_once',
           }
           required.update(
