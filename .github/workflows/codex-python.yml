@@ -50,9 +50,10 @@ jobs:
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
-          # Match Maturin's existing ARM64 wheel minimum before compiling helpers.
+          # Match Maturin's macOS environment before compiling shared dependencies.
           if [[ "$RUNNER_OS" == macOS ]]; then
             echo "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}" >> "$GITHUB_ENV"
+            echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
           fi
       - name: Configure Linux dependency registries
         if: runner.os == 'Linux'
@@ -200,6 +201,42 @@ jobs:
               target /= Path(build_target).stem
           name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
           shutil.copy2(target / "release" / "examples" / name, Path("dist") / name)
+          PYTHON
+      - name: Verify macOS executable symbol resolution
+        if: runner.os == 'macOS'
+        run: |
+          python - <<'PYTHON'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          sys.path.insert(0, str(Path("packages/codex/scripts").resolve()))
+          from native_helpers import native_helpers
+
+          wheel, = Path("dist").glob("openai_agents-*.whl")
+          expected = {f"agents/bin/{name}" for name in native_helpers("darwin")}
+          with tempfile.TemporaryDirectory(prefix="agents-macos-symbols-") as directory:
+              with ZipFile(wheel) as archive:
+                  members = [info.filename for info in archive.infolist()
+                             if info.filename.startswith("agents/bin/") and not info.is_dir()]
+                  if set(members) != expected or len(members) != len(expected):
+                      raise SystemExit("Wheel executable inventory differs from native_helpers")
+                  products = []
+                  for member in sorted(expected):
+                      product = Path(directory) / Path(member).name
+                      product.write_bytes(archive.read(member))
+                      products.append(product)
+              products.append(Path("dist/exec-server-fixture"))
+              for product in products:
+                  if not product.is_file():
+                      raise SystemExit(f"Missing native executable: {product}")
+                  result = subprocess.run(["xcrun", "nm", "-m", "-u", str(product)],
+                                          capture_output=True, text=True, check=True)
+                  if "(dynamically looked up)" in result.stdout:
+                      raise SystemExit(f"Deferred symbols in {product.name}:\n{result.stdout}")
+                  print(f"Verified linked imports: {product.name}")
           PYTHON
       - name: Remove SDK outputs from the dependency cache
         if: steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true'

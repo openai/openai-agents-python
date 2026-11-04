@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from zipfile import ZipFile
 
 import pytest
 import yaml
@@ -115,16 +116,28 @@ def test_native_dependency_cache_saves_only_in_selected_scopes(
 
 
 @pytest.mark.parametrize(
-    ("platform", "override", "expected"),
+    ("platform", "override", "rustflags", "expected", "expected_flags"),
     [
-        ("macOS", None, "11.0"),
-        ("macOS", "14.0", "14.0"),
-        ("Linux", None, None),
-        ("Windows", None, None),
+        ("macOS", None, None, "11.0", "-C link-arg=-undefined -C link-arg=dynamic_lookup"),
+        ("macOS", "14.0", None, "14.0", "-C link-arg=-undefined -C link-arg=dynamic_lookup"),
+        (
+            "macOS",
+            None,
+            "-C debuginfo=1",
+            "11.0",
+            "-C debuginfo=1 -C link-arg=-undefined -C link-arg=dynamic_lookup",
+        ),
+        ("Linux", None, "-C debuginfo=1", None, None),
+        ("Windows", None, None, None, None),
     ],
 )
-def test_native_ci_selects_shared_macos_deployment_target(
-    tmp_path: Path, platform: str, override: str | None, expected: str | None
+def test_native_ci_selects_shared_macos_build_environment(
+    tmp_path: Path,
+    platform: str,
+    override: str | None,
+    rustflags: str | None,
+    expected: str | None,
+    expected_flags: str | None,
 ) -> None:
     selection = next(
         step for step in _steps() if step.get("name") == "Select shared Cargo directories"
@@ -132,14 +145,79 @@ def test_native_ci_selects_shared_macos_deployment_target(
     output = tmp_path / "environment"
     env = os.environ.copy()
     env.pop("MACOSX_DEPLOYMENT_TARGET", None)
+    env.pop("RUSTFLAGS", None)
     env.update(RUNNER_OS=platform, RUNNER_TEMP=str(tmp_path), GITHUB_ENV=str(output))
     if override is not None:
         env["MACOSX_DEPLOYMENT_TARGET"] = override
+    if rustflags is not None:
+        env["RUSTFLAGS"] = rustflags
     subprocess.run(
         [workflow_bash(ROOT), "-e", "-c", selection["run"]], env=env, check=True, timeout=30
     )
     selected = dict(line.split("=", 1) for line in output.read_text().splitlines())
     assert selected.get("MACOSX_DEPLOYMENT_TARGET") == expected
+    assert selected.get("RUSTFLAGS") == expected_flags
+
+
+@pytest.mark.parametrize(
+    "scenario", ["linked", "deferred", "tool_error", "missing_helper", "missing_executor"]
+)
+def test_native_macos_rejects_deferred_executable_symbols(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str
+) -> None:
+    monkeypatch.syspath_prepend(str(ROOT / "packages/codex/scripts"))
+    from native_helpers import native_helpers
+
+    monkeypatch.chdir(tmp_path)
+    helpers = set(native_helpers("darwin"))
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    with ZipFile(dist / "openai_agents-fixture.whl", "w") as archive:
+        for helper in helpers:
+            if scenario != "missing_helper" or helper != "codex-code-mode-host":
+                archive.writestr(f"agents/bin/{helper}", "synthetic executable")
+    if scenario != "missing_executor":
+        (dist / "exec-server-fixture").write_text("synthetic executor")
+    checked = []
+
+    def nm(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert command[:4] == ["xcrun", "nm", "-m", "-u"]
+        assert kwargs["check"] is True
+        product = Path(command[4])
+        assert product.read_text().startswith("synthetic")
+        checked.append(product.name)
+        if scenario == "tool_error":
+            raise subprocess.CalledProcessError(1, command, stderr="nm failed")
+        symbols = "                 (undefined) external _puts (from libSystem)\n"
+        if scenario == "deferred" and product.name == "codex-execve-wrapper":
+            symbols += "                 (undefined) external _missing (dynamically looked up)\n"
+        return subprocess.CompletedProcess(command, 0, stdout=symbols, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", nm)
+    steps = _steps()
+    index = next(
+        i
+        for i, step in enumerate(steps)
+        if step.get("name") == "Verify macOS executable symbol resolution"
+    )
+    assert steps[index]["if"] == "runner.os == 'macOS'"
+    assert steps[index - 1]["name"] == "Build the shared test executor"
+    assert steps[index + 1]["name"] == "Remove SDK outputs from the dependency cache"
+    script = steps[index]["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
+    if scenario == "tool_error":
+        with pytest.raises(subprocess.CalledProcessError):
+            exec(compile(script, "macos-symbol-check", "exec"), {})
+    elif scenario != "linked":
+        expected = {
+            "deferred": "Deferred symbols in codex-execve-wrapper",
+            "missing_helper": "Wheel executable inventory differs",
+            "missing_executor": "Missing native executable",
+        }[scenario]
+        with pytest.raises(SystemExit, match=expected):
+            exec(compile(script, "macos-symbol-check", "exec"), {})
+    else:
+        exec(compile(script, "macos-symbol-check", "exec"), {})
+        assert set(checked) == helpers | {"exec-server-fixture"}
 
 
 @pytest.mark.parametrize(
