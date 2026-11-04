@@ -89,6 +89,8 @@ fn json_text<S: serde::Serializer>(value: &Value, serializer: S) -> Result<S::Ok
 // Borrow every potentially large field until its measured lease exists.
 #[derive(Serialize)]
 struct Request<'a, I, R, K> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tracing_context: Option<&'a str>,
     // Only a native capture confers turn authority; never serialize it to Python.
     #[serde(skip)]
     owner: Option<&'a Arc<DirectTurn>>,
@@ -1564,7 +1566,9 @@ impl StartedExec {
                 ..
             } => (cell_id, content_items),
         };
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
         let request = Request {
+            tracing_context: tracing.as_ref().map(|context| context.token()),
             owner: Some(&self.turn),
             phase: "after",
             route: "code_mode",
@@ -2327,7 +2331,9 @@ impl DirectRequest {
             // web/image, missing ids and malformed search are not client calls.
             _ => return Ok((item, false, None)),
         };
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
         let request = Request {
+            tracing_context: tracing.as_ref().map(|context| context.token()),
             owner: Some(&self.owner),
             phase: "before",
             route: "direct",
@@ -2625,7 +2631,9 @@ impl ToolLifecycleContributor for Boundary {
             if route == "code_mode" && input.outer_call_id.is_none() {
                 return Err(());
             }
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
             let request = Request {
+                tracing_context: tracing.as_ref().map(|context| context.token()),
                 owner: Some(&owner),
                 phase: "after",
                 route,
@@ -2830,7 +2838,9 @@ impl ToolLifecycleContributor for Boundary {
             };
             let original = std::mem::replace(input.result, crate::mcp_result_control::withheld());
             let tool = input.mcp_tool.tool_info();
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
             let request = Request {
+                tracing_context: tracing.as_ref().map(|context| context.token()),
                 owner: Some(&owner),
                 phase: "after",
                 route: "mcp",
@@ -3599,7 +3609,9 @@ impl CodeModeSessionDelegate for Delegate {
                     .and_then(|rules| rules.track(&self.turn.id, &invocation));
                 return self.inner.invoke_tool(invocation, cancellation_token).await;
             };
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
             let request = Request {
+                tracing_context: tracing.as_ref().map(|context| context.token()),
                 owner: Some(&self.turn),
                 phase: "before",
                 route: "code_mode",
@@ -3667,7 +3679,9 @@ impl CodeModeSessionDelegate for Delegate {
             if early_builtin_result {
                 return control.publish_result(&self.turn, Some(&cancellation_token), || result);
             }
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
             let request = Request {
+                tracing_context: tracing.as_ref().map(|context| context.token()),
                 owner: Some(&self.turn),
                 phase: "after",
                 route: "code_mode",
@@ -3884,7 +3898,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for Executor {
             let ToolPayload::Function { arguments } = &payload else {
                 unreachable!()
             };
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
             let request = Request {
+                tracing_context: tracing.as_ref().map(|context| context.token()),
                 // This extension's existing post-effect projection is not a
                 // public before policy and cannot confer StopTurn authority.
                 owner: None,
@@ -4979,7 +4995,9 @@ pub(crate) mod tests {
             meta: Some(json!({"fixture":"shared"})),
         };
         let arguments = json!({"query":"escaped\n\t\"and backslash\\"});
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
         let request = Request {
+            tracing_context: tracing.as_ref().map(|context| context.token()),
             owner: None,
             phase: "after",
             route: "mcp",
@@ -5026,7 +5044,9 @@ pub(crate) mod tests {
             meta: Some(json!({"marker":"ordinary\nmetadata"})),
         };
         let arguments = json!({"query":"a\nb\"c\\tail"});
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
         let request = Request {
+            tracing_context: tracing.as_ref().map(|context| context.token()),
             owner: None,
             phase: "after",
             route: "mcp",
@@ -6153,6 +6173,7 @@ pub(crate) mod tests {
         name: &'a str,
     ) -> Request<'a, (), (), &'static str> {
         Request {
+            tracing_context: None,
             owner: Some(owner),
             phase: "before",
             route: "code_mode",
@@ -7062,6 +7083,7 @@ pub(crate) mod tests {
         let arguments = json!({});
         let mut after = Box::pin(control.decide(
             Request {
+                tracing_context: None,
                 owner: Some(&owner),
                 phase: "after",
                 route: "mcp",

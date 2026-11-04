@@ -385,6 +385,7 @@ enum Phase {
 }
 
 struct PendingCall {
+    _tracing: Option<codex_otel::sdk_trace::ContextLease>,
     invocation: u64,
     manual_request: Option<Value>,
     sender: oneshot::Sender<DynamicToolResponse>,
@@ -1929,7 +1930,8 @@ impl PythonTools {
                 runtime_tool_call_id,
             } => json!({"cell_id": cell_id, "nested_call_id": runtime_tool_call_id}),
         };
-        let request = json!({
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
+        let mut request = json!({
             "id": call,
             "msg": {
                 "type":"dynamic_tool_call_request", "turnId": turn, "callId": call,
@@ -1939,6 +1941,9 @@ impl PythonTools {
                 "_sdk_code_origin": code_origin, "_sdk_model": model
             }
         });
+        if let Some(context) = &tracing {
+            request["msg"]["tracing_context"] = json!(context.token());
+        }
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("Python replies poisoned");
@@ -1946,6 +1951,7 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    _tracing: tracing,
                     invocation,
                     manual_request: entry.manual.then(|| request.clone()),
                     sender,
@@ -2781,13 +2787,22 @@ impl ToolContributor for PythonContributor {
                 .read()
                 .expect("Step defaults poisoned")
                 .clone();
-            tools.family.requests.send(QueuedRequest::Step(json!({
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
+            let mut request = json!({
                 "id": turn.level_id(),
                 "msg": {"type": "_sdk_select_step", "turn_id": turn.level_id(),
                     "thread": thread.level_id(), "instance": tools.instance,
                     "step_id": id, "generation": tools.snapshot().id,
                     "native_step": step.level_id(), "candidates": candidates, "defaults": defaults}
-            }))).map_err(|_| "Step reader closed")?;
+            });
+            if let Some(context) = &tracing {
+                request["msg"]["tracing_context"] = json!(context.token());
+            }
+            tools
+                .family
+                .requests
+                .send(QueuedRequest::Step(request))
+                .map_err(|_| "Step reader closed")?;
             let names = receive
                 .await
                 .map_err(|_| "Step selection cancelled")?

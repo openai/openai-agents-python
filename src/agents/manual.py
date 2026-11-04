@@ -253,6 +253,7 @@ class ActionRequested(Generic[InputT, ResultT]):
     _slot: int = field(repr=False)
     _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)
     call: ToolCallInfo
+    _tracing_context: str | None = field(default=None, init=False, repr=False, compare=False)
 
     def __new__(cls) -> ActionRequested[InputT, ResultT]:
         raise TypeError("ActionRequested values are issued by a live native Session")
@@ -830,6 +831,7 @@ class _CapturedManual:
         code_origin: dict[str, Any] | None,
         *,
         model: str | None = None,
+        tracing_context: str | None = None,
     ) -> ActionRequested[Any, Any]:
         from .native_agents import ChildInvocation
         from .tools import ToolCallInfo
@@ -866,6 +868,7 @@ class _CapturedManual:
             "_invocation": invocation,
             "_slot": slot,
             "_session": ref(session),
+            "_tracing_context": tracing_context,
         }.items():
             object.__setattr__(request, key, value)
         return request

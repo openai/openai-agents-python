@@ -475,6 +475,8 @@ async fn start_turn(thread: &CodexThread, value: Value) -> Result<Value> {
 }
 
 pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
+    let mut value = value;
+    codex_otel::sdk_trace::prepare_submission(&mut value).map_err(anyhow::Error::msg)?;
     let mut mutation = Some(state.mutations.lock().await);
     let thread = &state.thread;
     let mut p: TurnParams = decode(value)?;

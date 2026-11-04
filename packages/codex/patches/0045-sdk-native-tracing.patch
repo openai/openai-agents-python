@@ -1,0 +1,3062 @@
+diff --git a/codex-rs/code-mode-host/src/main.rs b/codex-rs/code-mode-host/src/main.rs
+index fb205fc1bf57c3679833bdca67bfa9ae671f6421..a58342e073db4a2ed329ffb5bcd8e4c6e0c1b06d 100644
+--- a/codex-rs/code-mode-host/src/main.rs
++++ b/codex-rs/code-mode-host/src/main.rs
+@@ -90,6 +90,7 @@ async fn main() -> anyhow::Result<()> {
+ 
+ fn build_trace_provider(endpoint: &str) -> anyhow::Result<OtelProvider> {
+     OtelProvider::try_new(&OtelSettings {
++        trace_processors: false,
+         http_client_factory: codex_http_client::HttpClientFactory::new(
+             codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+         ),
+diff --git a/codex-rs/config/src/types.rs b/codex-rs/config/src/types.rs
+index fab6fb2e95e9a97b1d363bc8114508f43a3abb51..dafb7f8c18e8c6837b348c7a42117547672eed09 100644
+--- a/codex-rs/config/src/types.rs
++++ b/codex-rs/config/src/types.rs
+@@ -639,6 +639,10 @@ pub struct OtelConfigToml {
+     /// Optional trace exporter
+     pub trace_exporter: Option<OtelExporterKind>,
+ 
++    /// Enable SDK lifecycle processors without a default trace exporter.
++    #[serde(default)]
++    pub trace_processors: bool,
++
+     /// Optional metrics exporter
+     pub metrics_exporter: Option<OtelExporterKind>,
+ 
+@@ -659,6 +663,7 @@ pub struct OtelConfig {
+     pub environment: String,
+     pub exporter: OtelExporterKind,
+     pub trace_exporter: OtelExporterKind,
++    pub trace_processors: bool,
+     pub metrics_exporter: OtelExporterKind,
+     pub span_attributes: BTreeMap<String, String>,
+     pub tracestate: BTreeMap<String, BTreeMap<String, String>>,
+@@ -674,6 +679,7 @@ impl Default for OtelConfig {
+             environment: DEFAULT_OTEL_ENVIRONMENT.to_owned(),
+             exporter: OtelExporterKind::None,
+             trace_exporter: OtelExporterKind::None,
++            trace_processors: false,
+             metrics_exporter: OtelExporterKind::Statsig,
+             span_attributes: BTreeMap::new(),
+             tracestate: BTreeMap::new(),
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index b832da2f807b1ad588207d1ece4c88e8b9b641a1..c9048b602ee923ee84d38255218d567cd06b03bd 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -3428,6 +3428,11 @@
+           ],
+           "description": "Optional trace exporter"
+         },
++        "trace_processors": {
++          "default": false,
++          "description": "Enable SDK lifecycle processors without a default trace exporter.",
++          "type": "boolean"
++        },
+         "tracestate": {
+           "additionalProperties": {
+             "additionalProperties": {
+diff --git a/codex-rs/core/src/config/otel.rs b/codex-rs/core/src/config/otel.rs
+index 1d0636e993fbda1abf430e37698da43444aada7c..d2f8dd11e1a4c6481ecb4f7d3a0c7b46b232e71c 100644
+--- a/codex-rs/core/src/config/otel.rs
++++ b/codex-rs/core/src/config/otel.rs
+@@ -33,6 +33,7 @@ pub(crate) fn resolve_config(
+         environment,
+         exporter,
+         trace_exporter,
++        trace_processors: config.trace_processors,
+         metrics_exporter,
+         span_attributes,
+         tracestate,
+diff --git a/codex-rs/core/src/otel_init.rs b/codex-rs/core/src/otel_init.rs
+index bd9df090ff431c253cbed84dd6fc36cd01c3480b..6e294102162b2bf257051daaefc58d2b36476806 100644
+--- a/codex-rs/core/src/otel_init.rs
++++ b/codex-rs/core/src/otel_init.rs
+@@ -88,6 +88,7 @@ pub fn build_provider(
+         environment: config.otel.environment.to_string(),
+         exporter,
+         trace_exporter,
++        trace_processors: config.otel.trace_processors,
+         metrics_exporter,
+         runtime_metrics,
+         span_attributes: config.otel.span_attributes.clone(),
+diff --git a/codex-rs/core/tests/suite/skills_extension.rs b/codex-rs/core/tests/suite/skills_extension.rs
+index 5b3bea22364a67a0d145c21460c2bba17e20cfc9..ced988a4e0d64f5ef326b40ad8d9428706bfad8c 100644
+--- a/codex-rs/core/tests/suite/skills_extension.rs
++++ b/codex-rs/core/tests/suite/skills_extension.rs
+@@ -2193,6 +2193,7 @@ async fn assert_catalog_model_switch(max_context_tokens: Option<usize>) -> Resul
+         codex_home: codex_home.path().to_path_buf(),
+         exporter: OtelExporter::None,
+         trace_exporter: OtelExporter::None,
++        trace_processors: false,
+         metrics_exporter: OtelExporter::OtlpHttp {
+             endpoint: format!("{}/metrics", server.uri()),
+             headers: Default::default(),
+diff --git a/codex-rs/exec-server/src/server/process_otel_tests.rs b/codex-rs/exec-server/src/server/process_otel_tests.rs
+index 93638142d87a27c63e693eb9f0cfd94de147dd60..d0fdd3f053e93998f4e9c0b69cd896fb7714ca3e 100644
+--- a/codex-rs/exec-server/src/server/process_otel_tests.rs
++++ b/codex-rs/exec-server/src/server/process_otel_tests.rs
+@@ -622,6 +622,7 @@ fn exported_logs(
+         tls: None,
+     };
+     let otel = OtelProvider::try_new(&OtelSettings {
++        trace_processors: false,
+         http_client_factory: codex_http_client::HttpClientFactory::new(
+             codex_http_client::OutboundProxyPolicy::ReqwestDefault,
+         ),
+diff --git a/codex-rs/otel/src/agent_response.rs b/codex-rs/otel/src/agent_response.rs
+index c7164e1f2046752a59244d9cad096369cf57ba97..dd2e04d511db456907357d7f91728420fcd55cee 100644
+--- a/codex-rs/otel/src/agent_response.rs
++++ b/codex-rs/otel/src/agent_response.rs
+@@ -41,6 +41,9 @@ impl AgentResponseLogger {
+         item: &ResponseItem,
+         context: AgentResponseContext<'_>,
+     ) {
++        if !crate::sdk_trace::scoped_capture_allowed() {
++            return;
++        }
+         let ResponseItem::Message {
+             id: Some(item_id),
+             role,
+diff --git a/codex-rs/otel/src/config.rs b/codex-rs/otel/src/config.rs
+index 69ad3b62d1da5185da30ed8b9187a7db1aa1898e..75ef2a550f22fb5cc098a6eeec759f8d4b2530db 100644
+--- a/codex-rs/otel/src/config.rs
++++ b/codex-rs/otel/src/config.rs
+@@ -56,6 +56,7 @@ pub struct OtelSettings {
+     pub codex_home: PathBuf,
+     pub exporter: OtelExporter,
+     pub trace_exporter: OtelExporter,
++    pub trace_processors: bool,
+     pub metrics_exporter: OtelExporter,
+     pub runtime_metrics: bool,
+     pub span_attributes: BTreeMap<String, String>,
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index 352265d9ea21f7e0812708888c1cedb90f30687c..65ef06bfe990e6b7dc69a717aea9dd745695c006 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -761,7 +761,7 @@ impl SessionTelemetry {
+                 event.name = "codex.api_request",
+                 duration_ms = %duration.as_millis(),
+                 http.response.status_code = status,
+-                error.message = error,
++                error.message = crate::sdk_trace::sensitive_optional(error),
+                 attempt = attempt,
+                 auth.header_attached = auth_header_attached,
+                 auth.header_name = auth_header_name,
+@@ -777,7 +777,7 @@ impl SessionTelemetry {
+                 auth.env_refresh_token_url_override_present = self.metadata.auth_env.refresh_token_url_override_present,
+                 auth.request_id = request_id,
+                 auth.cf_ray = cf_ray,
+-                auth.error = auth_error,
++                auth.error = crate::sdk_trace::sensitive_optional(auth_error),
+                 auth.error_code = auth_error_code,
+                 auth.agent_id = agent_identity_telemetry.map(|metadata| metadata.agent_id.as_str()),
+                 auth.task_id = agent_identity_telemetry.map(|metadata| metadata.task_id.as_str()),
+@@ -818,7 +818,7 @@ impl SessionTelemetry {
+                 duration_ms = %duration.as_millis(),
+                 http.response.status_code = status,
+                 success = success_str,
+-                error.message = error,
++                error.message = crate::sdk_trace::sensitive_optional(error),
+                 auth.header_attached = auth_header_attached,
+                 auth.header_name = auth_header_name,
+                 auth.retry_after_unauthorized = retry_after_unauthorized,
+@@ -834,7 +834,7 @@ impl SessionTelemetry {
+                 auth.connection_reused = connection_reused,
+                 auth.request_id = request_id,
+                 auth.cf_ray = cf_ray,
+-                auth.error = auth_error,
++                auth.error = crate::sdk_trace::sensitive_optional(auth_error),
+                 auth.error_code = auth_error_code,
+                 auth.agent_id = agent_identity_telemetry.map(|metadata| metadata.agent_id.as_str()),
+                 auth.task_id = agent_identity_telemetry.map(|metadata| metadata.task_id.as_str()),
+@@ -868,7 +868,7 @@ impl SessionTelemetry {
+                 event.name = "codex.websocket_request",
+                 duration_ms = %duration.as_millis(),
+                 success = success_str,
+-                error.message = error,
++                error.message = crate::sdk_trace::sensitive_optional(error),
+                 auth.env_openai_api_key_present = self.metadata.auth_env.openai_api_key_env_present,
+                 auth.env_codex_api_key_present = self.metadata.auth_env.codex_api_key_env_present,
+                 auth.env_codex_api_key_enabled = self.metadata.auth_env.codex_api_key_env_enabled,
+@@ -906,7 +906,7 @@ impl SessionTelemetry {
+                 auth.outcome = outcome,
+                 auth.request_id = request_id,
+                 auth.cf_ray = cf_ray,
+-                auth.error = auth_error,
++                auth.error = crate::sdk_trace::sensitive_optional(auth_error),
+                 auth.error_code = auth_error_code,
+                 auth.recovery_reason = recovery_reason,
+                 auth.state_changed = auth_state_changed,
+@@ -1067,13 +1067,13 @@ impl SessionTelemetry {
+                 event.name = "codex.sse_event",
+                 event.kind = %kind,
+                 duration_ms = %duration.as_millis(),
+-                error.message = %error,
++                error.message = %crate::sdk_trace::sensitive_display(error),
+             ),
+             None => log_event!(
+                 self,
+                 event.name = "codex.sse_event",
+                 duration_ms = %duration.as_millis(),
+-                error.message = %error,
++                error.message = %crate::sdk_trace::sensitive_display(error),
+             ),
+         }
+         trace_event!(
+@@ -1081,7 +1081,7 @@ impl SessionTelemetry {
+             event.name = "codex.sse_event",
+             event.kind = %kind_str,
+             duration_ms = %duration.as_millis(),
+-            error.message = %error,
++            error.message = %crate::sdk_trace::sensitive_display(error),
+         );
+     }
+ 
+@@ -1094,7 +1094,7 @@ impl SessionTelemetry {
+             common: {
+                 event.name = "codex.sse_event",
+                 event.kind = %"response.completed",
+-                error.message = %error,
++                error.message = %crate::sdk_trace::sensitive_display(error),
+             },
+             log: {},
+             trace: {},
+@@ -1123,13 +1123,23 @@ impl SessionTelemetry {
+     }
+ 
+     pub fn user_prompt(&self, items: &[UserInput]) {
+-        let prompt = items
++        let prompt_length = items
+             .iter()
+-            .flat_map(|item| match item {
+-                UserInput::Text { text, .. } => Some(text.as_str()),
+-                _ => None,
++            .map(|item| match item {
++                UserInput::Text { text, .. } => text.chars().count(),
++                _ => 0,
+             })
+-            .collect::<String>();
++            .sum::<usize>();
++        let prompt = (self.metadata.log_user_prompts && crate::sdk_trace::scoped_capture_allowed())
++            .then(|| {
++                items
++                    .iter()
++                    .filter_map(|item| match item {
++                        UserInput::Text { text, .. } => Some(text.as_str()),
++                        _ => None,
++                    })
++                    .collect::<String>()
++            });
+         let text_input_count = items
+             .iter()
+             .filter(|item| matches!(item, UserInput::Text { .. }))
+@@ -1143,22 +1153,18 @@ impl SessionTelemetry {
+             .filter(|item| matches!(item, UserInput::LocalImage { .. }))
+             .count();
+ 
+-        let prompt_to_log = if self.metadata.log_user_prompts {
+-            prompt.as_str()
+-        } else {
+-            "[REDACTED]"
+-        };
++        let prompt_to_log = prompt.as_deref().unwrap_or("[REDACTED]");
+ 
+         log_event!(
+             self,
+             event.name = "codex.user_prompt",
+-            prompt_length = %prompt.chars().count(),
++            prompt_length = %prompt_length,
+             prompt = %prompt_to_log,
+         );
+         trace_event!(
+             self,
+             event.name = "codex.user_prompt",
+-            prompt_length = %prompt.chars().count(),
++            prompt_length = %prompt_length,
+             text_input_count = text_input_count as i64,
+             image_input_count = image_input_count as i64,
+             local_image_input_count = local_image_input_count as i64,
+diff --git a/codex-rs/otel/src/events/shared.rs b/codex-rs/otel/src/events/shared.rs
+index f962e828c42373d96825a63b08ab2e38af2f6dc5..576c1e83cf16e5fa214f578814a14caf00279013 100644
+--- a/codex-rs/otel/src/events/shared.rs
++++ b/codex-rs/otel/src/events/shared.rs
+@@ -13,6 +13,7 @@ pub(crate) fn tool_namespace(tool_name: &ToolName) -> &str {
+ 
+ macro_rules! log_event {
+     ($self:expr, $($fields:tt)*) => {{
++        if $crate::sdk_trace::scoped_capture_allowed() {
+         tracing::event!(
+             target: $crate::targets::OTEL_LOG_ONLY_TARGET,
+             tracing::Level::INFO,
+@@ -28,11 +29,13 @@ macro_rules! log_event {
+             model = %$self.metadata.model,
+             slug = %$self.metadata.slug,
+         );
++        }
+     }};
+ }
+ 
+ macro_rules! trace_event {
+     ($self:expr, $($fields:tt)*) => {{
++        if $crate::sdk_trace::scoped_trace_enabled() {
+         tracing::event!(
+             target: $crate::targets::OTEL_TRACE_SAFE_TARGET,
+             tracing::Level::INFO,
+@@ -46,6 +49,7 @@ macro_rules! trace_event {
+             model = %$self.metadata.model,
+             slug = %$self.metadata.slug,
+         );
++        }
+     }};
+ }
+ 
+diff --git a/codex-rs/otel/src/lib.rs b/codex-rs/otel/src/lib.rs
+index 690fdd9094decfb1c1a99ca2164534192697b550..51f5dd4ce9246eed52d86fe9bd1596a268f48087 100644
+--- a/codex-rs/otel/src/lib.rs
++++ b/codex-rs/otel/src/lib.rs
+@@ -10,6 +10,9 @@ mod guardian_assessment;
+ mod network_policy;
+ mod otlp;
+ mod skill_invocation;
++pub mod sdk_trace;
++pub mod sdk_trace_routes;
++
+ mod targets;
+ mod tool_result;
+ 
+diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
+index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e241b160d 100644
+--- a/codex-rs/otel/src/provider.rs
++++ b/codex-rs/otel/src/provider.rs
+@@ -28,15 +28,13 @@ use opentelemetry_sdk::Resource;
+ use opentelemetry_sdk::error::OTelSdkResult;
+ use opentelemetry_sdk::logs::SdkLoggerProvider;
+ use opentelemetry_sdk::propagation::TraceContextPropagator;
+-use opentelemetry_sdk::runtime;
+-use opentelemetry_sdk::trace::BatchSpanProcessor;
+ use opentelemetry_sdk::trace::SdkTracerProvider;
+ use opentelemetry_sdk::trace::Span;
+ use opentelemetry_sdk::trace::SpanData;
++use opentelemetry_sdk::trace::SpanExporter as _;
+ use opentelemetry_sdk::trace::SpanProcessor;
+ use opentelemetry_sdk::trace::Tracer;
+ use opentelemetry_sdk::trace::TracerProviderBuilder;
+-use opentelemetry_sdk::trace::span_processor_with_async_runtime::BatchSpanProcessor as TokioBatchSpanProcessor;
+ use opentelemetry_semantic_conventions as semconv;
+ use std::collections::BTreeMap;
+ use std::error::Error;
+@@ -45,6 +43,7 @@ use std::mem::ManuallyDrop;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ use std::sync::mpsc;
++use std::sync::{Arc, Mutex};
+ use std::time::Duration;
+ use tracing::debug;
+ use tracing_subscriber::Layer;
+@@ -84,10 +83,10 @@ struct GlobalTracer {
+ }
+ 
+ impl opentelemetry::trace::Tracer for GlobalTracer {
+-    type Span = global::BoxedSpan;
++    type Span = crate::sdk_trace::ScopedSpan;
+ 
+     fn build_with_context(&self, builder: SpanBuilder, parent: &Context) -> Self::Span {
+-        global::tracer(self.service_name).build_with_context(builder, parent)
++        crate::sdk_trace::build_span(self.service_name, builder, parent)
+     }
+ }
+ 
+@@ -109,6 +108,80 @@ impl OtelProvider {
+         }
+     }
+ 
++    /// Flush completed records without retiring this provider or closing Sessions.
++    pub async fn force_flush_with_timeout(
++        &self,
++        timeout: Duration,
++    ) -> crate::sdk_trace_routes::FlushResult {
++        use crate::sdk_trace_routes as routes;
++        static FLUSH_RUNNING: AtomicBool = AtomicBool::new(false);
++        static FLUSH_ACTIVE: AtomicBool = AtomicBool::new(false);
++        let barrier = routes::current_barrier();
++        let deadline = std::time::Instant::now() + timeout;
++        if self.shutdown_started.load(Ordering::Acquire) {
++            return routes::result(barrier, "failure");
++        }
++        if FLUSH_ACTIVE
++            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
++            .is_err()
++        {
++            return routes::result(barrier, "failure");
++        }
++        struct ActiveFlush;
++        impl Drop for ActiveFlush {
++            fn drop(&mut self) {
++                FLUSH_ACTIVE.store(false, Ordering::Release);
++            }
++        }
++        let _active = ActiveFlush;
++        if FLUSH_RUNNING
++            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
++            .is_err()
++        {
++            return routes::result(barrier, "failure");
++        }
++        let barrier = routes::capture_barrier();
++        let tracer = self.tracer_provider.clone();
++        let logger = self.logger.clone();
++        let (tx, rx) = tokio::sync::oneshot::channel();
++        let spawned = std::thread::Builder::new()
++            .name("codex-otel-flush".into())
++            .spawn(move || {
++                struct Reset;
++                impl Drop for Reset {
++                    fn drop(&mut self) {
++                        FLUSH_RUNNING.store(false, Ordering::Release);
++                    }
++                }
++                let _reset = Reset;
++                let mut success = true;
++                if let Some(provider) = tracer {
++                    success &= provider.force_flush().is_ok();
++                }
++                if let Some(provider) = logger {
++                    success &= provider.force_flush().is_ok();
++                }
++                let _ = tx.send(success);
++            });
++        if spawned.is_err() {
++            FLUSH_RUNNING.store(false, Ordering::Release);
++            return routes::result(barrier, "failure");
++        }
++        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
++        let status = match tokio::time::timeout(remaining, rx).await {
++            Ok(Ok(true)) => {
++                if routes::wait_for_barrier(barrier, deadline).await {
++                    "success"
++                } else {
++                    "timeout"
++                }
++            }
++            Ok(_) => "failure",
++            Err(_) => "timeout",
++        };
++        routes::result(barrier, status)
++    }
++
+     /// Starts the detached shutdown worker before shutdown-time resource pressure.
+     fn prepare_shutdown_worker(&mut self) -> io::Result<()> {
+         self.prepare_shutdown_worker_with_spawner(|startup| {
+@@ -193,7 +266,8 @@ impl OtelProvider {
+ 
+     pub fn try_new(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
+         let log_enabled = !matches!(settings.exporter, OtelExporter::None);
+-        let trace_enabled = !matches!(settings.trace_exporter, OtelExporter::None);
++        let trace_enabled =
++            settings.trace_processors || !matches!(settings.trace_exporter, OtelExporter::None);
+         let metric_exporter = crate::config::resolve_exporter(&settings.metrics_exporter);
+         let metrics_enabled = !matches!(metric_exporter, OtelExporter::None);
+ 
+@@ -405,7 +479,9 @@ fn tracer_provider_builder(
+     resource: &Resource,
+     span_attributes: BTreeMap<String, String>,
+ ) -> TracerProviderBuilder {
+-    let builder = SdkTracerProvider::builder().with_resource(resource.clone());
++    let builder = SdkTracerProvider::builder()
++        .with_sampler(crate::sdk_trace::ScopeSampler::default())
++        .with_resource(resource.clone());
+     if span_attributes.is_empty() {
+         builder
+     } else {
+@@ -424,6 +500,17 @@ struct SpanAttributesProcessor {
+     attributes: BTreeMap<String, String>,
+ }
+ 
++impl crate::sdk_trace_routes::RouteSink for SpanAttributesProcessor {
++    fn enqueue(
++        &self,
++        _: SpanData,
++        _: Option<Arc<crate::sdk_trace_routes::TraceCredentials>>,
++        _: u64,
++    ) -> bool {
++        true
++    }
++}
++
+ impl SpanProcessor for SpanAttributesProcessor {
+     fn on_start(&self, span: &mut Span, _cx: &Context) {
+         for (key, value) in self.attributes.iter() {
+@@ -531,8 +618,62 @@ fn build_tracer_provider(
+     span_attributes: BTreeMap<String, String>,
+     factory: &codex_http_client::HttpClientFactory,
+ ) -> Result<SdkTracerProvider, Box<dyn Error>> {
++    if matches!(
++        crate::config::resolve_exporter(exporter),
++        OtelExporter::None
++    ) {
++        crate::sdk_trace_routes::configure_default(false);
++        return Ok(tracer_provider_builder(resource, span_attributes)
++            .with_span_processor(crate::sdk_trace_routes::RoutedSpanProcessor {
++                inner: SpanAttributesProcessor {
++                    attributes: BTreeMap::new(),
++                },
++                default_enabled: false,
++            })
++            .build());
++    }
++    let resource_for_builder = resource.clone();
++    let config = exporter.clone();
++    let factory = factory.clone();
++    let resource = resource.clone();
++    let processor = crate::sdk_trace_routes::TraceBatchProcessor::new(
++        crate::sdk_trace_routes::BatchSettings::from_env(
++            matches!(config, OtelExporter::OtlpHttp { .. })
++                && crate::otlp::current_tokio_runtime_is_multi_thread(),
++        )?,
++        move || {
++            let config = config.clone();
++            let factory = factory.clone();
++            let resource = resource.clone();
++            let mut base = build_trace_exporter(&config, &factory)
++                .map_err(|_| "trace transport initialization failed".to_owned())?;
++            base.set_resource(&resource);
++            Ok(CredentialSpanExporter {
++                base,
++                config,
++                factory,
++                resource: Mutex::new(resource),
++                runtime: tokio::runtime::Handle::try_current().ok(),
++            })
++        },
++    )?;
++    crate::sdk_trace_routes::configure_default(true);
++    Ok(
++        tracer_provider_builder(&resource_for_builder, span_attributes)
++            .with_span_processor(crate::sdk_trace_routes::RoutedSpanProcessor {
++                inner: processor,
++                default_enabled: true,
++            })
++            .build(),
++    )
++}
++
++fn build_trace_exporter(
++    exporter: &OtelExporter,
++    factory: &codex_http_client::HttpClientFactory,
++) -> Result<SpanExporter, Box<dyn Error>> {
+     let span_exporter = match crate::config::resolve_exporter(exporter) {
+-        OtelExporter::None => return Ok(tracer_provider_builder(resource, span_attributes).build()),
++        OtelExporter::None => return Err("trace exporter is disabled".into()),
+         OtelExporter::Statsig => unreachable!("statsig exporter should be resolved"),
+         OtelExporter::OtlpGrpc {
+             endpoint,
+@@ -567,39 +708,6 @@ fn build_tracer_provider(
+         } => {
+             debug!("Using OTLP Http exporter for traces: {endpoint}");
+ 
+-            if crate::otlp::current_tokio_runtime_is_multi_thread() {
+-                let protocol = match protocol {
+-                    OtelHttpProtocol::Binary => Protocol::HttpBinary,
+-                    OtelHttpProtocol::Json => Protocol::HttpJson,
+-                };
+-
+-                let mut exporter_builder = SpanExporter::builder()
+-                    .with_http()
+-                    .with_endpoint(endpoint)
+-                    .with_protocol(protocol)
+-                    .with_headers(headers);
+-
+-                let client = crate::otlp::build_async_http_client(
+-                    factory,
+-                    tls.as_ref(),
+-                    OTEL_EXPORTER_OTLP_TRACES_TIMEOUT,
+-                )?;
+-                exporter_builder = exporter_builder.with_http_client(client);
+-
+-                let processor = TokioBatchSpanProcessor::builder(
+-                    crate::network_policy::PolicyExporter {
+-                        exporter: exporter_builder.build()?,
+-                        policy: factory.network_policy().clone(),
+-                    },
+-                    runtime::Tokio,
+-                )
+-                .build();
+-
+-                return Ok(tracer_provider_builder(resource, span_attributes)
+-                    .with_span_processor(processor)
+-                    .build());
+-            }
+-
+             let protocol = match protocol {
+                 OtelHttpProtocol::Binary => Protocol::HttpBinary,
+                 OtelHttpProtocol::Json => Protocol::HttpJson,
+@@ -611,7 +719,9 @@ fn build_tracer_provider(
+                 .with_protocol(protocol)
+                 .with_headers(headers);
+ 
+-            if factory.network_policy().is_managed() {
++            if tokio::runtime::Handle::try_current().is_ok()
++                || factory.network_policy().is_managed()
++            {
+                 let client = crate::otlp::build_async_http_client(
+                     factory,
+                     tls.as_ref(),
+@@ -628,15 +738,113 @@ fn build_tracer_provider(
+         }
+     };
+ 
+-    let processor = BatchSpanProcessor::builder(crate::network_policy::PolicyExporter {
+-        exporter: span_exporter,
+-        policy: factory.network_policy().clone(),
+-    })
+-    .build();
++    Ok(span_exporter)
++}
++
++/// Partition a single bounded SDK batch by private credentials. Credentials never
++/// enter SpanData, serialization, resource attributes, or diagnostic strings.
++struct CredentialSpanExporter {
++    base: SpanExporter,
++    config: OtelExporter,
++    factory: codex_http_client::HttpClientFactory,
++    resource: Mutex<Resource>,
++    runtime: Option<tokio::runtime::Handle>,
++}
++impl std::fmt::Debug for CredentialSpanExporter {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("CredentialSpanExporter([redacted])")
++    }
++}
++impl CredentialSpanExporter {
++    async fn deliver(&self, exporter: &SpanExporter, spans: Vec<SpanData>) -> OTelSdkResult {
++        let permit = self
++            .factory
++            .network_policy()
++            .acquire_for_unsupported_sdk()
++            .map_err(|_| {
++                opentelemetry_sdk::error::OTelSdkError::InternalFailure(
++                    "trace destination policy denied delivery".into(),
++                )
++            })?;
++        permit.run(exporter.export(spans)).await.map_err(|_| {
++            opentelemetry_sdk::error::OTelSdkError::InternalFailure(
++                "trace destination policy revoked delivery".into(),
++            )
++        })?
++    }
++}
++impl crate::sdk_trace_routes::EnvelopeExporter for CredentialSpanExporter {
++    async fn export(
++        &self,
++        batch: Vec<crate::sdk_trace_routes::TraceEnvelope>,
++        receipt: &crate::sdk_trace_routes::BatchReceipt,
++    ) -> Result<Vec<u64>, ()> {
++        let mut groups: Vec<(
++            Option<Arc<crate::sdk_trace_routes::TraceCredentials>>,
++            Vec<crate::sdk_trace_routes::TraceEnvelope>,
++        )> = Vec::new();
++        for envelope in batch {
++            let credential = envelope.credential.clone();
++            let existing =
++                groups
++                    .iter_mut()
++                    .find(|(key, _)| match (key.as_ref(), credential.as_ref()) {
++                        (None, None) => true,
++                        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
++                        _ => false,
++                    });
++            if let Some((_, spans)) = existing {
++                spans.push(envelope);
++            } else {
++                groups.push((credential, vec![envelope]));
++            }
++        }
++        let mut failed = Vec::new();
++        for (credential, spans) in groups {
++            let records: Vec<_> = spans.iter().map(|e| e.record_sequence).collect();
++            let spans = spans.into_iter().map(|e| e.span).collect();
++            let result = if let Some(credential) = credential {
++                let mut config = crate::config::resolve_exporter(&self.config);
++                match &mut config {
++                    OtelExporter::OtlpHttp { headers, .. }
++                    | OtelExporter::OtlpGrpc { headers, .. } => {
++                        *headers = credential.overlay(headers)
++                    }
++                    _ => unreachable!("configured trace transport"),
++                }
++                let exporter = {
++                    let _runtime = self.runtime.as_ref().map(|runtime| runtime.enter());
++                    build_trace_exporter(&config, &self.factory).map_err(|_| ())
++                };
++                match exporter {
++                    Ok(mut exporter) => {
++                        let resource = self
++                            .resource
++                            .lock()
++                            .unwrap_or_else(|e| e.into_inner())
++                            .clone();
++                        exporter.set_resource(&resource);
++                        self.deliver(&exporter, spans).await
++                    }
++                    Err(_) => Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
++                        "trace credential transport initialization failed".into(),
++                    )),
++                }
++            } else {
++                self.deliver(&self.base, spans).await
++            };
++            if result.is_err() {
++                failed.extend(records);
++            } else {
++                receipt.succeeded(&records);
++            }
++        }
++        Ok(failed)
++    }
+ 
+-    Ok(tracer_provider_builder(resource, span_attributes)
+-        .with_span_processor(processor)
+-        .build())
++    fn shutdown(&mut self) -> OTelSdkResult {
++        self.base.shutdown_with_timeout(Duration::from_secs(5))
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -836,6 +1044,95 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[tokio::test]
++    async fn explicit_flush_keeps_provider_usable_before_terminal_shutdown() {
++        const CHILD: &str = "CODEX_OTEL_NONTERMINAL_FLUSH_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let status=std::process::Command::new(std::env::current_exe().unwrap())
++                .arg("--exact").arg("provider::tests::explicit_flush_keeps_provider_usable_before_terminal_shutdown")
++                .env(CHILD,"1").status().unwrap();
++            assert!(status.success());
++            return;
++        }
++        use opentelemetry::trace::Tracer as _;
++        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
++        let tracer_provider = SdkTracerProvider::builder()
++            .with_simple_exporter(exporter.clone())
++            .build();
++        let tracer = tracer_provider.tracer("flush-test");
++        let mut provider = OtelProvider {
++            logger: None,
++            tracer_provider: Some(tracer_provider),
++            tracer: Some(tracer.clone()),
++            metrics: None,
++            shutdown_started: AtomicBool::new(false),
++            shutdown_worker: None,
++        };
++        provider.prepare_shutdown_worker().unwrap();
++        let mut first = tracer.start("before-flush");
++        first.end();
++        let result = provider
++            .force_flush_with_timeout(Duration::from_secs(1))
++            .await;
++        assert_eq!(result.status, "success");
++        assert!(!provider.shutdown_started.load(Ordering::Acquire));
++        let mut second = tracer.start("after-flush");
++        second.end();
++        assert_eq!(
++            provider
++                .force_flush_with_timeout(Duration::from_secs(1))
++                .await
++                .status,
++            "success"
++        );
++        assert_eq!(exporter.get_finished_spans().unwrap().len(), 2);
++        provider
++            .shutdown_with_timeout(Duration::from_secs(1))
++            .await
++            .unwrap();
++    }
++
++    #[tokio::test]
++    async fn builtin_transports_enable_private_trace_credentials_after_configuration() {
++        const CHILD: &str = "CODEX_OTEL_CREDENTIAL_ROUTE_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let status=std::process::Command::new(std::env::current_exe().unwrap())
++                .arg("--exact").arg("provider::tests::builtin_transports_enable_private_trace_credentials_after_configuration")
++                .env(CHILD,"1").status().unwrap();
++            assert!(status.success());
++            return;
++        }
++        let reference = crate::sdk_trace_routes::register_trace_credentials(
++            r#"{"Authorization":"synthetic-trace-token"}"#,
++        )
++        .unwrap();
++        let resource = Resource::builder()
++            .with_service_name("credential-test")
++            .build();
++        let factory = HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault);
++        for exporter in [
++            OtelExporter::OtlpHttp {
++                endpoint: "http://127.0.0.1:1/v1/traces".into(),
++                headers: Default::default(),
++                protocol: OtelHttpProtocol::Binary,
++                tls: None,
++            },
++            OtelExporter::OtlpGrpc {
++                endpoint: "http://127.0.0.1:1".into(),
++                headers: Default::default(),
++                tls: None,
++            },
++        ] {
++            crate::sdk_trace_routes::configure_default(false);
++            assert!(crate::sdk_trace_routes::credential(&reference).is_err());
++            let provider =
++                build_tracer_provider(&resource, &exporter, BTreeMap::new(), &factory).unwrap();
++            assert!(crate::sdk_trace_routes::credential(&reference).is_ok());
++            provider.shutdown().unwrap();
++        }
++        crate::sdk_trace_routes::release_trace_credentials(&reference).unwrap();
++    }
++
+     fn test_otel_settings() -> OtelSettings {
+         OtelSettings {
+             http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+@@ -845,6 +1142,7 @@ mod tests {
+             codex_home: PathBuf::from("."),
+             exporter: OtelExporter::None,
+             trace_exporter: OtelExporter::None,
++            trace_processors: false,
+             metrics_exporter: OtelExporter::None,
+             runtime_metrics: false,
+             span_attributes: BTreeMap::new(),
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2b1ed5123d67a1b6bcf9e3f7317521bb8748e2ee
+--- /dev/null
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -0,0 +1,869 @@
++//! SDK-owned native spans and immutable, process-local tracing context leases.
++use std::borrow::Cow;
++use std::collections::HashMap;
++use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
++use std::sync::{Arc, Mutex, OnceLock, Weak};
++use std::time::SystemTime;
++
++pub use opentelemetry::trace::FutureExt;
++use opentelemetry::trace::{SamplingDecision, SamplingResult};
++use opentelemetry::trace::{
++    Span as _, SpanContext, SpanId, SpanKind, Status, TraceContextExt, TraceId, Tracer as _,
++};
++use opentelemetry::{Context, KeyValue, global};
++use opentelemetry_sdk::trace::ShouldSample;
++use serde::{Deserialize, Serialize};
++use serde_json::{Value, json};
++
++#[derive(Debug)]
++pub struct ScopePolicy {
++    pub disabled: bool,
++    pub include_sensitive_data: bool,
++    pub credential: Option<Arc<crate::sdk_trace_routes::TraceCredentials>>,
++}
++
++#[derive(Clone, Debug)]
++pub struct ScopeSampler {
++    inner: Box<dyn ShouldSample>,
++}
++impl Default for ScopeSampler {
++    fn default() -> Self {
++        Self {
++            inner: opentelemetry_sdk::trace::Config::default().sampler,
++        }
++    }
++}
++impl ShouldSample for ScopeSampler {
++    fn should_sample(
++        &self,
++        parent: Option<&Context>,
++        trace_id: TraceId,
++        name: &str,
++        kind: &SpanKind,
++        attributes: &[KeyValue],
++        links: &[opentelemetry::trace::Link],
++    ) -> SamplingResult {
++        if parent
++            .and_then(policy_for_context)
++            .is_some_and(|p| p.disabled)
++        {
++            SamplingResult {
++                decision: SamplingDecision::Drop,
++                attributes: Vec::new(),
++                trace_state: Default::default(),
++            }
++        } else {
++            self.inner
++                .should_sample(parent, trace_id, name, kind, attributes, links)
++        }
++    }
++}
++
++type Identity = (TraceId, SpanId);
++fn policies() -> &'static Mutex<HashMap<Identity, Weak<ScopePolicy>>> {
++    static POLICIES: OnceLock<Mutex<HashMap<Identity, Weak<ScopePolicy>>>> = OnceLock::new();
++    POLICIES.get_or_init(Default::default)
++}
++pub fn policy_for_span(span: &SpanContext) -> Option<Arc<ScopePolicy>> {
++    policies()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .get(&(span.trace_id(), span.span_id()))
++        .and_then(Weak::upgrade)
++}
++pub fn policy_for_context(context: &Context) -> Option<Arc<ScopePolicy>> {
++    context
++        .get::<Arc<ScopePolicy>>()
++        .cloned()
++        .or_else(|| policy_for_span(context.span().span_context()))
++}
++pub fn restore_policy(context: Context) -> Context {
++    match policy_for_context(&context) {
++        Some(policy) => context.with_value(policy),
++        None => context,
++    }
++}
++pub fn scoped_capture_allowed() -> bool {
++    policy_for_context(&Context::current())
++        .is_none_or(|policy| !policy.disabled && policy.include_sensitive_data)
++}
++pub fn scoped_trace_enabled() -> bool {
++    policy_for_context(&Context::current()).is_none_or(|policy| !policy.disabled)
++}
++
++/// Retains policy through sampled-out spans too; processor callbacks alone cannot do that.
++pub struct ScopedSpan {
++    span: Option<global::BoxedSpan>,
++    span_context: SpanContext,
++    policy: Option<Arc<ScopePolicy>>,
++}
++pub fn wrap_span(span: global::BoxedSpan, parent: &Context) -> ScopedSpan {
++    let policy = policy_for_context(parent);
++    if let Some(policy) = &policy {
++        let context = span.span_context();
++        policies().lock().unwrap_or_else(|e| e.into_inner()).insert(
++            (context.trace_id(), context.span_id()),
++            Arc::downgrade(policy),
++        );
++    }
++    let span_context = span.span_context().clone();
++    ScopedSpan {
++        span: Some(span),
++        span_context,
++        policy,
++    }
++}
++impl Drop for ScopedSpan {
++    fn drop(&mut self) {
++        if let Some(span) = self.span.as_mut() {
++            span.end();
++        }
++        if self.policy.is_some() {
++            let context = &self.span_context;
++            policies()
++                .lock()
++                .unwrap_or_else(|e| e.into_inner())
++                .remove(&(context.trace_id(), context.span_id()));
++        }
++    }
++}
++impl opentelemetry::trace::Span for ScopedSpan {
++    fn add_event_with_timestamp<T: Into<Cow<'static, str>>>(
++        &mut self,
++        name: T,
++        time: SystemTime,
++        attributes: Vec<KeyValue>,
++    ) {
++        if let Some(span) = self.span.as_mut() {
++            span.add_event_with_timestamp(name, time, attributes);
++        }
++    }
++    fn span_context(&self) -> &SpanContext {
++        &self.span_context
++    }
++    fn is_recording(&self) -> bool {
++        self.span.as_ref().is_some_and(|span| span.is_recording())
++    }
++    fn set_attribute(&mut self, value: KeyValue) {
++        if let Some(span) = self.span.as_mut() {
++            span.set_attribute(value);
++        }
++    }
++    fn set_status(&mut self, value: Status) {
++        if let Some(span) = self.span.as_mut() {
++            span.set_status(value);
++        }
++    }
++    fn update_name<T: Into<Cow<'static, str>>>(&mut self, value: T) {
++        if let Some(span) = self.span.as_mut() {
++            span.update_name(value);
++        }
++    }
++    fn add_link(&mut self, value: SpanContext, attributes: Vec<KeyValue>) {
++        if let Some(span) = self.span.as_mut() {
++            span.add_link(value, attributes);
++        }
++    }
++    fn end_with_timestamp(&mut self, time: SystemTime) {
++        if let Some(span) = self.span.as_mut() {
++            span.end_with_timestamp(time);
++        }
++    }
++}
++static PIPELINE_ENABLED: AtomicBool = AtomicBool::new(true);
++pub fn configure_pipeline(enabled: bool) {
++    PIPELINE_ENABLED.store(enabled, Ordering::Release);
++}
++/// A disabled SDK signal does not consult or replace another application's provider.
++pub fn build_span(
++    service_name: &'static str,
++    builder: opentelemetry::trace::SpanBuilder,
++    parent: &Context,
++) -> ScopedSpan {
++    if PIPELINE_ENABLED.load(Ordering::Acquire) {
++        return wrap_span(
++            global::tracer(service_name).build_with_context(builder, parent),
++            parent,
++        );
++    }
++    let policy = policy_for_context(parent);
++    if policy.is_none() {
++        return ScopedSpan { span: None, span_context: SpanContext::NONE, policy: None };
++    }
++    use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
++    let generator = RandomIdGenerator::default();
++    let inherited = parent.span().span_context().clone();
++    let trace_id = if inherited.is_valid() {
++        inherited.trace_id()
++    } else {
++        builder.trace_id.unwrap_or_else(|| generator.new_trace_id())
++    };
++    let span_context = SpanContext::new(
++        trace_id,
++        builder.span_id.unwrap_or_else(|| generator.new_span_id()),
++        opentelemetry::trace::TraceFlags::default(),
++        false,
++        inherited.trace_state().clone(),
++    );
++    if let Some(policy) = &policy {
++        policies()
++            .lock()
++            .unwrap_or_else(|e| e.into_inner())
++            .insert((trace_id, span_context.span_id()), Arc::downgrade(policy));
++    }
++    ScopedSpan {
++        span: None,
++        span_context,
++        policy,
++    }
++}
++
++struct Handle {
++    context: Context,
++    parent_span_id: Option<String>,
++    ended: Mutex<bool>,
++}
++fn handles() -> &'static Mutex<HashMap<String, Arc<Handle>>> {
++    static HANDLES: OnceLock<Mutex<HashMap<String, Arc<Handle>>>> = OnceLock::new();
++    HANDLES.get_or_init(Default::default)
++}
++fn token(prefix: &str) -> String {
++    static NEXT: AtomicU64 = AtomicU64::new(1);
++    format!("{prefix}{}", NEXT.fetch_add(1, Ordering::Relaxed))
++}
++fn resolve(handle: &str) -> Result<Arc<Handle>, String> {
++    handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .get(handle)
++        .cloned()
++        .ok_or_else(|| "Unknown or released native tracing context".into())
++}
++#[derive(Default, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct Options {
++    name: String,
++    #[serde(default)]
++    kind: String,
++    parent: Option<String>,
++    restrictions_parent: Option<String>,
++    #[serde(default)]
++    restrictions_parents: Vec<String>,
++    #[serde(default)]
++    detached: bool,
++    trace_id: Option<String>,
++    group_id: Option<String>,
++    metadata: Option<Value>,
++    disabled: Option<bool>,
++    include_sensitive_data: Option<bool>,
++    credential_ref: Option<String>,
++}
++#[derive(Serialize)]
++struct Readback {
++    handle: String,
++    trace_id: String,
++    span_id: String,
++    parent_span_id: Option<String>,
++    disabled: bool,
++    include_sensitive_data: bool,
++}
++fn readback(key: &str, handle: &Handle) -> Result<String, String> {
++    let span = handle.context.span();
++    let span = span.span_context();
++    let policy = policy_for_context(&handle.context).ok_or("Native tracing policy unavailable")?;
++    serde_json::to_string(&Readback {
++        handle: key.into(),
++        trace_id: span.trace_id().to_string(),
++        span_id: span.span_id().to_string(),
++        parent_span_id: handle.parent_span_id.clone(),
++        disabled: policy.disabled,
++        include_sensitive_data: policy.include_sensitive_data,
++    })
++    .map_err(|_| "Native tracing context could not serialize".into())
++}
++fn parse_trace_id(value: &str) -> Result<TraceId, String> {
++    let value = value.strip_prefix("trace_").unwrap_or(value);
++    if value.len() != 32 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
++        return Err("trace_id must contain 32 nonzero hexadecimal digits".into());
++    }
++    let id = TraceId::from_hex(value).map_err(|_| "Invalid trace_id")?;
++    if id == TraceId::INVALID {
++        return Err("trace_id must be nonzero".into());
++    }
++    Ok(id)
++}
++fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
++    if depth > 8 {
++        return Err("Tracing metadata exceeds maximum depth of 8".into());
++    }
++    match value {
++        Value::String(s) if s.len() > 4096 => Err("Tracing string exceeds 4096 UTF-8 bytes".into()),
++        Value::Array(values) => {
++            if values.len() > 64 {
++                return Err("Tracing arrays may contain at most 64 entries".into());
++            }
++            for value in values {
++                bounded_value(value, depth + 1)?;
++            }
++            Ok(())
++        }
++        Value::Object(values) => {
++            if values.len() > 64 {
++                return Err("Tracing objects may contain at most 64 fields".into());
++            }
++            for (key, value) in values {
++                if key.len() > 256 {
++                    return Err("Tracing key exceeds 256 UTF-8 bytes".into());
++                }
++                bounded_value(value, depth + 1)?;
++            }
++            Ok(())
++        }
++        _ => Ok(()),
++    }
++}
++fn metadata_attribute_value(value: &Value) -> Result<String, String> {
++    let encoded = match value { Value::String(value) => value.clone(), _ => value.to_string() };
++    if encoded.len() > 4096 { return Err("Encoded tracing metadata value exceeds 4096 UTF-8 bytes".into()); }
++    Ok(encoded)
++}
++
++pub fn start_trace_span(encoded: &str) -> Result<String, String> {
++    if encoded.len() > 65536 {
++        return Err("Tracing options exceed 64 KiB".into());
++    }
++    let options: Options =
++        serde_json::from_str(encoded).map_err(|_| "Invalid native tracing span options")?;
++    if options.name.is_empty() || options.name.len() > 4096 {
++        return Err("Tracing span name must contain 1–4096 UTF-8 bytes".into());
++    }
++    if !["workflow", "custom", "callback", "validation", "operation"]
++        .contains(&options.kind.as_str())
++    {
++        return Err("Unsupported native tracing span kind".into());
++    }
++    let parent = options.parent.as_deref().map(resolve).transpose()?;
++    let restriction = options
++        .restrictions_parent
++        .as_deref()
++        .map(resolve)
++        .transpose()?;
++    let inherited = parent.as_ref().and_then(|h| policy_for_context(&h.context));
++    let ambient = restriction
++        .as_ref()
++        .and_then(|h| policy_for_context(&h.context));
++    let restrictions = options
++        .restrictions_parents
++        .iter()
++        .map(|key| {
++            resolve(key).and_then(|handle| {
++                policy_for_context(&handle.context)
++                    .ok_or_else(|| "Native tracing policy unavailable".into())
++            })
++        })
++        .collect::<Result<Vec<_>, String>>()?;
++    let mut policies = vec![inherited.as_ref(), ambient.as_ref()];
++    policies.extend(restrictions.iter().map(Some));
++    let disabled =
++        options.disabled.unwrap_or(false) || policies.iter().flatten().any(|p| p.disabled);
++    let capture = options
++        .include_sensitive_data
++        .unwrap_or_else(|| inherited.as_ref().is_some_and(|p| p.include_sensitive_data))
++        && policies.iter().flatten().all(|p| p.include_sensitive_data);
++    let credential = match options.credential_ref.as_deref() {
++        Some(key) => Some(crate::sdk_trace_routes::credential(key)?),
++        None => inherited.as_ref().and_then(|p| p.credential.clone()),
++    };
++    let policy = Arc::new(ScopePolicy {
++        disabled,
++        include_sensitive_data: capture,
++        credential,
++    });
++    let metadata = options.metadata.unwrap_or_else(|| json!({}));
++    bounded_value(&metadata, 0)?;
++    let metadata = metadata
++        .as_object()
++        .ok_or("Tracing metadata must be an object")?;
++    let mut attributes = Vec::new();
++    attributes.push(KeyValue::new("sdk.span.kind", options.kind));
++    if let Some(group) = options.group_id {
++        if group.len() > 4096 {
++            return Err("Tracing group_id exceeds 4096 UTF-8 bytes".into());
++        }
++        attributes.push(KeyValue::new("sdk.group_id", group));
++    }
++    for (key, value) in metadata {
++        attributes.push(KeyValue::new(
++            format!("sdk.metadata.{key}"),
++            metadata_attribute_value(value)?,
++        ));
++    }
++    let parent_context = if options.detached {
++        Context::new()
++    } else {
++        parent
++            .as_ref()
++            .map(|h| h.context.clone())
++            .unwrap_or_default()
++    };
++    let parent_span = parent_context.span().span_context().clone();
++    let trace_id = options
++        .trace_id
++        .as_deref()
++        .map(parse_trace_id)
++        .transpose()?;
++    if parent_span.is_valid() && trace_id.is_some_and(|id| id != parent_span.trace_id()) {
++        return Err("trace_id does not match the selected parent".into());
++    }
++    let context = parent_context.with_value(policy);
++    let mut builder = opentelemetry::trace::SpanBuilder::from_name(options.name)
++        .with_attributes(attributes);
++    builder.trace_id = trace_id;
++    let span = build_span("codex_agents_sdk", builder, &context);
++    let context = context.with_span(span);
++    let handle = Arc::new(Handle {
++        context,
++        parent_span_id: parent_span
++            .is_valid()
++            .then(|| parent_span.span_id().to_string()),
++        ended: Mutex::new(false),
++    });
++    let key = token("s");
++    let result = readback(&key, &handle)?;
++    handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .insert(key, handle);
++    Ok(result)
++}
++pub fn trace_span_context(key: &str) -> Result<String, String> {
++    readback(key, resolve(key)?.as_ref())
++}
++pub fn retain_trace_context(key: &str) -> Result<String, String> {
++    let handle = resolve(key)?;
++    let key = token("c");
++    handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .insert(key.clone(), handle);
++    Ok(key)
++}
++pub fn release_trace_context(key: &str) {
++    handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .remove(key);
++}
++pub fn release_trace_span(key: &str) {
++    release_trace_context(key);
++}
++pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
++    #[derive(Deserialize)]
++    #[serde(deny_unknown_fields)]
++    struct Outcome {
++        status: String,
++        category: Option<String>,
++        data: Option<Value>,
++    }
++    if encoded.len() > 65536 {
++        return Err("Tracing outcome exceeds 64 KiB".into());
++    }
++    let outcome: Outcome =
++        serde_json::from_str(encoded).map_err(|_| "Invalid tracing span outcome")?;
++    if !["ok", "error", "cancelled"].contains(&outcome.status.as_str()) {
++        return Err("Invalid tracing outcome status".into());
++    }
++    if outcome.category.as_ref().is_some_and(|s| {
++        s.len() > 256 || !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
++    }) {
++        return Err("Tracing outcome category must be a bounded nonsecret label".into());
++    }
++    if let Some(data) = &outcome.data {
++        bounded_value(data, 0)?;
++        if data.to_string().len() > 4096 { return Err("Encoded tracing outcome data exceeds 4096 UTF-8 bytes".into()); }
++    }
++    let handle = resolve(key)?;
++    let mut ended = handle.ended.lock().unwrap_or_else(|e| e.into_inner());
++    if *ended {
++        return Ok(());
++    }
++    let span = handle.context.span();
++    span.set_status(if outcome.status == "ok" {
++        Status::Ok
++    } else {
++        Status::error(
++            outcome
++                .category
++                .clone()
++                .unwrap_or_else(|| outcome.status.clone()),
++        )
++    });
++    span.set_attribute(KeyValue::new("sdk.outcome", outcome.status));
++    if let Some(category) = outcome.category {
++        span.set_attribute(KeyValue::new("sdk.outcome.category", category));
++    }
++    if policy_for_context(&handle.context).is_some_and(|p| p.include_sensitive_data)
++        && let Some(data) = outcome.data
++    {
++        span.set_attribute(KeyValue::new("sdk.outcome.data", data.to_string()));
++    }
++    span.end();
++    *ended = true;
++    Ok(())
++}
++pub fn context(key: &str) -> Result<Context, String> {
++    Ok(resolve(key)?.context.clone())
++}
++pub fn current_context_token() -> Option<String> {
++    let context = restore_policy(Context::current());
++    policy_for_context(&context)?;
++    let handle = Arc::new(Handle {
++        context,
++        parent_span_id: None,
++        ended: Mutex::new(true),
++    });
++    let key = token("c");
++    handles()
++        .lock()
++        .unwrap_or_else(|e| e.into_inner())
++        .insert(key.clone(), handle);
++    Some(key)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn validates_supported_ids() {
++        assert_eq!(
++            parse_trace_id("trace_123456789012345678901234567890ab")
++                .unwrap()
++                .to_string(),
++            "123456789012345678901234567890ab"
++        );
++        assert!(parse_trace_id("00000000000000000000000000000000").is_err());
++        assert!(parse_trace_id("workflow").is_err());
++    }
++    #[test]
++    fn bounds_nested_fields() {
++        assert!(bounded_value(&json!({"x":"a".repeat(4097)}), 0).is_err());
++        assert!(bounded_value(&json!({"x":[1,2,3]}), 0).is_ok());
++    }
++    #[test]
++    fn bounds_actual_metadata_attribute_encoding() {
++        assert_eq!(metadata_attribute_value(&json!("x".repeat(4096))).unwrap().len(),4096);
++        assert!(metadata_attribute_value(&json!(["x".repeat(3000),"y".repeat(3000)])).is_err());
++        assert!(metadata_attribute_value(&json!({"key":[1,2]})).is_ok());
++    }
++    #[test]
++    fn disabled_sampling_has_no_recording() {
++        let policy = Arc::new(ScopePolicy {
++            disabled: true,
++            include_sensitive_data: false,
++            credential: None,
++        });
++        let context = Context::new().with_value(policy);
++        let sample = ScopeSampler::default().should_sample(
++            Some(&context),
++            TraceId::from(1),
++            "x",
++            &SpanKind::Internal,
++            &[],
++            &[],
++        );
++        assert_eq!(sample.decision, SamplingDecision::Drop);
++    }
++}
++
++/// A borrowed callback carrier remains valid only while this native lease lives.
++pub struct ContextLease {
++    token: String,
++}
++impl ContextLease {
++    pub fn capture() -> Option<Self> {
++        current_context_token().map(|token| Self { token })
++    }
++    pub fn token(&self) -> &str {
++        &self.token
++    }
++}
++impl Drop for ContextLease {
++    fn drop(&mut self) {
++        release_trace_context(&self.token);
++    }
++}
++pub fn trace_carrier(key: &str) -> Result<codex_protocol::protocol::W3cTraceContext, String> {
++    crate::trace_context::context_w3c_trace_context(&context(key)?)
++        .ok_or_else(|| "Native tracing context is invalid".into())
++}
++
++/// Resolve SDK-private ingress into Core's existing queued W3C context carrier.
++pub fn prepare_submission(value: &mut Value) -> Result<(), String> {
++    let Some(object) = value.as_object_mut() else {
++        return Ok(());
++    };
++    if let Some(token) = object.remove("tracing_context") {
++        if token.is_null() {
++            return Ok(());
++        }
++        let token = token.as_str().ok_or("Invalid tracing context token")?;
++        object.insert(
++            "trace".into(),
++            serde_json::to_value(trace_carrier(token)?)
++                .map_err(|_| "Native tracing carrier could not serialize")?,
++        );
++    }
++    Ok(())
++}
++
++#[cfg(test)]
++mod lifecycle_tests {
++    use super::*;
++    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
++
++    #[test]
++    fn native_scopes_keep_context_after_end_and_release_registry_entries() {
++        // Providers are process-global. Isolate this behavioral test from unrelated suites.
++        const CHILD: &str = "CODEX_SDK_TRACE_LIFECYCLE_TEST_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let status = std::process::Command::new(std::env::current_exe().unwrap())
++                .args(["--exact", "sdk_trace::lifecycle_tests::native_scopes_keep_context_after_end_and_release_registry_entries", "--nocapture"])
++                .env(CHILD,"1").status().unwrap();
++            assert!(status.success());
++            return;
++        }
++        let exporter = InMemorySpanExporter::default();
++        let provider = SdkTracerProvider::builder()
++            .with_sampler(ScopeSampler::default())
++            .with_simple_exporter(exporter.clone())
++            .build();
++        global::set_tracer_provider(provider.clone());
++        let root:Value=serde_json::from_str(&start_trace_span(r#"{"name":"workflow","kind":"workflow","trace_id":"trace_123456789012345678901234567890ab"}"#).unwrap()).unwrap();
++        let root_key = root["handle"].as_str().unwrap();
++        let lease = retain_trace_context(root_key).unwrap();
++        end_trace_span(root_key, r#"{"status":"ok"}"#).unwrap();
++        end_trace_span(root_key, r#"{"status":"error"}"#).unwrap();
++        release_trace_span(root_key);
++        let carrier = trace_carrier(&lease).unwrap();
++        let parent = crate::context_from_w3c_trace_context(&carrier).unwrap();
++        assert!(!policy_for_context(&parent).unwrap().include_sensitive_data);
++        let child = global::tracer("native-fixture").start_with_context("native-child", &parent);
++        let mut child = wrap_span(child, &parent);
++        child.end();
++        drop(child);
++        let snapshot = provider.force_flush();
++        assert!(snapshot.is_ok());
++        let spans = exporter.get_finished_spans().unwrap();
++        assert_eq!(spans.len(), 2);
++        let native = spans.iter().find(|s| s.name == "native-child").unwrap();
++        assert_eq!(
++            native.parent_span_id.to_string(),
++            root["span_id"].as_str().unwrap()
++        );
++        assert_eq!(
++            native.span_context.trace_id().to_string(),
++            root["trace_id"].as_str().unwrap()
++        );
++        release_trace_context(&lease);
++        drop(parent);
++        assert!(handles().lock().unwrap().is_empty());
++        assert!(policies().lock().unwrap().is_empty());
++        provider.shutdown().unwrap();
++    }
++}
++
++pub(crate) fn sensitive_display(value: &impl std::fmt::Display) -> String {
++    if scoped_capture_allowed() {
++        value.to_string()
++    } else {
++        "[REDACTED]".into()
++    }
++}
++pub(crate) fn sensitive_optional(value: Option<&str>) -> Option<&str> {
++    if scoped_capture_allowed() {
++        value
++    } else {
++        None
++    }
++}
++
++#[cfg(test)]
++mod payload_tests {
++    use super::*;
++    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
++    use tracing_subscriber::prelude::*;
++
++    #[test]
++    fn model_usage_and_tool_metadata_exclude_scoped_payloads_before_emission() {
++        const CHILD: &str = "CODEX_SDK_TRACE_PAYLOAD_TEST_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let status=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","sdk_trace::payload_tests::model_usage_and_tool_metadata_exclude_scoped_payloads_before_emission","--nocapture"]).env(CHILD,"1").status().unwrap();
++            assert!(status.success());
++            return;
++        }
++        let exporter = InMemorySpanExporter::default();
++        let provider = SdkTracerProvider::builder()
++            .with_sampler(ScopeSampler::default())
++            .with_simple_exporter(exporter.clone())
++            .build();
++        global::set_tracer_provider(provider.clone());
++        let root: Value = serde_json::from_str(
++            &start_trace_span(r#"{"name":"workflow","kind":"workflow"}"#).unwrap(),
++        )
++        .unwrap();
++        let key = root["handle"].as_str().unwrap();
++        let context = context(key).unwrap();
++        let _active = context.attach();
++        let subscriber = tracing_subscriber::registry().with(
++            crate::OtelProvider::reloadable_tracing_layer("native-fixture"),
++        );
++        tracing::subscriber::with_default(subscriber, || {
++            let telemetry = crate::SessionTelemetry::new(
++                codex_protocol::ThreadId::new(),
++                "scripted",
++                "scripted",
++                None,
++                None,
++                None,
++                "fixture".into(),
++                true,
++                "fixture".into(),
++                codex_protocol::protocol::SessionSource::Cli,
++            );
++            let span = tracing::trace_span!(target:"codex_otel.trace_safe","handle_responses",otel.name=tracing::field::Empty,gen_ai.usage.input_tokens=tracing::field::Empty,gen_ai.usage.output_tokens=tracing::field::Empty,codex.usage.total_tokens=tracing::field::Empty);
++            let _entered = span.enter();
++            const CANARY: &str = "SCOPED_PRIVATE_PAYLOAD_MUST_NOT_EXPORT";
++            telemetry.record_responses(
++                &span,
++                &codex_api::ResponseEvent::OutputTextDelta(CANARY.into()),
++            );
++            telemetry.user_prompt(&[codex_protocol::user_input::UserInput::Text {
++                text: CANARY.into(),
++                text_elements: Vec::new(),
++            }]);
++            telemetry.sse_event_failed(None, std::time::Duration::ZERO, &CANARY);
++            telemetry.tool_result_with_tags(
++                &codex_protocol::ToolName::plain("fixture-tool"),
++                "call-1",
++                CANARY,
++                std::time::Duration::ZERO,
++                true,
++                CANARY,
++                &[],
++                &[],
++            );
++            telemetry.record_responses(
++                &span,
++                &codex_api::ResponseEvent::Completed {
++                    response_id: CANARY.into(),
++                    token_usage: Some(codex_protocol::protocol::TokenUsage {
++                        input_tokens: 11,
++                        cached_input_tokens: 0,
++                        cache_write_input_tokens: 0,
++                        output_tokens: 7,
++                        reasoning_output_tokens: 0,
++                        total_tokens: 18,
++                        codex_rollout_budget_units: None,
++                    }),
++                    usage_metadata: None,
++                    end_turn: Some(true),
++                },
++            );
++        });
++        end_trace_span(key, r#"{"status":"ok"}"#).unwrap();
++        release_trace_span(key);
++        provider.force_flush().unwrap();
++        let spans = exporter.get_finished_spans().unwrap();
++        let completed = spans
++            .iter()
++            .find(|span| {
++                span.attributes
++                    .iter()
++                    .any(|attribute| attribute.key.as_str() == "gen_ai.usage.input_tokens")
++            })
++            .unwrap_or_else(|| {
++                panic!(
++                    "real native model usage span; got {:?}",
++                    spans.iter().map(|span| &span.name).collect::<Vec<_>>()
++                )
++            });
++        assert!(
++            completed
++                .attributes
++                .iter()
++                .any(
++                    |attribute| attribute.key.as_str() == "gen_ai.usage.input_tokens"
++                        && attribute.value == opentelemetry::Value::I64(11)
++                )
++        );
++        assert!(
++            completed
++                .attributes
++                .iter()
++                .any(
++                    |attribute| attribute.key.as_str() == "gen_ai.usage.output_tokens"
++                        && attribute.value == opentelemetry::Value::I64(7)
++                )
++        );
++        assert!(completed.events.iter().any(|event| {
++            event.attributes.iter().any(|attribute| {
++                attribute.key.as_str() == "event.name"
++                    && attribute.value.to_string() == "codex.tool_result"
++            })
++        }));
++        assert!(!format!("{spans:?}").contains("SCOPED_PRIVATE_PAYLOAD_MUST_NOT_EXPORT"));
++        provider.shutdown().unwrap();
++    }
++}
++
++#[cfg(test)]
++mod disabled_pipeline_tests {
++    use super::*;
++    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
++    #[test]
++    fn nonrecording_scopes_keep_valid_identity_without_using_external_provider() {
++        const CHILD: &str = "CODEX_SDK_TRACE_DISABLED_PIPELINE_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let status=std::process::Command::new(std::env::current_exe().unwrap()).args(["--exact","sdk_trace::disabled_pipeline_tests::nonrecording_scopes_keep_valid_identity_without_using_external_provider","--nocapture"]).env(CHILD,"1").status().unwrap();
++            assert!(status.success());
++            return;
++        }
++        let exporter = InMemorySpanExporter::default();
++        let external = SdkTracerProvider::builder()
++            .with_simple_exporter(exporter.clone())
++            .build();
++        global::set_tracer_provider(external.clone());
++        configure_pipeline(false);
++        let root: Value = serde_json::from_str(
++            &start_trace_span(r#"{"name":"suppressed","kind":"workflow","disabled":true}"#)
++                .unwrap(),
++        )
++        .unwrap();
++        let root_key = root["handle"].as_str().unwrap();
++        assert_ne!(root["trace_id"], TraceId::INVALID.to_string());
++        assert_ne!(root["span_id"], SpanId::INVALID.to_string());
++        let child:Value=serde_json::from_str(&start_trace_span(&json!({"name":"child","kind":"custom","parent":root_key,"disabled":false,"include_sensitive_data":true}).to_string()).unwrap()).unwrap();
++        let child_key = child["handle"].as_str().unwrap();
++        assert_eq!(child["trace_id"], root["trace_id"]);
++        assert_eq!(child["parent_span_id"], root["span_id"]);
++        assert_eq!(child["disabled"], true);
++        assert_eq!(child["include_sensitive_data"], false);
++        let lease = retain_trace_context(child_key).unwrap();
++        end_trace_span(root_key, r#"{"status":"ok"}"#).unwrap();
++        release_trace_span(root_key);
++        end_trace_span(child_key, r#"{"status":"ok"}"#).unwrap();
++        release_trace_span(child_key);
++        assert!(context(&lease).unwrap().span().span_context().is_valid());
++        assert!(!context(&lease).unwrap().span().is_recording());
++        release_trace_context(&lease);
++        external.force_flush().unwrap();
++        assert!(exporter.get_finished_spans().unwrap().is_empty());
++        let mut external_span = global::tracer("external").start("still-owned-by-application");
++        external_span.end();
++        external.force_flush().unwrap();
++        assert_eq!(exporter.get_finished_spans().unwrap().len(), 1);
++        assert!(handles().lock().unwrap().is_empty());
++        assert!(policies().lock().unwrap().is_empty());
++        external.shutdown().unwrap();
++    }
++}
+diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0ed6936c7
+--- /dev/null
++++ b/codex-rs/otel/src/sdk_trace_routes.rs
+@@ -0,0 +1,1219 @@
++//! Bounded SDK lifecycle delivery and private exporter credentials.
++use opentelemetry::Context;
++use opentelemetry::trace::Span as _;
++use opentelemetry_sdk::error::OTelSdkResult;
++use opentelemetry_sdk::trace::{Span, SpanData, SpanProcessor};
++use serde::Deserialize;
++use serde::Serialize;
++use serde_json::{Value, json};
++use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
++use std::sync::{Arc, Mutex, OnceLock};
++use std::time::{Duration, Instant, UNIX_EPOCH};
++
++const MAX_EVENTS: usize = 2048;
++const MAX_BYTES: usize = 4 * 1024 * 1024;
++
++pub struct TraceCredentials {
++    headers: HashMap<String, String>,
++}
++impl std::fmt::Debug for TraceCredentials {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("TraceCredentials([redacted])")
++    }
++}
++impl TraceCredentials {
++    pub(crate) fn overlay(&self, defaults: &HashMap<String, String>) -> HashMap<String, String> {
++        let mut headers: HashMap<_, _> = defaults
++            .iter()
++            .map(|(k, v)| (k.to_ascii_lowercase(), v.clone()))
++            .collect();
++        headers.extend(self.headers.clone());
++        headers
++    }
++}
++#[derive(Default)]
++struct Routes {
++    processors: Vec<String>,
++    replaced: bool,
++    default_available: bool,
++    sequence: u64,
++    acknowledged: u64,
++    delivered: u64,
++    queue: VecDeque<(u64, Value, usize)>,
++    pending: BTreeSet<u64>,
++    bytes: usize,
++    dropped: u64,
++    failed: u64,
++    flush_snapshot: Option<(u64, u64, u64)>,
++    batch: Option<std::sync::Weak<BatchShared>>,
++    credentials: HashMap<String, Arc<TraceCredentials>>,
++    next_credential: u64,
++}
++fn state() -> &'static Mutex<Routes> {
++    static STATE: OnceLock<Mutex<Routes>> = OnceLock::new();
++    STATE.get_or_init(Default::default)
++}
++fn lock() -> std::sync::MutexGuard<'static, Routes> {
++    state().lock().unwrap_or_else(|e| e.into_inner())
++}
++
++pub fn register_trace_credentials(input: &str) -> Result<String, String> {
++    if input.len() > 65536 {
++        return Err("trace credential headers exceed limit".into());
++    }
++    let raw: HashMap<String, String> =
++        serde_json::from_str(input).map_err(|_| "invalid trace credential headers")?;
++    if raw.len() > 64 {
++        return Err("too many trace credential headers".into());
++    }
++    let mut headers = HashMap::new();
++    for (key, value) in raw {
++        let name = http::header::HeaderName::from_bytes(key.as_bytes())
++            .map_err(|_| "invalid trace credential header name")?;
++        let lower = name.as_str().to_owned();
++        if !lower.bytes().all(|b| {
++            b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_' || b == b'.'
++        }) || lower.ends_with("-bin")
++            || value.bytes().any(|c| !(32..=126).contains(&c))
++            || http::header::HeaderValue::from_str(&value).is_err()
++        {
++            return Err("invalid trace credential header value".into());
++        }
++        if headers.insert(lower, value).is_some() {
++            return Err("duplicate trace credential header".into());
++        }
++    }
++    let mut s = lock();
++    if s.credentials.len() >= 1024 {
++        return Err("trace credential registry is full".into());
++    }
++    s.next_credential += 1;
++    let key = format!("credential_{}", s.next_credential);
++    s.credentials
++        .insert(key.clone(), Arc::new(TraceCredentials { headers }));
++    Ok(key)
++}
++pub(crate) fn configure_default(available: bool) {
++    lock().default_available = available;
++}
++pub fn credential(reference: &str) -> Result<Arc<TraceCredentials>, String> {
++    let s = lock();
++    if !s.default_available || s.replaced {
++        return Err(
++            "trace credential overrides require an active built-in OTLP trace route".into(),
++        );
++    }
++    s.credentials
++        .get(reference)
++        .cloned()
++        .ok_or_else(|| "unknown trace credential reference".into())
++}
++
++pub fn release_trace_credentials(reference: &str) -> Result<(), String> {
++    lock().credentials.remove(reference);
++    Ok(())
++}
++#[derive(Deserialize)]
++#[serde(deny_unknown_fields)]
++struct RouteOptions {
++    processor_ids: Vec<String>,
++    #[serde(default)]
++    replace: bool,
++}
++pub fn set_trace_routes(input: &str) -> Result<u64, String> {
++    if input.len() > 16384 {
++        return Err("trace route configuration exceeds limit".into());
++    }
++    let options: RouteOptions =
++        serde_json::from_str(input).map_err(|_| "invalid trace route configuration")?;
++    if options.processor_ids.len() > 64
++        || options
++            .processor_ids
++            .iter()
++            .any(|id| id.is_empty() || id.len() > 256)
++    {
++        return Err("invalid trace processor IDs".into());
++    }
++    let mut s = lock();
++    let mut ids = if options.replace {
++        Vec::new()
++    } else {
++        s.processors.clone()
++    };
++    for id in options.processor_ids {
++        if !ids.contains(&id) {
++            ids.push(id);
++        }
++    }
++    if ids.len() > 64 {
++        return Err("too many trace processors".into());
++    }
++    s.processors = ids;
++    s.replaced |= options.replace;
++    Ok(s.sequence)
++}
++fn event(s: &mut Routes, span: &SpanData, lifecycle: &str) {
++    s.sequence += 1;
++    let sequence = s.sequence;
++    if s.processors.is_empty() {
++        return;
++    }
++    // Native fields are copied into an immutable, bounded JSON snapshot. Never copy policy.
++    let mut attrs = BTreeMap::new();
++    // User metadata has 64 fields; reserve the native SDK's full 128-attribute
++    // capacity for SDK kind/group fields and configured span attributes too.
++    // The private metadata namespace prefix does not consume the user's key limit.
++    for kv in span.attributes.iter().take(128) {
++        let key = truncate(kv.key.as_str(), 256 + "sdk.metadata.".len());
++        let val = match &kv.value {
++            opentelemetry::Value::Bool(v) => json!(v),
++            opentelemetry::Value::I64(v) => json!(v),
++            opentelemetry::Value::F64(v) => json!(v),
++            other => json!(truncate(&other.to_string(), 4096)),
++        };
++        attrs.insert(key, val);
++    }
++    let value = json!({"sequence":sequence,"processor_ids":s.processors,"lifecycle":lifecycle,"trace_id":span.span_context.trace_id().to_string(),"span_id":span.span_context.span_id().to_string(),"parent_span_id":if span.parent_span_id==opentelemetry::trace::SpanId::INVALID {None}else{Some(span.parent_span_id.to_string())},"name":truncate(&span.name,4096),"kind":format!("{:?}",span.span_kind).to_ascii_lowercase(),"start_time_unix_nanos":span.start_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string(),"end_time_unix_nanos":if lifecycle=="end" {Some(span.end_time.duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos().to_string())}else{None},"attributes":attrs,"dropped_attributes_count":span.dropped_attributes_count,"outcome":match span.status { opentelemetry::trace::Status::Error{..}=>"error",opentelemetry::trace::Status::Ok=>"ok",_=>"unset" }});
++    let bytes = serde_json::to_vec(&value).map_or(MAX_BYTES + 1, |v| v.len());
++    if bytes > 65536 || s.pending.len() >= MAX_EVENTS || s.bytes + bytes > MAX_BYTES {
++        dropped(s, sequence);
++        return;
++    }
++    s.bytes += bytes;
++    s.pending.insert(sequence);
++    s.queue.push_back((sequence, value, bytes));
++}
++fn truncate(s: &str, max: usize) -> String {
++    let mut end = s.len().min(max);
++    while !s.is_char_boundary(end) {
++        end -= 1;
++    }
++    s[..end].to_owned()
++}
++pub fn drain_trace_events(max_count: usize) -> Result<String, String> {
++    let mut s = lock();
++    let mut events = Vec::new();
++    let cutoff = s
++        .flush_snapshot
++        .map(|(barrier, _, _)| barrier)
++        .filter(|barrier| s.pending.range(..=*barrier).next().is_some());
++    for _ in 0..max_count.min(512) {
++        if s.queue
++            .front()
++            .is_some_and(|(seq, _, _)| cutoff.is_some_and(|cutoff| *seq > cutoff))
++        {
++            break;
++        }
++        let Some((seq, value, bytes)) = s.queue.pop_front() else {
++            break;
++        };
++        s.bytes -= bytes;
++        s.delivered = seq;
++        events.push(value);
++    }
++    let through = cutoff.unwrap_or(s.sequence);
++    if s.queue.front().is_none_or(|(seq, _, _)| *seq > through) {
++        s.delivered = s.delivered.max(through);
++    }
++    serde_json::to_string(&json!({"events":events,"dropped_records":s.dropped,"failed_deliveries":s.failed,"through_sequence":s.delivered})).map_err(|_| "trace event serialization failed".into())
++}
++pub fn ack_trace_events(sequence: u64, failed: u64) -> Result<(), String> {
++    let mut s = lock();
++    if sequence > s.delivered || sequence < s.acknowledged {
++        return Err("invalid trace event acknowledgment".into());
++    }
++    if sequence > s.acknowledged {
++        s.failed = s.failed.saturating_add(failed);
++        if let Some((barrier, _, captured_failed)) = &mut s.flush_snapshot {
++            if sequence <= *barrier {
++                *captured_failed = captured_failed.saturating_add(failed);
++            }
++        }
++        s.acknowledged = sequence;
++        s.pending.retain(|pending| *pending > sequence);
++    }
++    Ok(())
++}
++pub(crate) fn current_barrier() -> u64 {
++    lock().sequence
++}
++pub(crate) fn capture_barrier() -> u64 {
++    let mut s = lock();
++    let barrier = s.sequence;
++    s.flush_snapshot = Some((barrier, s.dropped, s.failed));
++    if let Some(batch) = s.batch.as_ref().and_then(std::sync::Weak::upgrade) {
++        let mut state = batch.state.lock().unwrap_or_else(|e| e.into_inner());
++        let target = state.admitted;
++        state.captured_flush_target = Some(target);
++        state.flush = state.flush.max(target);
++        batch.changed.notify_all();
++    }
++    barrier
++}
++pub(crate) async fn wait_for_barrier(barrier: u64, deadline: Instant) -> bool {
++    loop {
++        {
++            let s = lock();
++            if s.pending.range(..=barrier).next().is_none() {
++                return true;
++            }
++        }
++        if Instant::now() >= deadline {
++            return false;
++        }
++        tokio::time::sleep(Duration::from_millis(2)).await;
++    }
++}
++#[derive(Debug, Serialize)]
++pub struct FlushResult {
++    pub status: &'static str,
++    pub dropped_records: u64,
++    pub failed_deliveries: u64,
++    pub barrier: u64,
++}
++pub(crate) fn result(barrier: u64, status: &'static str) -> FlushResult {
++    let s = lock();
++    let (dropped_records, failed_deliveries) = s
++        .flush_snapshot
++        .filter(|(b, _, _)| *b == barrier)
++        .map(|(_, d, f)| (d, f))
++        .unwrap_or((s.dropped, s.failed));
++    FlushResult {
++        status: if status == "success" && (dropped_records > 0 || failed_deliveries > 0) {
++            "partial"
++        } else {
++            status
++        },
++        dropped_records,
++        failed_deliveries,
++        barrier,
++    }
++}
++fn dropped(s: &mut Routes, sequence: u64) {
++    s.dropped += 1;
++    if let Some((barrier, captured_dropped, _)) = &mut s.flush_snapshot {
++        if sequence <= *barrier {
++            *captured_dropped += 1;
++        }
++    }
++}
++fn export_failures(sequences: &[u64]) {
++    let mut s = lock();
++    s.failed += sequences.len() as u64;
++    if let Some((barrier, _, captured_failed)) = &mut s.flush_snapshot {
++        *captured_failed += sequences.iter().filter(|seq| **seq <= *barrier).count() as u64;
++    }
++}
++
++/// A span and its private credential share exactly one bounded queue lifetime.
++pub(crate) struct TraceEnvelope {
++    pub(crate) span: SpanData,
++    pub(crate) credential: Option<Arc<TraceCredentials>>,
++    sequence: u64,
++    pub(crate) record_sequence: u64,
++}
++/// A partition removes its records only after delivery succeeds. Cancellation
++/// therefore counts remaining records without reclassifying delivered partitions.
++pub(crate) struct BatchReceipt(Mutex<BTreeSet<u64>>);
++impl BatchReceipt {
++    fn new(sequences: &[u64]) -> Self {
++        Self(Mutex::new(sequences.iter().copied().collect()))
++    }
++    pub(crate) fn succeeded(&self, sequences: &[u64]) {
++        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
++        for sequence in sequences {
++            pending.remove(sequence);
++        }
++    }
++    fn remaining(&self) -> Vec<u64> {
++        self.0
++            .lock()
++            .unwrap_or_else(|e| e.into_inner())
++            .iter()
++            .copied()
++            .collect()
++    }
++}
++pub(crate) trait EnvelopeExporter: Send + 'static {
++    fn export(
++        &self,
++        batch: Vec<TraceEnvelope>,
++        receipt: &BatchReceipt,
++    ) -> impl std::future::Future<Output = Result<Vec<u64>, ()>> + Send;
++    fn shutdown(&mut self) -> OTelSdkResult {
++        Ok(())
++    }
++}
++pub(crate) trait RouteSink: SpanProcessor {
++    fn enqueue(
++        &self,
++        span: SpanData,
++        credential: Option<Arc<TraceCredentials>>,
++        record_sequence: u64,
++    ) -> bool;
++}
++#[derive(Clone, Debug)]
++pub(crate) struct BatchSettings {
++    queue: usize,
++    batch: usize,
++    delay: Duration,
++    timeout: Duration,
++    concurrency: usize,
++}
++impl BatchSettings {
++    pub(crate) fn from_env(concurrent: bool) -> Result<Self, String> {
++        fn number(name: &str, default: usize) -> usize {
++            std::env::var(name)
++                .ok()
++                .and_then(|v| v.parse().ok())
++                .unwrap_or(default)
++        }
++        let queue = number("OTEL_BSP_MAX_QUEUE_SIZE", 2048);
++        let batch = number("OTEL_BSP_MAX_EXPORT_BATCH_SIZE", 512).min(queue);
++        let concurrency = if concurrent {
++            number("OTEL_BSP_MAX_CONCURRENT_EXPORTS", 1)
++        } else {
++            1
++        };
++        if queue == 0 || batch == 0 || concurrency == 0 {
++            return Err("trace batch queue, batch and concurrency sizes must be positive".into());
++        }
++        Ok(Self {
++            concurrency,
++            queue,
++            batch,
++            delay: Duration::from_millis(number("OTEL_BSP_SCHEDULE_DELAY", 5000) as u64),
++            timeout: Duration::from_millis(number("OTEL_BSP_EXPORT_TIMEOUT", 30000) as u64),
++        })
++    }
++}
++#[derive(Default)]
++struct BatchState {
++    queue: VecDeque<TraceEnvelope>,
++    admitted: u64,
++    completed: u64,
++    flush: u64,
++    shutdown: bool,
++    stopped: bool,
++    workers: usize,
++    completed_ranges: BTreeMap<u64, u64>,
++    captured_flush_target: Option<u64>,
++}
++struct BatchShared {
++    state: Mutex<BatchState>,
++    changed: std::sync::Condvar,
++    settings: BatchSettings,
++}
++impl std::fmt::Debug for BatchShared {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("TraceBatchState([private])")
++    }
++}
++#[derive(Debug)]
++pub(crate) struct TraceBatchProcessor {
++    shared: Arc<BatchShared>,
++}
++impl TraceBatchProcessor {
++    pub(crate) fn new<F, E>(settings: BatchSettings, build: F) -> Result<Self, String>
++    where
++        F: Fn() -> Result<E, String> + Send + Sync + 'static,
++        E: EnvelopeExporter,
++    {
++        let shared = Arc::new(BatchShared {
++            state: Mutex::new(BatchState {
++                workers: settings.concurrency,
++                ..Default::default()
++            }),
++            changed: std::sync::Condvar::new(),
++            settings,
++        });
++        let build = Arc::new(build);
++        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
++        for _ in 0..shared.settings.concurrency {
++            let worker = shared.clone();
++            let build = build.clone();
++            let ready_tx = ready_tx.clone();
++            std::thread::Builder::new()
++                .name("codex-sdk-trace-export".into())
++                .spawn(move || {
++                    let _suppression = Context::enter_telemetry_suppressed_scope();
++                    let runtime = match tokio::runtime::Builder::new_current_thread()
++                        .enable_all()
++                        .build()
++                    {
++                        Ok(runtime) => runtime,
++                        Err(_) => {
++                            let _ = ready_tx
++                                .send(Err("trace worker runtime initialization failed".to_owned()));
++                            return;
++                        }
++                    };
++                    let exporter = {
++                        let _entered = runtime.enter();
++                        build()
++                    };
++                    let mut exporter = match exporter {
++                        Ok(exporter) => exporter,
++                        Err(error) => {
++                            let _ = ready_tx.send(Err(error));
++                            return;
++                        }
++                    };
++                    let _ = ready_tx.send(Ok(()));
++                    drop(ready_tx);
++                    let mut next = Instant::now() + worker.settings.delay;
++                    loop {
++                        let (batch, shutdown) = {
++                            let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
++                            while !state.shutdown
++                                && (state.queue.is_empty()
++                                    || (state.flush > state.completed
++                                        && state
++                                            .queue
++                                            .front()
++                                            .is_some_and(|e| e.sequence > state.flush))
++                                    || (state.flush <= state.completed
++                                        && state.queue.len() < worker.settings.batch
++                                        && Instant::now() < next))
++                            {
++                                if state.flush > state.completed
++                                    && state
++                                        .queue
++                                        .front()
++                                        .is_some_and(|e| e.sequence > state.flush)
++                                {
++                                    state = worker
++                                        .changed
++                                        .wait(state)
++                                        .unwrap_or_else(|e| e.into_inner());
++                                    continue;
++                                }
++                                if state.queue.is_empty() {
++                                    state = worker
++                                        .changed
++                                        .wait(state)
++                                        .unwrap_or_else(|e| e.into_inner());
++                                    continue;
++                                }
++                                let wait = next.saturating_duration_since(Instant::now());
++                                state = worker
++                                    .changed
++                                    .wait_timeout(state, wait)
++                                    .unwrap_or_else(|e| e.into_inner())
++                                    .0;
++                            }
++                            if state.shutdown && state.queue.is_empty() {
++                                break;
++                            }
++                            let mut count = state.queue.len().min(worker.settings.batch);
++                            if !state.shutdown && state.flush > state.completed {
++                                count = state
++                                    .queue
++                                    .iter()
++                                    .take(count)
++                                    .take_while(|e| e.sequence <= state.flush)
++                                    .count();
++                            }
++                            let batch: Vec<_> = state.queue.drain(..count).collect();
++                            (batch, state.shutdown)
++                        };
++                        if batch.is_empty() {
++                            next = Instant::now() + worker.settings.delay;
++                            continue;
++                        }
++                        let first = batch.first().map(|e| e.sequence).unwrap_or_default();
++                        let last = batch.last().map(|e| e.sequence).unwrap_or_default();
++                        let records: Vec<_> = batch.iter().map(|e| e.record_sequence).collect();
++                        let receipt = BatchReceipt::new(&records);
++                        let outcome =
++                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++                                runtime.block_on(async {
++                                    tokio::time::timeout(
++                                        worker.settings.timeout,
++                                        exporter.export(batch, &receipt),
++                                    )
++                                    .await
++                                })
++                            }));
++                        match outcome {
++                            Ok(Ok(Ok(failed))) => export_failures(&failed),
++                            _ => export_failures(&receipt.remaining()),
++                        }
++                        let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
++                        let (mut first, mut last) = (first, last);
++                        if let Some((&start, &end)) =
++                            state.completed_ranges.range(..first).next_back()
++                        {
++                            if end.saturating_add(1) == first {
++                                first = start;
++                                state.completed_ranges.remove(&start);
++                            }
++                        }
++                        if let Some((&start, &end)) = state.completed_ranges.range(first..).next() {
++                            if last.saturating_add(1) == start {
++                                last = end;
++                                state.completed_ranges.remove(&start);
++                            }
++                        }
++                        state.completed_ranges.insert(first, last);
++                        loop {
++                            let next = state.completed + 1;
++                            let Some(last) = state.completed_ranges.remove(&next) else {
++                                break;
++                            };
++                            state.completed = last;
++                        }
++                        worker.changed.notify_all();
++                        if shutdown
++                            || state.flush > state.completed
++                            || state.queue.len() >= worker.settings.batch
++                        {
++                            next = Instant::now();
++                        } else {
++                            next = Instant::now() + worker.settings.delay;
++                        }
++                    }
++                    let _ = exporter.shutdown();
++                    let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
++                    state.workers -= 1;
++                    state.stopped = state.workers == 0;
++                    worker.changed.notify_all();
++                })
++                .map_err(|_| {
++                    let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
++                    state.shutdown = true;
++                    shared.changed.notify_all();
++                    "trace export worker initialization failed".to_owned()
++                })?;
++        }
++        drop(ready_tx);
++        for _ in 0..shared.settings.concurrency {
++            let result = ready_rx
++                .recv()
++                .map_err(|_| "trace export worker stopped during initialization".to_owned())?;
++            if let Err(error) = result {
++                let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
++                state.shutdown = true;
++                shared.changed.notify_all();
++                return Err(error);
++            }
++        }
++        lock().batch = Some(Arc::downgrade(&shared));
++        Ok(Self { shared })
++    }
++    fn wait(&self, timeout: Duration, shutdown: bool) -> OTelSdkResult {
++        let deadline = Instant::now() + timeout;
++        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
++        let target = if shutdown {
++            state.admitted
++        } else {
++            state.captured_flush_target.take().unwrap_or(state.admitted)
++        };
++        state.flush = state.flush.max(target);
++        state.shutdown |= shutdown;
++        self.shared.changed.notify_all();
++        while state.completed < target || (shutdown && !state.stopped) {
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            if remaining.is_zero() {
++                return Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
++                    "trace batch flush exceeded time budget".into(),
++                ));
++            }
++            state = self
++                .shared
++                .changed
++                .wait_timeout(state, remaining)
++                .unwrap_or_else(|e| e.into_inner())
++                .0;
++        }
++        Ok(())
++    }
++}
++impl RouteSink for TraceBatchProcessor {
++    fn enqueue(
++        &self,
++        span: SpanData,
++        credential: Option<Arc<TraceCredentials>>,
++        record_sequence: u64,
++    ) -> bool {
++        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
++        if state.shutdown || state.queue.len() >= self.shared.settings.queue {
++            return false;
++        }
++        state.admitted += 1;
++        let sequence = state.admitted;
++        state.queue.push_back(TraceEnvelope {
++            span,
++            credential,
++            sequence,
++            record_sequence,
++        });
++        if state.queue.len() == 1 || state.queue.len() >= self.shared.settings.batch {
++            self.shared.changed.notify_one();
++        }
++        true
++    }
++}
++impl SpanProcessor for TraceBatchProcessor {
++    fn on_start(&self, _: &mut Span, _: &Context) {}
++    fn on_end(&self, span: SpanData) {
++        let sequence = current_barrier();
++        if !self.enqueue(span, None, sequence) {
++            dropped(&mut lock(), sequence);
++        }
++    }
++    fn force_flush(&self) -> OTelSdkResult {
++        self.wait(Duration::from_secs(30), false)
++    }
++    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
++        self.wait(timeout, true)
++    }
++}
++
++#[derive(Debug)]
++pub(crate) struct RoutedSpanProcessor<P> {
++    pub(crate) inner: P,
++    pub(crate) default_enabled: bool,
++}
++impl<P: RouteSink> SpanProcessor for RoutedSpanProcessor<P> {
++    fn on_start(&self, span: &mut Span, cx: &Context) {
++        if crate::sdk_trace::policy_for_context(cx).is_some_and(|p| p.disabled) {
++            return;
++        }
++        self.inner.on_start(span, cx);
++        let mut s = lock();
++        if !s.processors.is_empty() {
++            if let Some(data) = span.exported_data() {
++                event(&mut s, &data, "start");
++            }
++        }
++    }
++    fn on_end(&self, span: SpanData) {
++        let policy = crate::sdk_trace::policy_for_span(&span.span_context);
++        if policy.as_ref().is_some_and(|p| p.disabled) {
++            return;
++        }
++        let mut s = lock();
++        event(&mut s, &span, "end");
++        if s.replaced || !self.default_enabled {
++            return;
++        }
++        let sequence = s.sequence;
++        if !self
++            .inner
++            .enqueue(span, policy.and_then(|p| p.credential.clone()), sequence)
++        {
++            dropped(&mut s, sequence);
++        }
++    }
++
++    fn force_flush(&self) -> OTelSdkResult {
++        self.inner.force_flush()
++    }
++    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
++        self.inner.shutdown_with_timeout(timeout)
++    }
++    fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
++        self.inner.set_resource(resource);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use opentelemetry::trace::{Tracer, TracerProvider};
++    use opentelemetry_sdk::trace::SdkTracerProvider;
++
++    static TEST_LOCK: Mutex<()> = Mutex::new(());
++
++    #[derive(Debug, Default, Clone)]
++    struct Recorder(Arc<Mutex<Vec<String>>>);
++    impl SpanProcessor for Recorder {
++        fn on_start(&self, _: &mut Span, _: &Context) {}
++        fn on_end(&self, span: SpanData) {
++            self.0.lock().unwrap().push(span.name.to_string());
++        }
++        fn force_flush(&self) -> OTelSdkResult {
++            Ok(())
++        }
++        fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
++            Ok(())
++        }
++    }
++    impl RouteSink for Recorder {
++        fn enqueue(&self, span: SpanData, _: Option<Arc<TraceCredentials>>, _: u64) -> bool {
++            self.on_end(span);
++            true
++        }
++    }
++
++    #[tokio::test]
++    async fn routes_are_bounded_ordered_and_replacement_gates_default() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        set_trace_routes(r#"{"processor_ids":["first"],"replace":false}"#).unwrap();
++        let recorder = Recorder::default();
++        let provider = SdkTracerProvider::builder()
++            .with_span_processor(RoutedSpanProcessor {
++                inner: recorder.clone(),
++                default_enabled: true,
++            })
++            .build();
++        let tracer = provider.tracer("route-test");
++        let mut old = tracer.start("old");
++        old.end();
++        set_trace_routes(r#"{"processor_ids":["second"],"replace":true}"#).unwrap();
++        let mut new = tracer.start("new");
++        new.end();
++        assert_eq!(*recorder.0.lock().unwrap(), vec!["old"]);
++        let snapshot: Value = serde_json::from_str(&drain_trace_events(512).unwrap()).unwrap();
++        let events = snapshot["events"].as_array().unwrap();
++        assert_eq!(events.len(), 4);
++        assert_eq!(events[0]["lifecycle"], "start");
++        assert_eq!(events[1]["lifecycle"], "end");
++        assert_eq!(events[0]["processor_ids"], json!(["first"]));
++        assert_eq!(events[2]["processor_ids"], json!(["second"]));
++        let barrier = capture_barrier();
++        assert!(!wait_for_barrier(barrier, Instant::now()).await);
++        ack_trace_events(barrier, 1).unwrap();
++        assert!(wait_for_barrier(barrier, Instant::now()).await);
++        assert_eq!(result(barrier, "success").status, "partial");
++        assert!(ack_trace_events(barrier + 1, 0).is_err());
++        for _ in 0..(MAX_EVENTS + 20) {
++            let mut span = tracer.start("overflow");
++            span.end();
++        }
++        let s = lock();
++        assert!(s.queue.len() <= MAX_EVENTS);
++        assert!(s.bytes <= MAX_BYTES);
++        assert!(s.dropped > 0);
++    }
++
++    #[test]
++    fn credentials_overlay_without_exposing_or_revoking_queued_lease() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        configure_default(true);
++        let reference =
++            register_trace_credentials(r#"{"Authorization":"private-token","X-Route":"blue"}"#)
++                .unwrap();
++        let lease = credential(&reference).unwrap();
++        configure_default(false);
++        assert!(credential(&reference).is_err());
++        configure_default(true);
++        release_trace_credentials(&reference).unwrap();
++        assert!(credential(&reference).is_err());
++        let defaults = HashMap::from([
++            ("AUTHORIZATION".into(), "default".into()),
++            ("x-default".into(), "kept".into()),
++        ]);
++        let headers = lease.overlay(&defaults);
++        assert_eq!(headers.get("authorization").unwrap(), "private-token");
++        assert_eq!(headers.get("x-default").unwrap(), "kept");
++        assert_eq!(headers.len(), 3);
++        assert!(!format!("{lease:?}").contains("private-token"));
++        assert!(
++            register_trace_credentials(r#"{"Authorization":"a","authorization":"b"}"#).is_err()
++        );
++        assert!(register_trace_credentials(r#"{"Authorization":"a\r\nb"}"#).is_err());
++        assert!(register_trace_credentials(r#"{"bad-bin":"plain"}"#).is_err());
++    }
++    fn sample_span() -> SpanData {
++        let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
++        let provider = SdkTracerProvider::builder()
++            .with_simple_exporter(exporter.clone())
++            .build();
++        let mut span = provider.tracer("fixture").start("fixture");
++        span.end();
++        exporter.get_finished_spans().unwrap().remove(0)
++    }
++    #[test]
++    fn worker_recovers_overflow_tail_and_flushes_full_queue() {
++        use std::sync::mpsc;
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        struct Exporter {
++            calls: std::sync::atomic::AtomicUsize,
++            started: mpsc::Sender<()>,
++            done: mpsc::Sender<usize>,
++            release: Arc<tokio::sync::Notify>,
++        }
++        impl EnvelopeExporter for Exporter {
++            async fn export(
++                &self,
++                batch: Vec<TraceEnvelope>,
++                _: &BatchReceipt,
++            ) -> Result<Vec<u64>, ()> {
++                if self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
++                    self.started.send(()).unwrap();
++                    self.release.notified().await;
++                }
++                let count = batch.len();
++                drop(batch);
++                self.done.send(count).unwrap();
++                Ok(Vec::new())
++            }
++        }
++        let (started_tx, started_rx) = mpsc::channel();
++        let (done_tx, done_rx) = mpsc::channel();
++        let release = Arc::new(tokio::sync::Notify::new());
++        let release_for_build = release.clone();
++        let worker = Arc::new(
++            TraceBatchProcessor::new(
++                BatchSettings {
++                    queue: 2,
++                    batch: 1,
++                    delay: Duration::from_millis(5),
++                    timeout: Duration::from_secs(5),
++                    concurrency: 1,
++                },
++                move || {
++                    Ok(Exporter {
++                        calls: Default::default(),
++                        started: started_tx.clone(),
++                        done: done_tx.clone(),
++                        release: release_for_build.clone(),
++                    })
++                },
++            )
++            .unwrap(),
++        );
++        let data = sample_span();
++        let credential = Arc::new(TraceCredentials {
++            headers: HashMap::new(),
++        });
++        let weak = Arc::downgrade(&credential);
++        assert!(worker.enqueue(data.clone(), Some(credential.clone()), 1));
++        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
++        assert!(worker.enqueue(data.clone(), Some(credential.clone()), 2));
++        assert!(worker.enqueue(data.clone(), Some(credential.clone()), 3));
++        for _ in 0..100 {
++            assert!(!worker.enqueue(data.clone(), Some(credential.clone()), 4));
++        }
++        drop(credential);
++        let flushing = worker.clone();
++        let (flush_tx, flush_rx) = mpsc::channel();
++        std::thread::spawn(move || {
++            flush_tx.send(flushing.force_flush()).unwrap();
++        });
++        assert!(flush_rx.recv_timeout(Duration::from_millis(20)).is_err());
++        // Wake the first request while the full queue and flush control coexist.
++        // The retained weak lease proves discarded envelopes release immediately.
++        assert!(weak.upgrade().is_some());
++        release.notify_one();
++        flush_rx
++            .recv_timeout(Duration::from_secs(2))
++            .unwrap()
++            .unwrap();
++        for _ in 0..3 {
++            assert_eq!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
++        }
++        assert!(weak.upgrade().is_none());
++        assert!(worker.enqueue(data, None, 5));
++        assert_eq!(done_rx.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
++        worker
++            .shutdown_with_timeout(Duration::from_secs(2))
++            .unwrap();
++    }
++    #[test]
++    fn batch_timeout_releases_credentials_counts_barrier_and_continues() {
++        use std::sync::atomic::{AtomicUsize, Ordering};
++        use std::sync::mpsc;
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        struct Exporter {
++            calls: AtomicUsize,
++            done: mpsc::Sender<usize>,
++        }
++        impl EnvelopeExporter for Exporter {
++            async fn export(
++                &self,
++                batch: Vec<TraceEnvelope>,
++                _: &BatchReceipt,
++            ) -> Result<Vec<u64>, ()> {
++                assert!(batch.len() <= 2);
++                match self.calls.fetch_add(1, Ordering::SeqCst) {
++                    0 => std::future::pending().await,
++                    1 => {
++                        self.done.send(batch.len()).unwrap();
++                        Ok(batch.iter().map(|e| e.record_sequence).collect())
++                    }
++                    _ => {
++                        self.done.send(batch.len()).unwrap();
++                        Ok(Vec::new())
++                    }
++                }
++            }
++        }
++        let (tx, rx) = mpsc::channel();
++        let worker = TraceBatchProcessor::new(
++            BatchSettings {
++                queue: 4,
++                batch: 2,
++                delay: Duration::from_millis(5),
++                timeout: Duration::from_millis(20),
++                concurrency: 1,
++            },
++            move || {
++                Ok(Exporter {
++                    calls: Default::default(),
++                    done: tx.clone(),
++                })
++            },
++        )
++        .unwrap();
++        let data = sample_span();
++        let original = data.clone();
++        let credential = Arc::new(TraceCredentials {
++            headers: HashMap::new(),
++        });
++        let weak = Arc::downgrade(&credential);
++        assert!(worker.enqueue(data.clone(), Some(credential.clone()), 1));
++        assert!(worker.enqueue(data.clone(), Some(credential.clone()), 2));
++        lock().sequence = 2;
++        let barrier = capture_barrier();
++        drop(credential);
++        assert!(worker.enqueue(data.clone(), None, 3));
++        worker.force_flush().unwrap();
++        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
++        assert!(weak.upgrade().is_none());
++        assert_eq!(data, original);
++        let report = result(barrier, "success");
++        assert_eq!(report.status, "partial");
++        assert_eq!(report.failed_deliveries, 2);
++        worker.force_flush().unwrap();
++        assert_eq!(lock().failed, 3);
++        assert!(worker.enqueue(data, None, 4));
++        worker.force_flush().unwrap();
++        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
++        worker
++            .shutdown_with_timeout(Duration::from_secs(1))
++            .unwrap();
++    }
++    #[test]
++    fn concurrent_workers_preserve_flush_barrier_on_out_of_order_completion() {
++        use std::sync::mpsc;
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        struct Exporter {
++            done: mpsc::Sender<u64>,
++            release: Arc<tokio::sync::Notify>,
++            future: Arc<tokio::sync::Notify>,
++        }
++        impl EnvelopeExporter for Exporter {
++            async fn export(
++                &self,
++                batch: Vec<TraceEnvelope>,
++                _: &BatchReceipt,
++            ) -> Result<Vec<u64>, ()> {
++                let sequence = batch[0].record_sequence;
++                if sequence == 1 {
++                    self.release.notified().await;
++                }
++                self.done.send(sequence).unwrap();
++                if sequence == 21 {
++                    self.future.notified().await;
++                }
++                Ok(Vec::new())
++            }
++        }
++        let (tx, rx) = mpsc::channel();
++        let release = Arc::new(tokio::sync::Notify::new());
++        let build_release = release.clone();
++        let future = Arc::new(tokio::sync::Notify::new());
++        let build_future = future.clone();
++        let worker = Arc::new(
++            TraceBatchProcessor::new(
++                BatchSettings {
++                    queue: 2,
++                    batch: 1,
++                    delay: Duration::from_millis(5),
++                    timeout: Duration::from_secs(2),
++                    concurrency: 2,
++                },
++                move || {
++                    Ok(Exporter {
++                        done: tx.clone(),
++                        release: build_release.clone(),
++                        future: build_future.clone(),
++                    })
++                },
++            )
++            .unwrap(),
++        );
++        let data = sample_span();
++        assert!(worker.enqueue(data.clone(), None, 1));
++        for sequence in 2..=20 {
++            assert!(worker.enqueue(data.clone(), None, sequence));
++            assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), sequence);
++            let mut state = worker.shared.state.lock().unwrap();
++            let deadline = Instant::now() + Duration::from_secs(1);
++            while state.completed_ranges.values().next().copied() != Some(sequence) {
++                assert!(Instant::now() < deadline);
++                state = worker
++                    .shared
++                    .changed
++                    .wait_timeout(state, Duration::from_secs(1))
++                    .unwrap()
++                    .0;
++            }
++            assert_eq!(state.completed_ranges.len(), 1);
++        }
++        lock().sequence = 20;
++        let _barrier = capture_barrier();
++        assert!(worker.enqueue(data, None, 21));
++        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
++        let flushing = worker.clone();
++        let (tx, done) = mpsc::channel();
++        std::thread::spawn(move || {
++            tx.send(flushing.force_flush()).unwrap();
++        });
++        assert!(done.recv_timeout(Duration::from_millis(20)).is_err());
++        release.notify_one();
++        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 1);
++        assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), 21);
++        done.recv_timeout(Duration::from_secs(1)).unwrap().unwrap();
++        future.notify_one();
++        worker
++            .shutdown_with_timeout(Duration::from_secs(1))
++            .unwrap();
++    }
++    #[test]
++    fn flush_capture_cannot_overtake_routed_span_admission() {
++        use std::sync::{Condvar, mpsc};
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        #[derive(Debug)]
++        struct Sink {
++            started: mpsc::Sender<()>,
++            release: Arc<(Mutex<bool>, Condvar)>,
++            admitted: Arc<std::sync::atomic::AtomicBool>,
++        }
++        impl SpanProcessor for Sink {
++            fn on_start(&self, _: &mut Span, _: &Context) {}
++            fn on_end(&self, _: SpanData) {}
++            fn force_flush(&self) -> OTelSdkResult {
++                Ok(())
++            }
++            fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
++                Ok(())
++            }
++        }
++        impl RouteSink for Sink {
++            fn enqueue(&self, _: SpanData, _: Option<Arc<TraceCredentials>>, _: u64) -> bool {
++                self.started.send(()).unwrap();
++                drop(
++                    self.release
++                        .1
++                        .wait_while(self.release.0.lock().unwrap(), |v| !*v)
++                        .unwrap(),
++                );
++                self.admitted
++                    .store(true, std::sync::atomic::Ordering::Release);
++                true
++            }
++        }
++        let (started_tx, started_rx) = mpsc::channel();
++        let release = Arc::new((Mutex::new(false), Condvar::new()));
++        let admitted = Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let provider = SdkTracerProvider::builder()
++            .with_span_processor(RoutedSpanProcessor {
++                inner: Sink {
++                    started: started_tx,
++                    release: release.clone(),
++                    admitted: admitted.clone(),
++                },
++                default_enabled: true,
++            })
++            .build();
++        let tracer = provider.tracer("race");
++        let ending = std::thread::spawn(move || {
++            let mut span = tracer.start("admission");
++            span.end();
++        });
++        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
++        let (tx, rx) = mpsc::channel();
++        let capture = std::thread::spawn(move || {
++            tx.send(capture_barrier()).unwrap();
++        });
++        assert!(rx.recv_timeout(Duration::from_millis(20)).is_err());
++        *release.0.lock().unwrap() = true;
++        release.1.notify_one();
++        assert!(rx.recv_timeout(Duration::from_secs(1)).unwrap() > 0);
++        assert!(admitted.load(std::sync::atomic::Ordering::Acquire));
++        ending.join().unwrap();
++        capture.join().unwrap();
++        provider.shutdown().unwrap();
++    }
++    #[test]
++    fn cancellation_counts_only_undelivered_credential_partitions() {
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        struct Exporter;
++        impl EnvelopeExporter for Exporter {
++            async fn export(
++                &self,
++                batch: Vec<TraceEnvelope>,
++                receipt: &BatchReceipt,
++            ) -> Result<Vec<u64>, ()> {
++                assert_eq!(batch.len(), 2);
++                // The first credential partition succeeds, the second stalls.
++                receipt.succeeded(&[batch[0].record_sequence]);
++                std::future::pending().await
++            }
++        }
++        let worker = TraceBatchProcessor::new(
++            BatchSettings {
++                queue: 2,
++                batch: 2,
++                delay: Duration::from_millis(5),
++                timeout: Duration::from_millis(20),
++                concurrency: 1,
++            },
++            || Ok(Exporter),
++        )
++        .unwrap();
++        let data = sample_span();
++        assert!(worker.enqueue(data.clone(), None, 1));
++        assert!(worker.enqueue(data, None, 2));
++        lock().sequence = 2;
++        let barrier = capture_barrier();
++        worker.force_flush().unwrap();
++        assert_eq!(result(barrier, "success").failed_deliveries, 1);
++        worker
++            .shutdown_with_timeout(Duration::from_secs(1))
++            .unwrap();
++    }
++    #[test]
++    fn tap_preserves_all_user_metadata_and_prefixed_key_boundaries() {
++        let mut data = sample_span();
++        data.attributes = vec![
++            opentelemetry::KeyValue::new("sdk.span.kind", "workflow"),
++            opentelemetry::KeyValue::new("sdk.group_id", "group"),
++        ];
++        for index in 0..62 {
++            data.attributes.push(opentelemetry::KeyValue::new(
++                format!("sdk.metadata.key_{index}"),
++                "value",
++            ));
++        }
++        let first = format!("sdk.metadata.{}a", "x".repeat(255));
++        let second = format!("sdk.metadata.{}b", "x".repeat(255));
++        data.attributes
++            .push(opentelemetry::KeyValue::new(first.clone(), "first"));
++        data.attributes
++            .push(opentelemetry::KeyValue::new(second.clone(), "second"));
++        data.dropped_attributes_count = 3;
++        let mut routes = Routes {
++            processors: vec!["recording".into()],
++            ..Default::default()
++        };
++        event(&mut routes, &data, "end");
++        let snapshot = &routes.queue.front().unwrap().1;
++        let attributes = snapshot["attributes"].as_object().unwrap();
++        assert_eq!(attributes.len(), 66);
++        assert_eq!(attributes[&first], "first");
++        assert_eq!(attributes[&second], "second");
++        assert_eq!(snapshot["dropped_attributes_count"], 3);
++    }
++}
+diff --git a/codex-rs/otel/src/tool_result.rs b/codex-rs/otel/src/tool_result.rs
+index 7f9c3ca1419d1bb3f56a7c6854c152dc81f6aa8b..d127f6a295427cfa5a740f4c715ab268dca8ab80 100644
+--- a/codex-rs/otel/src/tool_result.rs
++++ b/codex-rs/otel/src/tool_result.rs
+@@ -48,7 +48,14 @@ pub(crate) fn emit_tool_result(
+         output,
+     } = event;
+     let tool_namespace = tool_namespace(tool_name);
+-    let preview = telemetry_preview(output, limits);
++    let preview = if crate::sdk_trace::scoped_capture_allowed() {
++        telemetry_preview(output, limits)
++    } else {
++        ToolResultPreview {
++            text: Cow::Borrowed("[REDACTED]"),
++            truncated: false,
++        }
++    };
+     let tool_result_seq = next_tool_result_seq();
+ 
+     log_and_trace_event!(
+diff --git a/codex-rs/otel/src/trace_context.rs b/codex-rs/otel/src/trace_context.rs
+index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..e1c62777f1c1bd33eaf6898a57b9157de0085e79 100644
+--- a/codex-rs/otel/src/trace_context.rs
++++ b/codex-rs/otel/src/trace_context.rs
+@@ -28,16 +28,20 @@ static TRACESTATE_ENTRIES: OnceLock<RwLock<BTreeMap<String, BTreeMap<String, Str
+ 
+ pub fn current_span_w3c_trace_context() -> Option<W3cTraceContext> {
+     span_w3c_trace_context(&Span::current())
++        .or_else(|| context_w3c_trace_context(&Context::current()))
+ }
+ 
+ pub fn span_w3c_trace_context(span: &Span) -> Option<W3cTraceContext> {
+-    let context = span.context();
++    context_w3c_trace_context(&span.context())
++}
++
++pub(crate) fn context_w3c_trace_context(context: &Context) -> Option<W3cTraceContext> {
+     if !context.span().span_context().is_valid() {
+         return None;
+     }
+ 
+     let mut headers = HashMap::new();
+-    TraceContextPropagator::new().inject_context(&context, &mut headers);
++    TraceContextPropagator::new().inject_context(context, &mut headers);
+     let tracestate = headers.remove("tracestate");
+     let configured_tracestate_guard = tracestate_entries()
+         .read()
+@@ -105,6 +109,7 @@ pub fn current_span_trace_id() -> Option<String> {
+ 
+ pub fn context_from_w3c_trace_context(trace: &W3cTraceContext) -> Option<Context> {
+     context_from_trace_headers(trace.traceparent.as_deref(), trace.tracestate.as_deref())
++        .map(crate::sdk_trace::restore_policy)
+ }
+ 
+ pub fn set_parent_from_w3c_trace_context(span: &Span, trace: &W3cTraceContext) -> bool {
+diff --git a/codex-rs/otel/tests/suite/buffered_operations_tests.rs b/codex-rs/otel/tests/suite/buffered_operations_tests.rs
+index 50789799d127013ffddd34f636f427a5daca0085..eb6376ec536706eea5232763bffa693eebdb5a2d 100644
+--- a/codex-rs/otel/tests/suite/buffered_operations_tests.rs
++++ b/codex-rs/otel/tests/suite/buffered_operations_tests.rs
+@@ -80,6 +80,7 @@ fn shutdown_buffers_until_replacement_and_preserves_newer_installations() {
+ fn rejected_opt_out_preserves_recording_and_accepted_opt_out_survives_shutdown() {
+     let metrics = install();
+     let mut settings = OtelSettings {
++        trace_processors: false,
+         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+         environment: "test".to_string(),
+         service_name: "test".to_string(),
+diff --git a/codex-rs/otel/tests/suite/otlp_http_loopback.rs b/codex-rs/otel/tests/suite/otlp_http_loopback.rs
+index d0cedbef5244a0a8d5a5f91c958335fcd3992dc0..bf3e2f494d87fe78ef53211abfbfe3f474669eed 100644
+--- a/codex-rs/otel/tests/suite/otlp_http_loopback.rs
++++ b/codex-rs/otel/tests/suite/otlp_http_loopback.rs
+@@ -369,6 +369,7 @@ fn otlp_http_exporter_sends_logs_to_collector()
+             tls: None,
+         },
+         trace_exporter: OtelExporter::None,
++        trace_processors: false,
+         metrics_exporter: OtelExporter::None,
+         runtime_metrics: false,
+         span_attributes: BTreeMap::new(),
+@@ -417,6 +418,7 @@ fn otlp_http_exporter_sends_logs_to_collector()
+ #[test]
+ fn otel_provider_rejects_header_unsafe_configured_tracestate() {
+     let result = OtelProvider::try_new(&OtelSettings {
++        trace_processors: false,
+         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+         environment: "test".to_string(),
+         service_name: "codex-cli".to_string(),
+@@ -483,6 +485,7 @@ fn otlp_http_exporter_sends_traces_to_collector()
+     });
+ 
+     let otel = OtelProvider::try_new(&OtelSettings {
++        trace_processors: false,
+         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+         environment: "test".to_string(),
+         service_name: "codex-cli".to_string(),
+@@ -629,6 +632,7 @@ async fn otlp_http_exporter_sends_traces_to_collector_with_bounded_shutdown_in_t
+     });
+ 
+     let otel = OtelProvider::try_new(&OtelSettings {
++        trace_processors: false,
+         http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+         environment: "test".to_string(),
+         service_name: "codex-cli".to_string(),
+@@ -723,6 +727,7 @@ fn otlp_http_exporter_times_out_when_collector_stalls_during_bounded_shutdown()
+         .expect("build tokio runtime");
+     let (result, elapsed) = runtime.block_on(async move {
+         let otel = OtelProvider::try_new(&OtelSettings {
++            trace_processors: false,
+             http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+             environment: "test".to_string(),
+             service_name: "codex-cli".to_string(),
+@@ -823,6 +828,7 @@ fn otlp_http_exporter_sends_traces_to_collector_in_current_thread_tokio_runtime(
+ 
+         let result = runtime.block_on(async move {
+             let otel = OtelProvider::try_new(&OtelSettings {
++                trace_processors: false,
+                 http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
+                 environment: "test".to_string(),
+                 service_name: "codex-cli".to_string(),
+diff --git a/codex-rs/windows-sandbox-rs/src/wfp_setup.rs b/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
+index 45e8dc238253f1e889c1a9c11e50ef61822a93ca..4070507af3c6f28e3dbac72d1b04e0a38a6657e4 100644
+--- a/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
++++ b/codex-rs/windows-sandbox-rs/src/wfp_setup.rs
+@@ -56,6 +56,7 @@ fn build_wfp_metrics_provider(
+         codex_home: codex_home.to_path_buf(),
+         exporter: OtelExporter::None,
+         trace_exporter: OtelExporter::None,
++        trace_processors: false,
+         metrics_exporter: OtelExporter::Statsig,
+         runtime_metrics: false,
+         span_attributes: BTreeMap::new(),

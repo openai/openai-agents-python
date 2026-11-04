@@ -175,9 +175,21 @@ async def walkthrough(collector: Collector, scenario: str) -> dict[str, Any]:
         environment="synthetic-local",
     )
     try:
-        receipt = await exercise(scenario, collector.url)
+        with telemetry.trace(
+            "synthetic walkthrough",
+            options=telemetry.TraceOptions(
+                group_id=run_id,
+                metadata={"scenario": scenario},
+                # Keep detailed diagnostics for this synthetic, local example.
+                include_sensitive_data=True,
+            ),
+        ):
+            with telemetry.span("exercise scenario"):
+                receipt = await exercise(scenario, collector.url)
+        # Flush completed spans while leaving the SDK usable.
+        await telemetry.force_flush()
     finally:
-        # All Sessions have closed before flushing native exporters.
+        # Shutdown retires the SDK-owned telemetry provider.
         await telemetry.shutdown()
     return {"run_id": run_id, "receipt": receipt, "batches": collector.snapshot()}
 

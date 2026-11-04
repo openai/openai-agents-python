@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         _OpeningOwner,
     )
     from .state import LocalStorage, SessionState
+    from .telemetry import TraceOptions
     from .tools import ToolRef
     from .turn import Turn
 
@@ -487,6 +488,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        trace_options: TraceOptions | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -504,6 +506,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        trace_options: TraceOptions | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -521,6 +524,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        trace_options: TraceOptions | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -538,6 +542,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        trace_options: TraceOptions | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -556,6 +561,11 @@ class Agent(Generic[ContextT, OutputT]):
         them starts. Startup errors are reported on that Turn. Restoring an
         already-admitted pending manual turn readies its selected resources
         before exposing its replies.
+
+        trace_options captures native tracing defaults before opening. Every
+        submission inherits its disabled/content restrictions, including when
+        another ambient scope or explicit parent changes the trace linkage.
+        Tracing context and export credentials never enter SessionState.
 
         ``environment`` belongs to this session, so one Agent can use different
         application-owned executors for different users. A supplied Environment is
@@ -594,37 +604,49 @@ class Agent(Generic[ContextT, OutputT]):
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
         from .session import Session, _close_after_error
+        from .telemetry import _capture
 
-        session = await Session[SessionContextT, OutputT]._open(
-            self,
-            context=context,
-            state=state,
-            storage=storage,
-            resume=resume,
-            environment=environment,
-            provider=provider,
-            model=model,
-            model_settings=model_settings,
-            tool_selection=tools,
-            instruction_files=instruction_files,
-            reconciled_calls=reconciled_calls,
-        )
+        captured = _capture(trace_options)
+        trace_error: BaseException | None = None
         try:
-            yield session
-        except BaseException as error:
-            lease = session._environment_lease
-            await _close_after_error(error, session._exit_scope)
-            if lease is not None:
-                lease.raise_if_interrupted(error)
-            raise
-        else:
-            lease = session._environment_lease
+            session = await Session[SessionContextT, OutputT]._open(
+                self,
+                context=context,
+                state=state,
+                storage=storage,
+                resume=resume,
+                environment=environment,
+                provider=provider,
+                model=model,
+                model_settings=model_settings,
+                tool_selection=tools,
+                instruction_files=instruction_files,
+                reconciled_calls=reconciled_calls,
+                **({"_tracing_context": captured.context} if captured.context is not None else {}),
+            )
+            session._trace_context = captured.context
             try:
-                await session._exit_scope()
+                yield session
             except BaseException as error:
+                lease = session._environment_lease
+                await _close_after_error(error, session._exit_scope)
                 if lease is not None:
                     lease.raise_if_interrupted(error)
                 raise
+            else:
+                lease = session._environment_lease
+                try:
+                    await session._exit_scope()
+                except BaseException as error:
+                    if lease is not None:
+                        lease.raise_if_interrupted(error)
+                    raise
+
+        except BaseException as error:
+            trace_error = error
+            raise
+        finally:
+            captured.close(trace_error)
 
     @overload
     async def run(
@@ -641,6 +663,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -658,6 +681,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -676,6 +700,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -695,6 +720,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -785,6 +811,8 @@ class Agent(Generic[ContextT, OutputT]):
         # observations, including when it delegates to the original method.
         session_factory = self.session
         options: dict[str, Any] = {}
+        if trace_options is not None:
+            options["trace_options"] = trace_options
         if state is not None:
             options["state"] = state
         if provider is not None:
@@ -862,6 +890,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -879,6 +908,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -897,6 +927,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -916,6 +947,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        trace_options: TraceOptions | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -932,6 +964,8 @@ class Agent(Generic[ContextT, OutputT]):
             asyncio.get_running_loop()
         except RuntimeError:
             options: dict[str, Any] = {}
+            if trace_options is not None:
+                options["trace_options"] = trace_options
             if state is not None:
                 options["state"] = state
             if return_state is not False:

@@ -163,7 +163,11 @@
     {
       "path": "0044-scan-deep-helper-hard-links.patch",
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
+    },
+    {
+      "path": "0045-sdk-native-tracing.patch",
+      "sha256": "cc962c74fa929f85ea363394a28b0b3e402fda824584d01f4af9ed3884311bd9"
     }
   ],
-  "result_tree": "0429c4208ab3424b70262ee45e748b95092f9285"
+  "result_tree": "eea88daf0b9723adbe665defbfaef8d302c10189"
 }

@@ -35,6 +35,7 @@ def owner(callback):
         _native_agents=SimpleNamespace(before_step=callback),
         _catalog=SimpleNamespace(generation=7),
     )
+    session._select_step_body = Session._select_step_body.__get__(session, Session)
     message = {
         "step_id": key[0],
         "thread": key[1],

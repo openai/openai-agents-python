@@ -31,6 +31,8 @@ mod telemetry;
 mod turn_settlement;
 mod verification;
 
+use codex_otel::sdk_trace::FutureExt as _;
+
 use std::{collections::BTreeMap, sync::Arc};
 
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
@@ -1416,31 +1418,45 @@ impl NativeThread {
 
     // Managed ingress: the SDK holds its single active owner until terminal
     // settlement. Keep raw Compact blocked because it replaces active work.
-    fn _compact<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (tracing_context=None))]
+    fn _compact<'py>(
+        &self,
+        py: Python<'py>,
+        tracing_context: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let context = tracing_context
+            .map(codex_otel::sdk_trace::context)
+            .transpose()
+            .map_err(py_error)?
+            .unwrap_or_default();
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
-            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            let _mutation = inner.mutations.lock().await;
-            let tools = inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .ok_or_else(|| py_error("compact requires a replaceable tool session"))?;
-            let receipt = if let Err(error) = tools.check_idle(&inner.thread).await {
-                serde_json::json!({
-                    "status": "not_submitted",
-                    "reason": {"type": "not_idle", "message": error.to_string()}
-                })
-            } else {
-                let turn_id = inner
+        async_bridge::future_into_py(
+            py,
+            async move {
+                let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+                let _mutation = inner.mutations.lock().await;
+                let tools = inner
                     .thread
-                    .submit(codex_protocol::protocol::Op::Compact)
-                    .await
-                    .map_err(py_error)?;
-                serde_json::json!({"status": "started", "turn_id": turn_id})
-            };
-            serde_json::to_string(&receipt).map_err(py_error)
-        })
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+                    .ok_or_else(|| py_error("compact requires a replaceable tool session"))?;
+                let receipt = if let Err(error) = tools.check_idle(&inner.thread).await {
+                    serde_json::json!({
+                        "status": "not_submitted",
+                        "reason": {"type": "not_idle", "message": error.to_string()}
+                    })
+                } else {
+                    let turn_id = inner
+                        .thread
+                        .submit(codex_protocol::protocol::Op::Compact)
+                        .await
+                        .map_err(py_error)?;
+                    serde_json::json!({"status": "started", "turn_id": turn_id})
+                };
+                serde_json::to_string(&receipt).map_err(py_error)
+            }
+            .with_context(context),
+        )
     }
 
     fn _validate_hosted_search_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1675,15 +1691,29 @@ impl NativeThread {
         manual_checkpoint::prepare(&inner, &self.manual).map_err(py_error)
     }
 
-    fn _continue_manual<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (tracing_context=None))]
+    fn _continue_manual<'py>(
+        &self,
+        py: Python<'py>,
+        tracing_context: Option<&str>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let context = tracing_context
+            .map(codex_otel::sdk_trace::context)
+            .transpose()
+            .map_err(py_error)?
+            .unwrap_or_default();
         let inner = self.current()?;
         let manual = self.manual.clone();
-        async_bridge::future_into_py(py, async move {
-            let receipt = manual_checkpoint::continue_if_ready(&inner, &manual)
-                .await
-                .map_err(py_error)?;
-            serde_json::to_string(&receipt).map_err(py_error)
-        })
+        async_bridge::future_into_py(
+            py,
+            async move {
+                let receipt = manual_checkpoint::continue_if_ready(&inner, &manual)
+                    .await
+                    .map_err(py_error)?;
+                serde_json::to_string(&receipt).map_err(py_error)
+            }
+            .with_context(context),
+        )
     }
 
     // The Python owner has committed to retiring an unrecovered manual import.
@@ -2715,11 +2745,91 @@ fn configure_telemetry<'py>(
 }
 
 #[pyfunction]
-fn shutdown_telemetry<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    async_bridge::future_into_py(
-        py,
-        async move { telemetry::shutdown().await.map_err(py_error) },
-    )
+#[pyo3(signature = (timeout_ms=None))]
+fn shutdown_telemetry<'py>(
+    py: Python<'py>,
+    timeout_ms: Option<u32>,
+) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        async_bridge::retain_writer_operation(async move {
+            telemetry::shutdown(timeout_ms).await.map_err(py_error)
+        })
+        .await
+    })
+}
+
+#[pyfunction]
+fn start_trace_span(options_json: &str) -> PyResult<String> {
+    telemetry::scope_ready().map_err(py_error)?;
+    codex_otel::sdk_trace::start_trace_span(options_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn end_trace_span(handle: &str, outcome_json: &str) -> PyResult<()> {
+    codex_otel::sdk_trace::end_trace_span(handle, outcome_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn retain_trace_context(handle: &str) -> PyResult<String> {
+    codex_otel::sdk_trace::retain_trace_context(handle).map_err(py_error)
+}
+
+#[pyfunction]
+fn trace_span_context(handle: &str) -> PyResult<String> {
+    codex_otel::sdk_trace::trace_span_context(handle).map_err(py_error)
+}
+
+#[pyfunction]
+fn set_trace_routes(options_json: &str) -> PyResult<u64> {
+    telemetry::tracing_ready().map_err(py_error)?;
+    codex_otel::sdk_trace_routes::set_trace_routes(options_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn register_trace_credentials(headers_json: &str) -> PyResult<String> {
+    telemetry::tracing_ready().map_err(py_error)?;
+    codex_otel::sdk_trace_routes::register_trace_credentials(headers_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn release_trace_credentials(credential_ref: &str) -> PyResult<()> {
+    codex_otel::sdk_trace_routes::release_trace_credentials(credential_ref).map_err(py_error)
+}
+
+#[pyfunction]
+fn ack_trace_events(through_sequence: u64, failed_deliveries: u64) -> PyResult<()> {
+    codex_otel::sdk_trace_routes::ack_trace_events(through_sequence, failed_deliveries)
+        .map_err(py_error)
+}
+
+#[pyfunction]
+fn release_trace_context(handle: &str) {
+    codex_otel::sdk_trace::release_trace_context(handle);
+}
+
+#[pyfunction]
+fn release_trace_span(handle: &str) {
+    codex_otel::sdk_trace::release_trace_span(handle);
+}
+
+#[pyfunction]
+#[pyo3(signature = (timeout_ms=None))]
+fn force_flush_telemetry<'py>(
+    py: Python<'py>,
+    timeout_ms: Option<u32>,
+) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        async_bridge::retain_writer_operation(async move {
+            telemetry::force_flush(timeout_ms).await.map_err(py_error)
+        })
+        .await
+    })
+}
+#[pyfunction]
+fn drain_trace_events<'py>(py: Python<'py>, max_count: u32) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        codex_otel::sdk_trace_routes::drain_trace_events(max_count as usize).map_err(py_error)
+    })
 }
 
 #[pymodule]
@@ -2755,6 +2865,19 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(configure_telemetry, module)?)?;
     module.add_function(wrap_pyfunction!(shutdown_telemetry, module)?)?;
+    module.add_function(wrap_pyfunction!(start_trace_span, module)?)?;
+    module.add_function(wrap_pyfunction!(end_trace_span, module)?)?;
+    module.add_function(wrap_pyfunction!(retain_trace_context, module)?)?;
+    module.add_function(wrap_pyfunction!(trace_span_context, module)?)?;
+    module.add_function(wrap_pyfunction!(set_trace_routes, module)?)?;
+    module.add_function(wrap_pyfunction!(register_trace_credentials, module)?)?;
+    module.add_function(wrap_pyfunction!(release_trace_credentials, module)?)?;
+    module.add_function(wrap_pyfunction!(ack_trace_events, module)?)?;
+    module.add_function(wrap_pyfunction!(release_trace_context, module)?)?;
+    module.add_function(wrap_pyfunction!(release_trace_span, module)?)?;
+    module.add_function(wrap_pyfunction!(force_flush_telemetry, module)?)?;
+    module.add_function(wrap_pyfunction!(drain_trace_events, module)?)?;
+
     module.add("CODEX_REVISION", include_str!("../CODEX_REVISION").trim())?;
     let mut operations = ops::OPERATIONS.to_vec();
     operations.push("set_instructions");

@@ -25,6 +25,8 @@ static STATE: Mutex<State> = Mutex::const_new(State {
     provider: None,
 });
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+static TRACE_INITIALIZED: AtomicBool = AtomicBool::new(false);
+static ACTIVE: AtomicBool = AtomicBool::new(false);
 const SERVICE: &str = "codex_agents_python";
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -45,7 +47,8 @@ pub async fn engine_starting() -> Result<()> {
 }
 
 pub fn export_requested(config: &Config) -> bool {
-    !matches!(config.otel.exporter, OtelExporterKind::None)
+    config.otel.trace_processors
+        || !matches!(config.otel.exporter, OtelExporterKind::None)
         || !matches!(config.otel.trace_exporter, OtelExporterKind::None)
         || (config.analytics_enabled.unwrap_or(true)
             && !matches!(config.otel.metrics_exporter, OtelExporterKind::None))
@@ -97,6 +100,7 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             http_mtls_network_policy(&config.application_network_policy);
     }
 
+    codex_otel::sdk_trace::configure_pipeline(false);
     // Claim the subscriber first: losing this race must not modify native OTel globals.
     let (logger, handle) = reload::Layer::new(None::<ExportLayer>);
     let mut layers: Vec<ExportLayer> = vec![
@@ -106,9 +110,7 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             ))
             .boxed(),
     ];
-    if !matches!(config.otel.trace_exporter, OtelExporterKind::None) {
-        layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
-    }
+    layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layers))
         .context("Could not claim the process-wide Rust tracing subscriber")?;
     state.claimed = true;
@@ -136,16 +138,34 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     }
     codex_core::otel_init::record_process_start(provider.as_ref(), SERVICE);
     codex_core::otel_init::install_sqlite_telemetry(provider.as_ref(), SERVICE);
+    TRACE_INITIALIZED.store(
+        config.otel.trace_processors
+            || !matches!(config.otel.trace_exporter, OtelExporterKind::None),
+        Ordering::Release,
+    );
+    codex_otel::sdk_trace::configure_pipeline(TRACE_INITIALIZED.load(Ordering::Acquire));
+    ACTIVE.store(true, Ordering::Release);
     state.provider = provider;
     INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }
 
-pub async fn shutdown() -> Result<()> {
-    let mut state = STATE.lock().await;
+pub async fn shutdown(timeout_ms: Option<u32>) -> Result<()> {
+    let timeout = timeout(timeout_ms)?;
+    let started = std::time::Instant::now();
+    TRACE_INITIALIZED.store(false, Ordering::Release);
+    ACTIVE.store(false, Ordering::Release);
+    codex_otel::sdk_trace::configure_pipeline(false);
     INITIALIZED.store(false, Ordering::Release);
+    let mut state = tokio::time::timeout(timeout, STATE.lock())
+        .await
+        .map_err(|_| anyhow!("Telemetry shutdown timed out waiting for the telemetry owner"))?;
     if let Some(provider) = state.provider.take() {
-        provider.shutdown_with_timeout(SHUTDOWN_TIMEOUT).await?;
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let _ = provider.force_flush_with_timeout(remaining).await;
+        provider
+            .shutdown_with_timeout(timeout.saturating_sub(started.elapsed()))
+            .await?;
     }
     Ok(())
 }
@@ -235,4 +255,46 @@ mod tests {
         assert!(permit.check().is_err());
         assert!(policy.acquire_for_unsupported_sdk().is_err());
     }
+}
+
+fn timeout(timeout_ms: Option<u32>) -> Result<Duration> {
+    let value = timeout_ms.unwrap_or(SHUTDOWN_TIMEOUT.as_millis() as u32);
+    ensure!(
+        value > 0 && value <= 60_000,
+        "Telemetry timeout must be between 1 and 60000 milliseconds"
+    );
+    Ok(Duration::from_millis(u64::from(value)))
+}
+pub fn tracing_ready() -> Result<()> {
+    ensure!(
+        TRACE_INITIALIZED.load(Ordering::Acquire),
+        "Configure a trace exporter or trace processors before starting native traces"
+    );
+    Ok(())
+}
+pub async fn force_flush(timeout_ms: Option<u32>) -> Result<String> {
+    let timeout = timeout(timeout_ms)?;
+    let started = std::time::Instant::now();
+    scope_ready()?;
+    let state = match tokio::time::timeout(timeout, STATE.lock()).await {
+        Ok(state) => state,
+        // No barrier was admitted; zero identifies the empty prefix covered by this attempt.
+        Err(_) => return Ok(serde_json::json!({"status":"timeout", "dropped_records":0, "failed_deliveries":0, "barrier":0}).to_string()),
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if let Some(provider) = state.provider.as_ref() {
+        Ok(serde_json::to_string(
+            &provider.force_flush_with_timeout(remaining).await,
+        )?)
+    } else {
+        Ok(serde_json::json!({"status":"success", "dropped_records":0, "failed_deliveries":0, "barrier":0}).to_string())
+    }
+}
+
+pub fn scope_ready() -> Result<()> {
+    ensure!(
+        ACTIVE.load(Ordering::Acquire),
+        "Configure native telemetry before starting traces; shutdown is terminal"
+    );
+    Ok(())
 }
