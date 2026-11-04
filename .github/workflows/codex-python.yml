@@ -30,8 +30,8 @@ jobs:
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64"}' ||
         toJSON(inputs.runner)
       ) }}
-    # Allow cold builds of the bundled Codex runtime on Windows.
-    timeout-minutes: ${{ startsWith(inputs.runner, 'windows-') && 180 || 100 }}
+    # Allow cold builds of the bundled Codex runtime on macOS and Windows.
+    timeout-minutes: ${{ (startsWith(inputs.runner, 'windows-') || startsWith(inputs.runner, 'macos-')) && 180 || 100 }}
     defaults:
       run:
         shell: bash
