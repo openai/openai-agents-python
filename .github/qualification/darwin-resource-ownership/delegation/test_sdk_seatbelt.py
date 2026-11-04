@@ -242,7 +242,14 @@ async def test_sdk_seatbelt_delegation(responses, tmp_path, grant_nonce_director
 
         # The attempted service stays registered, but no job run or marker may
         # appear until the trusted host tries the same command.
-        assert 0 < int(statuses["kickstart_exit"]) < 125, output
+        deadline = time.monotonic() + 2
+        while not kickstart_marker.exists() and time.monotonic() < deadline:
+            await asyncio.sleep(0.025)
+        observed = launchctl("print", kickstart_service)
+        before_count = re.findall(r"^\s*runs = (\d+)", idle.stdout, re.MULTILINE)
+        after_count = re.findall(r"^\s*runs = (\d+)", observed.stdout, re.MULTILINE)
+        print(f"BEFORE TRUSTED KICKSTART: sandbox_rc={statuses['kickstart_exit']} initial_runs={before_count} observed_runs={after_count} marker={kickstart_marker.exists()}", flush=True)
+        assert not kickstart_marker.exists(), "sandboxed kickstart executed the registered job before any trusted kickstart"
         await asyncio.sleep(0.5)
         still_idle = launchctl("print", kickstart_service)
         assert still_idle.returncode == 0, still_idle.stderr
