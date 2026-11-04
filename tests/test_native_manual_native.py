@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -207,6 +208,69 @@ async def test_manual_checkpoint_keeps_settled_mcp_policy_result_without_replay(
             header == "Bearer synthetic-current-mcp-token" for header in current.auth
         )
         assert responses.request_headers[-1]["authorization"] == "Bearer synthetic-current-provider"
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a Unix executor")
+@pytest.mark.parametrize("strict", [False, True], ids=["implicit-workspace", "strict-workspace"])
+async def test_manual_checkpoint_preserves_remote_write_mode(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, strict: bool
+) -> None:
+    manual = FunctionTool(
+        name="lookup",
+        description="Read an application record",
+        input_type=LookupArgs,
+        output_type=str,
+    )
+    async with (
+        timeout(20),
+        ExecutorPeer(tmp_path / "original", token="synthetic-old-executor").serve() as old,
+        ExecutorPeer(tmp_path / "current", token="synthetic-current-executor").serve() as current,
+    ):
+        assert old.ca is not None and current.ca is not None
+        trust = tmp_path / "trusted.pem"
+        trust.write_bytes(old.ca.read_bytes() + current.ca.read_bytes())
+        monkeypatch.setenv("SSL_CERT_FILE", str(trust))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        responses.respond(function_call("lookup", {"key": "pending"}, "manual"))
+        original = declaration(old, writable_roots=[] if strict else None)
+        agent = Agent(instructions="Read a record.", tools=[manual], provider=provider(responses))
+        try:
+            async with agent.session(environment=original) as session:
+                turn = await session.submit("Read a record")
+                await next_request(session.interactions(), manual)
+                saved = await save_at_manual_boundary(session)
+                with pytest.raises(InteractionRequired):
+                    await turn.get_result()
+
+            changed_mode = declaration(old, writable_roots=None if strict else [])
+            rejected = [changed_mode]
+            if strict:
+                rejected.append(declaration(current, writable_roots=[]))
+            for environment in rejected:
+                with pytest.raises(ValueError, match="applied executor policy"):
+                    async with agent.session(state=saved, environment=environment):
+                        pytest.fail("Restore changed the executor write authority")
+
+            destination = original if strict else declaration(current)
+            async with agent.session(
+                state=SessionState.from_json(saved.to_json()), environment=destination
+            ) as restored:
+                request = await next_request(restored.interactions(), manual)
+                assert request.call_id == "manual" and request.arguments.key == "pending"
+                assert len(responses.requests) == 1
+                responses.respond(assistant_output("resumed"))
+                await request.respond("record")
+                assert (await restored.restored_turn.get_result()).final_output == "resumed"
+            assert len(responses.requests) == 2
+            if not strict:
+                assert current.attempts > 0
+            assert not any(
+                request.get("method") == "process/start"
+                for peer in (old, current)
+                for request in peer.requests
+            )
+        finally:
+            await agent.provider.aclose()
 
 
 @pytest.mark.requires_native_linux_sandbox
