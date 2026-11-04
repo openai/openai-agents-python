@@ -1,5 +1,6 @@
 //! Bind the selected executor and its application-owned policy.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -203,6 +204,20 @@ pub(crate) struct StrictExecutorWrites {
 }
 
 impl StrictExecutorWrites {
+    pub(crate) async fn check_local_resume_rollout_path(
+        &self,
+        home: &Path,
+        path: &Path,
+    ) -> Result<()> {
+        let path = if path.is_relative() {
+            Cow::Owned(home.join(path))
+        } else {
+            Cow::Borrowed(path)
+        };
+        let existing = codex_rollout::existing_rollout_path(&path).await;
+        self.check_local_rollout_path(existing.as_deref().unwrap_or(&path))
+    }
+
     pub(crate) fn check_local_rollout_path(&self, path: &Path) -> Result<()> {
         let roots = self
             .roots
@@ -1551,6 +1566,49 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_resume_refuses_the_selected_compressed_rollout() -> anyhow::Result<()> {
+        use codex_utils_path_uri::PathUri;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+
+        use super::{STORAGE_OVERLAP, StrictExecutorWrites};
+
+        let fixture = tempfile::tempdir()?;
+        let home = fixture.path().join("profile");
+        let workspace = fixture.path().join("workspace");
+        let relocated = fixture.path().join("relocated");
+        for directory in [&home, &workspace, &relocated] {
+            fs::create_dir(directory)?;
+        }
+        let requested = Path::new("../relocated/rollout.jsonl");
+        let plain = relocated.join("rollout.jsonl");
+        let compressed = workspace.join("rollout.jsonl.zst");
+        fs::write(&compressed, b"compressed rollout")?;
+        symlink(&compressed, plain.with_extension("jsonl.zst"))?;
+        let root = PathUri::from_host_native_path(workspace.canonicalize()?)?;
+        let writes = StrictExecutorWrites {
+            roots: [(root.clone(), root)].into(),
+        };
+
+        assert_eq!(
+            writes
+                .check_local_resume_rollout_path(&home, requested)
+                .await
+                .unwrap_err()
+                .to_string(),
+            STORAGE_OVERLAP
+        );
+
+        // A plain file in the disjoint location takes precedence.
+        fs::write(plain, b"plain rollout")?;
+        writes
+            .check_local_resume_rollout_path(&home, requested)
+            .await
+    }
 
     #[cfg(unix)]
     #[tokio::test]
