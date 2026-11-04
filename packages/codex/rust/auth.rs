@@ -1,14 +1,87 @@
-//! API-key authentication owned by the SDK, without Codex login discovery.
+//! SDK authentication for Responses and Apps.
 
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use codex_core_api::Config;
 use codex_login::{
     AuthManager, CodexAuth, ExternalAuth, ExternalAuthFuture, ExternalAuthRefreshContext,
 };
 use codex_protocol::config_types::ModelProviderAuthInfo;
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SavedCodexLogin {
+    pub codex_home: Option<PathBuf>,
+    pub account_id: Option<String>,
+    pub expected_binding: Option<String>,
+}
+
+pub(crate) struct CodexAccount {
+    pub account_id: String,
+    pub plan_type: String,
+    pub binding: String,
+}
+
+impl SavedCodexLogin {
+    pub fn open(self, config: &Config) -> Result<(Arc<AuthManager>, CodexAccount)> {
+        let codex_home = match self.codex_home {
+            Some(path) => path
+                .canonicalize()
+                .context("Cannot open the Codex login directory")?,
+            None => codex_core::config::find_codex_home()
+                .context("Cannot locate the Codex login directory")?
+                .to_path_buf(),
+        };
+        let manager = AuthManager::shared_saved_chatgpt(codex_home, config.auth_route_config())
+            .map_err(|_| anyhow::anyhow!(
+                "No usable saved Codex OAuth login. Sign in with ChatGPT using codex login first."
+            ))?;
+        let auth = manager
+            .auth_cached()
+            .context("Saved Codex OAuth login is unavailable")?;
+        let account_id = auth
+            .get_account_id()
+            .context("Saved Codex account ID is unavailable")?;
+        ensure!(
+            self.account_id
+                .as_ref()
+                .is_none_or(|expected| *expected == account_id),
+            "Saved Codex login does not match the expected account"
+        );
+        let user_id = auth
+            .get_chatgpt_user_id()
+            .context("Saved Codex user ID is unavailable")?;
+        let binding = format!(
+            "{:x}",
+            Sha256::digest(serde_json::to_vec(&(&account_id, user_id))?)
+        );
+        ensure!(
+            self.expected_binding
+                .as_ref()
+                .is_none_or(|expected| *expected == binding),
+            "Session requires the original Codex login"
+        );
+        let plan_type = auth
+            .account_plan_type()
+            .map(|plan| serde_json::to_value(plan))
+            .transpose()?
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".to_owned());
+        Ok((
+            manager,
+            CodexAccount {
+                account_id,
+                plan_type,
+                binding,
+            },
+        ))
+    }
+}
 
 struct ApiKey {
     auth: CodexAuth,

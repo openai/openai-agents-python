@@ -262,6 +262,18 @@ impl Engine {
         })
     }
     #[getter]
+    fn _codex_account(&self) -> PyResult<Option<(String, String, String)>> {
+        let inner = self.current()?;
+        Ok(inner.codex_account.as_ref().map(|account| {
+            (
+                account.account_id.clone(),
+                account.plan_type.clone(),
+                account.binding.clone(),
+            )
+        }))
+    }
+
+    #[getter]
     fn startup_warnings(&self) -> Vec<String> {
         self.startup_warnings.clone()
     }
@@ -1404,14 +1416,14 @@ impl NativeThread {
         })
     }
 
-    fn _validate_session_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn _validate_hosted_search_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let current = inner.thread.config_snapshot().await;
             inner
                 .engine
-                .validate_session_model(current.collaboration_mode.model())
+                .validate_hosted_search_model(current.collaboration_mode.model())
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             Ok(())
@@ -1443,7 +1455,7 @@ impl NativeThread {
             if let Some(model) = &settings.model {
                 inner
                     .engine
-                    .validate_session_model(model)
+                    .validate_hosted_search_model(model)
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }

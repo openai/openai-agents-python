@@ -217,8 +217,8 @@ class SessionState(BaseModel):
     repair_turns: list[RecordedTurn] = Field(default_factory=list)
     repair_items: list[SessionItem] = Field(default_factory=list)
     network_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    # Sign in with ChatGPT restores need a fresh token for the same registration.
-    chatgpt_auth_binding: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # Portable restores bind to the original Codex user and workspace.
+    codex_login_binding: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":

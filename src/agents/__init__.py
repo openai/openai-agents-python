@@ -12,9 +12,10 @@ if TYPE_CHECKING:
     )
     from .agent import (
         Agent as Agent,
+        CodexAccount as CodexAccount,
+        CodexLogin as CodexLogin,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
-        SignInWithChatGPT as SignInWithChatGPT,
     )
     from .executor import (
         Environment as Environment,
@@ -126,9 +127,10 @@ _MODULES = {
     "VerificationProof": ".manual",
     "Interaction": ".manual",
     "Agent": ".agent",
+    "CodexAccount": ".agent",
+    "CodexLogin": ".agent",
     "ModelSettings": ".agent",
     "NativeProvider": ".agent",
-    "SignInWithChatGPT": ".agent",
     "NativeOutput": ".schema",
     "PromptedOutput": ".schema",
     "OutputSpec": ".schema",

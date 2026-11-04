@@ -2067,14 +2067,6 @@ impl Drop for PendingReply<'_> {
 fn provider_error_metadata(details: &codex_protocol::error::CodexErrorDetails) -> Option<Value> {
     use codex_protocol::error::CodexErrorDetails;
 
-    if let CodexErrorDetails::Stream {
-        provider_code: Some(code),
-        ..
-    } = details
-    {
-        return valid_provider_error_code(code).then(|| json!({ "code": code }));
-    }
-
     let (status, code, request_id) = match details {
         CodexErrorDetails::UnexpectedStatus(error) => (
             error.status.as_u16(),
@@ -2109,15 +2101,12 @@ fn provider_error_code(body: &str) -> Option<String> {
     }
     let body: Value = serde_json::from_str(body).ok()?;
     let code = body.get("error")?.get("code")?.as_str()?;
-    valid_provider_error_code(code).then(|| code.to_owned())
-}
-
-fn valid_provider_error_code(code: &str) -> bool {
-    !code.is_empty()
+    (!code.is_empty()
         && code.len() <= 128
         && code
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte))
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_.-".contains(&byte)))
+    .then(|| code.to_owned())
 }
 
 #[derive(Default)]

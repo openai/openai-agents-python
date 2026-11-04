@@ -882,13 +882,7 @@ class DeferredTools:
             )
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_seconds
-        # A new SIWC Session resolves a current app token for the saved registration.
-        selection = _RestoreDeclaration(
-            agent,
-            opening,
-            session._model_api_key if session._chatgpt_auth_binding is None else None,
-            active.output,
-        )
+        selection = _RestoreDeclaration(agent, opening, session._model_api_key, active.output)
         try:
             selection.state = await self.prepare(session, request, timeout_seconds=timeout_seconds)
             remaining = deadline - loop.time()

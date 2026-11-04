@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import hashlib
 import importlib
 import json
-import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from copy import copy
 from dataclasses import FrozenInstanceError, dataclass, field, replace
+from pathlib import Path
 from threading import RLock
 from types import MappingProxyType, TracebackType
 from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
@@ -132,94 +130,55 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
     return settings.copy()
 
 
-_SIWC_AUDIENCE = "https://api.openai.com/v1"
-_SIWC_PROVIDER_PREFIX = "native_agent_siwc_"
+@dataclass(frozen=True, kw_only=True)
+class CodexLogin:
+    """Reuse an existing file-backed Codex login for a local native Session.
 
+    Codex locates its usual login directory unless you supply ``codex_home``.
+    Set ``account_id`` to require a specific ChatGPT account or workspace.
+    The SDK checks the saved login when it opens a Session.
 
-def _siwc_binding(token: object) -> str | None:
-    # Reject ordinary API keys and unrelated tokens before sending a request.
-    # Responses validates the signature and enforces workspace access.
-    if not isinstance(token, str) or not re.fullmatch(r"[\w-]+\.[\w-]+\.[\w-]+", token, re.ASCII):
-        return None
-    payload = token.split(".")[1]
-    try:
-        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
-    except (ValueError, RecursionError):
-        return None
-    if not isinstance(claims, dict):
-        return None
-    scope = claims.get("scope")
-    subject = claims.get("sub")
-    client = claims.get("client_id")
-    if (
-        claims.get("iss") != "https://auth.openai.com"
-        or claims.get("aud") != _SIWC_AUDIENCE
-        or not isinstance(scope, str)
-        or "chatgpt.tokens.use.direct" not in scope.split()
-        or not isinstance(subject, str)
-        or not subject
-        or not isinstance(client, str)
-        or not client
-    ):
-        return None
-    # A client is issued to an app registration for the selected workspace.
-    # Store a stable binding without storing the token or the raw identifiers.
-    return hashlib.sha256(json.dumps([client, subject]).encode()).hexdigest()
+    This experimental mode may change or be absent from the public beta or
+    general availability of the Agents SDK.
+    """
+
+    codex_home: str | Path | None = field(default=None, repr=False)
+    account_id: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.codex_home is not None and (
+            not isinstance(self.codex_home, (str, Path)) or not str(self.codex_home).strip()
+        ):
+            raise ValueError("codex_home must be a non-empty path")
+        if self.account_id is not None and (
+            not isinstance(self.account_id, str) or not self.account_id.strip()
+        ):
+            raise ValueError("account_id must be a non-empty string")
 
 
 @dataclass(frozen=True, kw_only=True)
-class SignInWithChatGPT:
-    """Experimental ChatGPT plan authentication for native Sessions.
+class CodexAccount:
+    """The account ID and plan type recorded in the login at Session opening."""
 
-    Plan usage is a limited preview for eligible open-source or personal
-    tools that run locally and selected private applications. Paid or
-    remotely hosted apps need approval. See the
-    [Sign in with ChatGPT guide](https://developers.openai.com/siwc/token-sharing-open-source).
-
-    Supply an async callback that returns an access token from the app's
-    Sign in with ChatGPT registration. Keep the callback bound to the user's
-    selected account and workspace. The app owns sign-in and refresh.
-    The SDK captures one token when opening a Session. To use a renewed
-    token, open a new Session and restore its conversation.
-
-    This feature may change or be removed. The public beta and general
-    availability of the Agents SDK may ship without it.
-    """
-
-    get_access_token: Callable[[], Awaitable[str]] = field(repr=False)
-
-    def __post_init__(self) -> None:
-        if not callable(self.get_access_token):
-            raise TypeError("get_access_token must be an async token callback")
-
-    async def _resolve_access_token(self) -> str:
-        failure: BaseException
-        try:
-            return await self.get_access_token()
-        except asyncio.CancelledError:
-            failure = asyncio.CancelledError()
-        except Exception:
-            failure = RuntimeError("Could not obtain a Sign in with ChatGPT access token")
-        # Credential sources can include secrets in error messages and causes.
-        raise failure
+    account_id: str
+    plan_type: str
 
 
 @dataclass(frozen=True, kw_only=True)
 class NativeProvider:
     """A native Responses connection. Construction performs no I/O.
 
-    With ``auth=None``, an omitted key uses ``OPENAI_API_KEY`` when the session
-    opens. Credentials and connection URLs are excluded from the descriptor's
-    representation.
+    For API-key authentication, an omitted key uses ``OPENAI_API_KEY`` when
+    the Session opens. Credentials and connection URLs are excluded from the
+    descriptor's representation.
     With ``supports_websockets=None``, the SDK permits WebSockets only when
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries.
 
-    Set ``auth=SignInWithChatGPT(...)`` to use an eligible ChatGPT plan.
-    This experimental mode uses HTTP on the OpenAI Responses endpoint and
-    requires its own credential. Omit ``api_key`` and ``base_url``.
+    Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
+    Omit ``api_key`` and ``base_url`` in this experimental mode.
 
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
@@ -228,7 +187,7 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
-    auth: SignInWithChatGPT | None = field(default=None, repr=False)
+    auth: CodexLogin | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("base_url", "api_key"):
@@ -238,12 +197,10 @@ class NativeProvider:
         if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
             raise ValueError("supports_websockets must be a bool or None")
         if self.auth is not None:
-            if not isinstance(self.auth, SignInWithChatGPT):
-                raise TypeError("auth must be SignInWithChatGPT or None")
+            if not isinstance(self.auth, CodexLogin):
+                raise TypeError("auth must be CodexLogin or None")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
-                raise ValueError(
-                    "Sign in with ChatGPT requires HTTP and its own endpoint and token"
-                )
+                raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
 
     @property
     def _websockets_enabled(self) -> bool:
@@ -536,9 +493,9 @@ class Agent(Generic[ContextT, OutputT]):
         """
         from .mcp import _tool_names
         from .schema import _prepare_spec
-        from .session import _split_agent_tools
+        from .session import _split_tools
 
-        python_tools, mcp_tools, _ = _split_agent_tools(self)
+        python_tools, mcp_tools, _ = _split_tools(self.tools, self.programmatic_tool_calling)
         _tool_names(mcp_tools)
         native = importlib.import_module("agents._native")
         native._validate_python_tool_declarations(
