@@ -1,0 +1,45 @@
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 211d99de7cf4e92c21779712cb31dc1b0f1c4426..55d39c46d1eaff030fb9f303077d807f12c7fe85 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -32,6 +32,7 @@ use crate::tools::ApprovalContext;
+ use crate::tools::context::ExecCommandToolOutput;
+ use crate::tools::events::ToolEmitter;
+ use crate::tools::events::ToolEventCtx;
++use crate::tools::events::ToolEventFailure;
+ use crate::tools::events::ToolEventStage;
+ use crate::tools::network_approval::DeferredNetworkApproval;
+ use crate::tools::network_approval::finish_deferred_network_approval;
+@@ -533,6 +534,32 @@ impl UnifiedExecProcessManager {
+             Ok((attempt, deferred_network_approval)) => (attempt, deferred_network_approval),
+             Err(err) => {
+                 self.release_process_id(request.process_id).await;
++                // A process denied during the early-exit check returns before Begin.
++                // Record the final denial only after the sandbox orchestrator has
++                // decided whether to retry, using the original process output.
++                if let UnifiedExecError::SandboxDenied { output, .. } = &err {
++                    let model_context = context.step_context.model_context();
++                    let mut event_ctx = ToolEventCtx::new(
++                        context.session.as_ref(),
++                        context.step_context.turn.as_ref(),
++                        &context.step_context.settings.model_info,
++                        &context.call_id,
++                        /*turn_diff_tracker*/ None,
++                    );
++                    event_ctx.model_context = Some(&model_context);
++                    ToolEmitter::unified_exec(
++                        &request.command,
++                        cwd,
++                        ExecCommandSource::UnifiedExecStartup,
++                        /*process_id*/ None,
++                        /*plugin_attribution*/ None,
++                    )
++                    .emit(
++                        event_ctx,
++                        ToolEventStage::Failure(ToolEventFailure::Output(output.clone())),
++                    )
++                    .await;
++                }
+                 return Err(err);
+             }
+         };
