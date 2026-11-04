@@ -123,9 +123,11 @@ class Worker:
         with os.fdopen(fd, "rb") as artifact:
             if not stat.S_ISREG(os.fstat(artifact.fileno()).st_mode):
                 return None
-            if artifact.read(128) != self.expected_text.encode():
+            expected_text = self.expected_text
+            expected_bytes = expected_text.encode()
+            if artifact.read(len(expected_bytes) + 1) != expected_bytes:
                 return None
-        return self.expected_text
+        return expected_text
 
 
 @function_tool
