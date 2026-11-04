@@ -488,7 +488,7 @@ index 2e634fe6a1a708e7c100a829ea43d3a838e63397..ef80e8fa51696fb1beab835c5a028bf1
  
  fn build_nested_tool_payload(
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index fb26fd6e8fbd79257d90fc8ba6f298eb65fdfa85..70e07f5e5e70002097cae7c1779b70309bd2c9ab 100644
+index fb26fd6e8fbd79257d90fc8ba6f298eb65fdfa85..d58f23756ec43a7bd3608fdf75606d6f371f67b0 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
 @@ -26,6 +26,7 @@ use crate::tools::registry::AnyToolResult;
@@ -568,6 +568,13 @@ index fb26fd6e8fbd79257d90fc8ba6f298eb65fdfa85..70e07f5e5e70002097cae7c1779b7030
          }
      }
  
+@@ -845,5 +857,5 @@ mod tests {
+         };
+         assert_eq!(
+             ResponseItemEnvelope::new(expected_response.into()),
+-            response
++            response.envelope
+         );
 diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
 index 73f7b89f263db8d0e81a9ac5be174e46cee67cc0..462c76ea7dcacfe1e8e8a9904fd76785491fe995 100644
 --- a/codex-rs/core/src/tools/registry.rs

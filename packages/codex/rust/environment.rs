@@ -851,6 +851,14 @@ pub(crate) async fn replace_writable_roots(
             previous.is_none_or(|root| root == canonical),
             "executor write root changed since it was selected"
         );
+        // A new spelling can reuse an active grant. Require the canonical
+        // path for a new grant, including a child with a read-only carveout.
+        ensure!(
+            previous.is_some()
+                || requested == canonical
+                || current.roots.values().any(|root| root == canonical),
+            "new executor write roots must use their canonical path"
+        );
     }
     let local_network = if local {
         local_session_network_policy(config)

@@ -734,6 +734,7 @@ async def test_repeated_write_root_alias_cannot_grant_a_new_target(
         ]
         for directory in (original, replacement, added):
             directory.mkdir()
+        replacement, added = replacement.resolve(), added.resolve()
         alias = executor.root / "write-root"
         alias.symlink_to(original, target_is_directory=True)
         selected = Environment(
@@ -792,6 +793,68 @@ async def test_repeated_write_root_alias_cannot_grant_a_new_target(
         common = {workspace, added.resolve().as_uri()}
         assert set(policies[-2]["writable_roots"]) == common | {original.resolve().as_uri()}
         assert set(policies[-1]["writable_roots"]) == common | {replacement.resolve().as_uri()}
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("regrant", [False, True], ids=["first-grant", "regrant"])
+async def test_new_write_root_alias_cannot_widen_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, regrant: bool
+) -> None:
+    async with (
+        timeout(45),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        alias = executor.root / "output"
+        original = tmp_path / "original"
+        original.mkdir()
+        if regrant:
+            alias.symlink_to(original, target_is_directory=True)
+        environment = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[alias] if regrant else [],
+        )
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        async with agent.session(environment=environment) as session:
+            model.respond(assistant_output("ready"))
+            assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+            if regrant:
+                model.respond(assistant_output("revoked"))
+                revoked = await session.submit("Revoke the additional root.", writable_roots=[])
+                assert (await revoked.get_result()).final_output == "revoked"
+                alias.unlink()
+
+            # The executor workspace stays writable. A new alias there may name
+            # a sibling outside the workspace or target its protected metadata.
+            target = tmp_path / "other" if regrant else executor.root / ".git"
+            target.mkdir()
+            alias.symlink_to(target, target_is_directory=True)
+            prior_requests = len(model.requests)
+            model.respond(assistant_output("canonical target"))
+            refused = await session.submit("Grant the output path.", writable_roots=[alias])
+            with pytest.raises(
+                NativeError, match="new executor write roots must use their canonical"
+            ) as error:
+                await refused.get_result()
+            assert error.value.effects == "not_started"
+            assert len(model.requests) == prior_requests
+
+            canonical = await session.submit(
+                "Grant the target explicitly.", writable_roots=[target.resolve()]
+            )
+            assert (await canonical.get_result()).final_output == "canonical target"
+            model.respond(assistant_output("same grant"))
+            repeated = await session.submit("Alias the same target.", writable_roots=[alias])
+            assert (await repeated.get_result()).final_output == "same grant"
+            policies = [turn["receipt"]["executors"][0] async for turn in session.turns()]
+            expected_roots = {executor.root.resolve().as_uri(), target.resolve().as_uri()}
+            assert set(policies[-2]["writable_roots"]) == expected_roots
+            assert policies[-1] == policies[-2]
 
 
 async def test_checkpoint_without_network_policy_restores_only_with_the_default() -> None:

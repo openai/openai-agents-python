@@ -294,7 +294,9 @@ async def test_local_write_root_replacement_survives_portable_resume(
 
     async with timeout(40), provider:
         async with agent.session(environment=selected) as session:
-            updated = await session.submit("Change the write policy.", writable_roots=[sibling])
+            updated = await session.submit(
+                "Change the write policy.", writable_roots=[sibling.resolve()]
+            )
             assert (await updated.get_result()).final_output == "replace"
             saved = await session.save_state()
         with pytest.raises(ValueError, match="agree on the applied executor policy"):
@@ -390,7 +392,7 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
                 session,
                 "replacement",
                 command(allow=(work, third), deny=(first, second)),
-                writable_roots=[third],
+                writable_roots=[third.resolve()],
             )
             inherited = await run_turn(
                 session, "inherited", command(allow=(work, third), deny=(first, second))
