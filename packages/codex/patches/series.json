@@ -119,7 +119,15 @@
     {
       "path": "0030-stop-owned-turn-sampling.patch",
       "sha256": "fbc98457cdfd3749088dbd32370eef5e1d3c4bc9fcbd7ca6ac3e9b4fb7cea713"
+    },
+    {
+      "path": "0031-protect-local-helper-mount-aliases.patch",
+      "sha256": "b269ec3e3a8d2a737494732696f4b9ecd94c2fbe0458c4a6eccdb543a6692059"
+    },
+    {
+      "path": "0032-join-published-linux-sandbox-shutdown.patch",
+      "sha256": "7222d3929d79347cd0e3822885d6e85a201a46eeebab45f80ada6a8be6aae564"
     }
   ],
-  "result_tree": "2acbe545cf0fc2ced2f5b6e32e84de1b7ace452d"
+  "result_tree": "330bff08c152a596febbba66565c298d743b0df6"
 }
