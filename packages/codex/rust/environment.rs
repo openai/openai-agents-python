@@ -35,6 +35,9 @@ use codex_protocol::protocol::{
     TurnSettingsUpdate, TurnSettingsUpdateOutcome,
 };
 use codex_protocol::sandbox::SandboxType;
+use codex_rollout::{
+    ARCHIVED_SESSIONS_SUBDIR, SESSIONS_SUBDIR, plain_rollout_path, rollout_id_from_path,
+};
 use codex_utils_path_uri::{PathConvention, PathUri, Platform};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -43,6 +46,14 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
 use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
+
+const STORAGE_OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
+
+#[derive(Clone, Copy)]
+pub(crate) struct LocalStorageHome<'a> {
+    pub path: &'a Path,
+    pub persistent_rollouts: bool,
+}
 
 pub async fn for_unattached_threads(
     config: &Config,
@@ -191,6 +202,26 @@ pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
 }
 
+impl StrictExecutorWrites {
+    pub(crate) fn check_local_rollout_path(&self, path: &Path) -> Result<()> {
+        let roots = self
+            .roots
+            .values()
+            .map(PathUri::to_abs_path)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
+        let mut files = Vec::new();
+        collect_local_rollout_files(path, &roots, &mut files)?;
+        ensure!(
+            !roots.contains_hard_link_to_any(&files).context(
+                "could not check writable roots for native SDK hard links; use readable writable roots"
+            )?,
+            "local executor writable roots contain a hard link to a private native SDK file"
+        );
+        Ok(())
+    }
+}
+
 impl EnvironmentOptions {
     fn id(&self) -> &'static str {
         if self.local {
@@ -212,10 +243,10 @@ impl EnvironmentOptions {
         capability_roots(self.id(), self.capability_directories.as_deref())
     }
 
-    pub async fn connect(
+    pub(crate) async fn connect(
         &self,
         config: &Config,
-        storage_home: Option<&Path>,
+        storage_home: Option<LocalStorageHome<'_>>,
     ) -> Result<EnvironmentManager> {
         self.check_config(config)?;
         if self.local {
@@ -401,7 +432,7 @@ impl EnvironmentOptions {
         environment: &Environment,
         info: &EnvironmentInfo,
         config: &Config,
-        storage_home: Option<&Path>,
+        storage_home: Option<LocalStorageHome<'_>>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
         if self.strict_writes() {
             strict_write_profile(
@@ -427,7 +458,7 @@ impl EnvironmentOptions {
         &self,
         config: &Config,
         manager: &EnvironmentManager,
-        storage_home: Option<&Path>,
+        storage_home: Option<LocalStorageHome<'_>>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
         self.check_config(config)?;
         let environment = manager
@@ -656,7 +687,7 @@ async fn strict_write_profile(
     additional: &[PathUri],
     local: bool,
     codex_home: &Path,
-    storage_home: Option<&Path>,
+    storage_home: Option<LocalStorageHome<'_>>,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -744,27 +775,24 @@ async fn strict_write_profile(
 fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
-    storage_home: Option<&Path>,
+    storage_home: Option<LocalStorageHome<'_>>,
 ) -> Result<()> {
+    let persistent_rollouts = storage_home.is_some_and(|home| home.persistent_rollouts);
     let storage_home = storage_home
-        .map(|home| {
-            check_local_write_root_overlap(
-                home,
-                roots,
-                "local executor writable roots must stay outside native SDK storage",
-            )
-        })
+        .map(|home| check_local_write_root_overlap(home.path, roots, STORAGE_OVERLAP))
         .transpose()?;
     let runtime_home = check_local_write_root_overlap(
         codex_home,
         roots,
         "local executor writable roots must stay outside the native SDK runtime home",
     )?;
-    let mut protected_files = storage_home
-        .as_deref()
-        .map(|home| relocated_database_files(home, roots))
-        .transpose()?
-        .unwrap_or_default();
+    let mut protected_files = Vec::new();
+    if let Some(home) = storage_home.as_deref() {
+        protected_files.extend(relocated_database_files(home, roots)?);
+        if persistent_rollouts {
+            protected_files.extend(relocated_rollout_files(home, roots)?);
+        }
+    }
     // A restored goal store may share the runtime home.
     let private_dirs = match storage_home {
         Some(home) if runtime_home.starts_with(&home) => vec![home],
@@ -884,7 +912,6 @@ fn check_local_write_root_overlap(
 
 fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::from_absolute_path(home)?);
-    let overlap = "local executor writable roots must stay outside native SDK storage";
     let mut files = Vec::new();
     for database in sqlite.runtime_db_paths() {
         match database.path.symlink_metadata() {
@@ -893,7 +920,7 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(_) => anyhow::bail!("could not check native SDK storage databases"),
         }
-        let target = check_local_write_root_overlap(&database.path, roots, overlap)?;
+        let target = check_local_write_root_overlap(&database.path, roots, STORAGE_OVERLAP)?;
         // SQLite opens journals beside the resolved database, including when
         // the profile's database entry points outside the profile directory.
         let companions = ["-wal", "-shm", "-journal"].map(|suffix| {
@@ -904,7 +931,7 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
         for file in std::iter::once(target).chain(companions) {
             match file.symlink_metadata() {
                 Ok(metadata) if metadata.is_file() => {
-                    ensure!(!roots.contains_entry(&file)?, "{overlap}");
+                    ensure!(!roots.contains_entry(&file)?, "{STORAGE_OVERLAP}");
                     files.push(file);
                 }
                 Ok(_) => {}
@@ -914,6 +941,100 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
         }
     }
     Ok(files)
+}
+
+fn relocated_rollout_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
+    // Core writes active rollouts under sessions/YYYY/MM/DD and archives in a
+    // flat directory. Resolve only those directory entries and recognized
+    // rollout filenames. Core's resume writer follows the recorded file path.
+    let dates = [(4, 9999), (2, 12), (2, 31)];
+    let mut pending = vec![
+        (
+            check_local_write_root_overlap(&home.join(SESSIONS_SUBDIR), roots, STORAGE_OVERLAP)?,
+            dates.as_slice(),
+        ),
+        (
+            check_local_write_root_overlap(
+                &home.join(ARCHIVED_SESSIONS_SUBDIR),
+                roots,
+                STORAGE_OVERLAP,
+            )?,
+            &[][..],
+        ),
+    ];
+    let mut files = Vec::new();
+    while let Some((directory, date_parts)) = pending.pop() {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).context("could not inspect native SDK rollout storage");
+            }
+        };
+        for entry in entries {
+            let entry = entry.context("could not inspect native SDK rollout storage")?;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).context("could not inspect native SDK rollout storage");
+                }
+            };
+            let path = entry.path();
+            if let Some((&(width, max), remaining)) = date_parts.split_first()
+                && (kind.is_dir() || kind.is_symlink())
+                && entry.file_name().to_str().is_some_and(|name| {
+                    name.len() == width
+                        && name.bytes().all(|digit| digit.is_ascii_digit())
+                        && name
+                            .parse::<u16>()
+                            .is_ok_and(|value| (1..=max).contains(&value))
+                })
+            {
+                let directory = if kind.is_symlink() {
+                    check_local_write_root_overlap(&path, roots, STORAGE_OVERLAP)?
+                } else {
+                    path
+                };
+                pending.push((directory, remaining));
+            } else if (kind.is_symlink() || kind.is_file() && !path.starts_with(home))
+                && rollout_id_from_path(&path).is_some()
+            {
+                collect_local_rollout_files(&path, roots, &mut files)?;
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn collect_local_rollout_files(
+    path: &Path,
+    roots: &LocalWriteRoots<'_>,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let target = check_local_write_root_overlap(path, roots, STORAGE_OVERLAP)?;
+    // Core may materialize a compressed rollout beside the resolved file.
+    let plain = plain_rollout_path(&target);
+    let companion = if plain != target {
+        Some(check_local_write_root_overlap(
+            &plain,
+            roots,
+            STORAGE_OVERLAP,
+        )?)
+    } else {
+        None
+    };
+    for file in std::iter::once(target).chain(companion) {
+        match file.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() => files.push(file),
+            Ok(_) => {}
+            Err(error) if error.kind() == ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).context("could not inspect native SDK rollout storage");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -1007,7 +1128,7 @@ pub(crate) async fn replace_writable_roots(
     manager: &EnvironmentManager,
     current: &StrictExecutorWrites,
     writable_roots: Vec<PathUri>,
-    storage_home: Option<&Path>,
+    storage_home: Option<LocalStorageHome<'_>>,
 ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;

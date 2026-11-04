@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, poll_fn};
-use std::path::Path;
 use std::pin::Pin;
 use std::sync::{
     Arc, RwLock, Weak,
@@ -29,6 +28,7 @@ use codex_thread_store::{
 };
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock, broadcast, mpsc, watch};
 
+use crate::environment::LocalStorageHome;
 use crate::{NativeThread, config, extensions, goals, options, telemetry};
 
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,8 +172,10 @@ impl EngineState {
             );
         }
         let goals_enabled = config::native_goal_store_enabled(&runtime_json)?;
-        let storage_home =
-            (goals_enabled || local_home.is_some()).then(|| config.sqlite_config().home());
+        let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
+            path: config.sqlite_config().home(),
+            persistent_rollouts: local_home.is_some(),
+        });
         let environment_options = config::environment(&runtime_json)?;
         // A local executor must pass its storage check before the profile opens.
         let local_environment = match (&environment_options, storage_home) {
@@ -486,6 +488,22 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let id = match &startup.initial_history {
             InitialHistory::Resumed(history) => {
+                if self.local_checklist_store.is_some()
+                    && let Some(path) = history.rollout_path.as_deref()
+                    && startup
+                        .environments
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|selection| {
+                            selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
+                        })
+                    && let Some(writes) = startup
+                        .thread_extension_init
+                        .get::<crate::environment::StrictExecutorWrites>()
+                {
+                    writes.check_local_rollout_path(path)?;
+                }
                 crate::checkpoint::validate_imported_history(&history.history)?;
                 Some(history.conversation_id)
             }
@@ -1062,9 +1080,11 @@ impl EngineState {
         }
     }
 
-    pub(crate) fn native_storage_home(&self) -> Option<&Path> {
-        (self.goals.is_some() || self.local_checklist_store.is_some())
-            .then(|| self.service_config.sqlite_config().home())
+    pub(crate) fn native_storage_home(&self) -> Option<LocalStorageHome<'_>> {
+        (self.goals.is_some() || self.local_checklist_store.is_some()).then(|| LocalStorageHome {
+            path: self.service_config.sqlite_config().home(),
+            persistent_rollouts: self.local_checklist_store.is_some(),
+        })
     }
 
     pub(crate) async fn build_startup(

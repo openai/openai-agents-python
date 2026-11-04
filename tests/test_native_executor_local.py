@@ -13,6 +13,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -169,6 +170,109 @@ async def test_local_write_roots_cannot_overlap_native_storage(
     else:
         assert not profile.exists()
     assert responses.requests == []
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@pytest.mark.parametrize("location", ["sessions", "session-year", "archived_sessions"])
+async def test_local_write_roots_cannot_overlap_relocated_rollout_directories(
+    responses: ResponsesFixture, tmp_path: Path, location: str
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    storage = LocalStorage(tmp_path / "profile")
+    alias = (
+        storage.path / "sessions" / str(datetime.now(timezone.utc).astimezone().year)
+        if location == "session-year"
+        else storage.path / location
+    )
+    alias.parent.mkdir(parents=True)
+    alias.symlink_to(workspace, target_is_directory=True)
+    agent = Agent(
+        instructions="Answer.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+
+    with pytest.raises(RuntimeError, match="writable roots must stay outside native SDK storage"):
+        async with agent.session(storage=storage, environment=Environment.local(cwd=workspace)):
+            pytest.fail("A write grant included the relocated rollout directory")
+
+    assert responses.requests == []
+    assert list(workspace.iterdir()) == []
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+@pytest.mark.parametrize("grant_history", [False, True], ids=["disjoint", "writable"])
+async def test_local_resume_keeps_relocated_rollout_files_outside_write_roots(
+    responses: ResponsesFixture, tmp_path: Path, grant_history: bool
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sessions = tmp_path / "relocated-sessions"
+    sessions.mkdir()
+    storage = LocalStorage(tmp_path / "profile")
+    storage.path.mkdir()
+    (storage.path / "sessions").symlink_to(sessions, target_is_directory=True)
+    # The local runtime does not select unrelated links as rollout storage.
+    (sessions / "unrelated").symlink_to(workspace, target_is_directory=True)
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Answer.", provider=provider)
+    environment = Environment.local(cwd=workspace)
+
+    async with provider:
+        responses.respond(assistant_output("original"))
+        async with agent.session(storage=storage, environment=environment) as session:
+            thread_id = session.id
+            assert (await (await session.submit("First.")).get_result()).final_output == "original"
+
+        (rollout,) = sessions.rglob(f"*{thread_id}.jsonl")
+        target = workspace if grant_history else tmp_path / "relocated-history"
+        target.mkdir(exist_ok=True)
+        relocated = rollout.rename(target / rollout.name)
+        rollout.symlink_to(relocated)
+        original_history = relocated.read_bytes()
+
+        if grant_history:
+            with pytest.raises(
+                RuntimeError, match="writable roots must stay outside native SDK storage"
+            ):
+                async with agent.session(
+                    storage=storage, resume=thread_id, environment=environment
+                ):
+                    pytest.fail("A write grant included the relocated recorded rollout")
+            assert relocated.read_bytes() == original_history
+            assert len(responses.requests) == 1
+        else:
+            responses.respond(assistant_output("resumed"))
+            async with agent.session(
+                storage=storage, resume=thread_id, environment=environment
+            ) as session:
+                assert session.id == thread_id
+                result = await (await session.submit("Second.")).get_result()
+                assert result.final_output == "resumed"
+                # The native writer now records the physical path in SQLite.
+                # Removing its old alias must not allow a later write grant.
+                rollout.unlink()
+                refused = await session.submit("Refuse this grant.", writable_roots=[target])
+                with pytest.raises(
+                    NativeError, match="writable roots must stay outside native SDK storage"
+                ):
+                    await refused.get_result()
+            assert b"resumed" in relocated.read_bytes()[len(original_history) :]
+            with pytest.raises(
+                RuntimeError, match="writable roots must stay outside native SDK storage"
+            ):
+                async with agent.session(
+                    storage=storage,
+                    resume=thread_id,
+                    environment=Environment.local(cwd=workspace, writable_roots=[target]),
+                ):
+                    pytest.fail("A write grant included the recorded physical rollout")
+            assert len(responses.requests) == 2
 
 
 def _relocate_database(database: Path, directory: Path) -> Path:
