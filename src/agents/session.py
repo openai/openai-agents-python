@@ -4839,6 +4839,11 @@ class Session(Generic[ContextT, OutputT]):
             return
         assert state.task is not None
         should_cancel = not state.stopping and not state.failure.done()
+        if should_cancel and state.handle is not None:
+            # Callback cleanup can finish before Core handles the interrupt.
+            # The public root may now own a later native continuation.
+            assert state.handle.turn_id is not None
+            self._native._request_sampling_stop(state.handle.turn_id)
         # A final manual reply can clear restored_pending while native recovery
         # is in flight. Keep ownership of the terminal retirement already chosen.
         state.retire_manual = state.retire_manual or state.restored_pending

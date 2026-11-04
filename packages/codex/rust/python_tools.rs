@@ -10,7 +10,7 @@ use codex_extension_api::{
     ContextContributor, ExtensionData, ExtensionFuture, ThreadIdleInput,
     ThreadLifecycleContributor, ThreadStartInput, ThreadStopInput, ToolCallOutcome,
     ToolContributor, ToolFinishInput, ToolLifecycleContributor, ToolLifecycleFuture, ToolPolicy,
-    TurnErrorInput, TurnLifecycleContributor, TurnStartInput, TurnStartPhase,
+    TurnErrorInput, TurnLifecycleContributor, TurnSamplingStop, TurnStartInput, TurnStartPhase,
     WorldStateContributionInput, WorldStateSectionContribution,
 };
 use codex_protocol::dynamic_tools::{
@@ -210,6 +210,7 @@ pub(crate) struct TurnAdmission {
     state: watch::Sender<AdmissionState>,
     completed_calls: Mutex<HashSet<String>>,
     graceful_requested: AtomicBool,
+    sampling_stop: Arc<TurnSamplingStop>,
     // A turn born while the graph is stopped must stay fenced even if a
     // later explicit submission starts a new graph generation.
     graph_fenced: bool,
@@ -516,9 +517,22 @@ pub fn checkpoint_specs(specs: &[DynamicToolSpec]) -> Result<Value> {
 }
 
 impl PythonTools {
+    pub(crate) fn request_sampling_stop(&self, turn_id: &str) {
+        let admission = self
+            .admission
+            .lock()
+            .expect("Python admission receipt poisoned");
+        if let Some(receipt) = admission
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn_id)
+        {
+            receipt.sampling_stop.request();
+        }
+    }
+
     /// Reserve the stop before returning an awaitable to Python. Native tools
     /// may finish while its settlement task is still waiting to be scheduled.
-    pub(crate) fn request_graph_interrupt(&self) -> Result<GraphStopRequest> {
+    pub(crate) fn request_graph_interrupt(&self, force: bool) -> Result<GraphStopRequest> {
         ensure!(
             self.instance.is_none(),
             "Only the root can interrupt its graph"
@@ -529,6 +543,9 @@ impl PythonTools {
             graph.fenced = true;
             for (_, _, receipt) in self.graph_turns(false) {
                 receipt.graceful_requested.store(true, Ordering::Release);
+                if force {
+                    receipt.sampling_stop.request();
+                }
             }
         }
         self.family.graph_changed.send_replace(());
@@ -2209,6 +2226,7 @@ impl TurnLifecycleContributor for PythonContributor {
                     state: watch::channel(AdmissionState::Pending).0,
                     completed_calls: Mutex::default(),
                     graceful_requested: AtomicBool::new(false),
+                    sampling_stop: input.turn_store.get_or_init(TurnSamplingStop::default),
                     graph_fenced: graph.fenced,
                     terminal: AtomicBool::new(false),
                     local_command_cleanup_failed: AtomicBool::new(false),
@@ -3717,7 +3735,7 @@ pub(crate) mod managed_tests {
                     assert_eq!(history.matches("unique steering tail in the native gap").count(), 1);
                     if outcome == "stop" {
                         let tools = state.thread.thread_extension_data().get::<PythonTools>().unwrap();
-                        let _stop = tools.request_graph_interrupt().unwrap();
+                        let _stop = tools.request_graph_interrupt(false).unwrap();
                         let rejected = crate::ops::submit_replaceable(&state, continuation).await.unwrap();
                         assert_eq!(rejected["status"], "not_submitted");
                         assert_eq!(provider.requests.lock().unwrap().len(), 1);

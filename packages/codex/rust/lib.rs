@@ -1208,6 +1208,18 @@ impl NativeThread {
         })
     }
 
+    fn _request_sampling_stop(&self, expected_turn_id: &str) -> PyResult<()> {
+        if let Some(inner) = self.live()?
+            && let Some(tools) = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+        {
+            tools.request_sampling_stop(expected_turn_id);
+        }
+        Ok(())
+    }
+
     #[pyo3(signature = (expected_turn_id, *, queued_compaction=false))]
     fn _interrupt_session<'py>(
         &self,
@@ -1241,7 +1253,7 @@ impl NativeThread {
             .ok_or_else(|| py_error("Graph interruption requires a managed Session"))?;
         let request = {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            tools.request_graph_interrupt().map_err(py_error)?
+            tools.request_graph_interrupt(force).map_err(py_error)?
         };
         async_bridge::future_into_py(py, async move {
             let _request = request;

@@ -115,7 +115,11 @@
     {
       "path": "0029-own-managed-darwin-command-cohort.patch",
       "sha256": "2df2d03f5f8c88124e6b54a9c85f02f1b9aff8b56e768f289eaa75c0971ccb43"
+    },
+    {
+      "path": "0030-stop-owned-turn-sampling.patch",
+      "sha256": "fbc98457cdfd3749088dbd32370eef5e1d3c4bc9fcbd7ca6ac3e9b4fb7cea713"
     }
   ],
-  "result_tree": "bb10b3bd4713f79bb2c18cb24c58d4b16a9e2086"
+  "result_tree": "2acbe545cf0fc2ced2f5b6e32e84de1b7ace452d"
 }
