@@ -19,6 +19,7 @@ def test_provider_dataclass_declaration_does_not_load_native():
         "base_url": "https://example.invalid/v1",
         "api_key": "synthetic",
         "supports_websockets": False,
+        "auth": None,
     }
     assert [field.name for field in fields(provider)] == list(expected)
     assert asdict(provider) == expected

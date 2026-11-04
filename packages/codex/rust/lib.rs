@@ -1404,14 +1404,14 @@ impl NativeThread {
         })
     }
 
-    fn _validate_hosted_search_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn _validate_session_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let current = inner.thread.config_snapshot().await;
             inner
                 .engine
-                .validate_hosted_search_model(current.collaboration_mode.model())
+                .validate_session_model(current.collaboration_mode.model())
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             Ok(())
@@ -1443,7 +1443,7 @@ impl NativeThread {
             if let Some(model) = &settings.model {
                 inner
                     .engine
-                    .validate_hosted_search_model(model)
+                    .validate_session_model(model)
                     .await
                     .map_err(|error| PyValueError::new_err(error.to_string()))?;
             }

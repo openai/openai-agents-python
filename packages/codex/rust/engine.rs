@@ -66,8 +66,25 @@ pub struct EngineState {
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
 }
 
+const SIWC_PROVIDER_PREFIX: &str = "native_agent_siwc_";
+
 impl EngineState {
-    pub(crate) fn validate_hosted_search(config: &Config, info: &ModelInfo) -> anyhow::Result<()> {
+    fn requires_model_validation(config: &Config) -> bool {
+        config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX)
+            || (config.web_search_mode.value()
+                != codex_protocol::config_types::WebSearchMode::Disabled
+                && !config.features.enabled(Feature::StandaloneWebSearch))
+    }
+
+    pub(crate) fn validate_model_for_provider(
+        config: &Config,
+        info: &ModelInfo,
+    ) -> anyhow::Result<()> {
+        // Lite puts function and custom tool declarations in additional_tools.
+        ensure!(
+            !config.model_provider_id.starts_with(SIWC_PROVIDER_PREFIX) || info.use_responses_lite,
+            "Sign in with ChatGPT requires a native model with Responses Lite support"
+        );
         // Lite selects Core's standalone executor even with its feature flag
         // off. A hosted grant must not silently acquire that other route.
         ensure!(
@@ -79,21 +96,28 @@ impl EngineState {
         Ok(())
     }
 
-    pub(crate) async fn validate_hosted_search_model(&self, model: &str) -> anyhow::Result<()> {
-        if self.service_config.web_search_mode.value()
-            != codex_protocol::config_types::WebSearchMode::Disabled
-            && !self
-                .service_config
-                .features
-                .enabled(Feature::StandaloneWebSearch)
-        {
+    pub(crate) async fn validate_session_model(&self, model: &str) -> anyhow::Result<()> {
+        if Self::requires_model_validation(&self.service_config) {
             let info = self
                 .manager
                 .get_models_manager()
                 .get_model_info(model, &self.service_config.to_models_manager_config())
                 .await;
-            Self::validate_hosted_search(&self.service_config, &info)?;
+            Self::validate_model_for_provider(&self.service_config, &info)?;
         }
+        Ok(())
+    }
+
+    fn validate_resume_provider(
+        stored_provider: &str,
+        current_provider: &str,
+    ) -> anyhow::Result<()> {
+        ensure!(
+            (!stored_provider.starts_with(SIWC_PROVIDER_PREFIX)
+                && !current_provider.starts_with(SIWC_PROVIDER_PREFIX))
+                || stored_provider == current_provider,
+            "Local thread and Session must use the same model authentication mode and ChatGPT registration"
+        );
         Ok(())
     }
 
@@ -228,10 +252,7 @@ impl EngineState {
                 ModelsResponse { models: catalog },
             ))
         } else {
-            if config.web_search_mode.value()
-                != codex_protocol::config_types::WebSearchMode::Disabled
-                && !config.features.enabled(Feature::StandaloneWebSearch)
-            {
+            if Self::requires_model_validation(&config) {
                 let model = if checkpoint {
                     initial_model.clone()
                 } else {
@@ -245,14 +266,18 @@ impl EngineState {
                             local_checklist_store.is_some(),
                             "SDK resume requires current native local storage"
                         );
-                        let model = store
+                        let stored = store
                             .read_thread(ReadThreadParams {
                                 thread_id: id,
                                 include_archived: true,
                                 include_history: false,
                             })
-                            .await?
-                            .model;
+                            .await?;
+                        Self::validate_resume_provider(
+                            &stored.model_provider,
+                            &config.model_provider_id,
+                        )?;
+                        let model = stored.model;
                         local_checklist_store
                             .as_ref()
                             .expect("local store checked above")
@@ -279,7 +304,7 @@ impl EngineState {
                     let info = models
                         .get_model_info(&model, &config.to_models_manager_config())
                         .await;
-                    Self::validate_hosted_search(&config, &info)?;
+                    Self::validate_model_for_provider(&config, &info)?;
                 }
             }
             models
@@ -426,7 +451,12 @@ impl EngineState {
                     && startup.reserved_thread_id.is_none(),
                 "SDK resume requires local storage, current replaceable tools, and no other history or identity"
             );
-            startup.initial_history = self.history(&id.to_string()).await?;
+            let stored = self.stored(&id.to_string()).await?;
+            Self::validate_resume_provider(
+                &stored.model_provider,
+                &startup.config.model_provider_id,
+            )?;
+            startup.initial_history = self.history_from_stored(stored).await?;
             ensure!(
                 startup
                     .initial_history
@@ -769,6 +799,10 @@ impl EngineState {
 
     pub async fn history(&self, id_or_path: &str) -> anyhow::Result<InitialHistory> {
         let stored = self.stored(id_or_path).await?;
+        self.history_from_stored(stored).await
+    }
+
+    async fn history_from_stored(&self, stored: StoredThread) -> anyhow::Result<InitialHistory> {
         let history = self
             .store
             .load_latest_model_context(LoadThreadHistoryParams {

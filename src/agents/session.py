@@ -32,12 +32,15 @@ from ._history import project_history
 from ._native_async import _NativeCompletionError
 from ._projection import _error_code
 from .agent import (
+    _SIWC_AUDIENCE,
+    _SIWC_PROVIDER_PREFIX,
     Agent,
     ContextT,
     ModelSettings,
     NativeProvider,
     OutputT,
     _copy_model_settings,
+    _siwc_binding,
     _SyncRun,
 )
 from .executor import Environment, EnvironmentSource, ExecutorContext
@@ -620,6 +623,7 @@ class _Invocation:
 
 
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
+_SIWC_RESPONSES_BASE_URL = _SIWC_AUDIENCE
 
 
 @dataclass(repr=False)
@@ -1379,6 +1383,7 @@ class Session(Generic[ContextT, OutputT]):
                 output_type=cast(OutputSpec[OutputT], agent.output_type),
                 programmatic_tool_calling=agent.programmatic_tool_calling,
             )
+        sign_in = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
@@ -1396,9 +1401,14 @@ class Session(Generic[ContextT, OutputT]):
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
             _check_checkpoint(saved, agent.instructions)
+            if (saved.chatgpt_auth_binding is not None) != (sign_in is not None):
+                raise ValueError(
+                    "Checkpoint and Session must use the same model authentication mode"
+                )
             # The binding still consumes its original idle/manual format.
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
+            payload.pop("chatgpt_auth_binding", None)
             if saved.format_version in (4, 5, 6, 7):
                 payload["format_version"] = saved.format_version - 2
             payload.pop("operation_tools", None)
@@ -1428,6 +1438,17 @@ class Session(Generic[ContextT, OutputT]):
         deferred_schemas = any(tool.defer_loading for tool in allowed_tools) or any(
             server.defer_loading for server in allowed_mcp
         )
+        if sign_in is not None:
+            if programmatic_tool_calling:
+                raise ValueError("Sign in with ChatGPT does not support programmatic_tool_calling")
+            if deferred_schemas:
+                raise ValueError("Sign in with ChatGPT does not support deferred tool loading")
+            if any(
+                isinstance(server, (ChatGPTAppsMCP, HostedVerificationMCP)) for server in mcp_tools
+            ):
+                raise ValueError("Sign in with ChatGPT does not support hosted Apps MCP tools")
+            if web_search is not None:
+                raise ValueError("Sign in with ChatGPT does not support WebSearch")
         if state is not None and state.descendants and native_agents is None:
             raise ValueError("Restoring child state requires current NativeAgents")
         if native_agents is not None:
@@ -1658,18 +1679,44 @@ class Session(Generic[ContextT, OutputT]):
                 session = None
                 engine = None
                 thread = None
+                if selected is not None:
+                    opening.api_key = selected.api_key
+                elif _captured_api_key is not None:
+                    opening.api_key = _captured_api_key
+                elif sign_in is not None:
+                    opening.api_key = await sign_in._resolve_access_token()
+                elif provider.api_key is None:
+                    opening.api_key = native._read_openai_api_key_from_env()
+                else:
+                    opening.api_key = provider.api_key
+                provider_id = "native_agent"
+                auth_binding = None
+                if sign_in is not None:
+                    auth_binding = _siwc_binding(opening.api_key)
+                    if auth_binding is None:
+                        raise ValueError(
+                            "Provide a Sign in with ChatGPT access token for Responses"
+                        )
+                    if state is not None and saved.chatgpt_auth_binding != auth_binding:
+                        raise ValueError("Checkpoint requires the original ChatGPT registration")
+                    provider_id = _SIWC_PROVIDER_PREFIX + auth_binding
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
-                    "model_provider": "native_agent",
-                    "model_providers.native_agent": {
+                    "model_provider": provider_id,
+                    f"model_providers.{provider_id}": {
                         "name": "Native agent provider",
-                        "base_url": provider.base_url
-                        if provider.base_url is not None
-                        else "https://api.openai.com/v1",
+                        "base_url": (
+                            _SIWC_RESPONSES_BASE_URL
+                            if sign_in is not None
+                            else provider.base_url or _SIWC_AUDIENCE
+                        ),
                         "wire_api": "responses",
                         "requires_openai_auth": True,
                         "supports_websockets": provider._websockets_enabled,
+                        # The pinned Core treats unknown failed-stream codes as
+                        # retryable, including ChatGPT plan usage-limit errors.
+                        **({"stream_max_retries": 0} if sign_in is not None else {}),
                         # Both native web protocols require a compatible Responses
                         # provider. The declaration admits that provider capability.
                         "supports_standalone_web_search": (
@@ -1758,14 +1805,6 @@ class Session(Generic[ContextT, OutputT]):
                             "tools.experimental_request_user_input.enabled": False,
                         }
                     )
-                if selected is not None:
-                    opening.api_key = selected.api_key
-                elif _captured_api_key is not None:
-                    opening.api_key = _captured_api_key
-                elif provider.api_key is None:
-                    opening.api_key = native._read_openai_api_key_from_env()
-                else:
-                    opening.api_key = provider.api_key
                 hosted_verification = next(
                     (server for server in allowed_mcp if type(server) is HostedVerificationMCP),
                     None,
@@ -1963,6 +2002,7 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
+                session._chatgpt_auth_binding = auth_binding
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
@@ -2053,15 +2093,13 @@ class Session(Generic[ContextT, OutputT]):
                                 "its runtime cannot be restored"
                             )
                 if (
-                    web_search is not None
-                    and web_search.route == "hosted"
-                    and (checkpoint is not None or "model" not in settings)
-                ):
+                    sign_in is not None or (web_search is not None and web_search.route == "hosted")
+                ) and (checkpoint is not None or "model" not in settings):
                     # Without a destination model, the restored model owns
                     # admission. Validate it before publishing any startup
                     # settings or instructions to an addressable local thread.
                     # Explicit model updates validate natively before writing.
-                    await session._publish_startup(thread._validate_hosted_search_model())
+                    await session._publish_startup(thread._validate_session_model())
                 if checkpoint is None and settings:
                     if (
                         await session._publish_startup(
@@ -2206,6 +2244,7 @@ class Session(Generic[ContextT, OutputT]):
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._model_api_key: str | None = None
+        self._chatgpt_auth_binding: str | None = None
         self._native_options: str | None = None
         self._websockets_enabled = False
         self._engine = engine
@@ -7072,6 +7111,8 @@ class Session(Generic[ContextT, OutputT]):
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}
+            if self._chatgpt_auth_binding is not None:
+                payload["chatgpt_auth_binding"] = self._chatgpt_auth_binding
             if active is None:
                 # Do not persist a temporary operation as an idle default.
                 # Only selectors cross restore, never endpoints or credentials.

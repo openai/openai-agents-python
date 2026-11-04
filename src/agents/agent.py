@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import importlib
 import json
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
@@ -129,17 +132,89 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
     return settings.copy()
 
 
+_SIWC_AUDIENCE = "https://api.openai.com/v1"
+_SIWC_PROVIDER_PREFIX = "native_agent_siwc_"
+
+
+def _siwc_binding(token: object) -> str | None:
+    # Reject ordinary API keys and unrelated tokens before sending a request.
+    # Responses validates the signature and enforces workspace access.
+    if not isinstance(token, str) or not re.fullmatch(r"[\w-]+\.[\w-]+\.[\w-]+", token, re.ASCII):
+        return None
+    payload = token.split(".")[1]
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(claims, dict):
+        return None
+    scope = claims.get("scope")
+    subject = claims.get("sub")
+    client = claims.get("client_id")
+    if (
+        claims.get("iss") != "https://auth.openai.com"
+        or claims.get("aud") != _SIWC_AUDIENCE
+        or not isinstance(scope, str)
+        or "chatgpt.tokens.use.direct" not in scope.split()
+        or not isinstance(subject, str)
+        or not subject
+        or not isinstance(client, str)
+        or not client
+    ):
+        return None
+    # A client is issued to an app registration for the selected workspace.
+    # Store a stable binding without storing the token or the raw identifiers.
+    return hashlib.sha256(json.dumps([client, subject]).encode()).hexdigest()
+
+
+@dataclass(frozen=True, kw_only=True)
+class SignInWithChatGPT:
+    """Experimental ChatGPT plan authentication for native Sessions.
+
+    Supply an async callback that returns an access token from the app's
+    Sign in with ChatGPT registration. Keep the callback bound to the user's
+    selected account and workspace. The app owns sign-in and refresh.
+    The SDK captures one token when opening a Session. To use a renewed
+    token, open a new Session and restore its conversation.
+
+    This feature may change or be removed. The public beta and general
+    availability of the Agents SDK may ship without it.
+    """
+
+    get_access_token: Callable[[], Awaitable[str]] = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if not callable(self.get_access_token):
+            raise TypeError("get_access_token must be an async token callback")
+
+    async def _resolve_access_token(self) -> str:
+        failure: BaseException
+        try:
+            return await self.get_access_token()
+        except asyncio.CancelledError:
+            failure = asyncio.CancelledError()
+        except Exception:
+            failure = RuntimeError("Could not obtain a Sign in with ChatGPT access token")
+        # Credential sources can include secrets in error messages and causes.
+        raise failure
+
+
 @dataclass(frozen=True, kw_only=True)
 class NativeProvider:
     """A native Responses connection. Construction performs no I/O.
 
-    An omitted key uses ``OPENAI_API_KEY`` when the session opens. Credentials
-    and connection URLs are excluded from the descriptor's representation.
+    With ``auth=None``, an omitted key uses ``OPENAI_API_KEY`` when the session
+    opens. Credentials and connection URLs are excluded from the descriptor's
+    representation.
     With ``supports_websockets=None``, the SDK permits WebSockets only when
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries.
+
+    Set ``auth=SignInWithChatGPT(...)`` to use an eligible ChatGPT plan.
+    This experimental mode uses HTTP on the OpenAI Responses endpoint and
+    requires its own credential. Omit ``api_key`` and ``base_url``.
 
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
@@ -148,6 +223,7 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
+    auth: SignInWithChatGPT | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("base_url", "api_key"):
@@ -156,10 +232,17 @@ class NativeProvider:
                 raise ValueError(f"{name} must be a non-empty string when provided")
         if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
             raise ValueError("supports_websockets must be a bool or None")
+        if self.auth is not None:
+            if not isinstance(self.auth, SignInWithChatGPT):
+                raise TypeError("auth must be SignInWithChatGPT or None")
+            if self.api_key is not None or self.base_url is not None or self.supports_websockets:
+                raise ValueError(
+                    "Sign in with ChatGPT requires HTTP and its own endpoint and token"
+                )
 
     @property
     def _websockets_enabled(self) -> bool:
-        return (
+        return self.auth is None and (
             self.supports_websockets
             if self.supports_websockets is not None
             else self.base_url is None

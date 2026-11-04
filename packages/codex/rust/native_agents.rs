@@ -94,7 +94,7 @@ async fn validate_model(
         .await;
     // Root and every declared role are validated before the environment opens.
     // Model-supplied overrides cannot expand this frozen native catalogue.
-    crate::engine::EngineState::validate_hosted_search(config, &info)?;
+    crate::engine::EngineState::validate_model_for_provider(config, &info)?;
     ensure!(
         !info.used_fallback_model_metadata
             && !matches!(info.shell_type, ConfigShellToolType::Disabled)

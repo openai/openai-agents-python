@@ -14,6 +14,7 @@ if TYPE_CHECKING:
         Agent as Agent,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
+        SignInWithChatGPT as SignInWithChatGPT,
     )
     from .executor import (
         Environment as Environment,
@@ -127,6 +128,7 @@ _MODULES = {
     "Agent": ".agent",
     "ModelSettings": ".agent",
     "NativeProvider": ".agent",
+    "SignInWithChatGPT": ".agent",
     "NativeOutput": ".schema",
     "PromptedOutput": ".schema",
     "OutputSpec": ".schema",
