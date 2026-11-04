@@ -5,6 +5,7 @@ import contextlib
 import os
 from pathlib import Path
 import platform
+import re
 import select
 import signal
 import socket
@@ -33,6 +34,36 @@ def driver_step(driver, step):
     return driver_line(driver)
 
 
+def wait_for_exit(api, pid):
+    deadline = time.monotonic() + 3
+    while api.identity(pid, missing_ok=True) is not None:
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"PID {pid} is still present")
+        time.sleep(0.025)
+
+
+def confirm_job_pid(fixture, service, pid):
+    result = fixture.launchctl("print", service)
+    lines = [line for line in result.stdout.splitlines()
+             if re.fullmatch(r"\s*pid = \d+\s*", line)]
+    fixture.check(result.returncode == 0 and [line.strip() for line in lines] == [f"pid = {pid}"],
+                  f"launchctl did not report the authenticated helper for {service}")
+    print(f"/bin/launchctl print {service} returned {result.returncode}", flush=True)
+    print(lines[0], flush=True)
+
+
+def remove_exited_job(fixture, cleanup, service):
+    result = fixture.launchctl("bootout", service)
+    print(f"/bin/launchctl bootout {service} returned {result.returncode}; "
+          f"stderr={result.stderr.strip()!r}", flush=True)
+    fixture.check(result.returncode == 0, f"could not remove the exited helper job {service}")
+    cleanup.pop_all()
+    result = fixture.launchctl("print", service)
+    print(f"/bin/launchctl print {service} after bootout returned {result.returncode}; "
+          f"stderr={result.stderr.strip()!r}", flush=True)
+    fixture.check(result.returncode != 0, f"removed helper job {service} is still registered")
+
+
 def run_case(fixture, driver_path, directory, domain, system_image):
     api = fixture.Darwin()
     label = f"org.openai.sdk.coalition-rust.{uuid.uuid4().hex}"
@@ -41,8 +72,10 @@ def run_case(fixture, driver_path, directory, domain, system_image):
         listener.bind(str(directory / "sock"))
         listener.listen(3)
         listener.settimeout(4)
-        helper_job = fixture.load_job(stack, directory, domain, label + ".target", "h")
-        helper, helper_token = fixture.accept_peer(stack, listener, b"h", helper_job)
+        target_cleanup = stack.enter_context(contextlib.ExitStack())
+        helper_job = fixture.load_job(target_cleanup, directory, domain, label + ".target", "h")
+        helper, helper_token = fixture.accept_peer(stack, listener, b"h")
+        confirm_job_pid(fixture, helper_job, helper_token[5])
         control_job = fixture.load_job(stack, directory, domain, label + ".control", "c")
         control, control_token = fixture.accept_peer(stack, listener, b"c", control_job)
         helper_pid, control_pid = helper_token[5], control_token[5]
@@ -98,7 +131,7 @@ def run_case(fixture, driver_path, directory, domain, system_image):
                                   "waitpid did not report SIGKILL for the system image")
                 else:
                     fixture.check(detached.recv(1) == b"", "detached child socket stayed open")
-                fixture.wait_for_exit(api, child_pid)
+                wait_for_exit(api, child_pid)
                 fixture.ping(helper)
                 fixture.ping(control)
 
@@ -106,13 +139,15 @@ def run_case(fixture, driver_path, directory, domain, system_image):
                 # holds a duplicate descriptor for the same accepted socket.
                 helper.shutdown(socket.SHUT_WR)
                 fixture.check(helper.recv(1) == b"", "helper did not exit")
-                fixture.wait_for_exit(api, helper_pid)
+                wait_for_exit(api, helper_pid)
                 fixture.check(driver_step(driver, b"z") == "FINAL 0",
                               "Rust driver did not read zero live target tasks")
                 fixture.ping(control)
                 fixture.check(api.member(control_pid, control_token[7]) == control_id,
                               "control changed resource coalition")
                 fixture.check(driver.wait(timeout=2) == 0, "Rust driver failed")
+                remove_exited_job(fixture, target_cleanup, helper_job)
+                fixture.ping(control)
             finally:
                 if driver.poll() is None:
                     driver.terminate()
