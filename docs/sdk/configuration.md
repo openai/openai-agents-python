@@ -4,7 +4,7 @@ Construct an Agent with instructions, tools and an optional output type. Constru
 
 Agent fields are immutable. Construct a new Agent to change defaults for future Sessions, or use `agent.with_output_type(...)` to change the output type. Unknown constructor options and Python model objects fail before native resources open.
 
-Pass `environment=...` to `agent.session()` or a one-shot method for a [remote workspace](tools.md#remote-execution). One Agent can open Sessions in different environments. Use `ToolContext[Application]` for callback application state, separate from model input and tool arguments.
+Pass `environment=...` to `agent.session()` or a one-shot method for a [local workspace](tools.md#local-execution) or a [remote workspace](tools.md#remote-execution). One Agent can open Sessions in different environments. Use `ToolContext[Application]` for callback application state, separate from model input and tool arguments.
 
 ## Model and Session settings
 
@@ -22,7 +22,7 @@ The Session records Python and manual tool names and pairs of MCP server names a
 
 ## Provider connection
 
-Pass `NativeProvider(base_url=..., api_key=...)` for a native Responses connection. The SDK uses Codex's built-in model client, not an `openai.OpenAI` or `openai.AsyncOpenAI` instance. Custom endpoints must support Responses. Chat Completions compatibility alone is insufficient.
+Model requests use an API key. Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection. The SDK uses Codex's built-in model client, not an `openai.OpenAI` or `openai.AsyncOpenAI` instance. Custom endpoints must support Responses. Chat Completions compatibility alone is insufficient.
 
 Connection defaults are:
 
@@ -31,6 +31,14 @@ Connection defaults are:
 - `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
 
 The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
+
+### Read API-key rate limits
+
+Read `session.rate_limits()` for the latest snapshot from a response with usable rate-limit data. The snapshot starts with unknown values. Each reported window can contain a limit, a remaining count, and the number of seconds until reset as measured at the response. `requests`, `tokens`, and `project_tokens` can each be absent. The provider can also supply a retry delay or an absolute retry time. Treat every `None` as unknown.
+
+For live updates, observe `ApiRateLimitsUpdated` from `agents.observation`. Use its `snapshot` field or read the current Session snapshot after an observation gap. Rate-limit updates can arrive independently of token usage. These snapshots describe the API-key connection. Account plan limits, credits, and billing are outside their scope.
+
+Read a settled failure with [`wait_for_attention()`](sessions.md#wait-for-a-decision-or-a-result). A reported temporary rate limit yields `reason="rate_limited"`. A reported blocking limit, such as exhausted quota, yields `reason="quota_blocked"`. Base that distinction on the failure reason. A remaining count alone cannot tell you whether the next request will succeed.
 
 ### Provider lifetime
 
