@@ -1106,6 +1106,26 @@ def _split_tools(
     return tuple(python_tools), tuple(mcp_tools.values()), native_agents
 
 
+def _split_agent_tools(
+    agent: Agent[ContextT, Any],
+) -> tuple[tuple[FunctionTool[Any, Any, Any], ...], tuple[_MCP[Any], ...], NativeAgents | None]:
+    tools = _split_tools(agent.tools, agent.programmatic_tool_calling)
+    if agent.provider is None or agent.provider.auth is None:
+        return tools
+    python_tools, mcp_tools, _ = tools
+    if agent.programmatic_tool_calling:
+        raise ValueError("Sign in with ChatGPT does not support programmatic_tool_calling")
+    if any(tool.defer_loading for tool in python_tools) or any(
+        server.defer_loading for server in mcp_tools
+    ):
+        raise ValueError("Sign in with ChatGPT does not support deferred tool loading")
+    if any(isinstance(server, (ChatGPTAppsMCP, HostedVerificationMCP)) for server in mcp_tools):
+        raise ValueError("Sign in with ChatGPT does not support hosted Apps MCP tools")
+    if any(isinstance(tool, WebSearch) for tool in agent.tools):
+        raise ValueError("Sign in with ChatGPT does not support WebSearch")
+    return tools
+
+
 def _selected_tool_refs(
     selection: Sequence[Any],
     python: Sequence[FunctionTool[Any, Any, Any]],
@@ -1427,7 +1447,7 @@ class Session(Generic[ContextT, OutputT]):
             continuation = saved.native_continuation
             if manual_restore:
                 restored_model_settings = _manual_restore_model_settings(saved)
-        tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+        tools, mcp_tools, native_agents = _split_agent_tools(agent)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -1438,17 +1458,6 @@ class Session(Generic[ContextT, OutputT]):
         deferred_schemas = any(tool.defer_loading for tool in allowed_tools) or any(
             server.defer_loading for server in allowed_mcp
         )
-        if sign_in is not None:
-            if programmatic_tool_calling:
-                raise ValueError("Sign in with ChatGPT does not support programmatic_tool_calling")
-            if deferred_schemas:
-                raise ValueError("Sign in with ChatGPT does not support deferred tool loading")
-            if any(
-                isinstance(server, (ChatGPTAppsMCP, HostedVerificationMCP)) for server in mcp_tools
-            ):
-                raise ValueError("Sign in with ChatGPT does not support hosted Apps MCP tools")
-            if web_search is not None:
-                raise ValueError("Sign in with ChatGPT does not support WebSearch")
         if state is not None and state.descendants and native_agents is None:
             raise ValueError("Restoring child state requires current NativeAgents")
         if native_agents is not None:
@@ -1679,7 +1688,7 @@ class Session(Generic[ContextT, OutputT]):
                 session = None
                 engine = None
                 thread = None
-                if selected is not None:
+                if selected is not None and sign_in is None:
                     opening.api_key = selected.api_key
                 elif _captured_api_key is not None:
                     opening.api_key = _captured_api_key

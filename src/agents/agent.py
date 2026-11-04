@@ -536,9 +536,9 @@ class Agent(Generic[ContextT, OutputT]):
         """
         from .mcp import _tool_names
         from .schema import _prepare_spec
-        from .session import _split_tools
+        from .session import _split_agent_tools
 
-        python_tools, mcp_tools, _ = _split_tools(self.tools, self.programmatic_tool_calling)
+        python_tools, mcp_tools, _ = _split_agent_tools(self)
         _tool_names(mcp_tools)
         native = importlib.import_module("agents._native")
         native._validate_python_tool_declarations(

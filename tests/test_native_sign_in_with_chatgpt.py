@@ -16,12 +16,14 @@ from pydantic import BaseModel, Field
 import agents
 from agents import (
     Agent,
+    ChatGPTAppsMCP,
     LocalStorage,
     NativeError,
     NativeProvider,
     PromptedOutput,
     SessionState,
     SignInWithChatGPT,
+    Turn,
     WebSearch,
     function_tool,
 )
@@ -32,6 +34,8 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
+from tests.test_deferred_jobs import Journal, Provider, declared, done
+from tests.test_deferred_opening_outcome import pending
 
 
 def _token(
@@ -283,6 +287,7 @@ async def test_token_source_error_is_sanitized_and_does_not_fall_back(
     [
         ("programmatic_tool_calling", "programmatic_tool_calling"),
         ("defer_loading", "deferred tool loading"),
+        ("hosted_apps", "hosted Apps MCP"),
         ("web_search", "WebSearch"),
     ],
 )
@@ -301,17 +306,79 @@ async def test_sign_in_with_chatgpt_rejects_unsupported_tool_routes(
         """Read a synthetic record."""
         return key
 
+    tools = [lookup]
+    if unsupported == "web_search":
+        tools = [WebSearch()]
+    elif unsupported == "hosted_apps":
+        tools = [
+            ChatGPTAppsMCP(
+                tools=["lookup"],
+                access_token="synthetic-apps-token",
+                account_id="synthetic-apps-account",
+            )
+        ]
     agent = Agent(
         instructions="Reject unsupported routing before work starts.",
-        tools=[WebSearch()] if unsupported == "web_search" else [lookup],
+        tools=tools,
         programmatic_tool_calling=unsupported == "programmatic_tool_calling",
         provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=access_token)),
     )
+    with pytest.raises(ValueError, match=expected):
+        agent.validate()
     with pytest.raises((TypeError, ValueError), match=expected):
         async with agent.session():
             pytest.fail("Unsupported tool route opened")
     assert calls == 0
     assert responses.requests == []
+
+
+@pytest.mark.parametrize("same_registration", [True, False])
+async def test_deferred_chatgpt_restore_obtains_current_token(
+    responses, siwc_endpoint, same_registration
+):
+    initial = _token("before-deferred-restore")
+    current = _token(
+        "after-deferred-restore",
+        client_id=(
+            "synthetic-app-registration" if same_registration else "synthetic-other-registration"
+        ),
+    )
+    tokens = iter([initial, current])
+    captured = []
+
+    async def access_token() -> str:
+        value = next(tokens)
+        captured.append(value)
+        return value
+
+    backend = Provider([done()])
+    jobs, tool = declared(Journal(), backend)
+    agent = Agent(
+        instructions="Run the declared job.",
+        tools=[tool],
+        provider=NativeProvider(auth=SignInWithChatGPT(get_access_token=access_token)),
+    )
+    async with timeout(30), agent.session() as session:
+        request = await pending(session, tool, responses)
+        if same_registration:
+            responses.respond(assistant_output("job finished"))
+            async with jobs.start(session, request) as (_, turn):
+                assert isinstance(turn, Turn)
+                assert (await turn.get_result()).final_output == "job finished"
+        else:
+            with pytest.raises(ValueError, match="original ChatGPT registration"):
+                async with jobs.start(session, request):
+                    pytest.fail("A different ChatGPT registration started the job")
+
+    assert captured == [initial, current]
+    if same_registration:
+        assert backend.calls == [("start", 2)]
+        assert len(responses.requests) == 2
+        _assert_sse_requests(responses, current, start=1)
+    else:
+        assert backend.calls == []
+        assert len(responses.requests) == 1
+    assert responses.request_headers[0]["authorization"] == f"Bearer {initial}"
 
 
 async def test_sign_in_with_chatgpt_rejects_incompatible_models(responses, siwc_endpoint):
