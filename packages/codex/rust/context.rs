@@ -45,6 +45,7 @@ pub struct Change {
     pub checkpoint: Value,
     settings: codex_protocol::protocol::ThreadSettingsSnapshot,
     instructions: Option<String>,
+    executor_policy: Option<Value>,
 }
 
 pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change> {
@@ -78,6 +79,20 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
     read(&state).await?;
     let snapshot = state.thread.conversation_history_snapshot().await;
     let settings = state.thread.thread_settings_snapshot().await;
+    let executor_policy = if state
+        .thread
+        .thread_extension_data()
+        .get::<crate::environment::StrictExecutorWrites>()
+        .is_some()
+    {
+        let [policy] = crate::local_reconciliation::executor_policies(&state)
+            .await?
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("compaction requires one applied executor policy"))?;
+        Some(policy)
+    } else {
+        None
+    };
     let instructions = state
         .instructions
         .0
@@ -110,6 +125,7 @@ pub async fn begin(state: std::sync::Arc<ThreadState>) -> anyhow::Result<Change>
         checkpoint,
         settings,
         instructions,
+        executor_policy,
     })
 }
 
@@ -125,10 +141,12 @@ impl Change {
             "instructions": self.instructions,
             "instruction_files": instruction_files,
             "settings": self.settings,
+            "executor_writable_roots": self.executor_policy.as_ref().map(|policy| &policy["writable_roots"]),
         })
     }
 
     pub async fn validate_candidate(&self, candidate: &ThreadState) -> anyhow::Result<()> {
+        use anyhow::Context;
         use codex_protocol::protocol::ThreadSettingsOverrides;
         // Only a different, private engine can be prepared under the source lease.
         ensure!(
@@ -138,6 +156,29 @@ impl Change {
         );
         let _operation = candidate.engine.operation(false)?;
         let _mutation = candidate.mutations.lock().await;
+        if let Some(policy) = self.executor_policy.as_ref() {
+            ensure!(
+                crate::local_reconciliation::executor_policies(candidate)
+                    .await?
+                    .as_slice()
+                    == std::slice::from_ref(policy),
+                "compaction cannot change the applied executor policy"
+            );
+            let writes = self
+                .state
+                .thread
+                .thread_extension_data()
+                .get::<crate::environment::StrictExecutorWrites>()
+                .context("compaction source lost its strict write policy")?;
+            let candidate_store = candidate.thread.thread_extension_data();
+            ensure!(
+                candidate_store
+                    .get::<crate::environment::StrictExecutorWrites>()
+                    .is_some(),
+                "compaction candidate lost its strict write policy"
+            );
+            candidate_store.insert((*writes).clone());
+        }
         // Startup options already restore these preferences in the common case.
         // Avoid rewriting an absent tier: native clear normalizes it to "default".
         let before = candidate.thread.thread_settings_snapshot().await;

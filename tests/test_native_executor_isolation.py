@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 from aiohttp import web
-from aiohttp.test_utils import TestServer
+from aiohttp.test_utils import TestServer, unused_port
 
 from agents import Agent, Environment, NativeProvider
 from tests._asyncio import timeout
@@ -36,12 +36,20 @@ def trust_certificates(
     monkeypatch.setenv("SSL_CERT_DIR", str(empty))
 
 
-@pytest.mark.parametrize("failure", ["wrong-host", "untrusted-ca", "forbidden"])
+@pytest.mark.parametrize(
+    ("failure", "reason"),
+    [
+        ("wrong-host", "TLS certificate does not match the executor host"),
+        ("untrusted-ca", "TLS certificate issuer is not trusted"),
+        ("forbidden", r"executor authentication denied \(HTTP 403\)"),
+    ],
+)
 async def test_executor_open_rejects_transport_identity_and_access_failures(
     responses: ResponsesFixture,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
+    reason: str,
 ) -> None:
     local = tmp_path / "local"
     local.mkdir()
@@ -58,7 +66,9 @@ async def test_executor_open_rejects_transport_identity_and_access_failures(
         if failure == "untrusted-ca":
             unrelated = tmp_path / "unrelated-ca"
             unrelated.mkdir()
-            trusted_ca, _ = await create_certificate(unrelated, "DNS:localhost")
+            trusted_ca, _ = await create_certificate(
+                unrelated, "DNS:localhost", issuer_name="Unrelated fixture CA"
+            )
         trust_certificates(monkeypatch, tmp_path, trusted_ca)
         token = "rejected-executor-credential" if failure == "forbidden" else peer.token
         selected = Environment(
@@ -68,7 +78,9 @@ async def test_executor_open_rejects_transport_identity_and_access_failures(
             tools=["exec_command"],
             connect_timeout=0.5,
         )
-        with pytest.raises(RuntimeError, match="remote executor failed to become ready") as caught:
+        with pytest.raises(
+            RuntimeError, match=f"remote executor failed to become ready: {reason}"
+        ) as caught:
             async with Agent(
                 instructions="Use only the selected executor.",
                 tools=[],
@@ -88,6 +100,68 @@ async def test_executor_open_rejects_transport_identity_and_access_failures(
             assert peer.attempts > 0
         else:
             assert peer.attempts == 0
+
+
+async def test_executor_open_reports_connection_refusal_without_requesting_model(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    selected = Environment(
+        url=f"wss://127.0.0.1:{unused_port()}/private-connection",
+        cwd=str(tmp_path),
+        headers={"Authorization": "Bearer refused-executor-credential"},
+        tools=["exec_command"],
+        # Windows can take about two seconds to report a refused loopback connection.
+        connect_timeout=5.0,
+    )
+    async with timeout(10):
+        with pytest.raises(
+            RuntimeError, match="remote executor failed to become ready: connection refused"
+        ) as caught:
+            async with Agent(instructions="Use tools.", provider=provider(responses)).session(
+                environment=selected
+            ):
+                pytest.fail("A refused remote connection opened a usable Session")
+    diagnostic = "".join(traceback.format_exception(caught.value)) + repr(selected)
+    assert "private-connection" not in diagnostic
+    assert "refused-executor-credential" not in diagnostic
+    assert responses.requests == []
+
+
+async def test_executor_open_reports_stalled_tls_handshake_without_requesting_model(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    connections: list[asyncio.StreamWriter] = []
+
+    def stall_handshake(_: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        connections.append(writer)
+
+    async with timeout(10), await asyncio.start_server(stall_handshake, "127.0.0.1") as server:
+        port = server.sockets[0].getsockname()[1]
+        selected = Environment(
+            url=f"wss://127.0.0.1:{port}/private-connection",
+            cwd=str(tmp_path),
+            headers={"Authorization": "Bearer timed-out-executor-credential"},
+            tools=["exec_command"],
+            connect_timeout=0.2,
+        )
+        try:
+            with pytest.raises(
+                RuntimeError, match="remote executor failed to become ready: .*timed out"
+            ) as caught:
+                async with Agent(instructions="Use tools.", provider=provider(responses)).session(
+                    environment=selected
+                ):
+                    pytest.fail("A stalled handshake opened a usable Session")
+        finally:
+            for writer in connections:
+                writer.close()
+            await asyncio.gather(*(writer.wait_closed() for writer in connections))
+
+    diagnostic = "".join(traceback.format_exception(caught.value)) + repr(selected)
+    assert connections
+    assert "private-connection" not in diagnostic
+    assert "timed-out-executor-credential" not in diagnostic
+    assert responses.requests == []
 
 
 @pytest.mark.requires_native_linux_sandbox
