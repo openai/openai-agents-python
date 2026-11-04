@@ -1,0 +1,12 @@
+[package]
+name = "codex-uds"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "../production/codex-rs/uds/src/lib.rs"
+
+[dependencies]
+libc.workspace = true
+tokio = { workspace = true, features = ["fs", "net", "rt"] }

@@ -1,0 +1,32 @@
+[package]
+name = "sdk-darwin-wrapper-qualification"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[[bin]]
+name = "sdk-darwin-wrapper-qualification"
+path = "driver.rs"
+
+[workspace]
+members = ["pty", "uds"]
+resolver = "3"
+
+[workspace.dependencies]
+anyhow = "=1.0.103"
+libc = "=0.2.186"
+tokio = "=1.52.3"
+
+[dependencies]
+anyhow.workspace = true
+codex-utils-pty = { path = "pty" }
+codex-uds = { path = "uds" }
+libc.workspace = true
+rustix = { version = "=1.1.4", features = ["fs", "net"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+tempfile = "=3.27.0"
+tokio = { workspace = true, features = ["io-util", "net", "rt", "sync", "time"] }
+tracing = "=0.1.44"
+uuid = { version = "=1.20.0", features = ["v4"] }

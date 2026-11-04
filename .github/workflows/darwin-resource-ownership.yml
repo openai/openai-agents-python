@@ -1,4 +1,4 @@
-name: Check launchd delegation from the packaged local sandbox
+name: Check the command wrapper and the packaged local sandbox
 on:
   push:
     branches: [test/darwin-resource-ownership-20261104]
@@ -71,3 +71,22 @@ jobs:
           sys.path.insert(0, os.getcwd())
           sys.exit(pytest.main(["-q", "-rA", "-s", "tests/sdk_seatbelt_qualification/test_sdk_seatbelt.py"]))
           PYTEST
+
+  wrapper:
+    name: Exercise the actual native command wrapper
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Compile the production wrapper and test command ownership and PTYs
+        run: |
+          set -eu
+          sw_vers
+          rustup toolchain install 1.95.0 --profile minimal
+          sh .github/qualification/darwin-resource-ownership/wrapper-qualification/run.sh

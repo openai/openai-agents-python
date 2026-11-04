@@ -1,0 +1,14 @@
+[package]
+name = "codex-utils-pty"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+path = "../production/codex-rs/utils/pty/src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+portable-pty = "=0.9.0"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "time"] }
