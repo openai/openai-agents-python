@@ -257,8 +257,16 @@ class StdioMCP(_MCP[ContextT_contra]):
                 raise ValueError(
                     f"StdioMCP location={self.location!r} requires a Session environment"
                 )
-            config["environment_id"] = "remote"
-            config["env_vars"] = [{"name": name, "source": "remote"} for name in self.env_vars]
+            if environment._is_local:
+                config["environment_id"] = "local"
+                config["env_vars"] = [
+                    name
+                    for name in self.env_vars
+                    if name not in {"OPENAI_API_KEY", "CODEX_API_KEY"}
+                ]
+            else:
+                config["environment_id"] = "remote"
+                config["env_vars"] = [{"name": name, "source": "remote"} for name in self.env_vars]
             cwd = self.cwd if self.cwd is not None else environment.cwd
             if cwd.startswith("file:"):
                 uri = urlsplit(cwd)

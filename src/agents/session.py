@@ -19,6 +19,7 @@ from contextlib import AbstractAsyncContextManager, contextmanager, suppress
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
@@ -40,7 +41,7 @@ from .agent import (
     _copy_model_settings,
     _SyncRun,
 )
-from .executor import Environment, EnvironmentSource, ExecutorContext
+from .executor import Environment, EnvironmentSource, ExecutorContext, _writable_roots
 from .history import RecordedTurn
 from .input import UserInput, _native_input
 from .manual import (
@@ -117,6 +118,7 @@ _ResultT = TypeVar("_ResultT")
 _TurnT = TypeVar("_TurnT")
 _SelectionContextT_contra = TypeVar("_SelectionContextT_contra", contravariant=True)
 _NATIVE_HOME_CLOSE_TIMEOUT = 30.0
+_IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST = hashlib.sha256(b"implicit-remote-workspace").hexdigest()
 
 
 def _native_model_settings(model: str | None, settings: ModelSettings | None) -> dict[str, Any]:
@@ -518,6 +520,7 @@ class _Submission:
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None
+    writable_roots: tuple[str, ...] | None = None
 
     def add_callback(self, task: asyncio.Task[None]) -> None:
         self.callbacks.add(task)
@@ -1548,6 +1551,14 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the command network policy"
                     )
+                if (
+                    saved.executor_policy_digest is None
+                    and executor is not None
+                    and (executor._is_local or executor.writable_roots is not None)
+                ):
+                    raise ValueError(
+                        "Checkpoint and Environment must agree on the applied executor policy"
+                    )
             if native_agents is not None and (
                 executor is None
                 or set(executor.tools) != {"exec_command", "write_stdin", "apply_patch"}
@@ -1642,11 +1653,10 @@ class Session(Generic[ContextT, OutputT]):
                         else "codex-code-mode-host"
                     )
                 )
-            if any(
+            if (executor is not None and executor._is_local) or any(
                 isinstance(server, StdioMCP) and server.location == "host" for server in allowed_mcp
             ):
-                # Reserve Core's lazy owner only for explicitly declared processes.
-                # This does not select a workspace or grant shell tools.
+                # Provision the helper for an explicit local executor or host MCP.
                 helpers = Path(__file__).parent / "bin"
                 runtime["codex_self_exe"] = str(
                     helpers
@@ -1977,11 +1987,28 @@ class Session(Generic[ContextT, OutputT]):
                 session._opening_agent = agent
                 session._bindings = agent.tools
                 session._executor = executor
+                if executor is not None and executor.writable_roots is not None:
+                    session._writable_roots = _writable_roots(executor.writable_roots)
                 session._native_agents = native_agents
                 session._storage = storage
                 if checkpoint is not None:
                     session._repair_turns = saved.repair_turns
                     session._repair_items = saved.repair_items
+                    recorded_policy = saved.executor_policy_digest
+                    if (
+                        recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+                        and restored_operation_refs is not None
+                        and executor is None
+                    ):
+                        # Older checkpoints can carry an implicit policy even
+                        # when the saved subset resolves without an executor.
+                        recorded_policy = None
+                    if recorded_policy is not None and (
+                        recorded_policy != await session._executor_policy_digest()
+                    ):
+                        raise ValueError(
+                            "Checkpoint and Environment must agree on the applied executor policy"
+                        )
                 if restored_defaults is not None:
                     session._default_tools = restored_defaults
                 if (
@@ -2061,6 +2088,7 @@ class Session(Generic[ContextT, OutputT]):
                                 "Native local history has an active descendant; "
                                 "its runtime cannot be restored"
                             )
+                    await session._publish_startup(thread._validate_local_executor_policy())
                 if (
                     web_search is not None
                     and web_search.route == "hosted"
@@ -2247,6 +2275,7 @@ class Session(Generic[ContextT, OutputT]):
             tuple[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents, ...] | None
         ) = None
         self._executor: Environment[Any] | None = None
+        self._writable_roots: tuple[str, ...] | None = None
         self._executor_termination_attempted = False
         self._native_agents: NativeAgents | None = None
         self._interception: _NativeInterception | None = None
@@ -2628,6 +2657,24 @@ class Session(Generic[ContextT, OutputT]):
         return self._api_rate_limit_snapshot
 
     @property
+    def _strict_executor_writes(self) -> bool:
+        return self._executor is not None and (
+            self._executor._is_local or self._writable_roots is not None
+        )
+
+    async def _executor_policy_digest(self) -> str | None:
+        if self._executor is None:
+            return None
+        if self._strict_executor_writes:
+            # The mode also disables escalation and permission requests.
+            policy = "strict-writes:" + await self._native._executor_policies()
+        else:
+            # An implicit WSS workspace can move on restore. Keep the write
+            # mode, and let the separate network digest check network authority.
+            return _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+        return hashlib.sha256(policy.encode("utf-8")).hexdigest()
+
+    @property
     def restored_turn(self) -> Turn[Any] | None:
         """The initially restored pending root, even after another turn starts.
 
@@ -2649,6 +2696,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
+        writable_roots: Sequence[str | PathLike[str]] | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2661,6 +2709,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
+        writable_roots: Sequence[str | PathLike[str]] | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2672,6 +2721,7 @@ class Session(Generic[ContextT, OutputT]):
         output_type: None = None,
         tools: None = None,
         before_step: None = None,
+        writable_roots: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -2683,6 +2733,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue", "steer"] = "reject",
+        writable_roots: Sequence[str | PathLike[str]] | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -2701,8 +2752,15 @@ class Session(Generic[ContextT, OutputT]):
         can be cancelled before any model request.
         Keep this Turn to wait with the chosen type, steer or cancel exactly it.
 
-        Selection cannot install new declarations, endpoints, credentials or
-        permissions. Each native step retains its immutable selected router for
+        For local executors and Linux WSS executors, writable_roots replaces
+        the additional write grants starting with this turn. An empty sequence
+        clears those grants. macOS WSS executors keep the opening write roots
+        for the whole Session.
+        None keeps the current policy. The working directory remains writable,
+        and the network policy stays fixed. Changing roots requires a strict
+        Environment and an idle graph.
+        Selection cannot install new declarations, endpoints or credentials.
+        Each native step retains its immutable selected router for
         direct, deferred-search and generated-code calls.
         A static subset can be suspended and restored under the existing native
         checkpoint conditions, against current opening declarations.
@@ -2716,9 +2774,12 @@ class Session(Generic[ContextT, OutputT]):
         if if_busy not in ("reject", "queue", "steer"):
             raise ValueError("if_busy must be 'reject', 'queue', or 'steer'")
         if if_busy == "steer" and (
-            output_type is not None or tools is not None or before_step is not None
+            output_type is not None
+            or tools is not None
+            or before_step is not None
+            or writable_roots is not None
         ):
-            raise TypeError("if_busy='steer' cannot override output_type, tools or before_step")
+            raise TypeError("if_busy='steer' cannot override the new turn's settings")
         if self._mutation is not None or self._checkpoint_task is not None:
             raise SessionBusyError("Session is changing or saving its state")
         if if_busy == "steer" and self._active is not None:
@@ -2729,6 +2790,13 @@ class Session(Generic[ContextT, OutputT]):
             return captured
         output = self._default_output if output_type is None else _prepare_spec(output_type)
         parts = _native_input(input)
+        roots = None
+        if writable_roots is not None:
+            if self._executor is None:
+                raise CapabilityError("Writable roots require a Session Environment")
+            if self._native_agents is not None:
+                raise CapabilityError("Writable roots cannot change with NativeAgents")
+            roots = _writable_roots(writable_roots)
         if output.mode == "prompted":
             parts.append(
                 {
@@ -2741,7 +2809,12 @@ class Session(Generic[ContextT, OutputT]):
                 }
             )
         return await self._start(
-            parts, output, tools=tools, before_step=before_step, enqueue=if_busy != "reject"
+            parts,
+            output,
+            tools=tools,
+            before_step=before_step,
+            enqueue=if_busy != "reject",
+            writable_roots=roots,
         )
 
     async def _steer(
@@ -3351,6 +3424,9 @@ class Session(Generic[ContextT, OutputT]):
             options = json.loads(self._native_options)
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
+            applied_roots = json.loads(change.options())["executor_writable_roots"]
+            if applied_roots is not None:
+                options["runtime"]["environment"]["writable_roots"] = applied_roots
             opening = self._opening_agent.tools
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),
@@ -3372,6 +3448,7 @@ class Session(Generic[ContextT, OutputT]):
                 json.dumps(options),
                 self._catalog.native_specs(),
             )
+            await change.validate_candidate(thread)
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
             if allowed_mcp:
@@ -3388,7 +3465,6 @@ class Session(Generic[ContextT, OutputT]):
                     candidate=thread,
                 )
                 _check_mcp_receipt(receipt, self._mcp_tools, allowed_mcp, self._catalog.generation)
-            await change.validate_candidate(thread)
             # From this point, retirement cannot roll back. Keep the old reader
             # attached until its own native EOF; do not end the Session stream.
             retiring = True
@@ -3672,6 +3748,7 @@ class Session(Generic[ContextT, OutputT]):
         | None = None,
         before_step: _BeforeStep[ContextT] | None = None,
         enqueue: bool = False,
+        writable_roots: tuple[str, ...] | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         self._check_open()
@@ -3744,6 +3821,7 @@ class Session(Generic[ContextT, OutputT]):
             operation_slots=slots,
             operation_mcp=mcp,
             operation_refs=operation_refs,
+            writable_roots=writable_roots,
         )
         if input is not None:
             issued = _root_turn(self, None, uuid4().hex, state.completion)
@@ -4728,6 +4806,11 @@ class Session(Generic[ContextT, OutputT]):
             return
         assert state.task is not None
         should_cancel = not state.stopping and not state.failure.done()
+        if should_cancel and state.handle is not None:
+            # Callback cleanup can finish before Core handles the interrupt.
+            # The public root may now own a later native continuation.
+            assert state.handle.turn_id is not None
+            self._native._request_sampling_stop(state.handle.turn_id)
         # A final manual reply can clear restored_pending while native recovery
         # is in flight. Keep ownership of the terminal retirement already chosen.
         state.retire_manual = state.retire_manual or state.restored_pending
@@ -4834,15 +4917,20 @@ class Session(Generic[ContextT, OutputT]):
                         request["expected_previous_turn_id"] = state.continued_from
                     if state.output.mode == "native":
                         request["start"] = {"final_output_json_schema": state.output.schema}
+                    if state.writable_roots is not None:
+                        request["writable_roots"] = state.writable_roots
                     receipt = json.loads(await self._native._submit(json.dumps(request)))
                 if receipt["status"] != "started":
                     confirmed_rejection = receipt["status"] == "not_submitted"
+                    reason = receipt["reason"]
                     problem = NativeError(
-                        f"Native input was not submitted: {receipt['reason']['type']}"
+                        reason.get("message") or f"Native input was not submitted: {reason['type']}"
                     )
                     if confirmed_rejection:
                         problem._effects = "not_started"
                     raise problem
+                if state.writable_roots is not None:
+                    self._writable_roots = state.writable_roots
                 if (
                     input is not None
                     and self._environment_lease is not None
@@ -5010,9 +5098,9 @@ class Session(Generic[ContextT, OutputT]):
                         # TurnAborted precedes Core's final abort cleanup. Keep
                         # this active slot until its exact named receipt is idle.
                         await self._native._finish_graceful_interrupt(state.handle.turn_id)
-                except BaseException:  # native interruption can fail during shutdown
+                except BaseException as interruption_error:
                     self._broken = True
-                    await self._native.close()
+                    await _close_after_error(interruption_error, self._native.close)
                     raise
                 finally:
                     try:
@@ -7103,6 +7191,23 @@ class Session(Generic[ContextT, OutputT]):
         *,
         probe: bool = False,
     ) -> str:
+        active_uses_executor = active is not None and (
+            active.operation_refs is None
+            or not _fixed_tool_refs((), False, self._executor, self._native_agents).isdisjoint(
+                active.operation_refs
+            )
+            or any(
+                isinstance(server, StdioMCP) and server.location == "environment"
+                for server in active.operation_mcp or ()
+            )
+        )
+        executor_policy_digest = None
+        if (
+            active_uses_executor
+            or self._strict_executor_writes
+            or (self._executor is not None and self._executor.network is not None)
+        ):
+            executor_policy_digest = await self._executor_policy_digest()
         if active is not None:
             if not await self._manual_ready(active):
                 raise _ManualBoundaryLost("The active submission is not a settled manual boundary")
@@ -7260,6 +7365,7 @@ class Session(Generic[ContextT, OutputT]):
             payload["network_policy_digest"] = (
                 self._executor._network_policy_digest() if self._executor is not None else None
             )
+            payload["executor_policy_digest"] = executor_policy_digest
             _redact_checkpoint_executor_receipts(payload)
             state = SessionState.from_json(json.dumps(payload))
             _check_checkpoint(state, self._instructions)

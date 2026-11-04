@@ -16,15 +16,17 @@ class RuntimeNetworkPolicy(TypedDict, total=False, closed=True):
 
 
 class RuntimeEnvironment(TypedDict, total=False, closed=True):
-    """Connect to an application-owned exec-server; timeout is in seconds."""
+    """Select the local executor or connect to WSS with a timeout in seconds."""
 
-    url: Required[str]
+    url: str
+    local: bool
     cwd: Required[str]
     headers: dict[str, str]
     connect_timeout: float | None
     local_mcp: bool
     network: RuntimeNetworkPolicy
     capability_directories: list[str]  # Remote file: URIs; omitted inherits, [] clears.
+    writable_roots: list[str]  # Additional write roots, as executor file: URIs.
 
 
 class BasicSpecialPath(TypedDict):

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
-from agents import Agent, HttpMCP, ReplaceArguments, StopTurn, ToolRef
+from agents import Agent, HttpMCP, NativeError, ReplaceArguments, StopTurn, ToolRef
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -181,6 +182,86 @@ async def no_private_output(run, responses):
     wire = json.dumps([history, run.captured.events, responses.requests])
     assert PRIVATE not in wire and UNACCEPTED not in wire
     assert (await run.first.get_result()).final_output == "original cached completion"
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="requires Linux or macOS executor write policies",
+)
+async def test_writable_roots_cannot_change_while_a_yielded_cell_owns_them(
+    responses, tmp_path, monkeypatch
+):
+    old_root = tmp_path / "old-root"
+    old_root.mkdir()
+    gate = Peer(names=("release",), release_call=asyncio.Event())
+    executor = ExecutorPeer(tmp_path / "remote", synthetic_process_output="late command complete")
+    async with timeout(35), gate.serve() as url, executor.serve() as peer:
+        trust(peer, tmp_path, monkeypatch)
+        agent = Agent(
+            instructions="Use the admitted code cell.",
+            tools=[HttpMCP(name="gate", url=url, tools=["release"], approval_mode="approve")],
+            provider=provider(responses),
+            programmatic_tool_calling=True,
+        )
+        environment = declaration(peer, writable_roots=[old_root])
+        script = (
+            'yield_control(); await tools.mcp__gate__release({key:"root-gate"}); '
+            'const result = await tools.exec_command({cmd:"printf late"}); '
+            "text(result.output);"
+        )
+        responses.respond(code_call(script, OUTER))
+        responses.respond(assistant_output("original turn finished"))
+        async with agent.session(environment=environment) as session:
+            try:
+                first = await session.submit("Start a cell with the original roots")
+                await gate.call_entered.wait()
+                assert (await first.get_result()).final_output == "original turn finished"
+                assert session.active_turn is None
+                receipt = output_for(responses, OUTER, code=True)
+                prefix = "Script running with cell ID "
+                assert receipt.startswith(prefix), receipt
+                cell = receipt.removeprefix(prefix).split()[0].rstrip(".")
+                assert not peer.synthetic_process_starts
+
+                before = len(responses.requests)
+                responses.respond(assistant_output("same roots accepted"))
+                refused = await session.submit("Narrow the roots", writable_roots=[])
+                refusal = (
+                    "macOS executors require fixed writable roots"
+                    if sys.platform == "darwin"
+                    else "old executor work"
+                )
+                with pytest.raises(NativeError, match=refusal) as failure:
+                    await refused.get_result()
+                assert failure.value.effects == "not_started"
+                assert len(responses.requests) == before
+
+                same = await session.submit("Keep the roots", writable_roots=[old_root])
+                assert (await same.get_result()).final_output == "same roots accepted"
+                assert not peer.synthetic_process_starts
+
+                responses.respond(
+                    function_call("wait", {"cell_id": cell, "yield_time_ms": 10000}, "collect-cell")
+                )
+                responses.respond(assistant_output("cell collected"))
+                gate.release_call.set()
+                collector = await session.submit("Collect the old cell")
+                assert (await collector.get_result()).final_output == "cell collected"
+                assert "late command complete" in output_for(responses, "collect-cell")
+                assert len(peer.synthetic_process_starts) == 1
+
+                before = len(responses.requests)
+                responses.respond(assistant_output("narrower roots accepted"))
+                narrower = await session.submit("Now narrow the roots", writable_roots=[])
+                if sys.platform == "darwin":
+                    with pytest.raises(NativeError, match=refusal) as failure:
+                        await narrower.get_result()
+                    assert failure.value.effects == "not_started"
+                    assert len(responses.requests) == before
+                else:
+                    assert (await narrower.get_result()).final_output == "narrower roots accepted"
+            finally:
+                gate.release_call.set()
 
 
 @pytest.mark.requires_native_linux_sandbox

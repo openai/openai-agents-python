@@ -39,6 +39,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
 
+use crate::environment::StrictExecutorWrites;
+
 const FAILURE: &str = "Native tool interception failed or was denied";
 const MAX_PENDING: usize = 128;
 const MAX_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
@@ -509,6 +511,7 @@ pub struct Control {
     expiry_cleanup_failed: AtomicBool,
     native_agents: OnceLock<Arc<crate::native_agents::Policy>>,
     executor_admission: OnceLock<PinnedExecutorAdmission>,
+    strict_executor_writes: OnceLock<()>,
     collaboration_namespace: std::sync::OnceLock<Option<String>>,
     channel: Arc<Channel>,
 }
@@ -590,6 +593,7 @@ impl Control {
             expiry_cleanup_failed: AtomicBool::new(false),
             native_agents: OnceLock::new(),
             executor_admission: OnceLock::new(),
+            strict_executor_writes: OnceLock::new(),
             collaboration_namespace: std::sync::OnceLock::new(),
             channel: Arc::new(Channel {
                 state: Mutex::new(State {
@@ -629,6 +633,7 @@ impl Control {
             } else {
                 OnceLock::new()
             },
+            strict_executor_writes: OnceLock::new(),
             collaboration_namespace: std::sync::OnceLock::new(),
             channel: parent.channel.clone(),
         }
@@ -1833,6 +1838,15 @@ impl ThreadLifecycleContributor<Config> for Boundary {
             // parent_thread_id is native and returns Some only for ThreadSpawn.
             // Start is awaited before the first turn, unlike UI creation notices.
             let parent = self.parent_control(input.session_source).await;
+            // The child gets a fresh store. Carry the validated marker only
+            // from live ancestry and for an executor Core selected for it.
+            if !input.environments.is_empty()
+                && parent.as_ref().is_some_and(|(owner, _)| {
+                    !owner.stopped.is_cancelled() && owner.strict_executor_writes.get().is_some()
+                })
+            {
+                input.thread_store.insert(StrictExecutorWrites::default());
+            }
             let control = input.thread_store.get_or_init(|| {
                 let id = input.thread_store.level_id().to_owned();
                 match parent {
@@ -1844,6 +1858,9 @@ impl ThreadLifecycleContributor<Config> for Boundary {
                     None => Control::new(id, root),
                 }
             });
+            if input.thread_store.get::<StrictExecutorWrites>().is_some() {
+                let _ = control.strict_executor_writes.set(());
+            }
             let _ = control
                 .agent_role
                 .set(input.session_source.get_agent_role());

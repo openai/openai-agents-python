@@ -19,6 +19,7 @@ from agents import (
     LocalStorage,
     NativeAgents,
     NativeProvider,
+    NetworkPolicy,
     ToolContext,
     function_tool,
 )
@@ -27,6 +28,8 @@ from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output, function_call, tool_output
 from tests.test_native_child_agents import ChildPeer, collaboration, handles, metadata
 from tests.test_native_local_storage import _collect
+
+DESCENDANT_MODEL = "gpt-6.1-sol"
 
 
 class LocalFamilyPeer(ChildPeer):
@@ -73,6 +76,102 @@ class LocalFamilyPeer(ChildPeer):
         return [assistant_output(path + " finished")]
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+async def test_local_descendant_receipts_include_the_selected_proxy_policy(tmp_path, monkeypatch):
+    peer = LocalFamilyPeer(depth=2)
+    original_response = peer.response
+
+    def response():
+        body, headers = peer.requests[-1], peer.request_headers[-1]
+        if metadata(body, headers)["agent_name"] != "/root/alpha/grandchild":
+            return original_response()
+        if any(item.get("call_id") == "probe-proxy" for item in body.get("input", [])):
+            assert "proxy active" in tool_output(body, "probe-proxy")
+            return [assistant_output("Grandchild used the proxy.")]
+        return [
+            function_call(
+                "exec_command",
+                {"cmd": 'test -n "$HTTP_PROXY" && printf "proxy active"'},
+                "probe-proxy",
+            )
+        ]
+
+    monkeypatch.setattr(peer, "response", response)
+    app = web.Application()
+    app.router.add_post("/v1/responses", peer.handle)
+    app.router.add_get("/v1/responses", peer.websocket)
+    app.on_shutdown.append(peer.close_sockets)
+    workspace, extra = tmp_path / "work", tmp_path / "extra"
+    workspace.mkdir()
+    extra.mkdir()
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(75), TestServer(app, shutdown_timeout=1) as server:
+        peer.url = str(server.make_url("/v1"))
+        agent = Agent(
+            instructions="Delegate the work.",
+            model=DESCENDANT_MODEL,
+            provider=peer.provider(websocket=False),
+            programmatic_tool_calling=False,
+            tools=[NativeAgents(max_children=2, max_depth=2)],
+        )
+        environment = Environment.local(
+            cwd=workspace,
+            writable_roots=[extra],
+            tools=["exec_command", "write_stdin", "apply_patch"],
+            network=NetworkPolicy(
+                allowed_domains=["allowed.example.invalid"],
+                denied_domains=["blocked.example.invalid"],
+                allow_all_unix_sockets=True,
+            ),
+        )
+        async with agent.session(storage=storage, environment=environment) as session:
+            assert (await (await session.submit("Delegate")).get_result()).final_output == (
+                "/root finished"
+            )
+            for child in await handles(session, 2):
+                await child.get_result()
+            identities = {
+                identity["agent_name"]: identity["thread_id"]
+                for body, headers in zip(peer.requests, peer.request_headers, strict=True)
+                if (identity := metadata(body, headers))
+            }
+            assert identities.keys() == {"/root", "/root/alpha", "/root/alpha/grandchild"}
+            for path, thread_id in identities.items():
+                child_id = None if thread_id == session.id else thread_id
+                [receipt] = [
+                    row["receipt"]
+                    async for row in session.turns(subagent_id=child_id)
+                    if "receipt" in row
+                ]
+                [executor] = receipt["executors"]
+                assert executor["transport"] == "local", path
+                assert executor["cwd"] == workspace.resolve().as_uri(), path
+                assert set(executor["writable_roots"]) == {
+                    workspace.resolve().as_uri(),
+                    extra.resolve().as_uri(),
+                }, path
+                assert executor["network_policy"]["domains"] == {
+                    "allowed.example.invalid": "allow",
+                    "blocked.example.invalid": "deny",
+                }, path
+
+    for path, thread_id in identities.items():
+        [rollout] = (storage.path / "sessions").rglob(f"*{thread_id}.jsonl")
+        receipts = [
+            row["payload"]["sdk_receipt"]
+            for line in rollout.read_text().splitlines()
+            if (row := json.loads(line))["type"] == "turn_context"
+            and row["payload"].get("sdk_receipt")
+            and row["payload"]["sdk_receipt"]["thread_id"] == thread_id
+        ]
+        assert receipts and all(row["strict_executor_writes"] is True for row in receipts), path
+
+
 async def worker() -> None:
     request = json.loads(sys.argv[1])
     path = Path(request["path"])
@@ -99,7 +198,7 @@ async def worker() -> None:
     native = None if request["no_children"] else NativeAgents(max_children=2, max_depth=2)
     agent = Agent(
         instructions="Record a memory.",
-        model="gpt-6.1-sol",
+        model=DESCENDANT_MODEL,
         provider=connection,
         programmatic_tool_calling=False,
         tools=[lookup] if native is None else [lookup, native],

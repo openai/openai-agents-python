@@ -953,6 +953,10 @@ pub async fn cancel(state: &Arc<ThreadState>, turn: &Arc<Turn>) -> anyhow::Resul
             return Ok(Some(false));
         }
     }
+    let receipt = thread
+        .thread_extension_data()
+        .get::<crate::python_tools::PythonTools>()
+        .and_then(|tools| tools.admission_ready(&turn.turn_id).ok());
     let interrupted = thread
         .interrupt_if_no_pending_input(&turn.turn_id)
         .await
@@ -973,6 +977,9 @@ pub async fn cancel(state: &Arc<ThreadState>, turn: &Arc<Turn>) -> anyhow::Resul
                 // belonging to this confirmed cancellation before reporting it.
                 return Ok(None);
             }
+        }
+        if receipt.is_some_and(|receipt| receipt.check_local_command_cleanup().is_err()) {
+            return Ok(None);
         }
     }
     Ok(Some(interrupted))
@@ -1232,7 +1239,7 @@ mod steering_capture_tests {
                     .thread_extension_data()
                     .get::<crate::python_tools::PythonTools>()
                     .unwrap();
-                let _stop = stop.then(|| root_tools.request_graph_interrupt().unwrap());
+                let _stop = stop.then(|| root_tools.request_graph_interrupt(false).unwrap());
                 let successor = continue_retained(&state, &original).await.unwrap();
                 if stop {
                     assert!(successor.is_none());
