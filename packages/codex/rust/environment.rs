@@ -22,7 +22,6 @@ use codex_exec_server::{
     ExecServerRuntimeOptions, FileSystemSandboxContext, GetMetadataOptions, LOCAL_ENVIRONMENT_ID,
     LocalWriteRoots, ProcessId, REMOTE_ENVIRONMENT_ID, RemoteEnvironmentOptions,
 };
-use codex_protocol::ThreadId;
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
 use codex_protocol::config_types::{
     ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit, WindowsSandboxLevel,
@@ -48,9 +47,7 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
 use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
-use crate::storage::{
-    LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY, checklist_path,
-};
+use crate::storage::{LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY};
 
 const STORAGE_OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
 
@@ -974,28 +971,16 @@ fn relocated_checklist_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result
             Err(error) => return Err(error).context(INSPECT_ERROR),
         };
         for entry in entries {
-            let name = entry.context(INSPECT_ERROR)?.file_name();
-            let Some(id) = Path::new(&name)
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .and_then(|stem| ThreadId::from_string(stem).ok())
-            else {
-                continue;
-            };
-            let path = checklist_path(&directory, id);
-            if !path
-                .file_name()
-                .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&name))
-            {
-                continue;
-            }
-            // The store opens the canonical spelling. Let the volume decide
-            // whether a differently cased directory entry supplies that file.
-            let metadata = match path.symlink_metadata() {
+            let entry = entry.context(INSPECT_ERROR)?;
+            // The filesystem may equate different spellings with the name
+            // the store opens. Protect entries in these dedicated directories
+            // without relying on filenames or walking other directories.
+            let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
                 Err(error) => return Err(error).context(INSPECT_ERROR),
             };
+            let path = entry.path();
             if metadata.is_symlink() {
                 let target = check_local_write_root_overlap(&path, roots, STORAGE_OVERLAP)?;
                 collect_existing_private_file(target, &mut files).context(INSPECT_ERROR)?;
