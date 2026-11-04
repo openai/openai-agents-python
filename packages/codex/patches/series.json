@@ -167,7 +167,11 @@
     {
       "path": "0042-sdk-provider-compaction-admission.patch",
       "sha256": "922d61467fdac4dac29f2ae66e8d433740586ad4d20f3dc46cc3cece20481e2b"
+    },
+    {
+      "path": "0043-stop-responses-http-retries.patch",
+      "sha256": "006646a16bc679be2c6824cf20e83ff365c54c58ed5d581ade421af07bf10e3b"
     }
   ],
-  "result_tree": "8de419409a46ca2b268135ab1f83626fa6122b37"
+  "result_tree": "52c466ac5a72802e4bebdcd075d27012afbedece"
 }
