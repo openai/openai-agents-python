@@ -235,7 +235,9 @@ impl EnvironmentOptions {
                 )
             })?;
             let info = executor_info(&environment).await?;
-            let (profile, ..) = self.profile(&environment, &info, storage_home).await?;
+            let (profile, ..) = self
+                .profile(&environment, &info, config, storage_home)
+                .await?;
             self.check_network_target(&info, &profile)?;
             probe_local_sandbox(&environment, &self.cwd, profile).await?;
             return Ok(manager);
@@ -266,7 +268,9 @@ impl EnvironmentOptions {
             .map_err(remote_startup_error)?;
         if self.strict_writes() || self.network.is_some() {
             let info = executor_info(&environment).await?;
-            let (profile, ..) = self.profile(&environment, &info, storage_home).await?;
+            let (profile, ..) = self
+                .profile(&environment, &info, config, storage_home)
+                .await?;
             self.check_network_target(&info, &profile)?;
         }
         Ok(manager)
@@ -396,6 +400,7 @@ impl EnvironmentOptions {
         &self,
         environment: &Environment,
         info: &EnvironmentInfo,
+        config: &Config,
         storage_home: Option<&Path>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
         if self.strict_writes() {
@@ -405,6 +410,7 @@ impl EnvironmentOptions {
                 &self.cwd,
                 self.writable_roots.as_deref().unwrap_or_default(),
                 self.local,
+                config.codex_home.as_path(),
                 storage_home,
             )
             .await
@@ -432,8 +438,9 @@ impl EnvironmentOptions {
             || self.cwd.infer_path_convention() == Some(PathConvention::Windows);
         let (profile, workspace_root, writes, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
-            let (profile, workspace_root, writes) =
-                self.profile(&environment, &info, storage_home).await?;
+            let (profile, workspace_root, writes) = self
+                .profile(&environment, &info, config, storage_home)
+                .await?;
             self.check_network_target(&info, &profile)?;
             (
                 profile,
@@ -648,6 +655,7 @@ async fn strict_write_profile(
     cwd: &PathUri,
     additional: &[PathUri],
     local: bool,
+    codex_home: &Path,
     storage_home: Option<&Path>,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
@@ -699,8 +707,17 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         check_local_helper_write_roots(environment, &roots)?;
         if let Some(home) = storage_home {
-            check_local_storage_write_roots(home, &roots)?;
+            check_local_write_root_overlap(
+                home,
+                &roots,
+                "local executor writable roots must stay outside native SDK storage",
+            )?;
         }
+        check_local_write_root_overlap(
+            codex_home,
+            &roots,
+            "local executor writable roots must stay outside the native SDK runtime home",
+        )?;
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -800,13 +817,16 @@ fn check_local_helper_write_roots(
     Ok(())
 }
 
-fn check_local_storage_write_roots(home: &Path, roots: &[AbsolutePathBuf]) -> Result<()> {
-    const OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
+fn check_local_write_root_overlap(
+    home: &Path,
+    roots: &[AbsolutePathBuf],
+    overlap: &str,
+) -> Result<()> {
     let mut resolved = PathBuf::new();
     resolve_local_path(home, &mut resolved, &mut 40, true, &|entry| {
         ensure!(
             roots.iter().all(|root| !entry.starts_with(root.as_path())),
-            OVERLAP
+            "{overlap}"
         );
         Ok(())
     })?;
@@ -814,7 +834,7 @@ fn check_local_storage_write_roots(home: &Path, roots: &[AbsolutePathBuf]) -> Re
         roots
             .iter()
             .all(|root| !root.as_path().starts_with(&resolved)),
-        OVERLAP
+        "{overlap}"
     );
     Ok(())
 }
@@ -894,6 +914,7 @@ pub(crate) async fn replace_writable_roots(
         &selection.cwd,
         &writable_roots,
         local,
+        config.codex_home.as_path(),
         storage_home,
     )
     .await?;
