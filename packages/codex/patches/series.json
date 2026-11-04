@@ -153,13 +153,17 @@
       "sha256": "dd1f102c61a4d8bac29b72dfbce0bb334228b0c31e3212590ebeac8f0f39cf08"
     },
     {
-      "path": "0039-stop-owned-auto-compaction.patch",
+      "path": "0039-resume-trusted-darwin-wrapper-during-shutdown.patch",
+      "sha256": "8e51ed328d871fa82532f9a8a4d2bfd33134852e936c0c092387c871adc8a049"
+    },
+    {
+      "path": "0040-stop-owned-auto-compaction.patch",
       "sha256": "c4b0c94c11802793558a561f6afdd1fbbe1f3dd154fadc7bea435cda8687b2cb"
     },
     {
-      "path": "0040-sdk-provider-compaction-admission.patch",
+      "path": "0041-sdk-provider-compaction-admission.patch",
       "sha256": "922d61467fdac4dac29f2ae66e8d433740586ad4d20f3dc46cc3cece20481e2b"
     }
   ],
-  "result_tree": "873edc59dbd665caf2365b5ade949624d7d863bd"
+  "result_tree": "7782cb898a13f3a9883a6a33d3041f95ca9cf600"
 }
