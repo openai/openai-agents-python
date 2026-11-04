@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import plistlib
+import re
 import shlex
 import shutil
 import subprocess
@@ -774,3 +776,98 @@ async def test_macos_session_close_stops_child_after_command_exit(
             assert not alive_at_close, f"child survived Session close (setsid errno {detach_error})"
         finally:
             release.touch()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt and launchd")
+@pytest.mark.requires_native_macos_sandbox
+async def test_macos_local_command_cannot_delegate_execution_to_launchd(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    marker = tmp_path / "launchd-marker"
+
+    def launchctl(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["/bin/launchctl", *args], capture_output=True, text=True, timeout=5, check=False
+        )
+
+    uid = os.getuid()
+    domain = f"gui/{uid}"
+    if launchctl("print", domain).returncode:
+        domain = f"user/{uid}"
+
+    label = f"org.openai.agents.sdk-test.{uuid4().hex}"
+    service = f"{domain}/{label}"
+    plist = workspace / f"{label}.plist"
+    job = {
+        "Label": label,
+        "ProgramArguments": ["/usr/bin/touch", str(marker)],
+        "RunAtLoad": False,
+        "KeepAlive": False,
+        "ExitTimeOut": 2,
+        "ThrottleInterval": 1,
+    }
+    if domain.startswith("user/"):
+        job["LimitLoadToSessionType"] = "Background"
+    plist.write_bytes(plistlib.dumps(job))
+
+    def runs() -> int:
+        status = launchctl("print", service)
+        assert status.returncode == 0, status.stderr
+        count = re.search(r"^\s*runs = (\d+)", status.stdout, re.MULTILINE)
+        assert count is not None, status.stdout
+        return int(count[1])
+
+    for operation, args in (
+        ("bootstrap", (domain, str(plist))),
+        ("kickstart", (service,)),
+    ):
+        cmd = (
+            "rc=0; "
+            + shlex.join(["/bin/launchctl", operation, *args])
+            + f" || rc=$?; printf '{operation} exit %s\\n' \"$rc\""
+        )
+        responses.respond(
+            function_call(
+                "exec_command", {"cmd": cmd, "yield_time_ms": 10000, "login": False}, operation
+            )
+        )
+        responses.respond(assistant_output("checked"))
+
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Use the selected tools.", provider=provider)
+    environment = Environment.local(cwd=workspace, tools=["exec_command"])
+    try:
+        assert launchctl("print", service).returncode != 0
+        assert not marker.exists()
+        async with timeout(35), provider, agent.session(environment=environment) as session:
+            turn = await session.submit("Try to register the test job.")
+            assert (await turn.get_result()).final_output == "checked"
+            output = tool_output(responses.requests[1], "bootstrap")
+            assert re.search(r"^bootstrap exit [1-9]\d*$", output, re.MULTILINE), output
+            assert launchctl("print", service).returncode != 0
+            assert not marker.exists()
+
+            bootstrapped = launchctl("bootstrap", domain, str(plist))
+            assert bootstrapped.returncode == 0, bootstrapped.stderr
+            assert runs() == 0
+
+            turn = await session.submit("Try to start the idle test job.")
+            assert (await turn.get_result()).final_output == "checked"
+            output = tool_output(responses.requests[3], "kickstart")
+            assert re.search(r"^kickstart exit [1-9]\d*$", output, re.MULTILINE), output
+            assert runs() == 0 and not marker.exists(), (
+                "sandboxed kickstart ran the registered launchd job"
+            )
+
+        kicked = launchctl("kickstart", service)
+        assert kicked.returncode == 0, kicked.stderr
+        async with timeout(5):
+            while not marker.exists():
+                await asyncio.sleep(0.05)
+        assert runs() == 1
+    finally:
+        stopped = launchctl("bootout", service)
+        if stopped.returncode:
+            assert launchctl("print", service).returncode != 0, stopped.stderr
