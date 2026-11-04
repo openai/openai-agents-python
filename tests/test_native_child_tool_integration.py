@@ -7,7 +7,7 @@ import json
 import os
 import threading
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import aclosing, asynccontextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ from agents import (
     function_tool,
 )
 from agents.observation import (
+    EventGap,
     ExecutionItemCompleted,
     OutputTextDelta,
     SessionEnded,
@@ -319,6 +320,21 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 execution = [
                     event.item for event in events if isinstance(event, ExecutionItemCompleted)
                 ]
+                if execute and not any(item["type"] == "command_execution" for item in execution):
+                    # Core can publish the command receipt after the child stream closes.
+                    assert isinstance(events[-1], TurnFinished)
+                    async with aclosing(session.events(after=events[-1].sequence)) as late:
+                        async for event in late:
+                            assert not isinstance(event, EventGap)
+                            if (
+                                isinstance(event, ExecutionItemCompleted)
+                                and event.submission_id == handle.submission_id
+                                and event.item["type"] == "command_execution"
+                                and event.item["thread_id"] == handle.child_id
+                                and event.item["turn_id"] == handle.turn_id
+                            ):
+                                execution.append(event.item)
+                                break
                 [mcp] = [item for item in execution if item["type"] == "mcp_call"]
                 assert (mcp["thread_id"], mcp["turn_id"]) == (handle.child_id, handle.turn_id)
                 assert "accepted-mcp:" + handle.child_id in str(mcp["output"])
@@ -337,6 +353,11 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                     denied = json.loads(printed)
                     assert type(denied["exit_code"]) is int and denied["exit_code"] > 0, denied
                     [command] = [item for item in execution if item["type"] == "command_execution"]
+                    assert (command["thread_id"], command["turn_id"]) == (
+                        handle.child_id,
+                        handle.turn_id,
+                    )
+                    assert command["argv"][-1:] == [f"printf {name} > ../{name}.txt"]
                     assert command["exit_code"] == denied["exit_code"]
                     assert command["native_status"] == "failed"
                     output = denied["output"].lower()
