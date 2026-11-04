@@ -301,3 +301,49 @@ async def test_prior_accepted_snapshot_remains_publishable(tmp_path, monkeypatch
     monkeypatch.setattr(sys, "argv", ["worker", "publish", str(directory)])
     worker.main()
     assert worker.read_record(directory, "published") == accepted
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Retargets a directory symlink")
+@pytest.mark.parametrize("command", ["status", "publish"])
+def test_worker_cli_keeps_original_journal_on_retarget(tmp_path, monkeypatch, capsys, command):
+    import json
+
+    directory, other = tmp_path / "alpha", tmp_path / "bravo"
+    for path in (directory, other):
+        path.mkdir()
+        text = f"{path.name}: verified\n"
+        worker.record_once(path, "identity", {"session_id": path.name})
+        worker.record_once(
+            path,
+            "accepted",
+            {
+                "session_id": path.name,
+                "text": text,
+                "sha256": hashlib.sha256(text.encode()).hexdigest(),
+            },
+        )
+    original_read = worker.read_record
+    accepted = original_read(directory, "accepted")
+    alias = tmp_path / "worker-link"
+    alias.symlink_to(directory, target_is_directory=True)
+    reads = []
+
+    def read_record(path, name):
+        value = original_read(path, name)
+        if not reads:
+            alias.unlink()
+            alias.symlink_to(other, target_is_directory=True)
+        reads.append(name)
+        return value
+
+    monkeypatch.setattr(worker, "read_record", read_record)
+    monkeypatch.setattr(sys, "argv", ["worker", command, str(alias)])
+    worker.main()
+    result = json.loads(capsys.readouterr().out)
+    if command == "status":
+        assert result["identity"] == {"session_id": "alpha"}
+        assert result["accepted"] == accepted
+    else:
+        assert result["status"] == "published"
+        assert original_read(directory, "published") == accepted
+        assert original_read(other, "published") is None
