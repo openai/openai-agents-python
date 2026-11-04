@@ -186,7 +186,10 @@ fn capability_roots(
 }
 
 /// Installed on a thread after selecting an executor with strict write controls.
-pub(crate) struct StrictExecutorWrites;
+#[derive(Clone, Default)]
+pub(crate) struct StrictExecutorWrites {
+    roots: HashMap<PathUri, PathUri>,
+}
 
 impl EnvironmentOptions {
     fn id(&self) -> &'static str {
@@ -224,7 +227,7 @@ impl EnvironmentOptions {
                 )
             })?;
             let info = executor_info(&environment).await?;
-            let (profile, _) = self.profile(&environment, &info).await?;
+            let (profile, ..) = self.profile(&environment, &info).await?;
             self.check_network_target(&info, &profile)?;
             probe_local_sandbox(&environment, &self.cwd, profile).await?;
             return Ok(manager);
@@ -255,7 +258,7 @@ impl EnvironmentOptions {
             .map_err(remote_startup_error)?;
         if self.strict_writes() || self.network.is_some() {
             let info = executor_info(&environment).await?;
-            let (profile, _) = self.profile(&environment, &info).await?;
+            let (profile, ..) = self.profile(&environment, &info).await?;
             self.check_network_target(&info, &profile)?;
         }
         Ok(manager)
@@ -385,7 +388,7 @@ impl EnvironmentOptions {
         &self,
         environment: &Environment,
         info: &EnvironmentInfo,
-    ) -> Result<(PermissionProfile, PathUri)> {
+    ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
         if self.strict_writes() {
             strict_write_profile(
                 environment,
@@ -399,15 +402,16 @@ impl EnvironmentOptions {
             Ok((
                 workspace_profile(std::slice::from_ref(&self.cwd)),
                 self.cwd.clone(),
+                StrictExecutorWrites::default(),
             ))
         }
     }
 
-    pub async fn selection(
+    pub(crate) async fn selection(
         &self,
         config: &Config,
         manager: &EnvironmentManager,
-    ) -> Result<TurnEnvironmentSelection> {
+    ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
         self.check_config(config)?;
         let environment = manager
             .get_environment(self.id())
@@ -415,19 +419,21 @@ impl EnvironmentOptions {
         let needs_info = self.strict_writes()
             || self.network.is_some()
             || self.cwd.infer_path_convention() == Some(PathConvention::Windows);
-        let (profile, workspace_root, windows_executor) = if needs_info {
+        let (profile, workspace_root, writes, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
-            let (profile, workspace_root) = self.profile(&environment, &info).await?;
+            let (profile, workspace_root, writes) = self.profile(&environment, &info).await?;
             self.check_network_target(&info, &profile)?;
             (
                 profile,
                 workspace_root,
+                writes,
                 info.platform_os.as_deref() == Some("windows"),
             )
         } else {
             (
                 workspace_profile(std::slice::from_ref(&self.cwd)),
                 self.cwd.clone(),
+                StrictExecutorWrites::default(),
                 false,
             )
         };
@@ -455,7 +461,7 @@ impl EnvironmentOptions {
         } else {
             permissions.shell_environment_policy.clone()
         };
-        Ok(TurnEnvironmentSelection {
+        let selection = TurnEnvironmentSelection {
             environment_id: self.id().to_owned(),
             workspace_roots: workspace_roots.clone(),
             cwd: self.cwd.clone(),
@@ -477,7 +483,8 @@ impl EnvironmentOptions {
                 },
                 selected_capability_roots,
             }),
-        })
+        };
+        Ok((selection, writes))
     }
 
     pub(crate) fn configure_local_proxy(
@@ -629,7 +636,7 @@ async fn strict_write_profile(
     cwd: &PathUri,
     additional: &[PathUri],
     local: bool,
-) -> Result<(PermissionProfile, PathUri)> {
+) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
             Platform::from_platform_os(info.platform_os.as_deref()),
@@ -640,6 +647,7 @@ async fn strict_write_profile(
     // Resolve on the executor, so controller path aliases cannot change the grant.
     let filesystem = environment.get_filesystem();
     let mut roots = Vec::with_capacity(additional.len() + 1);
+    let mut writes = StrictExecutorWrites::default();
     for root in std::iter::once(cwd).chain(additional) {
         ensure!(
             root.infer_path_convention() == Some(PathConvention::Posix) && root.parent().is_some(),
@@ -665,6 +673,7 @@ async fn strict_write_profile(
                     .is_directory,
             "executor write roots must be existing directories below the filesystem root"
         );
+        writes.roots.insert(root.clone(), canonical.clone());
         if !roots.contains(&canonical) {
             roots.push(canonical);
         }
@@ -701,6 +710,7 @@ async fn strict_write_profile(
             NetworkSandboxPolicy::Restricted,
         ),
         roots[0].clone(),
+        writes,
     ))
 }
 
@@ -808,12 +818,13 @@ fn check_local_helper_path(
 }
 
 /// Replace just the write profile of the currently selected executor.
-pub async fn replace_writable_roots(
+pub(crate) async fn replace_writable_roots(
     selection: &TurnEnvironmentSelection,
     config: &Config,
     manager: &EnvironmentManager,
+    current: &StrictExecutorWrites,
     writable_roots: Vec<PathUri>,
-) -> Result<TurnEnvironmentSelection> {
+) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
     check_writable_config(config, local)?;
@@ -825,12 +836,22 @@ pub async fn replace_writable_roots(
         .get_environment(&selection.environment_id)
         .context("selected executor was not registered")?;
     let info = executor_info(&environment).await?;
-    let (profile, workspace_root) =
+    let (profile, workspace_root, writes) =
         strict_write_profile(&environment, &info, &selection.cwd, &writable_roots, local).await?;
     ensure!(
         selection.workspace_roots.as_slice() == std::slice::from_ref(&workspace_root),
         "executor working directory changed since Session startup"
     );
+    for (requested, canonical) in &writes.roots {
+        let previous = current
+            .roots
+            .get(requested)
+            .or_else(|| current.roots.values().find(|root| *root == requested));
+        ensure!(
+            previous.is_none_or(|root| root == canonical),
+            "executor write root changed since it was selected"
+        );
+    }
     let local_network = if local {
         local_session_network_policy(config)
     } else {
@@ -848,7 +869,7 @@ pub async fn replace_writable_roots(
         )?;
     }
     settings.permission_profile = PermissionProfileSnapshot::legacy(profile);
-    Ok(selection)
+    Ok((selection, writes))
 }
 
 fn check_local_helpers(config: &Config) -> Result<()> {
@@ -1084,7 +1105,7 @@ pub async fn connect_environment(
             .await
             .map_err(remote_startup_error)?;
         let config = state.thread.config().await;
-        let selection = request.environment.selection(&config, &manager).await?;
+        let (selection, _) = request.environment.selection(&config, &manager).await?;
 
         // Connection is slow; serialize only the final update with turn admission and interrupts.
         let mutation = state.mutations.clone().lock_owned().await;

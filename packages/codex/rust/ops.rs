@@ -494,44 +494,56 @@ pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value
                 .is_some_and(|mode| mode.reasoning_effort() == Some(ReasoningEffort::Persistent)),
         "replaceable tools support ordinary submit/steer only, without persistent execution"
     );
-    if let Some(roots) = p.writable_roots.take() {
+    let writes = if let Some(roots) = p.writable_roots.take() {
         ensure!(
             matches!(p.mode, Mode::StartIfIdle) && p.thread_settings.environments.is_none(),
             "Writable roots require a new idle native turn"
         );
         match prepare_write_selection(state, roots).await {
-            Ok(replacement) => p.thread_settings.environments = Some(replacement),
+            Ok((replacement, writes)) => {
+                p.thread_settings.environments = Some(replacement);
+                Some(writes)
+            }
             Err(error) => {
                 return Ok(json!({"status": "not_submitted", "reason": {
                     "type": "writable_roots_refused", "message": error.to_string()
                 }}));
             }
-        };
+        }
+    } else {
+        None
+    };
+    let result = start_with_params(thread, p, None, Some((state, &mut mutation))).await?;
+    if let Some(writes) = writes
+        && result["status"] == "started"
+    {
+        thread.thread_extension_data().insert(writes);
     }
-    start_with_params(thread, p, None, Some((state, &mut mutation))).await
+    Ok(result)
 }
 
 async fn prepare_write_selection(
     state: &crate::engine::ThreadState,
     roots: Vec<PathUri>,
-) -> Result<TurnEnvironmentSelections> {
+) -> Result<(
+    TurnEnvironmentSelections,
+    crate::environment::StrictExecutorWrites,
+)> {
     let thread = &state.thread;
-    ensure!(
-        thread
-            .thread_extension_data()
-            .get::<crate::environment::StrictExecutorWrites>()
-            .is_some(),
-        "Writable roots require a strict Session Environment"
-    );
+    let writes = thread
+        .thread_extension_data()
+        .get::<crate::environment::StrictExecutorWrites>()
+        .context("Writable roots require a strict Session Environment")?;
     let current = thread.environment_selections().await;
     let [selection] = current.as_slice() else {
         bail!("Writable roots require one selected native Environment");
     };
     let config = thread.config().await;
-    let replacement = crate::environment::replace_writable_roots(
+    let (replacement, writes) = crate::environment::replace_writable_roots(
         selection,
         &config,
         &state.engine.manager.environment_manager(),
+        &writes,
         roots,
     )
     .await?;
@@ -546,9 +558,12 @@ async fn prepare_write_selection(
             "Cannot change writable roots while old executor work is still active"
         );
     }
-    Ok(TurnEnvironmentSelections::new(
-        thread.config_snapshot().await.cwd().clone(),
-        vec![replacement],
+    Ok((
+        TurnEnvironmentSelections::new(
+            thread.config_snapshot().await.cwd().clone(),
+            vec![replacement],
+        ),
+        writes,
     ))
 }
 

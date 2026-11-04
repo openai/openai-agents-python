@@ -716,6 +716,84 @@ async def test_supplied_compaction_keeps_the_applied_write_policy_after_retarget
             assert policies[1] == policies[0]
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("transition", ["live", "compaction", "reopen"])
+async def test_repeated_write_root_alias_cannot_grant_a_new_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transition: str
+) -> None:
+    async with (
+        timeout(45),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+        AsyncExitStack() as sessions,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        original, replacement, added = [
+            tmp_path / name for name in ("original", "replacement", "added")
+        ]
+        for directory in (original, replacement, added):
+            directory.mkdir()
+        alias = executor.root / "write-root"
+        alias.symlink_to(original, target_is_directory=True)
+        selected = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[alias],
+        )
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile") if transition == "reopen" else None
+        session = await sessions.enter_async_context(
+            agent.session(environment=selected, storage=storage)
+        )
+        model.respond(assistant_output("original"))
+        assert (await (await session.submit("Start.")).get_result()).final_output == "original"
+        model.respond(assistant_output("stable alias and new root"))
+        mixed = await session.submit(
+            "Keep the alias and add a root.", writable_roots=[alias, added]
+        )
+        assert (await mixed.get_result()).final_output == "stable alias and new root"
+        if transition == "compaction":
+            await session.compact(summary="A caller supplied this summary.")
+        elif transition == "reopen":
+            identity = session.id
+            await sessions.aclose()
+            session = await sessions.enter_async_context(
+                agent.session(
+                    environment=replace(selected, writable_roots=[alias, added]),
+                    storage=storage,
+                    resume=identity,
+                )
+            )
+        alias.unlink()
+        alias.symlink_to(replacement, target_is_directory=True)
+        model.respond(assistant_output("kept prior grants"))
+        repeated = await session.submit("Keep the same roots.", writable_roots=[alias, added])
+        try:
+            await repeated.get_result()
+        except NativeError as error:
+            assert "executor write root changed" in str(error)
+            assert error.effects == "not_started"
+        else:
+            policies = [turn["receipt"]["executors"][0] async for turn in session.turns()]
+            pytest.fail(f"Repeated alias selected {policies[-1]['writable_roots']}")
+        assert len(model.requests) == 2
+        implicit = await session.submit("Keep the current grants.")
+        assert (await implicit.get_result()).final_output == "kept prior grants"
+        model.respond(assistant_output("explicit replacement"))
+        explicit = await session.submit(
+            "Grant the replacement directory explicitly.", writable_roots=[replacement, added]
+        )
+        assert (await explicit.get_result()).final_output == "explicit replacement"
+        policies = [turn["receipt"]["executors"][0] async for turn in session.turns()]
+        workspace = executor.root.resolve().as_uri()
+        common = {workspace, added.resolve().as_uri()}
+        assert set(policies[-2]["writable_roots"]) == common | {original.resolve().as_uri()}
+        assert set(policies[-1]["writable_roots"]) == common | {replacement.resolve().as_uri()}
+
+
 async def test_checkpoint_without_network_policy_restores_only_with_the_default() -> None:
     async with timeout(20), model_peer() as model:
         agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))

@@ -1845,7 +1845,7 @@ impl ThreadLifecycleContributor<Config> for Boundary {
                     !owner.stopped.is_cancelled() && owner.strict_executor_writes.get().is_some()
                 })
             {
-                input.thread_store.insert(StrictExecutorWrites);
+                input.thread_store.insert(StrictExecutorWrites::default());
             }
             let control = input.thread_store.get_or_init(|| {
                 let id = input.thread_store.level_id().to_owned();

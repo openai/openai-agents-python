@@ -139,6 +139,7 @@ impl Change {
     }
 
     pub async fn validate_candidate(&self, candidate: &ThreadState) -> anyhow::Result<()> {
+        use anyhow::Context;
         use codex_protocol::protocol::ThreadSettingsOverrides;
         // Only a different, private engine can be prepared under the source lease.
         ensure!(
@@ -156,6 +157,20 @@ impl Change {
                     == std::slice::from_ref(policy),
                 "compaction cannot change the applied executor policy"
             );
+            let writes = self
+                .state
+                .thread
+                .thread_extension_data()
+                .get::<crate::environment::StrictExecutorWrites>()
+                .context("compaction source lost its strict write policy")?;
+            let candidate_store = candidate.thread.thread_extension_data();
+            ensure!(
+                candidate_store
+                    .get::<crate::environment::StrictExecutorWrites>()
+                    .is_some(),
+                "compaction candidate lost its strict write policy"
+            );
+            candidate_store.insert((*writes).clone());
         }
         // Startup options already restore these preferences in the common case.
         // Avoid rewriting an absent tier: native clear normalizes it to "default".

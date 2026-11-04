@@ -102,8 +102,8 @@
     },
     {
       "path": "0026-join-interrupted-local-commands.patch",
-      "sha256": "fe3b91705b0ae3047a139097362c8ced796aeb25c3cf7363917b90ec80f49f06"
+      "sha256": "ecd3806f1f04d8ccfb7f9bda7ddd0d95e288db1cc828d8f5cb3e682abea383e4"
     }
   ],
-  "result_tree": "ce6360bc3e081ea7d7ede2d768160211df0be4c6"
+  "result_tree": "c957d6580d89f9b8b91594bd5de89141d6f97717"
 }

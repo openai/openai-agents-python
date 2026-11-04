@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import shlex
 import shutil
@@ -12,6 +13,7 @@ from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 import pytest
 
@@ -19,6 +21,7 @@ import agents
 from agents import (
     Agent,
     Environment,
+    ExecutorContext,
     LocalStorage,
     NativeError,
     NativeProvider,
@@ -545,3 +548,96 @@ async def test_steer_twice_and_interrupt_running_local_command(
             await running.steer_exact("Stale correction.", expected_turn_id=turn_id)
         assert (await successor.get_result()).final_output == "New work."
         assert len(responses.requests) == 3
+
+
+def _command_is_running(cmdline: Path, name: str) -> bool:
+    try:
+        return cmdline.read_bytes().split(b"\0", 1)[0] == name.encode()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+
+
+async def _owned_command(name: str) -> Path:
+    # Inspect only descendants of this test process. A sandbox wrapper's
+    # initial yield can precede the final exec into the tagged command.
+    async with timeout(8):
+        while True:
+            pending = [os.getpid()]
+            while pending:
+                process = Path("/proc") / str(pending.pop())
+                cmdline = process / "cmdline"
+                if _command_is_running(cmdline, name):
+                    return cmdline
+                for children in process.glob("task/*/children"):
+                    try:
+                        pending.extend(map(int, children.read_text().split()))
+                    except (FileNotFoundError, ProcessLookupError):
+                        continue
+            await asyncio.sleep(0.02)
+
+
+@pytest.mark.requires_native_linux_sandbox
+async def test_cancel_joins_local_process_before_its_result_is_accepted(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    entered = asyncio.Event()
+    cancelled = asyncio.Event()
+    release = asyncio.Event()
+    handles: dict[str, int] = {}
+
+    async def transform(ctx: ExecutorContext[None], result: dict[str, object]) -> dict[str, object]:
+        assert ctx.call_id is not None
+        handle = result["session_id"]
+        assert isinstance(handle, int)
+        handles[ctx.call_id] = handle
+        if ctx.call_id == "held":
+            entered.set()
+            try:
+                await asyncio.Future()
+            except asyncio.CancelledError:
+                cancelled.set()
+                await release.wait()
+        return result
+
+    commands = {call_id: "agents-idle-" + uuid4().hex for call_id in ("returned", "held")}
+    for call_id, command in commands.items():
+        script = shlex.quote(f"exec -a {command} /usr/bin/sleep 60")
+        responses.respond(
+            function_call(
+                "exec_command",
+                {"cmd": f"/bin/bash -c {script}", "yield_time_ms": 250, "login": False},
+                call_id,
+            )
+        )
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    environment = Environment.local(
+        cwd=tmp_path, tools=["exec_command"], transform_result=transform
+    )
+    async with (
+        timeout(40),
+        provider,
+        Agent(instructions="Use the selected tools.", provider=provider).session(
+            environment=environment
+        ) as session,
+    ):
+        turn = await session.submit("Start two idle commands.")
+        stopping = None
+        try:
+            await entered.wait()
+            returned = await _owned_command(commands["returned"])
+            held = await _owned_command(commands["held"])
+            assert (
+                json.loads(tool_output(responses.requests[1], "returned"))["session_id"]
+                == (handles["returned"])
+            )
+            assert handles["held"] != handles["returned"]
+            stopping = asyncio.create_task(turn.cancel())
+            await cancelled.wait()
+            assert not stopping.done()
+        finally:
+            release.set()
+            if stopping is not None:
+                await stopping
+        assert len(responses.requests) == 2
+        assert not _command_is_running(held, commands["held"])
+        assert _command_is_running(returned, commands["returned"])
