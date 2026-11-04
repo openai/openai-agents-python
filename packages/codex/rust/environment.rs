@@ -759,9 +759,19 @@ fn check_local_helper_write_roots(
     let paths = environment
         .local_runtime_paths()
         .context("local executor requires native helper paths")?;
-    let packaged_helpers = std::iter::once(&paths.codex_self_exe)
-        .chain(paths.codex_linux_sandbox_exe.as_ref())
-        .map(|helper| helper.as_path());
+    let runtime = paths.codex_self_exe.as_path();
+    // A later Session can select the packaged host even if this one does not use it.
+    let code_mode = (cfg!(target_os = "linux") && runtime.ends_with("codex-sdk-runtime"))
+        .then(|| runtime.with_file_name("codex-code-mode-host"))
+        .filter(|path| path.is_file());
+    let packaged_helpers = std::iter::once(runtime)
+        .chain(
+            paths
+                .codex_linux_sandbox_exe
+                .as_ref()
+                .map(|helper| helper.as_path()),
+        )
+        .chain(code_mode.as_deref());
     for alias in packaged_helpers.clone() {
         let resolved = std::fs::canonicalize(alias)
             .map_err(|_| anyhow::anyhow!("could not verify the local executor helper path"))?;
@@ -791,6 +801,7 @@ fn check_local_helper_write_roots(
         .map(|directory| directory.join("bwrap"))
         .filter(|path| path.symlink_metadata().is_ok())
         .collect::<Vec<_>>();
+    let mut resolved_helpers = Vec::new();
     for path in packaged_helpers
         .chain(system_search)
         .chain(system_bwraps.iter().map(|path| path.as_path()))
@@ -799,9 +810,10 @@ fn check_local_helper_write_roots(
             path.is_absolute(),
             "local executor helpers must have absolute paths"
         );
+        let mut resolved = PathBuf::new();
         resolve_local_path(
             path,
-            &mut PathBuf::new(),
+            &mut resolved,
             &mut 40,
             /*allow_missing*/ false,
             &|entry| {
@@ -812,7 +824,14 @@ fn check_local_helper_write_roots(
                 Ok(())
             },
         )?;
+        resolved_helpers.push(resolved);
     }
+    ensure!(
+        !roots
+            .contains_hard_link_to_any(&resolved_helpers)
+            .context("could not check writable roots for installed sandbox helper hard links; use readable writable roots")?,
+        "local executor writable roots must stay outside the native helper installation"
+    );
     Ok(())
 }
 
