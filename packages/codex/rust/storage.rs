@@ -1233,6 +1233,10 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) async fn live_rollout_path(&self, id: ThreadId) -> ThreadStoreResult<PathBuf> {
+        self.inner.live_rollout_path(id).await
+    }
+
     pub fn new(
         config: LocalThreadStoreConfig,
         inner: LocalThreadStore,
