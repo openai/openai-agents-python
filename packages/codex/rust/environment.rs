@@ -22,6 +22,7 @@ use codex_exec_server::{
     ExecServerRuntimeOptions, FileSystemSandboxContext, GetMetadataOptions, LOCAL_ENVIRONMENT_ID,
     LocalWriteRoots, ProcessId, REMOTE_ENVIRONMENT_ID, RemoteEnvironmentOptions,
 };
+use codex_protocol::ThreadId;
 use codex_protocol::capabilities::{CapabilityRootLocation, SelectedCapabilityRoot};
 use codex_protocol::config_types::{
     ShellEnvironmentPolicy, ShellEnvironmentPolicyInherit, WindowsSandboxLevel,
@@ -47,6 +48,7 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
 use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
+use crate::storage::{LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY};
 
 const STORAGE_OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
 
@@ -806,18 +808,16 @@ fn check_local_private_write_roots(
         protected_files.extend(relocated_database_files(home, roots)?);
         if persistent_rollouts {
             protected_files.extend(relocated_rollout_files(home, roots)?);
+            protected_files.extend(relocated_checklist_files(home, roots)?);
         }
     }
     // A restored goal store may share the runtime home.
     let private_dirs = match storage_home {
         Some(home) if runtime_home.starts_with(&home) => vec![home],
-        Some(home) if !home.starts_with(&runtime_home) => vec![runtime_home, home],
-        _ => vec![runtime_home],
+        Some(home) if !home.starts_with(&runtime_home) => vec![runtime_home.clone(), home],
+        _ => vec![runtime_home.clone()],
     };
-    protected_files.extend(
-        linked_private_files(private_dirs)
-            .context("could not check native SDK storage and runtime home for hard links")?,
-    );
+    protected_files.extend(linked_private_files(private_dirs, &runtime_home)?);
     ensure!(
         !roots.contains_hard_link_to_any(&protected_files).context(
             "could not check writable roots for native SDK hard links; use readable writable roots"
@@ -958,6 +958,52 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
     Ok(files)
 }
 
+fn relocated_checklist_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
+    let checklists = home.join(LOCAL_CHECKLIST_DIRECTORY);
+    let budgets = checklists.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY);
+    let mut files = Vec::new();
+    for directory in [checklists, budgets] {
+        let directory = check_local_write_root_overlap(&directory, roots, STORAGE_OVERLAP)?;
+        let relocated = !directory.starts_with(home);
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).context("could not inspect native SDK checklist storage");
+            }
+        };
+        for entry in entries {
+            let entry = entry.context("could not inspect native SDK checklist storage")?;
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json")
+                || !path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .is_some_and(|stem| {
+                        ThreadId::from_string(stem).is_ok_and(|id| id.to_string() == stem)
+                    })
+            {
+                continue;
+            }
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).context("could not inspect native SDK checklist storage");
+                }
+            };
+            if kind.is_symlink() {
+                let target = check_local_write_root_overlap(&path, roots, STORAGE_OVERLAP)?;
+                collect_existing_private_file(target, &mut files)
+                    .context("could not inspect native SDK checklist storage")?;
+            } else if relocated && kind.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
 fn relocated_rollout_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
     // Core writes active rollouts under sessions/YYYY/MM/DD and archives in a
     // flat directory. Resolve only those directory entries and recognized
@@ -1040,43 +1086,57 @@ fn collect_local_rollout_files(
         None
     };
     for file in std::iter::once(target).chain(companion) {
-        match file.symlink_metadata() {
-            Ok(metadata) if metadata.is_file() => files.push(file),
-            Ok(_) => {}
-            Err(error) if error.kind() == ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).context("could not inspect native SDK rollout storage");
-            }
-        }
+        collect_existing_private_file(file, files)
+            .context("could not inspect native SDK rollout storage")?;
+    }
+    Ok(())
+}
+
+fn collect_existing_private_file(file: PathBuf, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    match file.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => files.push(file),
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
     }
     Ok(())
 }
 
 #[cfg(unix)]
-fn linked_private_files(mut directories: Vec<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+fn linked_private_files(
+    mut directories: Vec<PathBuf>,
+    runtime_home: &Path,
+) -> Result<Vec<PathBuf>> {
     use std::os::unix::fs::MetadataExt;
 
+    const INSPECT_ERROR: &str =
+        "could not check native SDK storage and runtime home for hard links";
     let mut files = Vec::new();
     while let Some(directory) = directories.pop() {
         let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
             // A fresh profile may not exist, and live storage may remove files.
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error).context(INSPECT_ERROR),
         };
         for entry in entries {
-            let entry = entry?;
+            let entry = entry.context(INSPECT_ERROR)?;
             // DirEntry::metadata does not follow symlinks. Only visit contents
             // of the verified private directories.
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
+                Err(error) => return Err(error).context(INSPECT_ERROR),
             };
+            let path = entry.path();
+            ensure!(
+                !metadata.is_symlink() || !path.starts_with(runtime_home),
+                "native SDK runtime home contains an unsupported symbolic link"
+            );
             if metadata.is_dir() {
-                directories.push(entry.path());
+                directories.push(path);
             } else if metadata.is_file() && metadata.nlink() > 1 {
-                files.push(entry.path());
+                files.push(path);
             }
         }
     }
@@ -1084,7 +1144,7 @@ fn linked_private_files(mut directories: Vec<PathBuf>) -> std::io::Result<Vec<Pa
 }
 
 #[cfg(not(unix))]
-fn linked_private_files(_directories: Vec<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+fn linked_private_files(_directories: Vec<PathBuf>, _runtime_home: &Path) -> Result<Vec<PathBuf>> {
     Ok(Vec::new())
 }
 
