@@ -99,7 +99,7 @@ jobs:
 
           import pytest
 
-          from agents import Agent, Environment, LocalStorage, NativeError, NativeProvider
+          from agents import Agent, Environment, LocalStorage, NativeProvider
           from tests.native_fixtures import assistant_output, responses as responses
 
 
@@ -139,7 +139,7 @@ jobs:
                   async with provider, agent.session(storage=storage, environment=environment) as session:
                       turn = await session.submit("Persist the synthetic turn.")
                       assert (await turn.get_result()).final_output == "rollout persisted"
-              except NativeError as error:
+              except RuntimeError as error:
                   if "writable roots must stay outside native SDK storage" not in str(error):
                       raise
                   assert responses.requests == []
@@ -157,7 +157,7 @@ jobs:
                       f"ADMITTED rollout_physically_inside_grant={aliased}"
                   )
           PROBE
-          printf '%s  %s\n' 9e63a2f0b27e5d37f97d27a84dfe8f636c2b248d49b35197e42a0dd8a35e910e "$probe" | tee "$proof/fixture.sha256" | shasum -a 256 -c -
+          printf '%s  %s\n' d39444ce83c259489fc780447de2904ffbb510a8c09ec0a68165426150e63012 "$probe" | tee "$proof/fixture.sha256" | shasum -a 256 -c -
           scratch="$(mktemp -d "$RUNNER_TEMP/agents-profile-volume.XXXXXX")"
           volume="$scratch/mounted"
           attached=0
@@ -170,35 +170,41 @@ jobs:
           trap cleanup EXIT
           mkdir "$volume" "$scratch/HostCaseProbe"
           if [[ -d "$scratch/hostcaseprobe" ]]; then
-            host_kind=insensitive
+            host_kind=folded
             volume_kind=sensitive
-            volume_fs=APFSX
+            volume_fs='Case-sensitive APFS'
+            fallback_fs=JHFSX
           else
             host_kind=sensitive
-            volume_kind=insensitive
+            volume_kind=folded
             volume_fs=APFS
+            fallback_fs=JHFS+
           fi
-          hdiutil create -size 512m -fs "$volume_fs" -volname AgentsProfileControl -type SPARSE "$scratch/control"
+          printf 'host=%s alternate=%s\n' "$host_kind" "$volume_kind" | tee "$proof/filesystems.txt"
+          node="$probe::test_physical_profile_directory_overlap"
+          run_probe() {
+            local variant="$1" root="$2"
+            .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
+              --basetemp="$root/$variant-tests" --junitxml="$proof/$variant.xml" "$node" 2>&1 | tee "$proof/$variant.log"
+          }
+          run_probe "$host_kind" "$scratch"
+
+          hdiutil create -listfs | tee -a "$proof/filesystems.txt"
+          if ! hdiutil create -size 512m -fs "$volume_fs" -volname AgentsProfileControl -type SPARSE "$scratch/control"; then
+            rm -f "$scratch/control.sparseimage"
+            hdiutil create -size 512m -fs "$fallback_fs" -volname AgentsProfileControl -type SPARSE "$scratch/control"
+          fi
           hdiutil attach -owners off -nobrowse -mountpoint "$volume" "$scratch/control.sparseimage"
           attached=1
           test "$(stat -f %d "$scratch")" != "$(stat -f %d "$volume")"
           mkdir "$volume/VolumeCaseProbe"
           if [[ "$volume_kind" = sensitive ]]; then
             test ! -e "$volume/volumecaseprobe"
-            folded="$scratch"
-            sensitive="$volume"
           else
             test -d "$volume/volumecaseprobe"
-            folded="$volume"
-            sensitive="$scratch"
           fi
-          printf 'host=%s alternate=%s\n' "$host_kind" "$volume_kind" | tee "$proof/filesystems.txt"
           diskutil info "$volume" | tee -a "$proof/filesystems.txt"
-          node="$probe::test_physical_profile_directory_overlap"
-          .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
-            --basetemp="$folded/folded-tests" --junitxml="$proof/folded.xml" "$node" 2>&1 | tee "$proof/folded.log"
-          .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
-            --basetemp="$sensitive/sensitive-tests" --junitxml="$proof/sensitive.xml" "$node" 2>&1 | tee "$proof/sensitive.log"
+          run_probe "$volume_kind" "$volume"
           .venv/bin/python -IB - "$proof" <<'PY'
           from pathlib import Path
           import sys
