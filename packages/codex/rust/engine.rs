@@ -1,6 +1,5 @@
 //! Constructs native services and owns their orderly shutdown.
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::{Future, poll_fn};
 use std::pin::Pin;
@@ -489,7 +488,8 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let id = match &startup.initial_history {
             InitialHistory::Resumed(history) => {
-                if self.local_checklist_store.is_some()
+                if let Some(home) = self.native_storage_home()
+                    && home.persistent_rollouts
                     && let Some(path) = history.rollout_path.as_deref()
                     && startup
                         .environments
@@ -503,13 +503,9 @@ impl EngineState {
                         .thread_extension_init
                         .get::<crate::environment::StrictExecutorWrites>()
                 {
-                    let path = if path.is_relative() {
-                        Cow::Owned(startup.config.codex_home.join(path))
-                    } else {
-                        Cow::Borrowed(path)
-                    };
-                    let existing = codex_rollout::existing_rollout_path(&path).await;
-                    writes.check_local_rollout_path(existing.as_deref().unwrap_or(&path))?;
+                    writes
+                        .check_local_resume_rollout_path(home.path, path)
+                        .await?;
                 }
                 crate::checkpoint::validate_imported_history(&history.history)?;
                 Some(history.conversation_id)
