@@ -119,7 +119,11 @@
     {
       "path": "0030-stop-owned-turn-sampling.patch",
       "sha256": "fbc98457cdfd3749088dbd32370eef5e1d3c4bc9fcbd7ca6ac3e9b4fb7cea713"
+    },
+    {
+      "path": "0031-stop-owned-auto-compaction.patch",
+      "sha256": "c4b0c94c11802793558a561f6afdd1fbbe1f3dd154fadc7bea435cda8687b2cb"
     }
   ],
-  "result_tree": "2acbe545cf0fc2ced2f5b6e32e84de1b7ace452d"
+  "result_tree": "c0e88964b0e1a3f10c0f76abbae73e5c6353d40f"
 }
