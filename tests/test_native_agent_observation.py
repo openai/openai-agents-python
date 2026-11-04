@@ -8,6 +8,7 @@ import json
 import weakref
 from collections.abc import AsyncIterator
 from dataclasses import FrozenInstanceError, fields
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from typing_extensions import assert_type
 from agents import (
     ActionRequested,
     Agent,
+    Environment,
     NativeError,
     NativeProvider,
     Session,
@@ -37,6 +39,7 @@ from agents.observation import (
     TurnStarted,
 )
 from tests._asyncio import timeout
+from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
     ResponsesFixture,
     assistant_output,
@@ -508,6 +511,122 @@ async def test_slow_session_readers_report_evicted_observations(
             <= 65_536
         )
         assert all(a.sequence < b.sequence for a, b in zip(retained, retained[1:], strict=False))
+
+
+@pytest.mark.parametrize(
+    ("chunk", "count", "successor"),
+    [("x", 350, False), ("y" * 1000, 100, True)],
+    ids=["idle-count", "successor-characters"],
+)
+async def test_late_root_completion_reports_evicted_owner(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chunk: str,
+    count: int,
+    successor: bool,
+) -> None:
+    responses.respond(function_call("exec_command", {"cmd": "printf proof"}, "late-shell"))
+    responses.respond(*text_response("original-output", *[chunk for _ in range(count)]))
+    if successor:
+        responses.respond(assistant_output("successor complete"))
+    release = asyncio.Event()
+    held = asyncio.Event()
+    async with (
+        timeout(20),
+        ExecutorPeer(tmp_path / "remote", synthetic_process_output="proof").serve() as peer,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty"))
+        selected = Environment(
+            url=peer.url,
+            cwd=str(peer.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + peer.token},
+        )
+        agent = Agent(instructions="Use the tool.", provider=provider(responses))
+        async with agent.session(environment=selected) as session:
+            native = session._native
+
+            class DelayCompletion:
+                """Delay delivery of the real native completion and keep native history intact."""
+
+                late: str | None = None
+                original_id: str | None = None
+                pause = False
+
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(native, name)
+
+                async def _next_session_event(self) -> str:
+                    if self.pause and self.late is not None:
+                        held.set()
+                        await release.wait()
+                        late, self.late = self.late, None
+                        return late
+                    while True:
+                        raw = await native._next_session_event()
+                        event = json.loads(raw)
+                        message = event.get("msg", {}) if event is not None else {}
+                        kind = message.get("type")
+                        if (
+                            kind == "item_completed"
+                            and message["item"]["type"] == "CommandExecution"
+                        ):
+                            self.late = raw
+                            self.original_id = message["turn_id"]
+                            continue
+                        if self.late is not None:
+                            if successor:
+                                self.pause = (
+                                    kind in {"task_started", "turn_started"}
+                                    and event["id"] != self.original_id
+                                )
+                            else:
+                                self.pause = (
+                                    kind in {"task_complete", "turn_complete"}
+                                    and event["id"] == self.original_id
+                                )
+                        return raw
+
+            delayed = DelayCompletion()
+            monkeypatch.setattr(session, "_native", delayed)
+            try:
+                original = await session.submit("Run the command and report its result.")
+                assert (await original.get_result()).final_output == chunk * count
+                assert delayed.original_id is not None
+                assert original.turn_id == delayed.original_id
+                assert session._observations.turn_started(delayed.original_id) is None
+                if successor:
+                    starts = session.events(after=session._observations.sequence)
+                    next_turn = await session.submit("Follow up.")
+                    started = await anext(starts)
+                    assert isinstance(started, TurnStarted)
+                    assert started.turn_id == next_turn.turn_id
+                    await starts.aclose()
+                    assert session.active_turn is next_turn
+                else:
+                    assert session.active_turn is None
+                await held.wait()
+                before = session._observations.sequence
+                caught_up = session.events(after=before)
+                release.set()
+                gap = await asyncio.wait_for(anext(caught_up), 2)
+                assert isinstance(gap, EventGap)
+                assert gap.first_sequence == gap.sequence == before + 1
+                [command] = [
+                    item async for item in session.items() if item["type"] == "command_execution"
+                ]
+                assert (command["thread_id"], command["turn_id"], command["call_id"]) == (
+                    session.id,
+                    original.turn_id,
+                    "late-shell",
+                )
+                assert command["output"] == "proof"
+                if successor:
+                    assert (await next_turn.get_result()).final_output == "successor complete"
+            finally:
+                release.set()
 
 
 async def test_oversized_observation_does_not_truncate_result_or_history(

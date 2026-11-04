@@ -17,13 +17,21 @@ from agents import (
     Agent,
     ChildInvocation,
     HttpMCP,
+    LocalStorage,
     MCPResultContext,
     NativeError,
     Session,
     TurnStoppedError,
     function_tool,
 )
-from agents.observation import Observation, ToolFinished, ToolStarted, TurnFinished
+from agents.observation import (
+    EventGap,
+    ExecutionItemCompleted,
+    Observation,
+    ToolFinished,
+    ToolStarted,
+    TurnFinished,
+)
 from agents.session import _ChildCallbacks
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -201,6 +209,7 @@ async def test_policy_barrier_private_data_and_independent_readers(
             native = RecordedNative(session._native)
             session._native = native
             slow = session.events()
+            detailed_slow = session.events(include_execution_details=True)
             handle = await session.submit("read")
             fast = asyncio.create_task(collect(handle.events()))
             reader = handle.events()
@@ -223,6 +232,7 @@ async def test_policy_barrier_private_data_and_independent_readers(
                 assert (await (handle).get_result()).final_output == "done"
             events = await fast
             assert await collect(handle.events()) == events
+            detailed = await collect(handle.events(include_execution_details=True))
             starts = [event for event in events if isinstance(event, ToolStarted)]
             assert [(event.family, event.name, event.namespace) for event in starts] == [
                 ("mcp", "find_record", "mcp__records_store")
@@ -239,9 +249,33 @@ async def test_policy_barrier_private_data_and_independent_readers(
                 result = native_ends[0]["result"]["Ok"]
                 assert result["isError"] is (outcome in ("is_error", "peer_error"))
                 assert result["content"] == [{"type": "text", "text": "private-accepted-result"}]
+                [reference] = [
+                    event.item for event in events if isinstance(event, ExecutionItemCompleted)
+                ]
+                assert reference == {
+                    "type": "mcp_call",
+                    "thread_id": session.id,
+                    "turn_id": handle.turn_id,
+                    "id": "protected-call",
+                    "call_id": "protected-call",
+                    "status": ends[0].status,
+                    "native_status": ends[0].status,
+                }
+                [completion] = [
+                    event.item for event in detailed if isinstance(event, ExecutionItemCompleted)
+                ]
+                assert completion["type"] == "mcp_call"
+                assert completion["thread_id"] == session.id
+                assert completion["turn_id"] == handle.turn_id
+                assert completion["id"] == completion["call_id"] == "protected-call"
+                assert completion["arguments"] == {"key": "private-argument"}
+                assert completion["output"] == result
+                assert completion["native_status"] == ends[0].status
+                history = [item async for item in session.items()]
+                assert [item for item in history if item["type"] == "mcp_call"] == [completion]
                 outputs = [
                     item["output"]
-                    for item in [item async for item in session.items()]
+                    for item in history
                     if item["type"] == "function_call_output"
                     and item["call_id"] == "protected-call"
                 ]
@@ -272,8 +306,48 @@ async def test_policy_barrier_private_data_and_independent_readers(
                 "private-policy-failure",
             ):
                 assert private not in public
+            trusted = json.dumps([asdict(event) for event in detailed])
+            assert peer.label not in trusted
+            assert "private-policy-failure" not in trusted
+            if outcome == "policy_failure":
+                assert "private-accepted-result" not in trusted
             await session._aclose()
             assert (await collect(slow))[:-1] == events
+            assert (await collect(detailed_slow))[:-1] == detailed
+
+
+async def test_large_mcp_completion_recovers_from_gap_after_local_reopen(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    peer = Peer(label="x" * 100_000)
+    responses.respond(mcp_call("search", "mcp__records", "large-call"))
+    responses.respond(assistant_output("done"))
+    async with timeout(30), peer.serve() as url:
+        storage = LocalStorage(tmp_path / "profile")
+        agent = Agent(
+            instructions="Use selected tools.",
+            provider=provider(responses),
+            tools=[HttpMCP(name="records", url=url, tools=["search"])],
+        )
+        async with agent.session(storage=storage) as session:
+            thread_id = session.id
+            turn = await session.submit("read")
+            assert (await turn.get_result()).final_output == "done"
+            turn_id = turn.turn_id
+            observed = await collect(turn.events())
+            assert isinstance(observed[0], EventGap)
+            assert isinstance(observed[-1], TurnFinished)
+            assert await collect(turn.events(include_execution_details=True)) == observed
+        async with agent.session(storage=storage, resume=thread_id) as session:
+            [retained] = [item async for item in session.items() if item["type"] == "mcp_call"]
+            assert retained["type"] == "mcp_call"
+            assert (retained["thread_id"], retained["turn_id"]) == (thread_id, turn_id)
+            assert retained["id"] == retained["call_id"] == "large-call"
+            assert retained["arguments"] == {"key": "43"}
+            assert retained["native_status"] == "completed"
+            assert "chars truncated" in str(retained["output"])
+            encoded = json.dumps(retained["output"], ensure_ascii=False, separators=(",", ":"))
+            assert len(encoded.encode()) <= 65_536
 
 
 async def test_cancelled_stdio_call_publishes_only_delivered_native_ends(
@@ -308,6 +382,15 @@ async def test_cancelled_stdio_call_publishes_only_delivered_native_ends(
             ]
             assert [event.call_id for event in ends] == [event["call_id"] for event in native_ends]
             assert all(event.status == "failed" for event in ends)
+            observed = [
+                event.item
+                async for event in handle.events(include_execution_details=True)
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert observed == [
+                item async for item in session.items() if item["type"] == "mcp_call"
+            ]
+            assert all(item["turn_id"] == handle.turn_id for item in observed)
             assert isinstance(events[-1], TurnFinished)
             assert events[-1].status == "cancelled"
             assert len(responses.requests) == 1

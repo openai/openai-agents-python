@@ -65,6 +65,8 @@ pub struct ThreadOptions {
     native_agent_roles: Option<Vec<String>>,
     #[serde(rename = "_native_agent_max_depth")]
     native_agent_max_depth: Option<usize>,
+    #[serde(rename = "_native_agent_instruction_files")]
+    native_agent_instruction_files: Vec<crate::application_instructions::InstructionFile>,
     #[serde(rename = "_canonical_rules")]
     canonical_rules: bool,
     config: Map<String, Value>,
@@ -242,6 +244,7 @@ impl ThreadOptions {
                 .insert(crate::native_agents::Policy {
                     roles,
                     max_depth,
+                    instruction_files: self.native_agent_instruction_files,
                     allowed: Default::default(),
                 });
         }
