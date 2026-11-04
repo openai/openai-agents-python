@@ -298,6 +298,48 @@ def test_canonical_execution_replaces_legacy_receipt_and_keeps_model_records():
     assert old[0]["error"] == {"message": "legacy result"}
 
 
+def test_reconciliation_binds_to_the_original_turn_even_when_the_call_id_is_reused():
+    def call(turn):
+        return [
+            event("task_started", turn),
+            response("function_call", call_id="shared", name="write", arguments="{}"),
+        ]
+
+    def reconciliation(original_turn):
+        return response(
+            "function_call_output",
+            call_id="shared",
+            output="application-confirmed no effect",
+            internal_chat_message_metadata_passthrough={
+                "turn_id": original_turn,
+                "content_item_kinds": ["sdk_reconciliation.not_applied"],
+            },
+        )
+
+    _, items = project_history(
+        [
+            *call("original"),
+            event("turn_aborted", "original"),
+            *call("next"),
+            reconciliation("unknown"),
+            reconciliation("original"),
+            response("function_call_output", call_id="shared", output="actual result"),
+            event("task_complete", "next"),
+        ],
+        "root",
+    )
+    assert [(item["type"], item["turn_id"], item["status"]) for item in items] == [
+        ("function_call", "original", "failed"),
+        ("function_call", "next", "completed"),
+        ("function_call_output", "original", "failed"),
+        ("function_call_output", "next", "completed"),
+    ]
+    assert items[2]["type"] == "function_call_output"
+    assert items[2]["reconciliation"] == "not_applied"
+    assert items[2]["output"] == "application-confirmed no effect"
+    assert "reconciliation" not in items[3]
+
+
 def test_latest_sampled_context_receipt_survives_inherited_turn_completion():
     def receipt(model):
         return {
