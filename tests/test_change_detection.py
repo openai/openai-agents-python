@@ -1060,11 +1060,13 @@ def test_native_selection_only_runs_for_trusted_code_events(
 def test_native_build_selection(
     change_repo: tuple[Path, str], monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
+    import builtins
     import io
     import json
     import urllib.error
     import urllib.parse
     import urllib.request
+    from types import SimpleNamespace
 
     pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
     scenario = scenario.removeprefix("pending_python_")
@@ -1754,7 +1756,6 @@ def test_native_build_selection(
     if scenario == "invalid_snapshot_digest":
         artifacts[0]["digest"] = "invalid"
 
-    import time
     from zipfile import ZipFile
 
     provenance = {
@@ -1860,8 +1861,18 @@ def test_native_build_selection(
     monkeypatch.setattr(subprocess, "run", tool)
     elapsed = [0]
     polls = []
-    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
-    monkeypatch.setattr(time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
+    clock = SimpleNamespace(
+        monotonic=lambda: elapsed[0],
+        sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
+    )
+
+    # Keep Git subprocess waits on real time while the workflow uses its own clock.
+    def selector_import(name, *args, **kwargs):
+        if name == "time":
+            return clock
+        return builtins.__import__(name, *args, **kwargs)
+
+    selector_globals = {"__builtins__": {**vars(builtins), "__import__": selector_import}}
 
     def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
         url = request.full_url
@@ -1987,30 +1998,30 @@ def test_native_build_selection(
     script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario == "invalid_snapshot_digest":
         with pytest.raises(SystemExit, match="Invalid native snapshot digest"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario == "missing_sdk_start":
         with pytest.raises(SystemExit, match="Incomplete SDK execution history"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario in {"branch_corrupt_identity", "branch_capture_attempt_changed"}:
         with pytest.raises(SystemExit, match="Inconsistent native producer identity"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario == "branch_corrupt_archive":
         with pytest.raises(ValueError, match="digest mismatch"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario == "branch_wait_api_error":
         with pytest.raises(urllib.error.HTTPError):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario == "branch_wait_changed_source":
         with pytest.raises(SystemExit, match="Inconsistent pinned push producer"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     elif scenario == "api_error":
         with pytest.raises(urllib.error.URLError, match="API unavailable"):
-            exec(compile(script, workflow_path, "exec"), {})
+            exec(compile(script, workflow_path, "exec"), selector_globals)
     else:
-        exec(compile(script, workflow_path, "exec"), {})
+        exec(compile(script, workflow_path, "exec"), selector_globals)
     if scenario.startswith("branch_wait_"):
         assert len(polls) == (75 if scenario == "branch_wait_timeout" else 1)
         assert elapsed[0] <= 75 * 60
