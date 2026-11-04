@@ -1110,25 +1110,34 @@ def test_native_build_selection(
     ):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(contents)
+        # Match the owning checkout before and after committing synthetic recipes.
+        target.write_text(contents, encoding="utf-8", newline="\n")
     if scenario in {"selector_changed", "historical_repack"}:
         (repo / workflow_path).write_text(
-            workflow_text.replace("# Search a bounded history.", "# Prior selector.")
+            workflow_text.replace("# Search a bounded history.", "# Prior selector."),
+            encoding="utf-8",
+            newline="\n",
         )
     if scenario == "extra_caller_job":
         (repo / workflow_path).write_text(
             workflow_text + "\n  corrupt-snapshot:\n    runs-on: ubuntu-latest\n"
-            "    steps:\n      - run: echo corrupt\n"
+            "    steps:\n      - run: echo corrupt\n",
+            encoding="utf-8",
+            newline="\n",
         )
     if scenario == "qualification_recipe_changed":
         path = repo / ".github/workflows/codex-python-qualify.yml"
-        path.write_text(path.read_text() + "# Different qualification recipe.\n")
+        path.write_text(
+            path.read_text() + "# Different qualification recipe.\n", encoding="utf-8", newline="\n"
+        )
     if scenario == "forwarding_changed":
         (repo / workflow_path).write_text(
             workflow_text.replace(
                 "${{ needs.changes.outputs.native_source_run }}",
                 "${{ inputs.native_source_run || '' }}",
-            )
+            ),
+            encoding="utf-8",
+            newline="\n",
         )
     native_workflow = repo / native_workflow_path
     if scenario == "redirected_download":
@@ -1136,11 +1145,15 @@ def test_native_build_selection(
             native_workflow_text.replace(
                 "NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}",
                 "NATIVE_SOURCE_RUN: 999",
-            )
+            ),
+            encoding="utf-8",
+            newline="\n",
         )
     if scenario == "native_workflow_changed":
         native_workflow.write_text(
-            native_workflow_text.replace('python-version: "3.12"', 'python-version: "3.11"')
+            native_workflow_text.replace('python-version: "3.12"', 'python-version: "3.11"'),
+            encoding="utf-8",
+            newline="\n",
         )
     project = (
         '[project]\nname = "openai-agents"\nversion = "0.23.1"\n'
@@ -1221,8 +1234,8 @@ def test_native_build_selection(
             path.write_text(f"after {path.name}\n")
         if scenario == "build_payload_changed_modified":
             payload_files[0].write_text("unreviewed compiler flags\n")
-    native_workflow.write_text(native_workflow_text)
-    (repo / workflow_path).write_text(workflow_text)
+    native_workflow.write_text(native_workflow_text, encoding="utf-8", newline="\n")
+    (repo / workflow_path).write_text(workflow_text, encoding="utf-8", newline="\n")
     (repo / ".github/workflows/codex-python-qualify.yml").write_bytes(
         (ROOT / ".github/workflows/codex-python-qualify.yml").read_bytes()
     )
@@ -1270,7 +1283,9 @@ def test_native_build_selection(
             target.write_text("Alpha release\n")
     if scenario == "producer_changed":
         (repo / workflow_path).write_text(
-            workflow_text.replace("runner: windows-latest", "runner: windows-2022")
+            workflow_text.replace("runner: windows-latest", "runner: windows-2022"),
+            encoding="utf-8",
+            newline="\n",
         )
     additional_paths: tuple[str, ...] = ()
     if scenario == "version_and_docs":
@@ -1526,7 +1541,11 @@ def test_native_build_selection(
         if scenario == "pr_ambiguous_context":
             source["referenced_workflows"] *= 2
         if scenario == "pr_execution_recipe_changed":
-            native_workflow.write_text(native_workflow_text + "# different producer recipe\n")
+            native_workflow.write_text(
+                native_workflow_text + "# different producer recipe\n",
+                encoding="utf-8",
+                newline="\n",
+            )
             _git(repo, "add", native_workflow_path)
             tree = _git(repo, "write-tree")
             execution_sha = _git(
@@ -1539,14 +1558,16 @@ def test_native_build_selection(
                 sha=execution_sha,
                 path=f"{repository}/.github/workflows/codex-python-qualify.yml@{execution_sha}",
             )
-            native_workflow.write_text(native_workflow_text)
+            native_workflow.write_text(native_workflow_text, encoding="utf-8", newline="\n")
             _git(repo, "add", native_workflow_path)
         if scenario == "pr_fixture_changed":
             head = _commit(repo, "packages/codex/tests/fixtures/exec_server.rs")
         if current_pr:
             if scenario == "pr_base_recipe_changed":
                 native_workflow.write_text(
-                    native_workflow_text + "# base producer recipe changed\n"
+                    native_workflow_text + "# base producer recipe changed\n",
+                    encoding="utf-8",
+                    newline="\n",
                 )
             if scenario == "pr_base_fixture_changed":
                 fixture = repo / "packages/codex/tests/fixtures/exec_server.rs"
