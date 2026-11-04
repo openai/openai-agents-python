@@ -48,7 +48,9 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
 use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
-use crate::storage::{LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY};
+use crate::storage::{
+    LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY, checklist_path,
+};
 
 const STORAGE_OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
 
@@ -959,44 +961,45 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
 }
 
 fn relocated_checklist_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
+    const INSPECT_ERROR: &str = "could not inspect native SDK checklist storage";
     let checklists = home.join(LOCAL_CHECKLIST_DIRECTORY);
     let budgets = checklists.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY);
     let mut files = Vec::new();
     for directory in [checklists, budgets] {
         let directory = check_local_write_root_overlap(&directory, roots, STORAGE_OVERLAP)?;
         let relocated = !directory.starts_with(home);
-        let entries = match std::fs::read_dir(directory) {
+        let entries = match std::fs::read_dir(&directory) {
             Ok(entries) => entries,
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(error).context("could not inspect native SDK checklist storage");
-            }
+            Err(error) => return Err(error).context(INSPECT_ERROR),
         };
         for entry in entries {
-            let entry = entry.context("could not inspect native SDK checklist storage")?;
-            let path = entry.path();
-            if path.extension().is_none_or(|extension| extension != "json")
-                || !path
-                    .file_stem()
-                    .and_then(|stem| stem.to_str())
-                    .is_some_and(|stem| {
-                        ThreadId::from_string(stem).is_ok_and(|id| id.to_string() == stem)
-                    })
+            let name = entry.context(INSPECT_ERROR)?.file_name();
+            let Some(id) = Path::new(&name)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| ThreadId::from_string(stem).ok())
+            else {
+                continue;
+            };
+            let path = checklist_path(&directory, id);
+            if !path
+                .file_name()
+                .is_some_and(|canonical| canonical.eq_ignore_ascii_case(&name))
             {
                 continue;
             }
-            let kind = match entry.file_type() {
-                Ok(kind) => kind,
+            // The store opens the canonical spelling. Let the volume decide
+            // whether a differently cased directory entry supplies that file.
+            let metadata = match path.symlink_metadata() {
+                Ok(metadata) => metadata,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error).context("could not inspect native SDK checklist storage");
-                }
+                Err(error) => return Err(error).context(INSPECT_ERROR),
             };
-            if kind.is_symlink() {
+            if metadata.is_symlink() {
                 let target = check_local_write_root_overlap(&path, roots, STORAGE_OVERLAP)?;
-                collect_existing_private_file(target, &mut files)
-                    .context("could not inspect native SDK checklist storage")?;
-            } else if relocated && kind.is_file() {
+                collect_existing_private_file(target, &mut files).context(INSPECT_ERROR)?;
+            } else if relocated && metadata.is_file() {
                 files.push(path);
             }
         }
