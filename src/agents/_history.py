@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from typing import Any, cast
 
-from ._events import SessionItem
+from ._events import FunctionCallItem, SessionItem
 from ._projection import EventProjector, _execution_item, _usage, project_execution_completion
 from ._web_projection import project_web_search_item
 from .history import RecordedTurn
+from .recovery import UncertainCall, _uncertain_call
 from .turn_receipt import _project_turn_receipt
 
 
@@ -16,6 +17,7 @@ class _HistoryItem:
     native: bool
     recorded_id: bool
     output: "_HistoryItem | None" = None
+    custom_input: str | None = None
 
 
 _EXECUTION_TYPES = {"command_execution", "mcp_call", "patch_execution"}
@@ -109,7 +111,11 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
 
 
 def project_history(
-    history: list[dict[str, Any]], session_id: str, subagent_id: str | None = None
+    history: list[dict[str, Any]],
+    session_id: str,
+    subagent_id: str | None = None,
+    *,
+    uncertain_calls: list[UncertainCall] | None = None,
 ) -> tuple[list[RecordedTurn], list[SessionItem]]:
     """Prefer native item events over raw records, retaining first-seen order."""
     projector = EventProjector(session_id, source_id=subagent_id)
@@ -122,7 +128,13 @@ def project_history(
     aborted_turn: str | None = None
     turn_order: list[str] = []
 
-    def remember(item: dict[str, Any], *, native: bool, recorded_id: bool = True) -> None:
+    def remember(
+        item: dict[str, Any],
+        *,
+        native: bool,
+        recorded_id: bool = True,
+        custom_input: str | None = None,
+    ) -> None:
         kind = item["type"]
         is_output = kind == "function_call_output"
         is_execution = kind in _EXECUTION_TYPES
@@ -159,6 +171,8 @@ def project_history(
             occurrence.recorded_id = recorded_id
         identities[identity] = occurrence
         if kind == "function_call":
+            if not native:
+                occurrence.custom_input = custom_input
             latest_calls[call_key] = occurrence
         elif is_output and call is not None:
             call.output = occurrence
@@ -222,7 +236,16 @@ def project_history(
                         item["reconciliation"] = reconciliation
                         if reconciliation == "not_applied":
                             item["status"] = "failed"
-                    remember(item, native=False, recorded_id=bool(payload.get("id")))
+                    remember(
+                        item,
+                        native=False,
+                        recorded_id=bool(payload.get("id")),
+                        custom_input=(
+                            payload.get("input")
+                            if uncertain_calls is not None and payload["type"] == "custom_tool_call"
+                            else None
+                        ),
+                    )
         elif kind == "event_msg":
             event_kind = payload["type"]
             if event_kind == "thread_rolled_back":
@@ -336,5 +359,17 @@ def project_history(
                 else "incomplete"
                 if terminal and terminal != "in_progress"
                 else "in_progress"
+            )
+        if (
+            uncertain_calls is not None
+            and item["type"] == "function_call"
+            and item["status"] in ("in_progress", "incomplete")
+        ):
+            uncertain_calls.append(
+                _uncertain_call(
+                    subagent_id if subagent_id is not None else session_id,
+                    cast(FunctionCallItem, item),
+                    custom_input=occurrence.custom_input,
+                )
             )
     return list(turns.values()), cast(list[SessionItem], [item.value for item in items])

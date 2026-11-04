@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context, Result, ensure};
+use codex_exec_server::REMOTE_ENVIRONMENT_ID;
 use codex_history::RolloutItem;
 use codex_protocol::models::{
     ContentItemKind, FunctionCallOutputBody, FunctionCallOutputPayload,
@@ -131,6 +132,94 @@ fn implicit_remote_authority(receipt: &Value) -> Option<Map<String, Value>> {
     Some(authority)
 }
 
+fn can_drop_implicit_remote(receipt: &Value) -> bool {
+    let Some(authority) = implicit_remote_authority(receipt) else {
+        return false;
+    };
+    if authority.len() != 4
+        || authority.get("environment_id").and_then(Value::as_str) != Some(REMOTE_ENVIRONMENT_ID)
+        || authority.get("network_sandbox").and_then(Value::as_str) != Some("restricted")
+    {
+        return false;
+    }
+    match authority.get("network_policy") {
+        Some(Value::Null) => true,
+        Some(Value::Object(policy)) => {
+            policy.len() == 4
+                && policy.get("requires_proxy").and_then(Value::as_bool) == Some(true)
+                && policy
+                    .get("allow_all_unix_sockets")
+                    .is_some_and(Value::is_boolean)
+                && policy
+                    .get("allow_local_binding")
+                    .is_some_and(Value::is_boolean)
+                && policy
+                    .get("domains")
+                    .and_then(Value::as_object)
+                    .is_some_and(|domains| {
+                        domains
+                            .values()
+                            .all(|permission| matches!(permission.as_str(), Some("allow" | "deny")))
+                    })
+        }
+        _ => false,
+    }
+}
+
+async fn validate_recorded_executor_policy(
+    state: &ThreadState,
+    history: &[RolloutItem],
+    thread_id: &str,
+) -> Result<()> {
+    let Some((previous, strict_writes)) = history.iter().rev().find_map(|record| {
+        let RolloutItem::TurnContext(context) = record else {
+            return None;
+        };
+        let receipt = context.sdk_receipt.as_ref()?;
+        if receipt["thread_id"].as_str() != Some(thread_id) {
+            return None;
+        }
+        Some((
+            receipt.get("executors")?,
+            receipt.get("strict_executor_writes"),
+        ))
+    }) else {
+        return Ok(());
+    };
+    let policy_error = "Local resume requires the recorded executor write and network policy";
+    let previous = previous.as_array().context(policy_error)?;
+    let strict_writes = match strict_writes {
+        None => false,
+        Some(strict) => strict.as_bool().context(policy_error)?,
+    };
+    // A model-only turn has no executor policy to carry into the next Session.
+    if previous.is_empty() {
+        return Ok(());
+    }
+    let current_strict_writes = state
+        .thread
+        .thread_extension_data()
+        .get::<crate::environment::StrictExecutorWrites>()
+        .is_some();
+    let current = executor_policies(state).await?;
+    let matches = if strict_writes || current_strict_writes {
+        (!strict_writes || current_strict_writes) && previous == &current
+    } else if current.is_empty() {
+        // Opening without an Environment leaves a model-only Session.
+        previous.iter().all(can_drop_implicit_remote)
+    } else {
+        // Like portable restore, implicit remote workspaces can move.
+        previous.len() == current.len()
+            && previous.iter().zip(&current).all(|(old, new)| {
+                old == new
+                    || implicit_remote_authority(old)
+                        .is_some_and(|old| Some(old) == implicit_remote_authority(new))
+            })
+    };
+    ensure!(matches, "{policy_error}");
+    Ok(())
+}
+
 pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> {
     let receipts: Vec<ReconciledCall> = serde_json::from_str(encoded)
         .map_err(|_| anyhow::anyhow!("Invalid local reconciliation receipt"))?;
@@ -148,41 +237,7 @@ pub(crate) async fn reconcile(state: &ThreadState, encoded: &str) -> Result<()> 
     tools.check_idle(&state.thread).await?;
     let history = store.load_owned_history(state.id).await?;
     let thread_id = state.id.to_string();
-    // A model-only turn has no executor policy to carry into the next Session.
-    if let Some((previous, strict_writes)) = history.iter().rev().find_map(|record| {
-        let RolloutItem::TurnContext(context) = record else {
-            return None;
-        };
-        let receipt = context.sdk_receipt.as_ref()?;
-        if receipt["thread_id"].as_str() != Some(thread_id.as_str()) {
-            return None;
-        }
-        Some((
-            receipt["executors"].as_array()?,
-            receipt["strict_executor_writes"].as_bool() == Some(true),
-        ))
-    }) && !previous.is_empty()
-    {
-        let current_strict_writes = state
-            .thread
-            .thread_extension_data()
-            .get::<crate::environment::StrictExecutorWrites>()
-            .is_some();
-        let current = executor_policies(state).await?;
-        // Like portable restore, implicit remote workspaces can move.
-        let matches = previous == &current
-            || (!strict_writes
-                && !current_strict_writes
-                && previous.len() == current.len()
-                && previous.iter().zip(&current).all(|(old, new)| {
-                    implicit_remote_authority(old)
-                        .is_some_and(|old| Some(old) == implicit_remote_authority(new))
-                }));
-        ensure!(
-            (!strict_writes || current_strict_writes) && matches,
-            "Local resume requires the recorded executor write and network policy"
-        );
-    }
+    validate_recorded_executor_policy(state, &history, &thread_id).await?;
     let guard = state
         .thread
         .thread_extension_data()

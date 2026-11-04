@@ -352,21 +352,40 @@ async def test_local_resume_allows_implicit_remote_workspace_to_move(
         [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
         history = rollout.read_text()
         rows = [json.loads(line) for line in history.splitlines()]
-        [recorded] = [
-            row["payload"]["sdk_receipt"]["executors"][0]
+        [receipt] = [
+            row["payload"]["sdk_receipt"]
             for row in rows
             if row["type"] == "turn_context" and row["payload"].get("sdk_receipt")
         ]
+        [recorded] = receipt["executors"]
         # A later receipt format may add authority fields. Only a known,
         # cwd-derived policy may move with the workspace.
-        for mapping in (recorded, recorded["permission_profile"]):
+        authority_parts = [recorded, recorded["permission_profile"]]
+        if explicit_network:
+            authority_parts.append(recorded["network_policy"])
+        for mapping in authority_parts:
             mapping["future_authority"] = "requires-review"
             rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
             with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
                 async with agent.session(storage=storage, resume=session_id, environment=current):
                     pytest.fail("Reopened a Session with unknown executor authority")
+            with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+                async with agent.session(storage=storage, resume=session_id):
+                    pytest.fail("Dropped an executor with unknown authority")
             del mapping["future_authority"]
-        rollout.write_text(history)
+
+        for field, malformed in (("executors", None), ("strict_executor_writes", "false")):
+            original_value = receipt[field]
+            receipt[field] = malformed
+            rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
+            with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+                async with agent.session(storage=storage, resume=session_id):
+                    pytest.fail("Dropped an executor with a malformed policy receipt")
+            receipt[field] = original_value
+
+        # Older receipts omitted the strict-write marker.
+        del receipt["strict_executor_writes"]
+        rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
         async with agent.session(
             storage=storage, resume=session_id, environment=current
@@ -377,6 +396,97 @@ async def test_local_resume_allows_implicit_remote_workspace_to_move(
             receipts = [turn["receipt"] async for turn in resumed.turns() if "receipt" in turn]
             assert receipts[-1]["executors"]
             assert receipts[-1]["executors"][0]["cwd"] == relocated.resolve().as_uri()
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("explicit_network", [False, True])
+async def test_local_resume_can_drop_an_implicit_remote_executor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, explicit_network: bool
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        storage = LocalStorage(tmp_path / "profile")
+        selected = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            network=NetworkPolicy(allow_all_unix_sockets=True) if explicit_network else None,
+        )
+        model.respond(assistant_output("ready"))
+        async with agent.session(storage=storage, environment=selected) as session:
+            session_id = session.id
+            assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+
+        model.respond(assistant_output("model only"))
+        async with agent.session(storage=storage, resume=session_id) as resumed:
+            assert resumed.id == session_id
+            result = await (await resumed.submit("Continue without command tools.")).get_result()
+            assert result.final_output == "model only"
+            receipts = [turn["receipt"] async for turn in resumed.turns() if "receipt" in turn]
+            assert receipts[-1]["executors"] == []
+            assert "exec_command" not in {
+                tool.get("name") for tool in model.requests[-1].get("tools", [])
+            }
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize("retarget_cwd", [False, True], ids=["additional-root", "workspace"])
+async def test_supplied_compaction_keeps_the_applied_write_policy_after_retargeting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, retarget_cwd: bool
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        original, replacement = tmp_path / "original", tmp_path / "replacement"
+        original.mkdir()
+        replacement.mkdir()
+        alias = executor.root / "write-root"
+        alias.symlink_to(original, target_is_directory=True)
+        selected = Environment(
+            url=executor.url,
+            cwd=str(alias if retarget_cwd else executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[] if retarget_cwd else [alias],
+        )
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        model.respond(assistant_output("ready"))
+        model.respond(assistant_output("continued"))
+        async with agent.session(environment=selected) as session:
+            assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+            alias.unlink()
+            alias.symlink_to(replacement, target_is_directory=True)
+            if retarget_cwd:
+                with pytest.raises(RuntimeError, match="compaction cannot change the applied"):
+                    await session.compact(summary="A caller supplied this summary.")
+            else:
+                await session.compact(summary="A caller supplied this summary.")
+            assert len(model.requests) == 1
+            assert (
+                await (await session.submit("Continue.")).get_result()
+            ).final_output == "continued"
+            policies = [
+                turn["receipt"]["executors"][0]
+                async for turn in session.turns()
+                if "receipt" in turn and turn["receipt"]["executors"]
+            ]
+            assert len(policies) == 2
+            expected_roots = {original.resolve().as_uri()}
+            if not retarget_cwd:
+                expected_roots.add(executor.root.resolve().as_uri())
+            assert set(policies[0]["writable_roots"]) == expected_roots
+            assert policies[1] == policies[0]
 
 
 async def test_checkpoint_without_network_policy_restores_only_with_the_default() -> None:

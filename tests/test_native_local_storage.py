@@ -19,8 +19,10 @@ from agents import (
     NativeProvider,
     ReconciledCall,
     ToolContext,
+    UncertainCall,
     function_tool,
 )
+from agents._history import project_history
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_native_manual_tools import LookupArgs, next_request, provider
@@ -185,6 +187,57 @@ async def test_unknown_local_receipt_never_replays_or_starts_model(responses, tm
     code, rows, err = await _collect(retried)
     assert code != 0 and rows and "unknown tool outcome" in rows[0]["message"], (rows, err)
     assert len(responses.requests) == request_count
+
+
+@pytest.mark.parametrize("custom_input", ["null", "42", "{}", "", '  "quoted"\n'])
+def test_unknown_custom_call_preserves_exact_input(custom_input: str) -> None:
+    history = [
+        {"type": "turn_context", "payload": {"turn_id": "original-turn"}},
+        {
+            "type": "response_item",
+            "payload": {
+                "type": "custom_tool_call",
+                "id": "original-item",
+                "call_id": "missing-custom-result",
+                "name": "apply_patch",
+                "input": custom_input,
+            },
+        },
+    ]
+    uncertain: list[UncertainCall] = []
+    _, items = project_history(history, "original-thread", uncertain_calls=uncertain)
+    (call,) = uncertain
+    assert call.arguments == custom_input
+    (item,) = items
+    assert item["type"] == "function_call"
+    assert item["arguments"] == custom_input
+
+    # The native event can replace the projected item and use the call ID
+    # as its item ID. Recovery still needs the original custom tool input.
+    native_arguments = {"normalized": True}
+    history.append(
+        {
+            "type": "event_msg",
+            "payload": {
+                "type": "item_started",
+                "turn_id": "original-turn",
+                "item": {
+                    "type": "DynamicToolCall",
+                    "id": "missing-custom-result",
+                    "tool": "apply_patch",
+                    "status": "in_progress",
+                    "arguments": native_arguments,
+                },
+            },
+        }
+    )
+    uncertain.clear()
+    _, items = project_history(history, "original-thread", uncertain_calls=uncertain)
+    (call,) = uncertain
+    assert call.arguments == custom_input
+    (item,) = items
+    assert item["type"] == "function_call"
+    assert item["arguments"] == native_arguments
 
 
 async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(responses, tmp_path):

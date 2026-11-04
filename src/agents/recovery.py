@@ -79,13 +79,14 @@ class LocalRecoveryRequired(RuntimeError):
         self.items = items
 
 
-def _uncertain_call(thread_id: str, item: FunctionCallItem) -> UncertainCall:
-    arguments = item["arguments"]
-    if isinstance(arguments, str):
+def _uncertain_call(
+    thread_id: str, item: FunctionCallItem, *, custom_input: str | None
+) -> UncertainCall:
+    arguments = custom_input if custom_input is not None else item["arguments"]
+    if custom_input is None and isinstance(arguments, str):
         try:
             arguments = json.loads(arguments)
         except ValueError:
-            # Some tools, including apply_patch, use plain text.
             pass
     return UncertainCall(
         thread_id=thread_id,

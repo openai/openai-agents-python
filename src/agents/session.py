@@ -96,7 +96,7 @@ from .observation import (
     _ObservationBuffer,
 )
 from .rate_limits import ApiRateLimits, _api_rate_limits
-from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall, _uncertain_call
+from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
@@ -2052,16 +2052,12 @@ class Session(Generic[ContextT, OutputT]):
                         history = json.loads(
                             await session._publish_startup(thread.read_thread_history(subagent_id))
                         )
-                        turns, items = project_history(history, session.id, subagent_id)
+                        turns, items = project_history(
+                            history, session.id, subagent_id, uncertain_calls=unknown
+                        )
                         thread_id = subagent_id if subagent_id is not None else session.id
                         recorded[thread_id] = turns
                         recorded_items.extend(items)
-                        unknown.extend(
-                            _uncertain_call(thread_id, item)
-                            for item in items
-                            if item["type"] == "function_call"
-                            and item["status"] in ("in_progress", "incomplete")
-                        )
                     if any(call.thread_id != session.id for call in unknown):
                         raise RuntimeError(
                             "Native local history has an unknown tool outcome in a descendant; "
@@ -3437,8 +3433,9 @@ class Session(Generic[ContextT, OutputT]):
             options = json.loads(self._native_options)
             options["_application_instructions"] = self._instructions
             options["_manual_tool_slots"] = self._catalog.manual_slots()
-            if self._writable_roots is not None:
-                options["runtime"]["environment"]["writable_roots"] = self._writable_roots
+            applied_roots = json.loads(change.options())["executor_writable_roots"]
+            if applied_roots is not None:
+                options["runtime"]["environment"]["writable_roots"] = applied_roots
             opening = self._opening_agent.tools
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),
@@ -3460,6 +3457,7 @@ class Session(Generic[ContextT, OutputT]):
                 json.dumps(options),
                 self._catalog.native_specs(),
             )
+            await change.validate_candidate(thread)
             available = opening
             _, allowed_mcp, _ = _split_tools(available)
             if allowed_mcp:
@@ -3476,7 +3474,6 @@ class Session(Generic[ContextT, OutputT]):
                     candidate=thread,
                 )
                 _check_mcp_receipt(receipt, self._mcp_tools, allowed_mcp, self._catalog.generation)
-            await change.validate_candidate(thread)
             # From this point, retirement cannot roll back. Keep the old reader
             # attached until its own native EOF; do not end the Session stream.
             retiring = True
