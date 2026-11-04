@@ -657,17 +657,18 @@ async def test_cancel_waits_for_entered_executor_policy_and_discards_late_result
 
 
 @pytest.mark.parametrize(
-    ("stop", "websocket"),
+    ("stop", "websocket", "near_context_limit"),
     [
-        ("turn", False),
-        ("turn", True),
-        ("continuation", False),
-        ("graph", False),
-        ("close", False),
+        ("turn", False, False),
+        ("turn", False, True),
+        ("turn", True, False),
+        ("continuation", False, False),
+        ("graph", False, False),
+        ("close", False, False),
     ],
 )
 async def test_force_stop_fences_sampling_before_executor_result_settles(
-    tmp_path, monkeypatch, stop, websocket
+    tmp_path, monkeypatch, stop, websocket, near_context_limit
 ) -> None:
     entered, cancelled, release_callback = (asyncio.Event() for _ in range(3))
     interrupt_entered, release_interrupt = asyncio.Event(), asyncio.Event()
@@ -696,12 +697,24 @@ async def test_force_stop_fences_sampling_before_executor_result_settles(
             tmp_path / "remote", synthetic_process_output="private-held-result"
         ).serve() as executor,
     ):
+        if near_context_limit:
+
+            async def report_usage(event):
+                if event["type"] == "response.completed" and len(model.requests) == 1:
+                    event["response"]["usage"].update(
+                        input_tokens=260_000, output_tokens=1_000, total_tokens=261_000
+                    )
+
+            model.before_event = report_usage
         trust(executor, tmp_path, monkeypatch)
         if stop == "continuation":
             model.respond(assistant_output("first native step"))
         model.respond(function_call("exec_command", {"cmd": "synthetic-no-execution"}, "held"))
+        if near_context_limit:
+            model.respond(assistant_output("compacted history"))
         model.respond(assistant_output("successor"))
         async with Agent(
+            model="gpt-5.5",
             instructions="Use the executor.",
             tools=[],
             provider=model.provider(websocket=websocket),
@@ -750,7 +763,20 @@ async def test_force_stop_fences_sampling_before_executor_result_settles(
             if stop != "close":
                 successor = await session.submit("Continue without tools.")
                 assert (await successor.get_result()).final_output == "successor"
-                assert len(model.requests) == request_count + 1
+                expected_count = request_count + (2 if near_context_limit else 1)
+                assert len(model.requests) == expected_count
+                if near_context_limit:
+                    metadata = [
+                        json.loads(request["client_metadata"]["x-codex-turn-metadata"])
+                        for request in model.requests
+                    ]
+                    assert [item["request_kind"] for item in metadata] == [
+                        "turn",
+                        "compaction",
+                        "turn",
+                    ]
+                    assert metadata[0]["turn_id"] != metadata[1]["turn_id"]
+                    assert metadata[1]["turn_id"] == metadata[2]["turn_id"]
             assert bool(model.frames) == websocket
             assert bool(model.http_requests) != websocket
             assert "private-held-result" not in json.dumps(model.requests)
