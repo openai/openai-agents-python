@@ -24,8 +24,13 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: da2fa45f69afcdda56e2eb1b68929266bb10c69e
+          ref: 902b813d72a79ab325defa61c6c77fd1a90b1a94
           persist-credentials: false
+      - name: Verify exact SDK checkout
+        run: |
+          test "$(git rev-parse HEAD)" = '902b813d72a79ab325defa61c6c77fd1a90b1a94'
+          test "$(git rev-parse HEAD^{tree})" = 'f2d7539c176cc795ae826b531dfd40fc8cdb3863'
+          git show -s --format='%H %T %s' HEAD
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"

@@ -292,7 +292,7 @@ index 759feb8..502334d 100644
          let exited = tokio::time::timeout(
              EARLY_EXIT_GRACE_PERIOD,
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index 660af27..ee6ae4c 100644
+index 660af27..6fbac2a 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
 @@ -52,7 +52,7 @@ use crate::unified_exec::MIN_YIELD_TIME_MS;
@@ -586,7 +586,7 @@ index 660af27..ee6ae4c 100644
 +                        .drain(..)
 +                        .map(|process| (None, process)),
 +                )
-+                .collect();
++                .collect::<Vec<_>>();
 +            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
              let starting = {
                  store.reserved_process_ids.clear();
@@ -1086,10 +1086,10 @@ index 0000000..ae2572f
 +}
 diff --git a/codex-rs/exec-server/src/darwin_command.rs b/codex-rs/exec-server/src/darwin_command.rs
 new file mode 100644
-index 0000000..8c5ee09
+index 0000000..e1cd44b
 --- /dev/null
 +++ b/codex-rs/exec-server/src/darwin_command.rs
-@@ -0,0 +1,765 @@
+@@ -0,0 +1,805 @@
 +//! Own each managed local command in a dedicated launchd resource coalition.
 +
 +use std::collections::HashMap;
@@ -1520,9 +1520,10 @@ index 0000000..8c5ee09
 +        command.arg0(arg0);
 +    }
 +    let tty = request.tty;
-+    // SAFETY: This callback only makes descriptor and session syscalls.
++    // SAFETY: This callback only makes descriptor, session, and task-port calls.
 +    unsafe {
 +        command.pre_exec(move || {
++            clear_launchd_ports()?;
 +            if tty {
 +                codex_utils_pty::pty::configure_child_terminal()?;
 +            } else if libc::setsid() == -1 {
@@ -1565,6 +1566,42 @@ index 0000000..8c5ee09
 +    wrapper.write_all(&[EXITED])?;
 +    wrapper.write_all(&status.to_le_bytes())?;
 +    Ok(0)
++}
++
++// The worker needs its launchd domain, but the payload must not inherit
++// authority to start unrelated jobs. exec inherits these task port slots.
++fn clear_launchd_ports() -> io::Result<()> {
++    const TASK_BOOTSTRAP_PORT: libc::c_int = 4;
++    const MACH_PORT_NULL: libc::mach_port_t = 0;
++    unsafe extern "C" {
++        fn mach_ports_register(
++            task: libc::mach_port_t,
++            ports: *const libc::mach_port_t,
++            count: libc::mach_msg_type_number_t,
++        ) -> libc::kern_return_t;
++        fn task_set_special_port(
++            task: libc::mach_port_t,
++            which: libc::c_int,
++            port: libc::mach_port_t,
++        ) -> libc::kern_return_t;
++    }
++
++    let registered_ports = [MACH_PORT_NULL; 3];
++    #[allow(deprecated)]
++    // SAFETY: The forked child's libSystem has initialized its own task port.
++    let task = unsafe { libc::mach_task_self_ };
++    // SAFETY: These Mach calls clear the current task's port slots. The
++    // registered port array is valid for the duration of the call.
++    let cleared = unsafe {
++        mach_ports_register(task, registered_ports.as_ptr(), 3) == libc::KERN_SUCCESS
++            && task_set_special_port(task, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL)
++                == libc::KERN_SUCCESS
++    };
++    if cleared {
++        Ok(())
++    } else {
++        Err(io::Error::from_raw_os_error(libc::EPERM))
++    }
 +}
 +
 +struct LaunchdJob {
@@ -1630,6 +1667,9 @@ index 0000000..8c5ee09
 +        loop {
 +            match listener.accept() {
 +                Ok((mut stream, _)) => {
++                    // Darwin's accept inherits the listener's nonblocking mode.
++                    // The worker protocol uses blocking I/O with timeouts.
++                    stream.set_nonblocking(false)?;
 +                    stream.set_read_timeout(Some(
 +                        deadline
 +                            .saturating_duration_since(Instant::now())
