@@ -419,6 +419,55 @@ A Python start record means the SDK accepted a function call. An MCP start recor
 
 Observations do not delay tool execution or completion. The buffer has a fixed limit. If a reader falls behind and the SDK drops older records, the reader can receive `EventGap`. Use [stream observations](sessions.md#stream-observations) to consume events while waiting for a turn. Use the [supported tool controls](#inspect-or-change-tool-values) to validate or change tool values.
 
+## Local execution
+
+Use `Environment.local()` to run selected tools with the SDK's native sandbox on a supported Linux or macOS host. The wheel supplies the local executor helper. Give the executor an existing absolute working directory and select the tools the model may call. Use a workspace your application owns.
+
+On macOS, local execution needs a usable per-user `launchd` domain and OS support for signaling a specific process instance. If either capability is unavailable, the SDK fails before running local commands. You can import the wheel and use model-only or WSS sessions on supported hosts that lack either capability.
+
+```python
+from pathlib import Path
+
+from agents import Agent, Environment
+
+workspace = Path("/jobs/worker/work")
+environment = Environment.local(
+    cwd=workspace,
+    tools=("exec_command", "apply_patch"),
+)
+agent = Agent(instructions="Work in the assigned workspace.")
+async with agent.session(environment=environment) as session:
+    turn = await session.submit("List the files in the workspace.")
+    print((await turn.get_result()).final_output)
+```
+
+Create the workspace before opening the Session. The SDK checks that the executor supports the required sandbox. It refuses startup when the helper or required sandbox support is unavailable. The sandbox governs executor tools. Your application owns the permissions of Python callbacks, the model connection, and any MCP services it supplies.
+
+Local commands can read the workspace, any additional `writable_roots`, and the platform files they need to run. The SDK starts them with a minimal environment and a system `PATH`. Command output can reach the model provider. For untrusted prompts or files, run each job in a job-private OS sandbox or VM. Keep host credentials and other jobs' data outside that boundary.
+
+Install the wheel and native helpers outside the workspace and any additional write roots. Local startup and write-root changes reject paths that overlap the helper installation. If you keep `.venv` in a project checkout, give the job a separate workspace.
+
+### Replace write roots between turns
+
+Writes to host files are limited to `cwd` and the additional `writable_roots`. On Linux, a command can also write to a private temporary filesystem. Those writes disappear when the sandbox exits. The runtime resolves the paths on the executor. It keeps its protections for native metadata. For a linked Git worktree that needs to update Git state, explicitly grant the required Git directories after checking which paths they expose.
+
+Pass `writable_roots` when constructing the local Environment or a compatible Linux or macOS WSS Environment. Passing it to the WSS constructor opts into the same strict write policy. The policy disables native sandbox escalation and permission requests that could widen the grants.
+
+Use a supported local executor or Linux WSS executor to change write grants between turns. With macOS WSS, choose the write roots in the Environment when opening the Session. The SDK cannot confirm that processes from earlier remote commands have exited. You can resubmit an equivalent grant if the paths pass validation.
+
+In a Session without `NativeAgents`, wait for the active turn and any descendant or background executor work to settle. Collect the results of any yielded tool cells before changing the roots. Then supply the complete replacement list on the next root turn. If an active root uses a symlink, the path must still resolve to the same directory when you submit it again. When adding a directory to the current root list, pass the canonical executor path from your application's configuration. Use the same rule when restoring a grant you removed. If the Session uses `NativeAgents`, set its write roots when opening it.
+
+```python
+# After earlier work settles.
+turn = await session.submit(
+    "Write the report in the assigned output directory.",
+    writable_roots=[Path("/jobs/worker/output")],
+)
+await turn.get_result()
+```
+
+The output directory must already exist on the executor. The working directory stays writable. On executors that support replacement, an empty list clears the additional grants. Omit `writable_roots` to keep the last applied policy. Start a new conversation to change the [network policy](#network-and-local-socket-access). See [restore executor policy](sessions.md#restore-executor-policy) for when the current Environment must match the last applied policy.
+
 ## Remote execution
 
 Remote execution requires an application-owned service that implements the Codex exec-server protocol. Use a version compatible with the SDK's pinned Codex runtime. This guide assumes that service is already deployed and has an authenticated WSS endpoint.
@@ -443,7 +492,7 @@ async with agent.session(environment=environment) as session:
     result = await turn.get_result()
 ```
 
-`agent.run(..., environment=environment)` and `agent.run_sync(..., environment=environment)` accept the same connection data. `Environment.tools` defaults to an empty tuple, so process and file tools must be selected explicitly. The SDK does not fall back to running these tools on the application host.
+`agent.run(..., environment=environment)` and `agent.run_sync(..., environment=environment)` accept the same connection data. `Environment.tools` defaults to an empty tuple, so process and file tools must be selected explicitly. If the WSS connection fails, the SDK reports a startup cause, such as a certificate error, HTTP status, or timeout. To run tools on the application host, select [local execution](#local-execution) explicitly.
 
 ### Select executor tools
 
@@ -467,7 +516,7 @@ The schemas currently advertise `number` for numeric fields. Codex applies narro
 
 ### Workspace and connection limits
 
-Selected tools can modify the assigned remote workspace. The SDK requests write access only to `cwd`, protects metadata directories natively, and requests restricted networking. Changing a command's `workdir` grants no additional writable workspace.
+Selected tools can modify the assigned remote workspace. By default the SDK requests writes in `cwd`, protects native metadata, and requests restricted networking. Supply [additional write roots](#replace-write-roots-between-turns) through application code. A model's `workdir` argument only sets a command's working directory.
 
 The application must isolate workspaces and tenants and choose an executor that enforces the required OS limits. Selecting tools does not approve permission escalation. `Environment` has no `sandbox_mode` option.
 
@@ -480,7 +529,7 @@ Configure the connection with current application-owned credentials:
 
 ### Replace or restore an Environment
 
-A Session captures one Environment. Tool replacement cannot change the Environment, and it does not belong in `update(tools=...)`. To change the connection or selected executor tools, open a new Session. The same Agent can serve Sessions with different Environments. Restore uses the current Environment you supply. Saved history does not supply credentials or permission to start processes. Live processes do not transfer to a restored Session.
+A Session captures one Environment. Tool replacement cannot change the Environment, and it does not belong in `update(tools=...)`. To change the connection or selected executor tools, open a new Session. The same Agent can serve Sessions with different Environments. Restore uses the current Environment you supply. Check the [executor policy matching rules](sessions.md#restore-executor-policy) for your type of restore. Supply current credentials and start new processes through the current Session.
 
 Python, manual, HTTP MCP and stdio MCP tools can coexist with an Environment. A `StdioMCP` server runs on the host by default, or on the executor with `location="environment"`.
 
@@ -540,7 +589,7 @@ Close the Session on its opening event loop and handle release failures from Ses
 
 ### Network and local socket access
 
-Set `Environment.network` to a `NetworkPolicy` to configure network destinations and local socket access for native commands. These settings do not control the model connection, Python functions, or MCP clients. Omitting `network` preserves the default executor behavior.
+Pass a `NetworkPolicy` as `network` when constructing a local or WSS Environment. It controls network destinations and local socket access for native commands. This policy applies to the selected executor. The model connection, Python functions, and MCP clients use their own connections. Omitting `network` preserves the default executor behavior.
 
 #### Platform requirements
 
@@ -596,7 +645,7 @@ An empty destination list does not prevent proxy hostname lookups before denial.
 
 The SDK cannot infer an offline boundary from a URL. The backend must verify it.
 
-Restore requires the same normalized network policy from current application code. The checkpoint stores only a comparison digest, which grants no access or encryption. Debug logs and command history can still contain policy details. To change the policy, open a new Session.
+Supply the same normalized network policy when restoring a checkpoint or reopening a local conversation with a recorded policy. Your application grants access through its current Environment. The SDK compares the current policy with the saved policy. Start a new conversation to change the network policy.
 
 Python callbacks can run fixed operations directly in the application's worker. See [Restore an Environment](sessions.md#compact-save-and-restore).
 
