@@ -2369,17 +2369,21 @@ class Session(Generic[ContextT, OutputT]):
     def id(self) -> str:
         return self._id
 
-    def events(self, *, after: int = 0) -> EventStream:
+    def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
         """Observe all turns until this Session ends.
 
         after is a retained global sequence, with zero replaying the retained
         suffix. Gaps report unavailable observations. Use items() to recover
         recorded completions, including completions after a turn settles.
         Use interactions() for live requests that need an answer.
+        Set include_execution_details=True for a trusted reader that needs
+        command, patch, and MCP payloads. The default includes their IDs and status.
         """
         self._check_loop()
         self._check_callback_operation("observe its own Session")
-        return EventStream(self._observations, after=after)
+        return EventStream(
+            self._observations, after=after, _include_execution_details=include_execution_details
+        )
 
     async def pending_interactions(self) -> tuple[Interaction, ...]:
         """Read fresh, still-live requests from this Session and its children."""

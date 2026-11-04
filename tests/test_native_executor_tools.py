@@ -52,9 +52,16 @@ async def test_selected_remote_process_uses_wss_and_current_directory(
             result = await turn.get_result()
             assert result.final_output == "done"
             assert str(peer.root) in tool_output(responses.requests[1], "pwd")
-            [completion] = [
+            [reference] = [
                 event.item
                 async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert reference["id"] == reference["call_id"] == "pwd"
+            assert {"command", "argv", "cwd", "output", "exit_code"}.isdisjoint(reference)
+            [completion] = [
+                event.item
+                async for event in turn.events(include_execution_details=True)
                 if isinstance(event, ExecutionItemCompleted)
             ]
             assert completion["type"] == "command_execution"
@@ -148,9 +155,17 @@ async def test_native_tty_stdin_and_patch(
             assert set(offered) == {("functions", name) for name in selected.tools}
             history = [item async for item in session.items()]
             assert all(call in json.dumps(history) for call in ("start", "stdin", "patch"))
-            [patch] = [
+            [reference] = [
                 event.item
                 async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+                and event.item["type"] == "patch_execution"
+            ]
+            assert reference["id"] == reference["call_id"] == "patch"
+            assert {"changes", "stdout", "stderr"}.isdisjoint(reference)
+            [patch] = [
+                event.item
+                async for event in turn.events(include_execution_details=True)
                 if isinstance(event, ExecutionItemCompleted)
                 and event.item["type"] == "patch_execution"
             ]

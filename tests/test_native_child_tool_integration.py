@@ -312,7 +312,7 @@ async def test_two_children_can_use_context_and_mcp_after_root_finishes(
                 assert "accepted:" + name in child_wire
                 assert "accepted-mcp:" + handle.child_id in child_wire
                 assert "accepted:" + ({"alpha", "beta"} - {name}).pop() not in child_wire
-                events = await collect(handle.events())
+                events = await collect(handle.events(include_execution_details=True))
                 assert any(
                     isinstance(event, ToolStarted) and event.family == "function"
                     for event in events

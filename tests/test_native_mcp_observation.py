@@ -209,6 +209,7 @@ async def test_policy_barrier_private_data_and_independent_readers(
             native = RecordedNative(session._native)
             session._native = native
             slow = session.events()
+            detailed_slow = session.events(include_execution_details=True)
             handle = await session.submit("read")
             fast = asyncio.create_task(collect(handle.events()))
             reader = handle.events()
@@ -231,6 +232,7 @@ async def test_policy_barrier_private_data_and_independent_readers(
                 assert (await (handle).get_result()).final_output == "done"
             events = await fast
             assert await collect(handle.events()) == events
+            detailed = await collect(handle.events(include_execution_details=True))
             starts = [event for event in events if isinstance(event, ToolStarted)]
             assert [(event.family, event.name, event.namespace) for event in starts] == [
                 ("mcp", "find_record", "mcp__records_store")
@@ -247,8 +249,20 @@ async def test_policy_barrier_private_data_and_independent_readers(
                 result = native_ends[0]["result"]["Ok"]
                 assert result["isError"] is (outcome in ("is_error", "peer_error"))
                 assert result["content"] == [{"type": "text", "text": "private-accepted-result"}]
-                [completion] = [
+                [reference] = [
                     event.item for event in events if isinstance(event, ExecutionItemCompleted)
+                ]
+                assert reference == {
+                    "type": "mcp_call",
+                    "thread_id": session.id,
+                    "turn_id": handle.turn_id,
+                    "id": "protected-call",
+                    "call_id": "protected-call",
+                    "status": ends[0].status,
+                    "native_status": ends[0].status,
+                }
+                [completion] = [
+                    event.item for event in detailed if isinstance(event, ExecutionItemCompleted)
                 ]
                 assert completion["type"] == "mcp_call"
                 assert completion["thread_id"] == session.id
@@ -285,15 +299,21 @@ async def test_policy_barrier_private_data_and_independent_readers(
             assert isinstance(events[-1], TurnFinished)
             assert events[-1].status == ("failed" if outcome == "policy_failure" else "completed")
             public = json.dumps([asdict(event) for event in events])
-            assert peer.label not in public
-            assert "private-policy-failure" not in public
-            statuses = json.dumps(
-                [asdict(event) for event in events if not isinstance(event, ExecutionItemCompleted)]
-            )
-            assert "private-argument" not in statuses
-            assert "private-accepted-result" not in statuses
+            for private in (
+                peer.label,
+                "private-argument",
+                "private-accepted-result",
+                "private-policy-failure",
+            ):
+                assert private not in public
+            trusted = json.dumps([asdict(event) for event in detailed])
+            assert peer.label not in trusted
+            assert "private-policy-failure" not in trusted
+            if outcome == "policy_failure":
+                assert "private-accepted-result" not in trusted
             await session._aclose()
             assert (await collect(slow))[:-1] == events
+            assert (await collect(detailed_slow))[:-1] == detailed
 
 
 async def test_large_mcp_completion_recovers_from_gap_after_local_reopen(
@@ -317,6 +337,7 @@ async def test_large_mcp_completion_recovers_from_gap_after_local_reopen(
             observed = await collect(turn.events())
             assert isinstance(observed[0], EventGap)
             assert isinstance(observed[-1], TurnFinished)
+            assert await collect(turn.events(include_execution_details=True)) == observed
         async with agent.session(storage=storage, resume=thread_id) as session:
             [retained] = [item async for item in session.items() if item["type"] == "mcp_call"]
             assert retained["type"] == "mcp_call"
@@ -361,7 +382,11 @@ async def test_cancelled_stdio_call_publishes_only_delivered_native_ends(
             ]
             assert [event.call_id for event in ends] == [event["call_id"] for event in native_ends]
             assert all(event.status == "failed" for event in ends)
-            observed = [event.item for event in events if isinstance(event, ExecutionItemCompleted)]
+            observed = [
+                event.item
+                async for event in handle.events(include_execution_details=True)
+                if isinstance(event, ExecutionItemCompleted)
+            ]
             assert observed == [
                 item async for item in session.items() if item["type"] == "mcp_call"
             ]

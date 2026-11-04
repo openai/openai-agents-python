@@ -93,9 +93,16 @@ async def test_environment_provider_id_can_equal_native_execution_id(tmp_path, m
         async with agent.session(environment=declaration(executor)) as session:
             turn = await session.submit("Check")
             assert (await turn.get_result()).final_output == "finished"
-            [completion] = [
+            [reference] = [
                 event.item
                 async for event in turn.events()
+                if isinstance(event, ExecutionItemCompleted)
+            ]
+            assert reference["id"] == reference["call_id"] == call_id
+            assert "output" not in reference
+            [completion] = [
+                event.item
+                async for event in turn.events(include_execution_details=True)
                 if isinstance(event, ExecutionItemCompleted)
             ]
             assert completion["id"] == completion["call_id"] == call_id
@@ -106,5 +113,6 @@ async def test_environment_provider_id_can_equal_native_execution_id(tmp_path, m
             assert original["id"] == original["call_id"] == call_id
             assert original["arguments"] == call["item"]["arguments"]
             assert len({item["id"] for item in history}) == len(history)
+            assert execution["call_id"] == reference["call_id"]
             assert {**execution, "id": completion["id"]} == completion
             assert [item async for item in session.items()] == history

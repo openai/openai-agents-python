@@ -15,7 +15,9 @@ from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar, cast
 
-from ._events import ExecutionItem
+from typing_extensions import TypedDict
+
+from ._events import ExecutionItem, FunctionCallStatus
 from .rate_limits import ApiRateLimits
 from .usage import TokenUsageInfo
 
@@ -137,17 +139,29 @@ class ToolFinished(_SubmissionEvent):
     type: Literal["tool_finished"] = field(default="tool_finished", init=False)
 
 
+class _ExecutionItemReference(TypedDict):
+    type: Literal["command_execution", "patch_execution", "mcp_call"]
+    id: str
+    call_id: str
+    thread_id: str | None
+    turn_id: str
+    status: FunctionCallStatus
+    native_status: str | None
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ExecutionItemCompleted(_SubmissionEvent):
     """Core reported the end of a command, patch, or MCP call.
 
-    Match the item's thread, turn, and item IDs to its retained record in
+    By default, the item contains only identity and status. Use
+    include_execution_details=True on the reader to receive sensitive payloads.
+    Match the item's thread, turn, and call IDs to its retained record in
     Session.items() after an EventGap or reopen. Pass subagent_id for a child
     thread. Core bounds command output and MCP results before retention.
     Calls interrupted before Core reports a completion may have no item.
     """
 
-    item: ExecutionItem
+    item: ExecutionItem | _ExecutionItemReference
     type: Literal["execution_item_completed"] = field(
         default="execution_item_completed", init=False
     )
@@ -288,7 +302,12 @@ class EventStream(AsyncIterator[Observation]):
     """
 
     def __init__(
-        self, buffer: _ObservationBuffer, *, after: int, _turn: Turn[Any] | None = None
+        self,
+        buffer: _ObservationBuffer,
+        *,
+        after: int,
+        _turn: Turn[Any] | None = None,
+        _include_execution_details: bool = False,
     ) -> None:
         if after < 0 or after > buffer.sequence:
             raise ValueError("after must be between zero and the current event sequence")
@@ -297,6 +316,7 @@ class EventStream(AsyncIterator[Observation]):
         self._closed = False
         self._reading = False
         self._turn = _turn
+        self._include_execution_details = _include_execution_details is True
 
     def __aiter__(self) -> EventStream:
         return self
@@ -328,7 +348,20 @@ class EventStream(AsyncIterator[Observation]):
                     if event.sequence > self._after:
                         self._after = event.sequence
                         if isinstance(event, ExecutionItemCompleted):
-                            event = replace(event, item=deepcopy(event.item))
+                            item = event.item
+                            if self._include_execution_details:
+                                item = deepcopy(item)
+                            else:
+                                item = {
+                                    "type": item["type"],
+                                    "id": item["id"],
+                                    "call_id": item.get("call_id", item["id"]),
+                                    "thread_id": item.get("thread_id"),
+                                    "turn_id": item["turn_id"],
+                                    "status": item["status"],
+                                    "native_status": item.get("native_status"),
+                                }
+                            event = replace(event, item=item)
                         if self._turn is None:
                             return event
                         owners = {step.submission_id for step in self._turn._steps()}

@@ -955,7 +955,7 @@ async def test_failed_direct_result_policy_does_not_publish_original_output(
             history = json.loads(await captured.read_thread_history(None))
             [completion] = [
                 event.item
-                async for event in turn.events()
+                async for event in turn.events(include_execution_details=True)
                 if isinstance(event, ExecutionItemCompleted)
             ]
             assert completion["type"] == "command_execution"
