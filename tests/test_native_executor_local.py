@@ -124,6 +124,49 @@ async def test_local_write_roots_cannot_include_the_native_helper_installation(
     assert responses.requests == []
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@pytest.mark.parametrize("overlap", ["cwd", "additional_alias", "storage_alias", "descendant"])
+async def test_local_write_roots_cannot_overlap_native_storage(
+    responses: ResponsesFixture, tmp_path: Path, overlap: str
+) -> None:
+    work = tmp_path / "work"
+    work.mkdir()
+    profile = tmp_path / "profile"
+    extra = []
+    if overlap == "cwd":
+        profile = work / "new" / "profile"
+    elif overlap == "additional_alias":
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        alias = tmp_path / "alias"
+        alias.symlink_to(shared, target_is_directory=True)
+        extra = [alias]
+        profile = shared / "profile"
+    elif overlap == "storage_alias":
+        alias = work / "alias"
+        alias.symlink_to(tmp_path, target_is_directory=True)
+        profile = alias / "profile"
+    else:
+        extra = [profile / "workspace"]
+        extra[0].mkdir(parents=True)
+
+    agent = Agent(
+        instructions="Use the selected tools.",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
+    )
+    with pytest.raises(RuntimeError, match="writable roots must stay outside native SDK storage"):
+        async with agent.session(
+            storage=LocalStorage(profile),
+            environment=Environment.local(cwd=work, writable_roots=extra, tools=["exec_command"]),
+        ):
+            pytest.fail("A writable storage profile opened a Session")
+    if overlap == "descendant":
+        assert list(profile.iterdir()) == extra
+    else:
+        assert not profile.exists()
+    assert responses.requests == []
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="requires Linux system helper paths")
 @pytest.mark.parametrize("system_root", ["/bin", "/usr"])
 async def test_local_write_roots_cannot_include_system_sandbox_helper_paths(
@@ -389,6 +432,16 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
             before = await run_turn(
                 session, "original", command(allow=(work, first, second), deny=(third,))
             )
+            request_count = len(responses.requests)
+            overlap = await session.submit(
+                "Do not grant the profile.", writable_roots=[storage.path.resolve()]
+            )
+            with pytest.raises(
+                NativeError, match="writable roots must stay outside native SDK storage"
+            ) as refused:
+                await overlap.get_result()
+            assert refused.value.effects == "not_started"
+            assert len(responses.requests) == request_count
             bad = await session.submit("Invalid policy", writable_roots=[tmp_path / "missing"])
             with pytest.raises(NativeError, match="resolve an executor write root") as failure:
                 await bad.get_result()

@@ -1,6 +1,7 @@
 //! Thread startup options and host-provided instruction snapshots.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use codex_core_api::{Config, EnvironmentManager, InitialHistory, StartThreadOptions};
@@ -150,6 +151,7 @@ impl ThreadOptions {
         cloud: codex_config::CloudConfigBundleLoader,
         initial_config: Option<&Config>,
         environment_manager: &EnvironmentManager,
+        storage_home: Option<&Path>,
     ) -> anyhow::Result<(StartThreadOptions, Arc<ThreadInstructions>)> {
         anyhow::ensure!(
             self.sdk_history.is_none(),
@@ -281,8 +283,9 @@ impl ThreadOptions {
             (Some(environments), _) => Some(ops::environments(environments)?),
             (None, Some(env)) => {
                 let strict_writes = env.strict_writes();
-                let (selection, writes) =
-                    env.selection(&options.config, environment_manager).await?;
+                let (selection, writes) = env
+                    .selection(&options.config, environment_manager, storage_home)
+                    .await?;
                 env.configure_local_proxy(&mut options.config, &selection)?;
                 if strict_writes {
                     options.thread_extension_init.insert(writes);

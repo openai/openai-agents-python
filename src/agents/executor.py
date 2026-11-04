@@ -285,7 +285,8 @@ class Environment(Generic[ContextT_contra]):
         no ambient environment variables. They can read the working directory,
         additional writable roots, and platform runtime paths. Run the executor
         on an isolated job host if those paths contain sensitive data.
-        Install the SDK and its native helpers outside the writable roots.
+        Keep the SDK, its native helpers, and LocalStorage profiles outside
+        the working directory and additional writable roots.
         """
         path = fspath(cwd)
         return _LocalEnvironment(

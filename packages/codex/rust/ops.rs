@@ -545,6 +545,7 @@ async fn prepare_write_selection(
         &state.engine.manager.environment_manager(),
         &writes,
         roots,
+        state.engine.native_storage_home(),
     )
     .await?;
     if selection != &replacement {

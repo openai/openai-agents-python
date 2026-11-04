@@ -200,6 +200,10 @@ impl EnvironmentOptions {
         }
     }
 
+    pub(crate) fn is_local(&self) -> bool {
+        self.local
+    }
+
     pub(crate) fn strict_writes(&self) -> bool {
         self.local || self.writable_roots.is_some()
     }
@@ -208,7 +212,11 @@ impl EnvironmentOptions {
         capability_roots(self.id(), self.capability_directories.as_deref())
     }
 
-    pub async fn connect(self, config: &Config) -> Result<EnvironmentManager> {
+    pub async fn connect(
+        &self,
+        config: &Config,
+        storage_home: Option<&Path>,
+    ) -> Result<EnvironmentManager> {
         self.check_config(config)?;
         if self.local {
             ensure!(
@@ -227,7 +235,7 @@ impl EnvironmentOptions {
                 )
             })?;
             let info = executor_info(&environment).await?;
-            let (profile, ..) = self.profile(&environment, &info).await?;
+            let (profile, ..) = self.profile(&environment, &info, storage_home).await?;
             self.check_network_target(&info, &profile)?;
             probe_local_sandbox(&environment, &self.cwd, profile).await?;
             return Ok(manager);
@@ -258,7 +266,7 @@ impl EnvironmentOptions {
             .map_err(remote_startup_error)?;
         if self.strict_writes() || self.network.is_some() {
             let info = executor_info(&environment).await?;
-            let (profile, ..) = self.profile(&environment, &info).await?;
+            let (profile, ..) = self.profile(&environment, &info, storage_home).await?;
             self.check_network_target(&info, &profile)?;
         }
         Ok(manager)
@@ -388,6 +396,7 @@ impl EnvironmentOptions {
         &self,
         environment: &Environment,
         info: &EnvironmentInfo,
+        storage_home: Option<&Path>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
         if self.strict_writes() {
             strict_write_profile(
@@ -396,6 +405,7 @@ impl EnvironmentOptions {
                 &self.cwd,
                 self.writable_roots.as_deref().unwrap_or_default(),
                 self.local,
+                storage_home,
             )
             .await
         } else {
@@ -411,6 +421,7 @@ impl EnvironmentOptions {
         &self,
         config: &Config,
         manager: &EnvironmentManager,
+        storage_home: Option<&Path>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
         self.check_config(config)?;
         let environment = manager
@@ -421,7 +432,8 @@ impl EnvironmentOptions {
             || self.cwd.infer_path_convention() == Some(PathConvention::Windows);
         let (profile, workspace_root, writes, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
-            let (profile, workspace_root, writes) = self.profile(&environment, &info).await?;
+            let (profile, workspace_root, writes) =
+                self.profile(&environment, &info, storage_home).await?;
             self.check_network_target(&info, &profile)?;
             (
                 profile,
@@ -636,6 +648,7 @@ async fn strict_write_profile(
     cwd: &PathUri,
     additional: &[PathUri],
     local: bool,
+    storage_home: Option<&Path>,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -680,7 +693,14 @@ async fn strict_write_profile(
     }
     let mut filesystem_policy = workspace_profile(&roots).file_system_sandbox_policy();
     if local {
+        let roots = roots
+            .iter()
+            .map(PathUri::to_abs_path)
+            .collect::<std::io::Result<Vec<_>>>()?;
         check_local_helper_write_roots(environment, &roots)?;
+        if let Some(home) = storage_home {
+            check_local_storage_write_roots(home, &roots)?;
+        }
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -714,14 +734,13 @@ async fn strict_write_profile(
     ))
 }
 
-fn check_local_helper_write_roots(environment: &Environment, roots: &[PathUri]) -> Result<()> {
+fn check_local_helper_write_roots(
+    environment: &Environment,
+    roots: &[AbsolutePathBuf],
+) -> Result<()> {
     let paths = environment
         .local_runtime_paths()
         .context("local executor requires native helper paths")?;
-    let roots = roots
-        .iter()
-        .map(PathUri::to_abs_path)
-        .collect::<std::io::Result<Vec<_>>>()?;
     let packaged_helpers = std::iter::once(&paths.codex_self_exe)
         .chain(paths.codex_linux_sandbox_exe.as_ref())
         .map(|helper| helper.as_path());
@@ -764,17 +783,48 @@ fn check_local_helper_write_roots(environment: &Environment, roots: &[PathUri]) 
             path.is_absolute(),
             "local executor helpers must have absolute paths"
         );
-        let mut links_left = 40;
-        check_local_helper_path(&roots, path, &mut PathBuf::new(), &mut links_left)?;
+        resolve_local_path(
+            path,
+            &mut PathBuf::new(),
+            &mut 40,
+            /*allow_missing*/ false,
+            &|entry| {
+                ensure!(
+                    roots.iter().all(|root| !entry.starts_with(root.as_path())),
+                    "local executor writable roots must stay outside the native helper installation"
+                );
+                Ok(())
+            },
+        )?;
     }
     Ok(())
 }
 
-fn check_local_helper_path(
-    roots: &[AbsolutePathBuf],
+fn check_local_storage_write_roots(home: &Path, roots: &[AbsolutePathBuf]) -> Result<()> {
+    const OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
+    let mut resolved = PathBuf::new();
+    resolve_local_path(home, &mut resolved, &mut 40, true, &|entry| {
+        ensure!(
+            roots.iter().all(|root| !entry.starts_with(root.as_path())),
+            OVERLAP
+        );
+        Ok(())
+    })?;
+    ensure!(
+        roots
+            .iter()
+            .all(|root| !root.as_path().starts_with(&resolved)),
+        OVERLAP
+    );
+    Ok(())
+}
+
+fn resolve_local_path(
     path: &Path,
     resolved: &mut PathBuf,
     links_left: &mut usize,
+    allow_missing: bool,
+    check: &impl Fn(&Path) -> Result<()>,
 ) -> Result<()> {
     for part in path.components() {
         match part {
@@ -785,33 +835,33 @@ fn check_local_helper_path(
             }
             _ => resolved.push(part),
         }
-        let is_symlink = matches!(part, Component::Normal(_))
-            && resolved
-                .symlink_metadata()
-                .context("could not resolve a local sandbox helper path")?
-                .is_symlink();
-        if matches!(part, Component::Normal(_)) && !is_symlink {
-            *resolved = resolved
-                .canonicalize()
-                .context("could not resolve a local sandbox helper path")?;
-        }
-        // Protect each directory entry before following it. A writable link
-        // can redirect the launch even when its current target is trusted.
-        ensure!(
-            !roots
-                .iter()
-                .any(|root| resolved.starts_with(root.as_path())),
-            "local executor writable roots must stay outside the native helper installation"
-        );
+        let is_symlink = if matches!(part, Component::Normal(_)) {
+            match resolved.symlink_metadata() {
+                Ok(metadata) if metadata.is_symlink() => true,
+                Ok(_) => {
+                    *resolved = resolved
+                        .canonicalize()
+                        .context("could not resolve a protected local path")?;
+                    false
+                }
+                Err(error) if allow_missing && error.kind() == ErrorKind::NotFound => false,
+                Err(_) => anyhow::bail!("could not resolve a protected local path"),
+            }
+        } else {
+            false
+        };
+        // Check the directory entry before following a symlink. A writable
+        // link can redirect future access even when its current target is safe.
+        check(resolved)?;
         if is_symlink {
             *links_left = links_left
                 .checked_sub(1)
-                .context("could not resolve a local sandbox helper path")?;
+                .context("could not resolve a protected local path")?;
             let target = resolved
                 .read_link()
-                .context("could not resolve a local sandbox helper path")?;
+                .context("could not resolve a protected local path")?;
             resolved.pop();
-            check_local_helper_path(roots, &target, resolved, links_left)?;
+            resolve_local_path(&target, resolved, links_left, allow_missing, check)?;
         }
     }
     Ok(())
@@ -824,6 +874,7 @@ pub(crate) async fn replace_writable_roots(
     manager: &EnvironmentManager,
     current: &StrictExecutorWrites,
     writable_roots: Vec<PathUri>,
+    storage_home: Option<&Path>,
 ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
@@ -837,8 +888,15 @@ pub(crate) async fn replace_writable_roots(
         .context("selected executor was not registered")?;
     let info = executor_info(&environment).await?;
     let platform = Platform::from_platform_os(info.platform_os.as_deref());
-    let (profile, workspace_root, writes) =
-        strict_write_profile(&environment, &info, &selection.cwd, &writable_roots, local).await?;
+    let (profile, workspace_root, writes) = strict_write_profile(
+        &environment,
+        &info,
+        &selection.cwd,
+        &writable_roots,
+        local,
+        storage_home,
+    )
+    .await?;
     ensure!(
         selection.workspace_roots.as_slice() == std::slice::from_ref(&workspace_root),
         "executor working directory changed since Session startup"
@@ -1120,7 +1178,10 @@ pub async fn connect_environment(
             .await
             .map_err(remote_startup_error)?;
         let config = state.thread.config().await;
-        let (selection, _) = request.environment.selection(&config, &manager).await?;
+        let (selection, _) = request
+            .environment
+            .selection(&config, &manager, None)
+            .await?;
 
         // Connection is slow; serialize only the final update with turn admission and interrupts.
         let mutation = state.mutations.clone().lock_owned().await;

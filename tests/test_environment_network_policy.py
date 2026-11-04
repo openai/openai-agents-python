@@ -366,7 +366,8 @@ async def test_local_resume_matches_recorded_write_mode(
         monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
         agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
-        storage = LocalStorage(tmp_path / "profile")
+        # Host storage and remote executor paths are separate namespaces.
+        storage = LocalStorage(executor.root / "profile")
         implicit = Environment(
             url=executor.url,
             cwd=str(executor.root),
