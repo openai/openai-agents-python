@@ -23,6 +23,7 @@ from agents import (
     NativeError,
     NativeRole,
     ToolContext,
+    TurnNeedsAttention,
     function_tool,
 )
 from tests._asyncio import timeout
@@ -73,6 +74,10 @@ async def test_child_cancel_joins_yielded_cell_and_preserves_root_and_successor(
                 child_cell = yielded_cell(child_requests[2], "alpha")
                 assert await child.try_cancel(captured) is True
                 peer.release["alpha"].set()
+                attention = await captured.wait_for_attention()
+                assert isinstance(attention, TurnNeedsAttention)
+                assert attention.reason == "interrupted"
+                assert isinstance(attention.error, NativeError)
                 await inspect_and_reuse(
                     child,
                     peer.programs["/root/alpha"],

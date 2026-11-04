@@ -1478,11 +1478,19 @@ impl NativeThread {
         })
     }
 
+    #[pyo3(signature = (instructions, instruction_files_json=None))]
     fn _update_instructions<'py>(
         &self,
         py: Python<'py>,
         instructions: String,
+        instruction_files_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let files = instruction_files_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?
+            .unwrap_or_default();
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
@@ -1499,7 +1507,7 @@ impl NativeThread {
                 .await
                 .map_err(|error| PyValueError::new_err(error.to_string()))?;
             // Once publication begins, any error can conceal changed native history.
-            application_instructions::publish(&inner.thread, instructions)
+            application_instructions::publish_with_files(&inner.thread, instructions, files)
                 .await
                 .map_err(py_error)?;
             Ok(true)

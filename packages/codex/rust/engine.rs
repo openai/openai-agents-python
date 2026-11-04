@@ -1428,8 +1428,18 @@ async fn read_child(children: &mut VecDeque<(ThreadId, ChildReader)>) -> (ChildE
 
 fn native_event(
     source: Option<(ThreadId, u64)>,
-    event: Event,
+    mut event: Event,
+    session_reader: bool,
 ) -> anyhow::Result<serde_json::Value> {
+    // Session observations and stored items use Core's same retention limit.
+    // Keep the full native event for callers of the low-level raw reader.
+    if session_reader
+        && matches!(event.msg, EventMsg::ItemCompleted(_))
+        && let Some(std::borrow::Cow::Owned(retained)) =
+            codex_rollout::persisted_event_msg(&event.msg, ThreadHistoryMode::Paginated)
+    {
+        event.msg = retained;
+    }
     let mut value = serde_json::to_value(&event)?;
     if let Some((id, instance)) = source {
         value["subagent_id"] = serde_json::json!(id);
@@ -1534,6 +1544,7 @@ impl ThreadState {
         self: &Arc<Self>,
         source: ChildEventSource,
         mut event: Event,
+        session_reader: bool,
     ) -> anyhow::Result<serde_json::Value> {
         let mut current = false;
         let mut turn_failed = None;
@@ -1570,7 +1581,7 @@ impl ThreadState {
         } else {
             None
         };
-        let mut event = native_event(Some((source.0, source.1)), event)?;
+        let mut event = native_event(Some((source.0, source.1)), event, session_reader)?;
         if let Some(grant) = question {
             let id = ThreadId::new().to_string();
             self.child_questions.lock().await.insert(
@@ -1627,7 +1638,7 @@ impl ThreadState {
         let mut events = self.events.lock().await;
         ensure!(!*closing.borrow(), "Codex thread is closed");
         if let Some(event) = events.initial.take() {
-            return native_event(None, event);
+            return native_event(None, event, admission_ready);
         }
         loop {
             if let Some(terminal) = events.session_terminal.as_mut() {
@@ -1644,7 +1655,7 @@ impl ThreadState {
                 {
                     settlement.delivered(&event.msg);
                 }
-                let mut value = native_event(None, event)?;
+                let mut value = native_event(None, event, admission_ready)?;
                 receipt.attach_provider_error(&mut value);
                 if !value["msg"]["error"].is_null() {
                     receipt.attach_policy_failure(&mut value);
@@ -1658,7 +1669,7 @@ impl ThreadState {
                 return graph_event(event);
             }
             if let Some((source, event)) = events.pending.pop_front() {
-                return self.child_event(source, event).await;
+                return self.child_event(source, event, admission_ready).await;
             }
             let ThreadEvents {
                 extensions,
@@ -1692,9 +1703,9 @@ impl ThreadState {
                         .get::<crate::turn_settlement::Settlement>() {
                         settlement.delivered(&event.msg);
                     }
-                    return native_event(None, event);
+                    return native_event(None, event, admission_ready);
                 },
-                (source, event) = read_child(children) => return self.child_event(source, event).await,
+                (source, event) = read_child(children) => return self.child_event(source, event, admission_ready).await,
                 Some(event) = graph.recv() => {
                     self.discover_children(&mut events).await?;
                     return graph_event(event);
@@ -1710,7 +1721,7 @@ impl ThreadState {
                 event = extensions.recv() => {
                     let (target, event) = event?;
                     if target.is_empty() || target == self.id.to_string() {
-                        return native_event(None, event);
+                        return native_event(None, event, admission_ready);
                     }
                     if let Ok(id) = ThreadId::from_string(&target) {
                         if !events.children.iter().any(|(child_id, _)| *child_id == id) {

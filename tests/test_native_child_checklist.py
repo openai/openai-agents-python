@@ -14,7 +14,7 @@ import pytest
 from agents import function_tool
 from agents.tools import Checklist
 from tests._asyncio import timeout
-from tests.native_executor_fixtures import ExecutorPeer
+from tests.native_executor_fixtures import ExecutorPeer, assert_portable_executor_turns
 from tests.native_fixtures import assistant_output, function_call, tool_output
 from tests.test_environment_leases_checklist import declarations
 from tests.test_native_child_agents import agent_for, child_peer, handles, metadata, trust
@@ -165,7 +165,7 @@ async def test_native_child_checklist_history_and_readonly_restore(
             before_count = len(peer.requests)
             assert await restored.checklist() == root_plan
             assert [item async for item in restored.items()] == root_items
-            assert [turn async for turn in restored.turns()] == root_turns
+            assert_portable_executor_turns([turn async for turn in restored.turns()], root_turns)
             rows = [row async for row in restored.subagents()]
             assert all(row.turn is None for row in rows)
             for row in rows:
@@ -173,9 +173,10 @@ async def test_native_child_checklist_history_and_readonly_restore(
                 assert [item async for item in restored.items(subagent_id=row.id)] == snapshots[
                     row.id
                 ][1]
-                assert [turn async for turn in restored.turns(subagent_id=row.id)] == snapshots[
-                    row.id
-                ][2]
+                assert_portable_executor_turns(
+                    [turn async for turn in restored.turns(subagent_id=row.id)],
+                    snapshots[row.id][2],
+                )
             assert len(peer.requests) == before_count
             result = await (await restored.submit("Read, do not update.")).get_result()
             assert result.final_output == "read only"

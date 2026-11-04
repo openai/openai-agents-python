@@ -14,10 +14,22 @@ from pathlib import Path
 from typing import Any
 
 from aiohttp import ClientConnectorError, ClientSession, ClientTimeout, WSMsgType, web
-from aiohttp.test_utils import TestServer, unused_port
+from aiohttp.test_utils import TestServer
 
 import agents
+from agents.history import RecordedTurn
 from tests._asyncio import timeout
+
+
+def assert_portable_executor_turns(restored: list[RecordedTurn], live: list[RecordedTurn]) -> None:
+    """Compare turns that sampled the fixture executor before a portable restore."""
+    assert restored and len(restored) == len(live)
+    for actual, original in zip(restored, live, strict=True):
+        live_receipt = original.get("receipt")
+        restored_receipt = actual.get("receipt")
+        assert live_receipt is not None and live_receipt["executors"]
+        assert restored_receipt is not None and restored_receipt["executors"] is None
+        assert actual == {**original, "receipt": {**live_receipt, "executors": None}}
 
 
 async def _openssl(*arguments: str) -> None:
@@ -115,8 +127,6 @@ class ExecutorPeer:
         config.mkdir()
         ca, context = await test_certificate(config, self.certificate_names)
         self.ca = ca
-        port = unused_port()
-        address = f"http://127.0.0.1:{port}"
         # This fixture is the remote host and must find its own sandbox helper.
         helper_path = Path(agents.__file__).resolve().parent / "bin"
         environment = {
@@ -127,10 +137,10 @@ class ExecutorPeer:
         with (config / "exec-server.log").open("wb") as log:
             process = await asyncio.create_subprocess_exec(
                 str(binary),
-                address.replace("http:", "ws:"),
+                "ws://127.0.0.1:0",
                 cwd=self.root,
                 env=environment,
-                stdout=log,
+                stdout=asyncio.subprocess.PIPE,
                 stderr=log,
             )
             try:
@@ -138,9 +148,20 @@ class ExecutorPeer:
                     timeout(15) as startup,
                     ClientSession(timeout=ClientTimeout(total=2)) as client,
                 ):
+                    assert process.stdout is not None
+                    address = (await process.stdout.readline()).decode().strip()
+                    if not address:
+                        await process.wait()
+                        raise AssertionError(
+                            f"Native exec server exited during startup ({process.returncode}): "
+                            + (config / "exec-server.log").read_text()
+                        )
+                    assert address.startswith("ws://127.0.0.1:"), address
+                    address = address.replace("ws:", "http:", 1)
                     while True:
                         assert process.returncode is None, (
-                            "Native exec server exited during startup"
+                            f"Native exec server exited during startup ({process.returncode}): "
+                            + (config / "exec-server.log").read_text()
                         )
                         try:
                             async with client.get(address + "/readyz") as response:

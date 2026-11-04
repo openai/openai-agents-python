@@ -7,21 +7,29 @@ durable log. Use Turn.get_result and canonical history for authoritative results
 from __future__ import annotations
 
 import asyncio
+import json
 import weakref
 from collections import deque
 from collections.abc import AsyncIterator, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar, cast
 
+from typing_extensions import TypedDict
+
+from ._events import ExecutionItem, FunctionCallStatus
+from .rate_limits import ApiRateLimits
 from .usage import TokenUsageInfo
 
 if TYPE_CHECKING:
     from .turn import Turn
 
 __all__ = [
+    "ApiRateLimitsUpdated",
     "ContextCompacted",
     "EventGap",
     "EventStream",
+    "ExecutionItemCompleted",
     "Observation",
     "OutputTextDelta",
     "SubagentLifecycle",
@@ -87,6 +95,14 @@ class UsageUpdated(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class ApiRateLimitsUpdated(_SubmissionEvent):
+    """Rate-limit fields reported on a provider response for this turn."""
+
+    snapshot: ApiRateLimits
+    type: Literal["api_rate_limits_updated"] = field(default="api_rate_limits_updated", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ContextCompacted(_SubmissionEvent):
     """Core completed this native context-compaction item."""
 
@@ -121,6 +137,34 @@ class ToolFinished(_SubmissionEvent):
     status: Literal["completed", "failed", "cancelled"]
     family: Literal["function", "mcp"] = "function"
     type: Literal["tool_finished"] = field(default="tool_finished", init=False)
+
+
+class _ExecutionItemReference(TypedDict):
+    type: Literal["command_execution", "patch_execution", "mcp_call"]
+    id: str
+    call_id: str
+    thread_id: str | None
+    turn_id: str
+    status: FunctionCallStatus
+    native_status: str | None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExecutionItemCompleted(_SubmissionEvent):
+    """Core reported the end of a command, patch, or MCP call.
+
+    By default, the item contains only identity and status. Use
+    include_execution_details=True on the reader to receive sensitive payloads.
+    Match the item's thread, turn, and call IDs to its retained record in
+    Session.items() after an EventGap or reopen. Pass subagent_id for a child
+    thread. Core bounds command output and MCP results before retention.
+    Calls interrupted before Core reports a completion may have no item.
+    """
+
+    item: ExecutionItem | _ExecutionItemReference
+    type: Literal["execution_item_completed"] = field(
+        default="execution_item_completed", init=False
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -164,9 +208,11 @@ Observation: TypeAlias = (
     | SubagentLifecycle
     | OutputTextDelta
     | UsageUpdated
+    | ApiRateLimitsUpdated
     | ContextCompacted
     | ToolStarted
     | ToolFinished
+    | ExecutionItemCompleted
     | SessionEnded
     | EventGap
 )
@@ -198,28 +244,43 @@ class _ObservationBuffer:
         self.changed.set()
         self.changed = asyncio.Event()
 
+    def turn_started(self, turn_id: str) -> TurnStarted | None:
+        """Find the retained owner of a late native completion."""
+        for event, _ in reversed(self.records):
+            if isinstance(event, TurnStarted) and event.turn_id == turn_id:
+                return event
+        return None
+
+    def _mark_gap(self) -> None:
+        if self.closed:
+            return
+        self.sequence += 1
+        # Drop the prefix so the retained observations form a contiguous suffix.
+        self.records.clear()
+        self.characters = 0
+        self.notify()
+
     def append(self, event: _ObservationT) -> _ObservationT | None:
         if self.closed:
             return None
-        self.sequence += 1
-        event = replace(event, sequence=self.sequence)
+        event = replace(event, sequence=self.sequence + 1)
         size = sum(
             len(value)
             for definition in fields(event)
             if isinstance(value := getattr(event, definition.name), str)
         )
+        if isinstance(event, ExecutionItemCompleted):
+            size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
         if size > 65_536:
-            # An oversized record is a visible hole. Drop the older prefix too,
-            # so the retained records still form one contiguous suffix.
-            self.records.clear()
-            self.characters = 0
+            self._mark_gap()
         else:
+            self.sequence += 1
             self.records.append((event, size))
             self.characters += size
             while len(self.records) > 256 or self.characters > 65_536:
                 _, removed = self.records.popleft()
                 self.characters -= removed
-        self.notify()
+            self.notify()
         if self.repair_parent is not None and isinstance(event, _SubmissionEvent):
             buffer, parent_id = self.repair_parent
             buffer.append(cast(Observation, replace(event, parent_submission_id=parent_id)))
@@ -241,7 +302,12 @@ class EventStream(AsyncIterator[Observation]):
     """
 
     def __init__(
-        self, buffer: _ObservationBuffer, *, after: int, _turn: Turn[Any] | None = None
+        self,
+        buffer: _ObservationBuffer,
+        *,
+        after: int,
+        _turn: Turn[Any] | None = None,
+        _include_execution_details: bool = False,
     ) -> None:
         if after < 0 or after > buffer.sequence:
             raise ValueError("after must be between zero and the current event sequence")
@@ -250,6 +316,7 @@ class EventStream(AsyncIterator[Observation]):
         self._closed = False
         self._reading = False
         self._turn = _turn
+        self._include_execution_details = _include_execution_details is True
 
     def __aiter__(self) -> EventStream:
         return self
@@ -280,6 +347,21 @@ class EventStream(AsyncIterator[Observation]):
                 for event, _ in records:
                     if event.sequence > self._after:
                         self._after = event.sequence
+                        if isinstance(event, ExecutionItemCompleted):
+                            item = event.item
+                            if self._include_execution_details:
+                                item = deepcopy(item)
+                            else:
+                                item = {
+                                    "type": item["type"],
+                                    "id": item["id"],
+                                    "call_id": item.get("call_id", item["id"]),
+                                    "thread_id": item.get("thread_id"),
+                                    "turn_id": item["turn_id"],
+                                    "status": item["status"],
+                                    "native_status": item.get("native_status"),
+                                }
+                            event = replace(event, item=item)
                         if self._turn is None:
                             return event
                         owners = {step.submission_id for step in self._turn._steps()}

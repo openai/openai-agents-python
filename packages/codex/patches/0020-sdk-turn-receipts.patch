@@ -1,0 +1,795 @@
+diff --git a/codex-rs/app-server/src/request_processors/feedback_processor.rs b/codex-rs/app-server/src/request_processors/feedback_processor.rs
+index a5192d03ead25c6706eb1f7d00264e4fb119ade5..15aa393134cd62801d3f3ffd324ec9a70b3f9ff2 100644
+--- a/codex-rs/app-server/src/request_processors/feedback_processor.rs
++++ b/codex-rs/app-server/src/request_processors/feedback_processor.rs
+@@ -758,6 +758,7 @@ mod tests {
+                 timestamp: "2026-07-24T00:00:01Z".to_string(),
+                 ordinal: None,
+                 item: RolloutItem::TurnContext(TurnContextItem {
++                    sdk_receipt: None,
+                     turn_id: Some((*turn_id).to_string()),
+                     root_turn_id: None,
+                     disabled_plugin_ids: None,
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index d6ce293b53c4740e10426e3c835944a166ba73dc..81bef45c8b8ab98b3aea451b9f8297a84b6d4ac2 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -63,6 +63,7 @@ fn turn_context_item(
+     active_permission_profile: Option<ActivePermissionProfile>,
+ ) -> RolloutItem {
+     RolloutItem::TurnContext(TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_id.to_string()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+diff --git a/codex-rs/core/src/agents_md.rs b/codex-rs/core/src/agents_md.rs
+index 8e0c475d90339a236f51da33f85e70b967a61f26..4228374b3cd89b9203b656bba8d5e70c69982980 100644
+--- a/codex-rs/core/src/agents_md.rs
++++ b/codex-rs/core/src/agents_md.rs
+@@ -498,6 +498,32 @@ impl LoadedAgentsMd {
+             )
+     }
+ 
++    /// The exact text loaded from each native instruction file.
++    pub(crate) fn sdk_file_receipts(&self, sha256: fn(&str) -> String) -> Vec<serde_json::Value> {
++        let host = [
++            ("native_user", self.user_instructions.as_ref()),
++            ("native_thread", self.thread_instructions.as_ref()),
++        ];
++        host.into_iter()
++            .filter_map(|(source, instructions)| {
++                let instructions = instructions?;
++                Some(serde_json::json!({
++                    "path": instructions.source.as_ref()?,
++                    "source": source,
++                    "sha256": sha256(&instructions.text),
++                }))
++            })
++            .chain(self.entries.iter().filter_map(|entry| {
++                let path = entry.provenance.path()?;
++                Some(serde_json::json!({
++                    "path": path.inferred_native_path_string(),
++                    "source": "native_project",
++                    "sha256": sha256(&entry.contents),
++                }))
++            }))
++            .collect()
++    }
++
+     fn has_multiple_project_environments(&self) -> bool {
+         let mut first_environment_id = None;
+         self.entries.iter().any(|entry| {
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index b70c0b5a70dd24251fe15227669c4ef0eb43694a..69d70003b60b93c831089efb5ab8539be3c8fbc5 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -19,6 +19,7 @@ use codex_exec_server::SelectedCapabilityRootsStatus;
+ use codex_extension_api::ConversationHistorySnapshot;
+ use codex_extension_api::ThreadIdleCause;
+ use codex_features::Feature;
++use codex_history::ResponseItemEnvelope;
+ use codex_history::RolloutItem;
+ use codex_otel::SessionTelemetry;
+ use codex_otel::current_span_w3c_trace_context;
+@@ -855,6 +856,33 @@ impl CodexThread {
+     pub async fn inject_response_items_for_turn(
+         &self,
+         items: Vec<ResponseItem>,
++    ) -> CodexResult<()> {
++        let envelopes = items
++            .into_iter()
++            .map(|item| self.session.annotate_client_response_item(item))
++            .collect();
++        self.inject_annotated_response_items_for_turn(envelopes)
++            .await
++    }
++
++    /// Creates a client response item with the harness's normal provenance.
++    pub fn annotate_client_response_item(&self, item: ResponseItem) -> ResponseItemEnvelope {
++        self.session.annotate_client_response_item(item)
++    }
++
++    /// Injects a host-authored item with metadata that stays in native history.
++    pub async fn inject_response_item_envelopes(
++        &self,
++        items: Vec<ResponseItemEnvelope>,
++    ) -> CodexResult<()> {
++        self.inject_annotated_response_items_for_turn(items).await?;
++        self.checkpoint_preparation().await?;
++        Ok(())
++    }
++
++    async fn inject_annotated_response_items_for_turn(
++        &self,
++        items: Vec<ResponseItemEnvelope>,
+     ) -> CodexResult<()> {
+         if items.is_empty() {
+             return Err(CodexErr::InvalidRequest(
+@@ -884,7 +912,7 @@ impl CodexThread {
+                 .await?;
+         }
+         self.session
+-            .inject_client_response_items(items, turn_context.as_ref())
++            .inject_annotated_response_items(items, turn_context.as_ref())
+             .await;
+         Ok(())
+     }
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 52d417afaac9288c8bd7e0a7463d7c486501b43e..33986a65bdeba3577c677669b9be00918ecdb690 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -705,6 +705,7 @@ fn developer_msg_with_fragments(texts: &[&str]) -> ResponseItem {
+ 
+ fn reference_context_item() -> TurnContextItem {
+     TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some("reference-turn".to_string()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+diff --git a/codex-rs/core/src/session/inject.rs b/codex-rs/core/src/session/inject.rs
+index ea999374a39c488a7a619962e39d1702f00cb094..55e1df40e1a7ef292394a99db84dec0815ccef47 100644
+--- a/codex-rs/core/src/session/inject.rs
++++ b/codex-rs/core/src/session/inject.rs
+@@ -67,10 +67,6 @@ impl Session {
+     }
+ 
+     /// Preserves trusted client provenance while items wait for an active turn.
+-    #[expect(
+-        clippy::await_holding_invalid_type,
+-        reason = "active turn checks and turn state updates must remain atomic"
+-    )]
+     pub(crate) async fn inject_client_response_items(
+         &self,
+         items: Vec<ResponseItem>,
+@@ -79,7 +75,20 @@ impl Session {
+         let items = items
+             .into_iter()
+             .map(|item| self.annotate_client_response_item(item))
+-            .collect::<Vec<_>>();
++            .collect();
++        self.inject_annotated_response_items(items, turn_context)
++            .await;
++    }
++
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "active turn checks and turn state updates must remain atomic"
++    )]
++    pub(crate) async fn inject_annotated_response_items(
++        &self,
++        items: Vec<ResponseItemEnvelope>,
++        turn_context: &TurnContext,
++    ) {
+         let mut active = self.active_turn.lock().await;
+         if let Some(active_turn) = active.as_mut() {
+             self.input_queue
+diff --git a/codex-rs/core/src/session/rollout_reconstruction.rs b/codex-rs/core/src/session/rollout_reconstruction.rs
+index ab20e5b30ef4a363d12d12ee9d5c1375b985a825..404412549fc370ad134d9e5cbb6fecc6d7c52118 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction.rs
+@@ -4,6 +4,7 @@ use crate::context_manager::is_user_turn_boundary;
+ use codex_history::ResponseItemEnvelope;
+ use codex_protocol::protocol::SessionContextWindow;
+ use codex_protocol::protocol::ThreadHistoryMode;
++use serde::Deserialize;
+ use uuid::Uuid;
+ 
+ // Return value of `Session::reconstruct_history_from_rollout`, bundling the rebuilt history with
+@@ -165,6 +166,59 @@ fn finalize_active_segment<'a>(
+     }
+ }
+ 
++// A sampling record copies the frozen context for a turn whose canonical context
++// was already written. Live sampling may change summary, realtime, or the
++// effective settings inside the receipt. Those observations are not baselines.
++fn sdk_sampling_context_indexes(replay_items: &[RolloutItem]) -> HashSet<usize> {
++    let mut observations = HashSet::new();
++    let mut baseline: Option<&TurnContextItem> = None;
++    for (index, item) in replay_items.iter().enumerate() {
++        match item {
++            RolloutItem::TurnContext(context) => {
++                if baseline.is_some_and(|baseline| is_sdk_sampling_context(context, baseline)) {
++                    observations.insert(index);
++                } else {
++                    baseline = Some(context);
++                }
++            }
++            RolloutItem::Compacted(_)
++            | RolloutItem::EventMsg(
++                EventMsg::TurnStarted(_) | EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_),
++            ) => baseline = None,
++            _ => {}
++        }
++    }
++    observations
++}
++
++fn is_sdk_sampling_context(context: &TurnContextItem, baseline: &TurnContextItem) -> bool {
++    let Some(receipt) = context.sdk_receipt.as_ref() else {
++        return false;
++    };
++    if context.turn_id.is_none()
++        || context.turn_id != baseline.turn_id
++        || receipt.get("version").and_then(serde_json::Value::as_u64) != Some(1)
++        || !receipt
++            .get("thread_id")
++            .and_then(serde_json::Value::as_str)
++            .is_some_and(|id| ThreadId::from_string(id).is_ok())
++        || !receipt
++            .get("model")
++            .and_then(serde_json::Value::as_str)
++            .is_some_and(|model| !model.is_empty())
++        || !receipt
++            .get("approval_policy")
++            .is_some_and(|policy| AskForApproval::deserialize(policy).is_ok())
++    {
++        return false;
++    }
++    let mut baseline = baseline.clone();
++    baseline.sdk_receipt.clone_from(&context.sdk_receipt);
++    baseline.realtime_active = context.realtime_active;
++    baseline.summary = context.summary;
++    &baseline == context
++}
++
+ impl Session {
+     pub(super) async fn reconstruct_history_from_rollout(
+         &self,
+@@ -227,6 +281,7 @@ impl Session {
+         // we hit its matching `TurnStarted`, at which point the segment can be finalized.
+         let mut active_segment: Option<ActiveReplaySegment<'_>> = None;
+ 
++        let sdk_sampling_contexts = sdk_sampling_context_indexes(replay_items);
+         for (index, item) in replay_items.iter().enumerate().rev() {
+             match item {
+                 RolloutItem::Compacted(compacted) => {
+@@ -290,6 +345,9 @@ impl Session {
+                     active_segment.counts_as_user_turn = true;
+                 }
+                 RolloutItem::TurnContext(ctx) => {
++                    if sdk_sampling_contexts.contains(&index) {
++                        continue;
++                    }
+                     let active_segment =
+                         active_segment.get_or_insert_with(ActiveReplaySegment::default);
+                     // `TurnContextItem` can attach metadata to an existing segment, but only a
+@@ -311,8 +369,10 @@ impl Session {
+                             active_segment.reference_context_item,
+                             TurnReferenceContextItem::NeverSet
+                         ) {
++                            let mut reference = ctx.clone();
++                            reference.sdk_receipt = None;
+                             active_segment.reference_context_item =
+-                                TurnReferenceContextItem::Latest(Box::new(ctx.clone()));
++                                TurnReferenceContextItem::Latest(Box::new(reference));
+                         }
+                     }
+                 }
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index 7b280be1205f785b8770729b0976ec8109bd0d12..9feb0790280d1baac1d5252fc9c5d0aabee573e4 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -437,6 +437,7 @@ async fn record_initial_history_resumed_bare_turn_context_does_not_hydrate_previ
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+@@ -489,6 +490,7 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "previous-rollout-model";
+     let mut previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+@@ -576,6 +578,72 @@ async fn record_initial_history_resumed_hydrates_previous_turn_settings_from_lif
+     );
+ }
+ 
++#[tokio::test]
++async fn sdk_sampling_metadata_cannot_discard_the_durable_turn_context() {
++    let (session, turn_context) = make_session_and_context().await;
++    let canonical = turn_context.to_turn_context_item();
++    let turn_id = canonical.turn_id.clone().expect("native turn id");
++    let receipt = json!({
++        "version": 1,
++        "thread_id": ThreadId::new(),
++        "model": "step-model",
++        "reasoning_effort": null,
++        "instruction_revision": null,
++        "developer_instructions_sha256": null,
++        "instruction_files": [],
++        "user_config_applied": false,
++        "codex_revision": "a".repeat(40),
++        "codex_source_tree": "b".repeat(40),
++        "approval_policy": "never",
++        "executors": null,
++    });
++
++    for (attached, include_sample) in [
++        (Some(json!({"invalid": true})), false),
++        (Some(receipt.clone()), false),
++        (None, true),
++    ] {
++        let mut restored_context = canonical.clone();
++        restored_context.sdk_receipt = attached;
++        let mut rollout = vec![
++            RolloutItem::EventMsg(EventMsg::TurnStarted(
++                codex_protocol::protocol::TurnStartedEvent {
++                    turn_id: turn_id.clone(),
++                    root_turn_id: None,
++                    trace_id: None,
++                    started_at: None,
++                    model_context_window: Some(128_000),
++                    collaboration_mode_kind: ModeKind::Default,
++                },
++            )),
++            RolloutItem::EventMsg(EventMsg::UserMessage(
++                codex_protocol::protocol::UserMessageEvent {
++                    message: "seed".to_string(),
++                    ..Default::default()
++                },
++            )),
++            RolloutItem::TurnContext(restored_context),
++        ];
++        if include_sample {
++            let mut sampled = canonical.clone();
++            sampled.sdk_receipt = Some(receipt.clone());
++            sampled.realtime_active = Some(!turn_context.realtime_active);
++            rollout.push(RolloutItem::TurnContext(sampled));
++        }
++        let restored = session
++            .reconstruct_history_from_rollout(&turn_context, &rollout)
++            .await;
++        assert_eq!(restored.reference_context_item.as_ref(), Some(&canonical));
++        assert_eq!(
++            restored
++                .previous_turn_settings
++                .as_ref()
++                .map(|settings| settings.model.as_str()),
++            Some(canonical.model.as_str())
++        );
++    }
++}
++
+ #[tokio::test]
+ async fn reconstruct_history_rollback_keeps_history_and_metadata_in_sync_for_completed_turns() {
+     let (session, turn_context) = make_session_and_context().await;
+@@ -907,6 +975,7 @@ async fn reconstruct_history_rollback_skips_non_user_turns_for_history_and_metad
+         RolloutItem::ResponseItem(standalone_assistant.into()),
+         RolloutItem::WorldState(WorldStateItem::full(object!({}))),
+         RolloutItem::TurnContext(TurnContextItem {
++            sdk_receipt: None,
+             turn_id: Some(standalone_turn_id.clone()),
+             ..first_context_item.clone()
+         }),
+@@ -961,6 +1030,7 @@ async fn reconstruct_history_rollback_counts_inter_agent_assistant_turns() {
+         .expect("turn context should have turn_id");
+     let assistant_turn_id = "assistant-instruction-turn".to_string();
+     let assistant_turn_context = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(assistant_turn_id.clone()),
+         ..first_context_item.clone()
+     };
+@@ -1915,6 +1985,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: Some("root-turn".to_string()),
+         disabled_plugin_ids: None,
+@@ -2017,6 +2088,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
+         serde_json::to_value(session.reference_context_item().await)
+             .expect("serialize seeded reference context item"),
+         serde_json::to_value(Some(TurnContextItem {
++            sdk_receipt: None,
+             turn_id: Some(turn_context.sub_id.clone()),
+             root_turn_id: Some("root-turn".to_string()),
+             disabled_plugin_ids: None,
+@@ -2053,6 +2125,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+@@ -2198,6 +2271,7 @@ async fn record_initial_history_resumed_unmatched_abort_preserves_active_turn_fo
+     let current_turn_id = "current-turn".to_string();
+     let unmatched_abort_turn_id = "other-turn".to_string();
+     let current_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(current_turn_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+@@ -2334,6 +2408,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+@@ -2521,6 +2596,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "previous-rollout-model";
+     let previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index 53e295061c291d02677873d8eb581a891b950f02..09b77f6dedc0daaaf84ceb473e970ca13ad5dab6 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -13,11 +13,17 @@ use crate::tools::router::ToolRouter;
+ use codex_exec_server::ExecutorCapabilityDiscoverySnapshot;
+ use codex_exec_server::ResolvedSelectedCapabilityRoot;
+ use codex_extension_api::ExtensionData;
++use codex_extension_api::SdkTurnReceiptSeed;
+ use codex_file_system::EnvironmentAccess;
+ use codex_mcp::McpBinding;
+ use codex_otel::SessionTelemetry;
++use codex_protocol::ThreadId;
+ use codex_protocol::items::ModelInvocationContext;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::TurnContextItem;
++use codex_protocol::protocol::sdk_executor_policy_receipt;
+ use tokio_util::sync::CancellationToken;
+ 
+ /// Request-scoped state that may change between model sampling requests.
+@@ -82,6 +88,67 @@ impl StepContext {
+         item
+     }
+ 
++    pub(crate) fn sdk_sampling_receipt(
++        &self,
++        thread_id: ThreadId,
++        input: &[ResponseItem],
++        effort: Option<&ReasoningEffort>,
++    ) -> Option<serde_json::Value> {
++        let seed = self.extension_data.get::<SdkTurnReceiptSeed>()?;
++        let application = seed.application.as_ref().filter(|application| {
++            input.iter().rev().any(|item| {
++                let ResponseItem::Message { role, content, .. } = item else {
++                    return false;
++                };
++                role == "developer" && content.iter().any(|part| {
++                    matches!(part, ContentItem::InputText { text } if text == &application.rendered)
++                })
++            })
++        });
++        let mut files = application
++            .map(|application| application.files.clone())
++            .unwrap_or_default();
++        if let Some(instructions) = &self.loaded_agents_md {
++            files.extend(instructions.sdk_file_receipts(seed.sha256));
++        }
++        let developer_sha256 = application
++            .map(|value| value.developer_sha256.clone())
++            .or_else(|| self.turn.developer_instructions.as_deref().map(seed.sha256));
++        let settings = &self.settings;
++        let model = &settings.model_info;
++        let reasoning_effort = effort
++            .or(model.default_reasoning_level.as_ref())
++            .map(|effort| model.resolve_reasoning_effort(effort.clone()));
++        let executors = self
++            .environments
++            .turn_environments()
++            .filter_map(|env| {
++                sdk_executor_policy_receipt(&env.selection, env.environment.is_remote())
++            })
++            .collect::<Vec<_>>();
++        let user_config_applied = self
++            .turn
++            .config
++            .config_layer_stack
++            .effective_user_config()
++            .is_some_and(|config| config.as_table().is_some_and(|table| !table.is_empty()));
++        Some(serde_json::json!({
++            "version": 1,
++            "thread_id": thread_id,
++            "model": model.slug,
++            "reasoning_effort": reasoning_effort,
++            "instruction_revision": application.and_then(|value| value.revision.as_deref()),
++            "developer_instructions_sha256": developer_sha256,
++            "instruction_files": files,
++            "user_config_applied": user_config_applied,
++            "codex_revision": seed.codex_revision,
++            "codex_source_tree": seed.codex_source_tree,
++            "approval_policy": settings.approval_policy(),
++            "strict_executor_writes": seed.strict_executor_writes && !executors.is_empty(),
++            "executors": executors,
++        }))
++    }
++
+     pub(crate) fn model_context(&self) -> ModelInvocationContext {
+         ModelInvocationContext {
+             model_slug: self.settings.model_info.slug.clone(),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index ced8b3c2e8c38f51b45805ad46294709f92f763b..f525dfe8b6f2abbfe1ff20f5bf013b79a7e063ae 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -4309,6 +4309,7 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
+     let (session, turn_context) = make_session_and_context().await;
+     let previous_model = "forked-rollout-model";
+     let previous_context_item = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_context.sub_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index e8d730a7cbc42656b65ec480d8265b27328cd867..f214991ca929490d0b45b6a94db24abbd345061f 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -77,6 +77,7 @@ use codex_extension_api::TurnInputEnvironment;
+ use codex_features::Feature;
+ use codex_file_system::FindUpErrorPolicy;
+ use codex_file_system::find_nearest_ancestor_with_markers;
++use codex_history::RolloutItem;
+ use codex_login::CodexAuth;
+ use codex_model_provider::RemoteCompactionSupport;
+ use codex_protocol::ResponseItemId;
+@@ -2578,6 +2579,27 @@ async fn try_run_sampling_request(
+     let effort = sess
+         .reasoning_effort_for_request(&step_context.settings, super::RequestEffortUsage::Sampling)
+         .await;
++    // Record settings from this actual sampling context without changing the resume baseline.
++    // A later request in the same turn may select different live settings.
++    struct LastSdkReceipt(serde_json::Value);
++    if let Some(receipt) =
++        step_context.sdk_sampling_receipt(sess.thread_id(), &prompt.input, effort.as_ref())
++        && turn_context
++            .extension_data
++            .get::<LastSdkReceipt>()
++            .as_deref()
++            .map(|last| &last.0)
++            != Some(&receipt)
++    {
++        let mut item = step_context.to_turn_context_item();
++        item.sdk_receipt = Some(receipt.clone());
++        if sess
++            .persist_rollout_items(&[RolloutItem::TurnContext(item)])
++            .await
++        {
++            turn_context.extension_data.insert(LastSdkReceipt(receipt));
++        }
++    }
+     let mut stream = client_session
+         .stream(
+             prompt,
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index e8f9abb256ddb2fab8b606863006f811a284132d..0b00915161474caaa30191035ba8477d249e5adb 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -924,6 +924,7 @@ impl TurnContext {
+         #[allow(deprecated)]
+         let cwd = self.cwd.clone();
+         TurnContextItem {
++            sdk_receipt: None,
+             turn_id: Some(self.sub_id.clone()),
+             root_turn_id: self.turn_metadata_state.root_turn_id(),
+             disabled_plugin_ids: Some(self.disabled_plugin_ids.clone()),
+diff --git a/codex-rs/core/tests/suite/resume_warning.rs b/codex-rs/core/tests/suite/resume_warning.rs
+index fd53c8cfe22a7611d91db05c2b53f3408b718974..19f7b60887adda327e1c7f41c00e827c84dbc5a6 100644
+--- a/codex-rs/core/tests/suite/resume_warning.rs
++++ b/codex-rs/core/tests/suite/resume_warning.rs
+@@ -29,6 +29,7 @@ fn resume_history(
+ ) -> InitialHistory {
+     let turn_id = "resume-warning-seed-turn".to_string();
+     let turn_ctx = TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_id.clone()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 4e48e52d715d0f455977a35f1296b79161018ebf..ea9ac3fb1101cf4ba94ea8dde938d2062368351f 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -124,3 +124,21 @@ pub use model_request::ModelResponseInterceptor;
+ pub use model_request::ModelResponseStream;
+ pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
++
++/// SDK host context for recording the settings used to prepare a sampling request.
++pub struct SdkTurnReceiptSeed {
++    pub codex_revision: &'static str,
++    pub codex_source_tree: &'static str,
++    pub sha256: fn(&str) -> String,
++    pub strict_executor_writes: bool,
++    pub application: Option<SdkApplicationInstructions>,
++}
++
++/// SDK instruction provenance to verify against the model context.
++#[derive(Clone)]
++pub struct SdkApplicationInstructions {
++    pub revision: Option<String>,
++    pub rendered: String,
++    pub developer_sha256: String,
++    pub files: Vec<serde_json::Value>,
++}
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 5fb8de42908c2a52cb3230d330710846c5904277..53d396cf3a3faca4ff785c7a130023f9c9eaf1f2 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -61,6 +61,10 @@ pub struct ResponseItemEnvelope {
+ ///
+ #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+ pub struct CodexHarnessMetadata {
++    /// File sources for an SDK-authored instruction publication. Host-only.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub sdk_instruction_files: Option<serde_json::Value>,
++
+     /// Complete retained records actually delivered by this Guardian message. Host-only.
+     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+     pub guardian_sources: Vec<RetainedSource>,
+diff --git a/codex-rs/protocol/src/environment.rs b/codex-rs/protocol/src/environment.rs
+index a21dbb63424ed1eb917ad76b86b0007be7ef454b..93443249595270ed0c5509eee3b2eb14134a66bd 100644
+--- a/codex-rs/protocol/src/environment.rs
++++ b/codex-rs/protocol/src/environment.rs
+@@ -6,7 +6,9 @@ use crate::config_types::WindowsSandboxLevel;
+ use crate::mcp_policy::EnvironmentMcpPolicy;
+ use crate::models::PermissionProfile;
+ use crate::models::PermissionProfileSnapshot;
++use crate::permissions::FileSystemPath;
+ use crate::protocol::AskForApproval;
++use crate::protocol::TurnEnvironmentSelection;
+ use crate::sandbox::SandboxType;
+ use codex_execpolicy::RequirementsExecPolicy;
+ use codex_network_proxy::EnvironmentNetworkPolicy;
+@@ -99,3 +101,41 @@ impl std::fmt::Debug for EnvironmentConfig {
+             .finish()
+     }
+ }
++
++/// Policy for the executor selected for an SDK sampling request.
++pub fn sdk_executor_policy_receipt(
++    selection: &TurnEnvironmentSelection,
++    remote: bool,
++) -> Option<serde_json::Value> {
++    let EnvironmentConfigState::Ready(config) = &selection.config else {
++        return None;
++    };
++    let profile = config.permission_profile.permission_profile();
++    let fs = profile.file_system_sandbox_policy();
++    let writable_roots = fs
++        .entries
++        .iter()
++        .filter_map(|entry| match &entry.path {
++            FileSystemPath::Path { path } if entry.access.can_write() => Some(path),
++            _ => None,
++        })
++        .collect::<Vec<_>>();
++    let network_policy = config.network_policy.as_ref().map(|policy| {
++        serde_json::json!({
++            "requires_proxy": policy.requires_proxy,
++            "domains": policy.domains,
++            "allow_all_unix_sockets": policy.dangerously_allow_all_unix_sockets,
++            "allow_local_binding": policy.allow_local_binding,
++        })
++    });
++    let permission_profile = serde_json::to_value(profile).ok()?;
++    Some(serde_json::json!({
++        "environment_id": selection.environment_id,
++        "transport": if remote { "remote" } else { "local" },
++        "cwd": selection.cwd,
++        "writable_roots": writable_roots,
++        "permission_profile": permission_profile,
++        "network_sandbox": profile.network_sandbox_policy(),
++        "network_policy": network_policy,
++    }))
++}
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 2f3003e58fe5754c3963708b7c235cf5741492a2..181e430fc839d812563fa94a7f7ea898dac910ec 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -100,6 +100,7 @@ pub use crate::approvals::NetworkPolicyRuleAction;
+ pub use crate::environment::EnvironmentConfig;
+ pub use crate::environment::EnvironmentConfigState;
+ pub use crate::environment::has_full_access;
++pub use crate::environment::sdk_executor_policy_receipt;
+ pub use crate::legacy_events::HasLegacyEvent;
+ pub use crate::permissions::FileSystemAccessMode;
+ pub use crate::permissions::FileSystemPath;
+@@ -3327,6 +3328,11 @@ pub struct TurnContextNetworkItem {
+ /// latest durable baseline.
+ #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
+ pub struct TurnContextItem {
++    /// SDK-only evidence captured at a regular model sampling boundary.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[schemars(skip)]
++    #[ts(skip)]
++    pub sdk_receipt: Option<Value>,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     pub turn_id: Option<String>,
+     /// Root turn that owns this subagent turn's attribution.
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index 25b5e381f10725e693ce9611270b60ae4dfc17a8..a5aa2bde6fdec7fe7773a26d8cce5c6da6e0dda2 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -1891,6 +1891,7 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
+         timestamp: "2025-01-03T13:00:01Z".to_string(),
+         ordinal: None,
+         item: RolloutItem::TurnContext(TurnContextItem {
++            sdk_receipt: None,
+             turn_id: Some("turn-1".to_string()),
+             root_turn_id: None,
+             disabled_plugin_ids: None,
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 8adeb295bcc22fa0067994c3590bf17bc025d03f..a9723801c815596a7f1409dec64ea15b17f3fdcf 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -562,6 +562,7 @@ mod tests {
+         apply_rollout_item(
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
++                sdk_receipt: None,
+                 turn_id: Some("turn-1".to_string()),
+                 root_turn_id: None,
+                 disabled_plugin_ids: None,
+@@ -612,6 +613,7 @@ mod tests {
+         apply_rollout_item(
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
++                sdk_receipt: None,
+                 turn_id: Some("turn-1".to_string()),
+                 root_turn_id: None,
+                 disabled_plugin_ids: None,
+@@ -662,6 +664,7 @@ mod tests {
+         apply_rollout_item(
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
++                sdk_receipt: None,
+                 turn_id: Some("turn-1".to_string()),
+                 root_turn_id: None,
+                 disabled_plugin_ids: None,
+@@ -701,6 +704,7 @@ mod tests {
+         apply_rollout_item(
+             &mut metadata,
+             &RolloutItem::TurnContext(TurnContextItem {
++                sdk_receipt: None,
+                 turn_id: Some("turn-1".to_string()),
+                 root_turn_id: None,
+                 disabled_plugin_ids: None,
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 907ce0a71771d7cbad28a12901b220806a92a095..0ed72ba6d49d561b16ced3323d863756163db7f5 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -1073,6 +1073,7 @@ mod tests {
+         let cwd = std::env::current_dir().expect("current directory");
+         let turn_context = |model: &str, approval_policy| {
+             RolloutItem::TurnContext(TurnContextItem {
++                sdk_receipt: None,
+                 turn_id: Some("turn-1".to_string()),
+                 root_turn_id: None,
+                 disabled_plugin_ids: None,
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index 7be08ce485a84a3690cd5db69fdaded8c670fd0a..6a3b51117f9a9bd42c413aaae624112cb6aee005 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -676,6 +676,7 @@ fn completed_user_message(turn_id: &str, message: &str) -> RolloutItem {
+ 
+ fn turn_context(root: &Path, turn_id: &str) -> RolloutItem {
+     RolloutItem::TurnContext(TurnContextItem {
++        sdk_receipt: None,
+         turn_id: Some(turn_id.to_string()),
+         root_turn_id: None,
+         disabled_plugin_ids: None,
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index 90e2f11512c58da95ec5fb48edc311a20091f758..618dade7ff67d6bf61ce9cdf095b2c50418134ea 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -2063,6 +2063,7 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
+             }),
+             started("child-turn"),
+             RolloutItem::TurnContext(TurnContextItem {
++                sdk_receipt: None,
+                 turn_id: Some("child-turn".to_string()),
+                 root_turn_id: None,
+                 disabled_plugin_ids: None,

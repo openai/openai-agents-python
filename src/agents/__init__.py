@@ -58,6 +58,10 @@ if TYPE_CHECKING:
         ReplaceArguments as ReplaceArguments,
         StopTurn as StopTurn,
     )
+    from .rate_limits import (
+        ApiRateLimits as ApiRateLimits,
+        ApiRateLimitWindow as ApiRateLimitWindow,
+    )
     from .schema import (
         NativeOutput as NativeOutput,
         OutputSpec as OutputSpec,
@@ -97,7 +101,18 @@ if TYPE_CHECKING:
         ToolRef as ToolRef,
         WebSearch as WebSearch,
     )
-    from .turn import PendingRequests as PendingRequests, Turn as Turn
+    from .turn import (
+        PendingRequests as PendingRequests,
+        SteeringReceipt as SteeringReceipt,
+        Turn as Turn,
+        TurnNeedsAttention as TurnNeedsAttention,
+    )
+    from .turn_receipt import (
+        ExecutorNetworkReceipt as ExecutorNetworkReceipt,
+        ExecutorPolicyReceipt as ExecutorPolicyReceipt,
+        InstructionFileReceipt as InstructionFileReceipt,
+        TurnReceipt as TurnReceipt,
+    )
 
 _MODULES = {
     "Allow": ".native_interception",
@@ -137,6 +152,8 @@ _MODULES = {
     "OutputValidationError": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "ApiRateLimits": ".rate_limits",
+    "ApiRateLimitWindow": ".rate_limits",
     "InputImage": ".input",
     "InputText": ".input",
     "UserMessage": ".input",
@@ -170,6 +187,12 @@ _MODULES = {
     "SessionBusyError": ".session",
     "Turn": ".turn",
     "PendingRequests": ".turn",
+    "SteeringReceipt": ".turn",
+    "TurnNeedsAttention": ".turn",
+    "ExecutorNetworkReceipt": ".turn_receipt",
+    "ExecutorPolicyReceipt": ".turn_receipt",
+    "InstructionFileReceipt": ".turn_receipt",
+    "TurnReceipt": ".turn_receipt",
     "Subagent": ".subagents",
 }
 

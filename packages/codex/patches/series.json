@@ -69,9 +69,21 @@
       "sha256": "4406a07b8bcd9769595ba9295e10986311e8b3fd96bcfeda3d9dfe13a3095048"
     },
     {
-      "path": "0018-saved-codex-login.patch",
+      "path": "0018-api-key-rate-limits.patch",
+      "sha256": "7214955c12f507f0534a7813205eeba656265aa6d919aa3704ec5a47f3ea7d64"
+    },
+    {
+      "path": "0019-retained-execution-completions.patch",
+      "sha256": "c96852d1582d17b99e5ffaafa110c471fd3af697a7b384afa15e86955897af10"
+    },
+    {
+      "path": "0020-sdk-turn-receipts.patch",
+      "sha256": "2e7b19c453c96c609fd5dafba2836eafe802776f02274ea45f6320a04d60a67c"
+    },
+    {
+      "path": "0021-saved-codex-login.patch",
       "sha256": "4d9993f691208259f5fe320849d6968b30c2574fcc24b556b8233171f6958096"
     }
   ],
-  "result_tree": "b031c4ebd6346732ad7295be8d7c862548437db7"
+  "result_tree": "e5a43df050d3b3d0825b166b9f36553bce42eda3"
 }

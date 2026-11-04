@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from agents import (
     FunctionTool,
     SessionBusyError,
     StaleTurnError,
+    SteeringReceipt,
     TurnStoppedError,
     function_tool,
 )
@@ -68,8 +70,9 @@ async def test_idle_start_rejects_steering_and_typed_response_keeps_exact_owner(
             assert not hasattr(session, removed)
 
 
+@pytest.mark.parametrize("exact", [False, True])
 async def test_steer_checks_captured_native_identity_after_admission_yields(
-    responses: ResponsesFixture,
+    responses: ResponsesFixture, exact: bool
 ) -> None:
     entered, allow_finish = asyncio.Event(), asyncio.Event()
 
@@ -104,7 +107,12 @@ async def test_steer_checks_captured_native_identity_after_admission_yields(
         session._native = DelaySteer()
         first = await session.submit("first")
         await entered.wait()
-        pending = asyncio.create_task(first.steer("MUST NOT REACH LATER WORK"))
+        assert first.turn_id is not None
+        pending = asyncio.create_task(
+            first.steer_exact("MUST NOT REACH LATER WORK", expected_turn_id=first.turn_id)
+            if exact
+            else first.steer("MUST NOT REACH LATER WORK")
+        )
         try:
             await steer_entered.wait()
             allow_finish.set()
@@ -121,6 +129,64 @@ async def test_steer_checks_captured_native_identity_after_admission_yields(
             allow_finish.set()
             release_steer.set()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_exact_steer_returns_one_receipt_for_each_admitted_input(
+    responses: ResponsesFixture,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        """Hold the native turn open across two steering requests."""
+        entered.set()
+        await release.wait()
+        return "finished"
+
+    responses.respond(function_call("hold", {}, "exact-hold"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(15),
+        Agent(instructions="Act.", tools=[hold], provider=provider(responses)).session() as session,
+    ):
+        turn = await session.submit("first")
+        await entered.wait()
+        native_id = turn.turn_id
+        assert native_id is not None
+        try:
+            steer_exact: Any = turn.steer_exact
+            with pytest.raises(TypeError, match="expected_turn_id"):
+                await steer_exact("missing ID")
+            for invalid_id in (None, "", 1):
+                with pytest.raises(ValueError, match="expected_turn_id"):
+                    await steer_exact("invalid ID", expected_turn_id=invalid_id)
+            with pytest.raises(StaleTurnError):
+                await turn.steer_exact("bad ID", expected_turn_id="another-turn")
+            first = await turn.steer_exact("exact input one", expected_turn_id=native_id)
+            second = await turn.steer_exact("exact input two", expected_turn_id=native_id)
+            assert isinstance(first, SteeringReceipt)
+            assert (first.session_id, first.turn_id, first.submission_id) == (
+                session.id,
+                native_id,
+                turn.submission_id,
+            )
+            assert second.turn_id == first.turn_id
+            assert second.input_id != first.input_id
+            with pytest.raises(RuntimeError, match="Cannot mix"):
+                await turn.steer("continuation input")
+        finally:
+            release.set()
+        assert (await turn.get_result()).final_output == "done"
+        with pytest.raises(StaleTurnError):
+            await turn.steer_exact("late input", expected_turn_id=native_id)
+    assert len(responses.requests) == 2
+    assert "exact input one" in json.dumps(responses.requests[1])
+    assert "exact input two" in json.dumps(responses.requests[1])
+    assert "missing ID" not in json.dumps(responses.requests)
+    assert "invalid ID" not in json.dumps(responses.requests)
+    assert "bad ID" not in json.dumps(responses.requests)
+    assert "continuation input" not in json.dumps(responses.requests)
+    assert "late input" not in json.dumps(responses.requests)
 
 
 async def test_anchored_wait_cannot_jump_to_explicit_later_root_after_automatic_successor(

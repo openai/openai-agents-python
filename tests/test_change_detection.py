@@ -806,11 +806,19 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     suites = jobs["tests-windows"]
     assert suites["needs"] == "native-windows" and "if" not in suites
     assert suites["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
-    assert suites["runs-on"] == "windows-latest"
+    assert suites["runs-on"] == (
+        "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
+        '\'{"group":"codex-runners","labels":"codex-windows-x64"}\' || '
+        "'\"windows-latest\"') }}"
+    )
     assert "packaged-contract-windows" not in jobs
     win_typecheck = jobs["mypy-win32"]
     assert win_typecheck["needs"] == "native-linux"
-    assert win_typecheck["runs-on"] == "ubuntu-latest"
+    assert win_typecheck["runs-on"] == (
+        "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
+        '\'{"group":"codex-runners","labels":"codex-linux-x64"}\' || '
+        "'\"ubuntu-latest\"') }}"
+    )
     assert "if" not in win_typecheck
 
 
