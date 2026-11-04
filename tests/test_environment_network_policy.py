@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shlex
 import sys
@@ -16,7 +17,7 @@ from aiohttp import ClientTimeout, web
 from aiohttp.test_utils import RawTestServer, TestClient
 
 import agents
-from agents import Agent, Environment, LocalStorage, NativeError, NetworkPolicy
+from agents import Agent, Environment, FunctionTool, LocalStorage, NativeError, NetworkPolicy
 from agents._options import RuntimeNetworkPolicy
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -28,7 +29,8 @@ from tests.native_fixtures import (
     responses as responses,
     tool_output,
 )
-from tests.test_native_agent import provider
+from tests.test_native_agent import function_declarations, provider
+from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_provider_websockets import peer as model_peer
 
 
@@ -232,6 +234,83 @@ async def test_checkpoint_requires_the_current_effective_policy(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+@pytest.mark.parametrize(
+    "mode", ["excluded", "legacy-excluded", "selected", "default", "strict", "network"]
+)
+async def test_manual_checkpoint_binds_admitted_executor_tools(
+    mode: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Look up a key", input_type=LookupArgs, output_type=str
+    )
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(
+            instructions="Use lookup.", tools=[lookup], provider=model.provider(websocket=False)
+        )
+        environment = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            writable_roots=[] if mode == "strict" else None,
+            network=NetworkPolicy(allow_all_unix_sockets=True) if mode == "network" else None,
+        )
+        model.respond(function_call("lookup", {"key": "A"}, "call-A"))
+        async with agent.session(environment=environment) as session:
+            tools = (
+                None
+                if mode == "default"
+                else [lookup, environment]
+                if mode == "selected"
+                else [lookup]
+            )
+            await session.submit("Look up A", tools=tools)
+            await next_request(session.interactions(), lookup)
+            saved = await session.suspend()
+
+        if mode == "legacy-excluded":
+            saved = saved.model_copy(
+                update={
+                    "executor_policy_digest": hashlib.sha256(
+                        b"implicit-remote-workspace"
+                    ).hexdigest()
+                }
+            )
+        saved = SessionState.from_json(saved.to_json())
+        excluded = mode in ("excluded", "legacy-excluded")
+        attempts = executor.attempts
+        if not excluded:
+            with pytest.raises(
+                ValueError, match="Checkpoint and Environment must agree|must have been allowed"
+            ):
+                async with agent.session(state=saved):
+                    pytest.fail("Restored a checkpoint without its executor policy")
+        model.respond(assistant_output("continued"))
+        async with agent.session(
+            state=saved, environment=None if excluded else environment
+        ) as restored:
+            current = await next_request(restored.interactions(), lookup)
+            assert current.call_id == "call-A"
+            await current.respond("answer-A")
+            assert (await restored.restored_turn.get_result()).final_output == "continued"
+        assert tool_output(model.requests[1], "call-A") == "answer-A"
+        for request in model.requests:
+            assert any(
+                tool.get("name") == "exec_command" for tool in function_declarations(request)
+            ) == (mode in ("selected", "default"))
+        assert (saved.executor_policy_digest is None) == (mode == "excluded")
+        assert (saved.network_policy_digest is not None) == (mode == "network")
+        if excluded:
+            assert executor.attempts == attempts
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
 async def test_checkpoint_requires_explicit_strict_writes_even_without_extra_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -353,7 +432,7 @@ async def test_local_resume_rejects_incomplete_strict_executor_receipt(
                 latest["strict_executor_writes"] = False
         rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-        for environment in (None, selected):
+        for environment in (None, selected, replace(selected, writable_roots=None)):
             with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
                 async with agent.session(
                     storage=storage, resume=session_id, environment=environment
@@ -495,6 +574,14 @@ async def test_local_resume_can_drop_an_implicit_remote_executor(
                 environment=replace(selected, writable_roots=[]),
             ):
                 pytest.fail("Reopened a model-only Session with strict write grants")
+        changed_network = None if explicit_network else NetworkPolicy(allow_all_unix_sockets=True)
+        with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+            async with agent.session(
+                storage=storage,
+                resume=session_id,
+                environment=replace(selected, network=changed_network),
+            ):
+                pytest.fail("A model-only turn replaced the earlier executor's network policy")
         model.respond(assistant_output("still model-only"))
         async with agent.session(storage=storage, resume=session_id) as resumed:
             result = await (await resumed.submit("Continue without an executor.")).get_result()

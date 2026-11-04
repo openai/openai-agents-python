@@ -203,14 +203,19 @@ async fn validate_recorded_executor_policy(
         .is_some();
     let current = executor_policies(state).await?;
     if previous.is_empty() {
-        // A model-only turn cannot replace a recorded strict policy or start an
-        // executor during reopen.
+        // Only a genuinely model-only history can attach a new implicit remote
+        // executor. An empty turn cannot replace a recorded strict policy.
         ensure!(
             !strict_writes
                 && !current_strict_writes
-                && current.is_empty()
-                && !recorded_policies
-                    .any(|(_, strict)| strict.and_then(Value::as_bool) == Some(true)),
+                && current.iter().all(can_drop_implicit_remote)
+                && !recorded_policies.any(|(older, strict)| {
+                    strict.is_some_and(|value| value.as_bool() != Some(false))
+                        || (!current.is_empty()
+                            && older
+                                .and_then(Value::as_array)
+                                .is_none_or(|values| !values.is_empty()))
+                }),
             "{policy_error}"
         );
         return Ok(());

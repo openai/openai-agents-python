@@ -119,6 +119,7 @@ _ResultT = TypeVar("_ResultT")
 _TurnT = TypeVar("_TurnT")
 _SelectionContextT_contra = TypeVar("_SelectionContextT_contra", contravariant=True)
 _NATIVE_HOME_CLOSE_TIMEOUT = 30.0
+_IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST = hashlib.sha256(b"implicit-remote-workspace").hexdigest()
 
 
 def _native_model_settings(model: str | None, settings: ModelSettings | None) -> dict[str, Any]:
@@ -1992,8 +1993,17 @@ class Session(Generic[ContextT, OutputT]):
                 if checkpoint is not None:
                     session._repair_turns = saved.repair_turns
                     session._repair_items = saved.repair_items
-                    if saved.executor_policy_digest is not None and (
-                        saved.executor_policy_digest != await session._executor_policy_digest()
+                    recorded_policy = saved.executor_policy_digest
+                    if (
+                        recorded_policy == _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+                        and restored_operation_refs is not None
+                        and executor is None
+                    ):
+                        # Older checkpoints can carry an implicit policy even
+                        # when the saved subset resolves without an executor.
+                        recorded_policy = None
+                    if recorded_policy is not None and (
+                        recorded_policy != await session._executor_policy_digest()
                     ):
                         raise ValueError(
                             "Checkpoint and Environment must agree on the applied executor policy"
@@ -2682,7 +2692,7 @@ class Session(Generic[ContextT, OutputT]):
         else:
             # An implicit WSS workspace can move on restore. Keep the write
             # mode, and let the separate network digest check network authority.
-            policy = "implicit-remote-workspace"
+            return _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
         return hashlib.sha256(policy.encode("utf-8")).hexdigest()
 
     @property
@@ -7195,9 +7205,19 @@ class Session(Generic[ContextT, OutputT]):
         *,
         probe: bool = False,
     ) -> str:
+        active_uses_executor = active is not None and (
+            active.operation_refs is None
+            or not _fixed_tool_refs((), False, self._executor, self._native_agents).isdisjoint(
+                active.operation_refs
+            )
+            or any(
+                isinstance(server, StdioMCP) and server.location == "environment"
+                for server in active.operation_mcp or ()
+            )
+        )
         executor_policy_digest = None
         if (
-            active is not None
+            active_uses_executor
             or self._strict_executor_writes
             or (self._executor is not None and self._executor.network is not None)
         ):
