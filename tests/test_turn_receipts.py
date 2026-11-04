@@ -47,6 +47,47 @@ def test_old_context_or_unknown_receipt_version_is_unavailable():
     assert _project_turn_receipt({"turn_id": "new-turn", "sdk_receipt": {"version": 2}}) is None
 
 
+def test_executor_receipt_projects_only_the_public_policy_fields():
+    public_executor = {
+        "environment_id": "test-executor",
+        "transport": "local",
+        "cwd": "file:///synthetic/work",
+        "writable_roots": ["file:///synthetic/work"],
+        "network_sandbox": "restricted",
+        "network_policy": {
+            "requires_proxy": True,
+            "domains": {"allowed.example.invalid": "allow"},
+            "allow_all_unix_sockets": False,
+            "allow_local_binding": None,
+        },
+    }
+    permission_profile = {"native_policy": "internal"}
+    native_executor = {**public_executor, "permission_profile": permission_profile}
+    projected = _project_turn_receipt(
+        {
+            "turn_id": "test-turn",
+            "sdk_receipt": {
+                "version": 1,
+                "thread_id": "test-thread",
+                "model": "test-model",
+                "reasoning_effort": None,
+                "instruction_revision": None,
+                "developer_instructions_sha256": None,
+                "instruction_files": [],
+                "user_config_applied": False,
+                "codex_revision": "test-revision",
+                "codex_source_tree": "test-tree",
+                "approval_policy": "never",
+                "executors": [native_executor],
+            },
+        }
+    )
+
+    assert projected is not None
+    assert projected["executors"] == [public_executor]
+    assert native_executor["permission_profile"] == permission_profile
+
+
 def test_portable_checkpoint_omits_descendant_and_repair_executor_details():
     private = {"executors": [{"cwd": "/synthetic/private"}], "model": "test-model"}
     descendant = {

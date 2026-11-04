@@ -214,16 +214,22 @@ async def test_reconciled_local_call_can_reopen_without_replay_or_id_reuse(respo
         assert (tmp_path / "effects").read_text() == "unknown:unknown-effect\n"
         assert len(responses.requests) == 1
 
-        confirmed = ReconciledCall(
+        with pytest.raises(ValueError, match="confirmed outcome and a text result"):
+            call.reconcile(outcome="unknown", result="Outcome is still unknown")
+        with pytest.raises(ValueError, match="confirmed outcome and a text result"):
+            call.reconcile(outcome="applied", result={"confirmed": True})
+        confirmed = call.reconcile(outcome="applied", result="Confirmed application record")
+        from_journal = ReconciledCall(
             thread_id=thread_id,
             turn_id=call.turn_id,
             call_id=call.call_id,
             outcome="applied",
             result="Confirmed application record",
         )
+        assert confirmed == from_journal
         # Repeating the same application receipt after a reconnect must be
         # safe. The same native call ID must stay fenced across later opens.
-        for receipts in ([confirmed], [confirmed], []):
+        for receipts in ([confirmed], [from_journal], []):
             async with agent.session(
                 storage=storage, resume=thread_id, reconciled_calls=receipts
             ) as session:

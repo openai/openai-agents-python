@@ -42,17 +42,14 @@ class ExecutorNetworkReceipt(TypedDict):
 class ExecutorPolicyReceipt(TypedDict):
     """Resolved policy from a ready executor in the sampling context.
 
-    The profile is the native permission object, including symbolic entries
-    and restrictions. `writable_roots` lists its explicit write paths as URIs.
-    These fields report Core's selected policy. Verify enforcement on the host
-    where the executor runs.
+    `writable_roots` lists explicit write paths as URIs. Use these fields to
+    inspect Core's selected policy. Verify enforcement on the executor host.
     """
 
     environment_id: str
     transport: Literal["local", "remote"]
     cwd: str
     writable_roots: list[str]
-    permission_profile: dict[str, Any]
     network_sandbox: Literal["restricted", "enabled"]
     network_policy: ExecutorNetworkReceipt | None
 
@@ -132,7 +129,19 @@ def _project_turn_receipt(payload: dict[str, Any]) -> TurnReceipt | None:
     fields = TurnReceipt.__required_keys__ - {"turn_id"}
     if not fields.issubset(raw):
         return None
-    return cast(TurnReceipt, {key: raw[key] for key in fields} | {"turn_id": turn_id})
+    projected = {key: raw[key] for key in fields}
+    executors = raw["executors"]
+    if executors is not None:
+        if not isinstance(executors, list):
+            return None
+        executor_fields = ExecutorPolicyReceipt.__required_keys__
+        public_executors = []
+        for executor in executors:
+            if not isinstance(executor, dict) or not executor_fields.issubset(executor):
+                return None
+            public_executors.append({key: executor[key] for key in executor_fields})
+        projected["executors"] = public_executors
+    return cast(TurnReceipt, projected | {"turn_id": turn_id})
 
 
 def _redact_checkpoint_executor_receipts(payload: dict[str, Any]) -> None:

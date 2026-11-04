@@ -14,7 +14,7 @@ python -m examples.supervised_worker publish "$job_dir/alpha"
 
 Each process owns a separate workspace and native `LocalStorage` history. A status client can exit while the worker runs. When a new client reads status, it sees the same saved session ID and any accepted result. The application keeps its records beside the workspace, outside the roots it grants to model tools.
 
-Each worker steers the exact live turn twice when the brief tool starts. The receipts confirm the native turn accepted the inputs. The worker denies approval requests and stops when an unattended run needs another decision. It uses `Turn.wait_for_attention()` to distinguish completion from interruption, connection loss, and provider limits.
+Each worker calls `Turn.steer_exact()` twice when the brief tool starts. The receipts confirm the native turn accepted the inputs. The worker denies approval requests and stops when an unattended run needs another decision. It uses `Turn.wait_for_attention()` to distinguish completion from interruption, connection loss, and provider limits.
 
 To select a trusted MCP server, pass `--mcp-url` with a server that exposes a `lookup` tool. To load a method file, pass `--instruction-file PATH`. Use the same trusted settings when reopening a worker.
 

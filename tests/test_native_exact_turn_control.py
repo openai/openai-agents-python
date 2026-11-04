@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 from pydantic import BaseModel
@@ -108,7 +109,7 @@ async def test_steer_checks_captured_native_identity_after_admission_yields(
         await entered.wait()
         assert first.turn_id is not None
         pending = asyncio.create_task(
-            first.steer("MUST NOT REACH LATER WORK", expected_turn_id=first.turn_id)
+            first.steer_exact("MUST NOT REACH LATER WORK", expected_turn_id=first.turn_id)
             if exact
             else first.steer("MUST NOT REACH LATER WORK")
         )
@@ -153,10 +154,16 @@ async def test_exact_steer_returns_one_receipt_for_each_admitted_input(
         native_id = turn.turn_id
         assert native_id is not None
         try:
+            steer_exact: Any = turn.steer_exact
+            with pytest.raises(TypeError, match="expected_turn_id"):
+                await steer_exact("missing ID")
+            for invalid_id in (None, "", 1):
+                with pytest.raises(ValueError, match="expected_turn_id"):
+                    await steer_exact("invalid ID", expected_turn_id=invalid_id)
             with pytest.raises(StaleTurnError):
-                await turn.steer("bad ID", expected_turn_id="another-turn")
-            first = await turn.steer("exact input one", expected_turn_id=native_id)
-            second = await turn.steer("exact input two", expected_turn_id=native_id)
+                await turn.steer_exact("bad ID", expected_turn_id="another-turn")
+            first = await turn.steer_exact("exact input one", expected_turn_id=native_id)
+            second = await turn.steer_exact("exact input two", expected_turn_id=native_id)
             assert isinstance(first, SteeringReceipt)
             assert (first.session_id, first.turn_id, first.submission_id) == (
                 session.id,
@@ -171,10 +178,12 @@ async def test_exact_steer_returns_one_receipt_for_each_admitted_input(
             release.set()
         assert (await turn.get_result()).final_output == "done"
         with pytest.raises(StaleTurnError):
-            await turn.steer("late input", expected_turn_id=native_id)
+            await turn.steer_exact("late input", expected_turn_id=native_id)
     assert len(responses.requests) == 2
     assert "exact input one" in json.dumps(responses.requests[1])
     assert "exact input two" in json.dumps(responses.requests[1])
+    assert "missing ID" not in json.dumps(responses.requests)
+    assert "invalid ID" not in json.dumps(responses.requests)
     assert "bad ID" not in json.dumps(responses.requests)
     assert "continuation input" not in json.dumps(responses.requests)
     assert "late input" not in json.dumps(responses.requests)

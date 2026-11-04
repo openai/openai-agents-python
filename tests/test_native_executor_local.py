@@ -322,6 +322,7 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
                 path.resolve().as_uri() for path in (third, work)
             }
             assert receipts[inherited] == receipts[after]
+            assert "permission_profile" not in receipts[after]
             assert receipts[before]["network_sandbox"] == receipts[after]["network_sandbox"]
             assert receipts[before]["network_policy"] == receipts[after]["network_policy"]
             assert receipts[after]["network_policy"]["domains"] == {
@@ -346,6 +347,12 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
         async with agent.session(
             storage=storage, resume=session_id, environment=replacement
         ) as session:
+            [restored_policy] = [
+                turn["receipt"]["executors"][0]
+                async for turn in session.turns()
+                if turn["id"] == inherited
+            ]
+            assert restored_policy == receipts[inherited]
             await run_turn(
                 session,
                 "cleared",
@@ -391,8 +398,8 @@ async def test_steer_twice_and_interrupt_running_local_command(
             await asyncio.sleep(0.01)
         turn_id = running.turn_id
         assert turn_id is not None
-        first = await running.steer("First correction.", expected_turn_id=turn_id)
-        second = await running.steer("Second correction.", expected_turn_id=turn_id)
+        first = await running.steer_exact("First correction.", expected_turn_id=turn_id)
+        second = await running.steer_exact("Second correction.", expected_turn_id=turn_id)
         assert first.turn_id == second.turn_id == turn_id
         assert first.input_id != second.input_id
         await running.cancel()
@@ -406,6 +413,6 @@ async def test_steer_twice_and_interrupt_running_local_command(
         responses.respond(assistant_output("New work."))
         successor = await session.submit("Start fresh.")
         with pytest.raises(StaleTurnError):
-            await running.steer("Stale correction.", expected_turn_id=turn_id)
+            await running.steer_exact("Stale correction.", expected_turn_id=turn_id)
         assert (await successor.get_result()).final_output == "New work."
         assert len(responses.requests) == 2

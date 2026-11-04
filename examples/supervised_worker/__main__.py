@@ -185,7 +185,7 @@ async def observe(worker: Worker, turn: Turn[Any], trace: TurnTrace, *, interrup
                 if active_id is None:
                     raise RuntimeError("No native turn ID was observed before the brief.")
                 for correction in CORRECTIONS:
-                    receipt = await turn.steer(correction, expected_turn_id=active_id)
+                    receipt = await turn.steer_exact(correction, expected_turn_id=active_id)
                     trace.steering.append(
                         {"turn_id": receipt.turn_id, "input_id": receipt.input_id}
                     )
@@ -414,15 +414,7 @@ async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
                 ):
                     raise
                 session = await open_session(
-                    (
-                        ReconciledCall(
-                            thread_id=call.thread_id,
-                            turn_id=call.turn_id,
-                            call_id=call.call_id,
-                            outcome="applied",
-                            result=EFFECT_RESULT,
-                        ),
-                    )
+                    (call.reconcile(outcome="applied", result=EFFECT_RESULT),)
                 )
             startup_ms = (monotonic() - started) * 1000
             record_once(directory, "identity", {"session_id": session.id})

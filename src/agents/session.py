@@ -2750,8 +2750,7 @@ class Session(Generic[ContextT, OutputT]):
         sequence selects only already bound tools; [] permits no model tools. A new
         submit rejects busy work by default; if_busy="queue" registers FIFO new work.
         if_busy="steer" disallows overrides and awaits native acceptance for
-        the captured active root. For strict native-turn targeting, pass
-        expected_turn_id to Turn.steer instead.
+        the captured active root. Use Turn.steer_exact to target one native root turn.
         New work returns before native admission; await Turn.get_result() for completion.
         before_step(turn, *, step_index) may narrow admitted tools before
         sampling. Return None to use the captured operation default, or a
@@ -2830,10 +2829,6 @@ class Session(Generic[ContextT, OutputT]):
         self._check_open()
         self._check_callback_operation("steer its own Session")
         self._check_graph_admission()
-        if expected_turn_id is not None and (
-            not isinstance(expected_turn_id, str) or not expected_turn_id
-        ):
-            raise ValueError("expected_turn_id must be a nonempty native root turn ID")
         if turn.child_id is not None:
             if expected_turn_id is not None:
                 raise ValueError("Exact steering requires a root Turn")

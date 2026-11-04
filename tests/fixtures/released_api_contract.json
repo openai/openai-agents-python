@@ -381,7 +381,7 @@
       },
       "agents.recovery": {
         "declarations": [
-          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)\n\n    def reconcile(self, *, outcome: Literal['applied', 'not_applied'], result: str) -> ReconciledCall:\n        pass",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ReconciledCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    outcome: Literal['applied', 'not_applied']\n    result: str = field(repr=False)",
           "class LocalRecoveryRequired(RuntimeError):\n\n    def __init__(self, calls: tuple[UncertainCall, ...], turns: tuple[RecordedTurn, ...], items: tuple[SessionItem, ...]) -> None:\n        pass"
         ],
@@ -690,7 +690,7 @@
           "@dataclass(frozen=True)\nclass PendingRequests(Generic[OutputT]):\n    turn: Turn[OutputT]\n    requests: tuple[Interaction, ...] = field(repr=False)",
           "@dataclass(frozen=True, slots=True)\nclass SteeringReceipt:\n    session_id: str\n    turn_id: str\n    submission_id: str\n    input_id: str",
           "@dataclass(frozen=True, slots=True)\nclass TurnNeedsAttention:\n    reason: Literal['interrupted', 'connection_lost', 'quota_blocked', 'rate_limited']\n    error: NativeError | TurnStoppedError\n    rate_limits: ApiRateLimits",
-          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    @overload\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    @overload\n    async def steer(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def steer(self, input: UserInput, *, expected_turn_id: str | None=None) -> SteeringReceipt | None:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0) -> EventStream:\n        pass"
+          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0) -> EventStream:\n        pass"
         ],
         "exports": {
           "OutputT": "OutputT",
@@ -702,7 +702,7 @@
         "imports": [
           "import asyncio",
           "from dataclasses import dataclass, field",
-          "from typing import Any, Generic, Literal, TypeVar, overload",
+          "from typing import Any, Generic, Literal, TypeVar",
           "from .input import UserInput",
           "from .manual import Interaction",
           "from .observation import EventStream",
@@ -724,7 +724,7 @@
         "declarations": [
           "class InstructionFileReceipt(TypedDict):\n    path: str\n    source: Literal['application_file', 'native_user', 'native_thread', 'native_project']\n    sha256: str",
           "class ExecutorNetworkReceipt(TypedDict):\n    requires_proxy: bool\n    domains: dict[str, Literal['allow', 'deny']] | None\n    allow_all_unix_sockets: bool\n    allow_local_binding: bool | None",
-          "class ExecutorPolicyReceipt(TypedDict):\n    environment_id: str\n    transport: Literal['local', 'remote']\n    cwd: str\n    writable_roots: list[str]\n    permission_profile: dict[str, Any]\n    network_sandbox: Literal['restricted', 'enabled']\n    network_policy: ExecutorNetworkReceipt | None",
+          "class ExecutorPolicyReceipt(TypedDict):\n    environment_id: str\n    transport: Literal['local', 'remote']\n    cwd: str\n    writable_roots: list[str]\n    network_sandbox: Literal['restricted', 'enabled']\n    network_policy: ExecutorNetworkReceipt | None",
           "class TurnReceipt(TypedDict):\n    thread_id: str\n    turn_id: str\n    model: str\n    reasoning_effort: str | None\n    instruction_revision: str | None\n    developer_instructions_sha256: str | None\n    instruction_files: list[InstructionFileReceipt]\n    user_config_applied: bool\n    codex_revision: str\n    codex_source_tree: str\n    approval_policy: str | dict[str, Any]\n    executors: list[ExecutorPolicyReceipt] | None"
         ],
         "exports": {

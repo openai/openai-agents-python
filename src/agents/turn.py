@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Iterator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar
 
 if TYPE_CHECKING:
     from .input import UserInput
@@ -122,23 +122,23 @@ class Turn(Generic[OutputT]):
                 raise
             return TurnNeedsAttention(reason, error, self._session.rate_limits())
 
-    @overload
-    async def steer(self, input: UserInput) -> None: ...
+    async def steer(self, input: UserInput) -> None:
+        """Steer this submitted task's current native step, never another task."""
+        await self._session._steer(self, input)
 
-    @overload
-    async def steer(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt: ...
-
-    async def steer(
-        self, input: UserInput, *, expected_turn_id: str | None = None
-    ) -> SteeringReceipt | None:
-        """Steer the current step, or require one exact native root turn.
+    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:
+        """Steer one exact native root turn and return its acceptance receipt.
 
         Pass the ID from a TurnStarted observation for strict steering. A stale
         target raises StaleTurnError. Strict input cannot start a continuation.
         Use one steering mode per native turn. If the caller cancels the wait
         after sending input, its acceptance may be unknown.
         """
-        return await self._session._steer(self, input, expected_turn_id=expected_turn_id)
+        if not isinstance(expected_turn_id, str) or not expected_turn_id:
+            raise ValueError("expected_turn_id must be a nonempty native root turn ID")
+        receipt = await self._session._steer(self, input, expected_turn_id=expected_turn_id)
+        assert receipt is not None
+        return receipt
 
     async def cancel(self, *, mode: Literal["graceful", "force"] = "force") -> None:
         """Stop and join this root's callbacks and cells. A settled root is a no-op.

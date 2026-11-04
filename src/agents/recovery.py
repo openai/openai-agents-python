@@ -24,6 +24,18 @@ class UncertainCall:
     name: str
     arguments: JsonValue = field(repr=False)
 
+    def reconcile(
+        self, *, outcome: Literal["applied", "not_applied"], result: str
+    ) -> ReconciledCall:
+        """Create a confirmation using this call's IDs and your verified outcome."""
+        return ReconciledCall(
+            thread_id=self.thread_id,
+            turn_id=self.turn_id,
+            call_id=self.call_id,
+            outcome=outcome,
+            result=result,
+        )
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ReconciledCall:
