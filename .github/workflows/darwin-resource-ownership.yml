@@ -1,13 +1,14 @@
-name: Qualify the Rust command owner on Apple Silicon
+name: Check launchd delegation from the packaged local sandbox
 on:
   push:
     branches: [test/darwin-resource-ownership-20261104]
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  check:
+  verify:
     strategy:
       fail-fast: false
       matrix:
@@ -17,34 +18,56 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
+          path: validation
           persist-credentials: false
-      - name: Check process ownership as the runner user
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 024d0032cdd13fb930f85668539322c940f39386
+          path: sdk
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 13311065835
+          run-id: 41803603288
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/native-baseline
+          merge-multiple: true
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          version: "0.11.14"
+          enable-cache: false
+          python-version: "3.14"
+      - name: Install the exact earlier wheel and add the focused test
+        working-directory: sdk
+        run: |
+          set -eu
+          test "$(git rev-parse HEAD)" = 024d0032cdd13fb930f85668539322c940f39386
+          cd "$RUNNER_TEMP/native-baseline"
+          wheel=openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl
+          printf '%s  %s\n' 107f32f33f18aa6f592437d93150ad31a36830385081c9693557a9f167b847de "$wheel" | shasum -a 256 -c -
+          export OPENAI_AGENTS_NATIVE_WHEEL="$PWD/$wheel"
+          cd "$GITHUB_WORKSPACE/sdk"
+          uv sync --frozen --group dev --no-install-project
+          uv pip install --python .venv/bin/python --no-deps "$OPENAI_AGENTS_NATIVE_WHEEL"
+          mkdir -p tests/sdk_seatbelt_qualification
+          cp ../validation/.github/qualification/darwin-resource-ownership/delegation/probe.c ../validation/.github/qualification/darwin-resource-ownership/delegation/test_sdk_seatbelt.py tests/sdk_seatbelt_qualification/
+      - name: Check sandboxed launchd and helper access
+        working-directory: sdk
+        env:
+          OPENAI_API_KEY: fake-for-tests
         run: |
           set -eu
           sw_vers
-          uname -m
-          user_id=$(id -u)
-          if /bin/launchctl print "gui/$user_id" >/dev/null 2>&1; then
-            domain=gui
+          if /bin/launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+            export SDK_SEATBELT_DOMAIN=gui
           else
-            domain=user
+            export SDK_SEATBELT_DOMAIN=user
           fi
-          root=.github/qualification/darwin-resource-ownership
-          printf 'SDK_TEST_DOMAIN=%s\nSDK_TEST_ROOT=%s\n' "$domain" "$root" >> "$GITHUB_ENV"
-          python3 -u "$root/system/smoke.py" "$domain"
-      - name: Build the exact private Rust module
-        if: ${{ !cancelled() }}
-        run: |
-          set -eu
-          rustup toolchain install 1.95.0 --profile minimal
-          cargo +1.95.0 build --locked --manifest-path "$SDK_TEST_ROOT/rust-qualification/Cargo.toml"
-      - name: Reap a detached process and keep the other job running
-        if: ${{ !cancelled() }}
-        run: |
-          set -eu
-          python3 -u "$SDK_TEST_ROOT/rust-qualification/qualify.py" "$SDK_TEST_ROOT/rust-qualification/target/debug/sdk-coalition-qualification" "$SDK_TEST_DOMAIN" "$SDK_TEST_ROOT"
-      - name: Reap an Apple platform executable
-        if: ${{ !cancelled() }}
-        run: |
-          set -eu
-          python3 -u "$SDK_TEST_ROOT/rust-qualification/qualify.py" "$SDK_TEST_ROOT/rust-qualification/target/debug/sdk-coalition-qualification" "$SDK_TEST_DOMAIN" "$SDK_TEST_ROOT/system" --system-image
+          .venv/bin/python -I -B - <<'PYTEST'
+          import os, pathlib, platform, sys, sysconfig
+          import agents._native, pytest
+          assert sys.platform == "darwin" and platform.machine() == "arm64"
+          assert pathlib.Path(agents._native.__file__).resolve().is_relative_to(pathlib.Path(sysconfig.get_path("platlib")).resolve())
+          sys.path.insert(0, os.getcwd())
+          sys.exit(pytest.main(["-q", "-rA", "-s", "tests/sdk_seatbelt_qualification/test_sdk_seatbelt.py"]))
+          PYTEST
