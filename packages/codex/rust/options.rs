@@ -1,6 +1,7 @@
 //! Thread startup options and host-provided instruction snapshots.
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use codex_core_api::{Config, EnvironmentManager, InitialHistory, StartThreadOptions};
@@ -15,7 +16,6 @@ use codex_protocol::{ThreadId, ToolName};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 
-use crate::environment::LocalStorageHome;
 use crate::{config, ops};
 
 pub struct ThreadInstructions(pub RwLock<Option<String>>, pub bool);
@@ -151,7 +151,7 @@ impl ThreadOptions {
         cloud: codex_config::CloudConfigBundleLoader,
         initial_config: Option<&Config>,
         environment_manager: &EnvironmentManager,
-        storage_home: Option<LocalStorageHome<'_>>,
+        storage_home: Option<&Path>,
     ) -> anyhow::Result<(StartThreadOptions, Arc<ThreadInstructions>)> {
         anyhow::ensure!(
             self.sdk_history.is_none(),

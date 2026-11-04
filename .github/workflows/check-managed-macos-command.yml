@@ -1,4 +1,4 @@
-name: Qualify the final supervised worker on Linux
+name: Probe physical LocalStorage overlap on macOS
 on:
   push:
     branches: [test/managed-macos-command-qualification-20261104]
@@ -8,9 +8,9 @@ permissions:
   actions: read
 
 jobs:
-  worker:
-    name: Run the installed native two-worker flow
-    runs-on: ubuntu-24.04
+  profile-overlap:
+    name: Run the installed ARM macOS profile overlap probe
+    runs-on: macos-latest
     timeout-minutes: 12
     defaults:
       run:
@@ -20,115 +20,213 @@ jobs:
       OPENAI_AGENTS_NATIVE_TESTS: "1"
       OPENAI_AGENTS_REQUIRE_LOCAL_SANDBOX: "1"
       PYTHONDONTWRITEBYTECODE: "1"
-      RUST_MIN_STACK: "16777216"
+      TZ: UTC
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 41c4733faf008adf7651e6e3981b5b7615c7ed3a
+          ref: 61991ac259ed05ffe4fc3da8471185d8517d11a3
           persist-credentials: false
-      - name: Verify the exact integrated worker source
-        run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = 41c4733faf008adf7651e6e3981b5b7615c7ed3a
-          test "$(git rev-parse HEAD^{tree})" = 1a79c3e4e782b17bfef216ba5dcc61029a62d47b
-          git show -s --format='%H %T %s' HEAD
-          sha256sum examples/supervised_worker/__main__.py tests/test_supervised_worker_{example,supervision}.py
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           version: "0.11.14"
           python-version: "3.13"
           enable-cache: true
-      - name: Download the verified official Linux wheel and fixture
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
-        with:
-          name: native-Linux-X64
-          path: ${{ runner.temp }}/worker-donor
-          github-token: ${{ github.token }}
-          run-id: 41906563434
-      - name: Verify and install the donor without building a package
+      - name: Verify and install the known ARM macOS wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          donor="$RUNNER_TEMP/worker-donor"
-          site="$RUNNER_TEMP/worker-installed"
-          proof="$RUNNER_TEMP/worker-proof"
+          sw_vers
+          test "$(uname -m)" = arm64
+          test "$(git rev-parse HEAD)" = 61991ac259ed05ffe4fc3da8471185d8517d11a3
+          test "$(git rev-parse HEAD^{tree})" = b24fe99ccedd69fd0978653f699001a74df983d2
+          git show -s --format='%H %T %s' HEAD
+          work="$RUNNER_TEMP/profile-overlap"
+          proof="$work/proof"
           mkdir -p "$proof"
-          wheel="$donor/openai_agents-0.24.0a6-cp310-abi3-manylinux_2_39_x86_64.whl"
-          fixture="$donor/exec-server-fixture"
-          printf '%s  %s\n' 2742384d7a5109cdd4d38413271afb903c98e53b5b76e8b3fda542bd60764fb5 "$wheel" 84ab26145a8149e8742ea486d40c66ca52d7fdf67ccc629e67801a288986eff5 "$fixture" | tee "$proof/donor-inputs.sha256" | sha256sum --check --strict
-          chmod +x "$fixture"
-          uv sync --frozen --no-install-project --group dev
-          uv pip install --no-deps --python .venv/bin/python --target "$site" "$wheel"
-          {
-            echo "PYTHONPATH=$site:$GITHUB_WORKSPACE"
-            echo "CODEX_EXEC_SERVER_TEST_BINARY=$fixture"
-            echo "OPENAI_AGENTS_WORKER_SITE=$site"
-          } >> "$GITHUB_ENV"
-          printf 'wheel_sdk=%s\nwheel_core=%s\nfixture_source=%s\n' \
-            bdffdbaf34c8f6fcbfea38f86bf125a83280c331 cb24aab4e2ab11a1f6488452e0c06a6349993ba1 \
-            41c4733faf008adf7651e6e3981b5b7615c7ed3a | tee "$proof/source-provenance.txt"
-      - name: Enable the same Linux helper profiles used by the repository tests
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap
-          helper="$OPENAI_AGENTS_WORKER_SITE/agents/bin/codex-linux-sandbox"
-          runtime="$OPENAI_AGENTS_WORKER_SITE/agents/bin/codex-sdk-runtime"
-          test -x "$helper"
-          test -x "$runtime"
-          if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
-            sudo tee /etc/apparmor.d/agents-sdk-worker-qualification > /dev/null <<EOF
-          abi <abi/4.0>,
-          include <tunables/global>
-          profile agents-sdk-worker-fixture "$CODEX_EXEC_SERVER_TEST_BINARY" flags=(unconfined) {
-            userns,
-          }
-          profile agents-sdk-worker-sandbox "$helper" flags=(unconfined) {
-            userns,
-          }
-          profile agents-sdk-worker-runtime "$runtime" flags=(unconfined) {
-            userns,
-          }
-          EOF
-            sudo apparmor_parser -r /etc/apparmor.d/agents-sdk-worker-qualification
-          fi
-      - name: Run the maintained real worker acceptance and publish flow
-        run: |
-          set -euo pipefail
-          proof="$RUNNER_TEMP/worker-proof"
-          .venv/bin/python -B - <<'PYTHON'
-          import os
+          api=repos/openai/openai-agents-python/actions/artifacts/13361650105
+          gh api "$api" > "$proof/donor.json"
+          uv run --no-project python - "$proof/donor.json" <<'PY'
+          import json
+          import sys
           from pathlib import Path
+
+          receipt = json.loads(Path(sys.argv[1]).read_text())
+          assert receipt['id'] == 13361650105 and not receipt['expired']
+          assert receipt['name'] == 'verified-final-python-wheel-macos'
+          assert receipt['digest'] == 'sha256:a087520f62b172c8bf089642eafaa5c92da30b79655492a12b4eb493eeed7784'
+          assert receipt['workflow_run']['id'] == 41901579120
+          assert receipt['workflow_run']['head_sha'] == 'a50e5d25d94b04ba3fd79bd10f39fa0bb519d963'
+          PY
+          gh api "$api/zip" > "$work/donor.zip"
+          printf '%s  %s\n' a087520f62b172c8bf089642eafaa5c92da30b79655492a12b4eb493eeed7784 "$work/donor.zip" | shasum -a 256 -c -
+          name=openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl
+          wheel="$work/$name"
+          unzip -p "$work/donor.zip" "openai-agents-python/openai-agents-python/dist/$name" > "$wheel"
+          printf '%s  %s\n' b953cbb8e4e91bd7797cd4edc976046d946650d69038598c8bf5ab138f52c4a2 "$wheel" | tee "$proof/wheel.sha256" | shasum -a 256 -c -
+          uv sync --frozen --no-install-project --group dev
+          uv pip install --no-deps --python .venv/bin/python --target "$work/site" "$wheel"
+          printf 'wheel_sdk=%s\nwheel_core=%s\n' \
+            61991ac259ed05ffe4fc3da8471185d8517d11a3 108422bfeff81dbff09e60c72c76efa9e4b0ad51 | tee "$proof/source-provenance.txt"
+      - name: Observe both directions on real case-insensitive and case-sensitive filesystems
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/profile-overlap"
+          proof="$work/proof"
+          site="$work/site"
+          export PYTHONPATH="$site:$GITHUB_WORKSPACE"
+          unset OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX
+          .venv/bin/python -B - "$site" <<'PY'
+          from pathlib import Path
+          import sys
 
           import agents
           import agents._native
           import agents.session
-          from examples.supervised_worker import __main__ as worker
 
-          site = Path(os.environ['OPENAI_AGENTS_WORKER_SITE']).resolve()
+          site = Path(sys.argv[1]).resolve()
           for module in (agents, agents._native, agents.session):
               path = Path(module.__file__).resolve()
               assert path.is_relative_to(site), path
               print(f'Installed module: {path}')
-          expected = Path.cwd() / 'examples/supervised_worker/__main__.py'
-          assert Path(worker.__file__).resolve() == expected.resolve(), worker.__file__
-          print(f'Exact worker example: {worker.__file__}')
-          PYTHON
-          node=tests/test_supervised_worker_example.py::test_two_workers_revise_reconnect_recover_and_publish_once
-          .venv/bin/python -Bu -m pytest -vv -rA --color=no --tb=short -p no:cacheprovider \
-            --junitxml="$proof/worker.xml" "$node" 2>&1 | tee "$proof/worker.log"
-          .venv/bin/python -IB - "$proof/worker.xml" "${node##*::}" <<'PYTHON'
+          PY
+          probe=tests/test_casefold_profile_overlap_probe.py
+          cat > "$probe" <<'PROBE'
+          """Observe real top-level profile placement under a case-sensitive or casefold mount."""
+
+          import sys
+          from datetime import datetime
+
+          import pytest
+
+          from agents import Agent, Environment, LocalStorage, NativeError, NativeProvider
+          from tests.native_fixtures import assistant_output, responses as responses
+
+
+          @(
+              pytest.mark.requires_native_linux_sandbox
+              if sys.platform == "linux"
+              else pytest.mark.requires_native_macos_sandbox
+          )
+          @pytest.mark.parametrize("direction", ["protected-below-grant", "grant-below-protected"])
+          async def test_physical_profile_directory_overlap(responses, tmp_path, direction):
+              physical = tmp_path / "workspace"
+              physical.mkdir()
+              alias = tmp_path / "WORKSPACE"
+              aliased = alias.exists()
+              if aliased:
+                  assert alias.samefile(physical)
+              else:
+                  alias.mkdir()
+              year, month, day = datetime.now().strftime("%Y %m %d").split()
+              if direction == "protected-below-grant":
+                  protected = alias / "rollouts"
+                  protected.mkdir()
+                  cwd = physical
+              else:
+                  protected = alias
+                  cwd = physical / "sessions" / year / month
+                  cwd.mkdir(parents=True)
+              expected_day = protected / "sessions" / year / month / day
+              assert not expected_day.exists()
+
+              storage = LocalStorage(protected)
+              provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+              agent = Agent(instructions="Answer.", provider=provider)
+              environment = Environment.local(cwd=cwd, tools=["exec_command"])
+              responses.respond(assistant_output("rollout persisted"))
+              try:
+                  async with provider, agent.session(storage=storage, environment=environment) as session:
+                      turn = await session.submit("Persist the synthetic turn.")
+                      assert (await turn.get_result()).final_output == "rollout persisted"
+              except NativeError as error:
+                  if "writable roots must stay outside native SDK storage" not in str(error):
+                      raise
+                  assert responses.requests == []
+                  print(f"PHYSICAL_PROFILE_OVERLAP {direction} aliased={aliased} REFUSED")
+              else:
+                  [rollout] = list(expected_day.glob("rollout-*.jsonl"))
+                  assert "Persist the synthetic turn." in rollout.read_text()
+                  lower_path = physical / rollout.relative_to(alias)
+                  assert lower_path.exists() == aliased
+                  if aliased:
+                      assert rollout.samefile(lower_path)
+                      assert lower_path.is_relative_to(cwd)
+                  print(
+                      f"PHYSICAL_PROFILE_OVERLAP {direction} aliased={aliased} "
+                      f"ADMITTED rollout_physically_inside_grant={aliased}"
+                  )
+          PROBE
+          printf '%s  %s\n' 9e63a2f0b27e5d37f97d27a84dfe8f636c2b248d49b35197e42a0dd8a35e910e "$probe" | tee "$proof/fixture.sha256" | shasum -a 256 -c -
+          scratch="$(mktemp -d "$RUNNER_TEMP/agents-profile-volume.XXXXXX")"
+          volume="$scratch/mounted"
+          attached=0
+          cleanup() {
+            if [[ "$attached" = 1 ]]; then
+              hdiutil detach "$volume" || return
+            fi
+            rm -rf -- "$scratch"
+          }
+          trap cleanup EXIT
+          mkdir "$volume" "$scratch/HostCaseProbe"
+          if [[ -d "$scratch/hostcaseprobe" ]]; then
+            host_kind=insensitive
+            volume_kind=sensitive
+            volume_fs=APFSX
+          else
+            host_kind=sensitive
+            volume_kind=insensitive
+            volume_fs=APFS
+          fi
+          hdiutil create -size 512m -fs "$volume_fs" -volname AgentsProfileControl -type SPARSE "$scratch/control"
+          hdiutil attach -owners off -nobrowse -mountpoint "$volume" "$scratch/control.sparseimage"
+          attached=1
+          test "$(stat -f %d "$scratch")" != "$(stat -f %d "$volume")"
+          mkdir "$volume/VolumeCaseProbe"
+          if [[ "$volume_kind" = sensitive ]]; then
+            test ! -e "$volume/volumecaseprobe"
+            folded="$scratch"
+            sensitive="$volume"
+          else
+            test -d "$volume/volumecaseprobe"
+            folded="$volume"
+            sensitive="$scratch"
+          fi
+          printf 'host=%s alternate=%s\n' "$host_kind" "$volume_kind" | tee "$proof/filesystems.txt"
+          diskutil info "$volume" | tee -a "$proof/filesystems.txt"
+          node="$probe::test_physical_profile_directory_overlap"
+          .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
+            --basetemp="$folded/folded-tests" --junitxml="$proof/folded.xml" "$node" 2>&1 | tee "$proof/folded.log"
+          .venv/bin/python -Bu -m pytest -vv -s -rA --color=no --tb=short -p no:cacheprovider \
+            --basetemp="$sensitive/sensitive-tests" --junitxml="$proof/sensitive.xml" "$node" 2>&1 | tee "$proof/sensitive.log"
+          .venv/bin/python -IB - "$proof" <<'PY'
+          from pathlib import Path
           import sys
           import xml.etree.ElementTree as ET
 
-          cases = ET.parse(sys.argv[1]).findall('.//testcase')
-          assert [case.attrib['name'] for case in cases] == [sys.argv[2]], cases
-          assert all(cases[0].find(tag) is None for tag in ('skipped', 'failure', 'error'))
-          print('Installed two-worker acceptance and publish flow passed unskipped.')
-          PYTHON
-      - name: Upload the worker-only qualification evidence
+          proof = Path(sys.argv[1])
+          directions = ('protected-below-grant', 'grant-below-protected')
+          for variant in ('folded', 'sensitive'):
+              tests = list(ET.parse(proof / f'{variant}.xml').iter('testcase'))
+              assert len(tests) == 2 and all(len(test) == 0 for test in tests), tests
+              assert [test.get('name') for test in tests] == [
+                  f'test_physical_profile_directory_overlap[{direction}]' for direction in directions
+              ]
+              log = (proof / f'{variant}.log').read_text()
+              for direction in directions:
+                  prefix = f'PHYSICAL_PROFILE_OVERLAP {direction} aliased='
+                  if variant == 'sensitive':
+                      assert prefix + 'False ADMITTED rollout_physically_inside_grant=False' in log
+                  else:
+                      assert (
+                          prefix + 'True REFUSED' in log
+                          or prefix + 'True ADMITTED rollout_physically_inside_grant=True' in log
+                      )
+          PY
+      - name: Upload the installed overlap observations
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: verified-linux-supervised-worker
-          path: ${{ runner.temp }}/worker-proof
+          name: verified-macos-physical-profile-overlap
+          path: ${{ runner.temp }}/profile-overlap/proof
           if-no-files-found: ignore

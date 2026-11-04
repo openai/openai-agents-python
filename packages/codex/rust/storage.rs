@@ -25,9 +25,6 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::manual_checkpoint::UnsupportedManualState;
 
-pub(crate) const LOCAL_CHECKLIST_DIRECTORY: &str = "sdk-checklists";
-pub(crate) const LOCAL_CHECKLIST_BUDGETS_DIRECTORY: &str = "budgets";
-
 /// Last accepted whole-list update. Never a source of runtime configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1236,16 +1233,12 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
-    pub(crate) async fn live_rollout_path(&self, id: ThreadId) -> ThreadStoreResult<PathBuf> {
-        self.inner.live_rollout_path(id).await
-    }
-
     pub fn new(
         config: LocalThreadStoreConfig,
         inner: LocalThreadStore,
         graph: Arc<MemoryAgentGraph>,
     ) -> Self {
-        let directory = config.codex_home.join(LOCAL_CHECKLIST_DIRECTORY);
+        let directory = config.codex_home.join("sdk-checklists");
         let cleanup_directory = directory.clone();
         // Called by native delete only after its reference and writer checks, for
         // both single and bulk delete. A failure leaves native deletion retryable.
@@ -1261,10 +1254,7 @@ impl LocalChecklistStore {
                             Err(e) if e.kind() == ErrorKind::NotFound => {}
                             Err(e) => return Err(checklist_error(e)),
                         }
-                        match std::fs::remove_file(checklist_path(
-                            &directory.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY),
-                            id,
-                        )) {
+                        match std::fs::remove_file(checklist_path(&directory.join("budgets"), id)) {
                             Ok(()) => {}
                             Err(e) if e.kind() == ErrorKind::NotFound => {}
                             Err(e) => return Err(checklist_error(e)),
@@ -1383,7 +1373,7 @@ impl LocalChecklistStore {
         calls: &[ResponseItem],
         continuations: &HashMap<String, serde_json::Value>,
     ) -> ThreadStoreResult<()> {
-        let directory = self.directory.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY);
+        let directory = self.directory.join("budgets");
         tokio::task::block_in_place(|| {
             std::fs::create_dir_all(&directory).map_err(checklist_error)?;
             saved["sdk_parked"] = serde_json::json!({
@@ -1413,7 +1403,7 @@ impl LocalChecklistStore {
             .get(&id)
             .ok_or(ThreadStoreError::ThreadNotFound { thread_id: id })?;
         writer.check()?;
-        let directory = self.directory.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY);
+        let directory = self.directory.join("budgets");
         tokio::task::block_in_place(|| {
             let path = checklist_path(&directory, id);
             let mut saved: Option<serde_json::Value> = match std::fs::File::open(&path) {
@@ -1526,7 +1516,7 @@ impl LocalChecklistStore {
                 "SDK re-entry calls are not unique in native history",
             ));
         }
-        let path = checklist_path(&self.directory.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY), id);
+        let path = checklist_path(&self.directory.join("budgets"), id);
         let saved = tokio::task::block_in_place(|| -> ThreadStoreResult<serde_json::Value> {
             if *turn == format!("sdk-import-{id}") {
                 return Ok(serde_json::json!({"turn_id": turn}));

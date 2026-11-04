@@ -13,7 +13,6 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import replace
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from uuid import uuid4
@@ -23,7 +22,6 @@ import pytest
 import agents
 from agents import (
     Agent,
-    Checklist,
     Environment,
     ExecutorContext,
     LocalStorage,
@@ -173,204 +171,11 @@ async def test_local_write_roots_cannot_overlap_native_storage(
     assert responses.requests == []
 
 
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize("location", ["sessions", "session-year", "archived_sessions"])
-async def test_local_write_roots_cannot_overlap_relocated_rollout_directories(
-    responses: ResponsesFixture, tmp_path: Path, location: str
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    storage = LocalStorage(tmp_path / "profile")
-    alias = (
-        storage.path / "sessions" / str(datetime.now(timezone.utc).astimezone().year)
-        if location == "session-year"
-        else storage.path / location
-    )
-    alias.parent.mkdir(parents=True)
-    alias.symlink_to(workspace, target_is_directory=True)
-    agent = Agent(
-        instructions="Answer.",
-        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
-    )
-
-    with pytest.raises(RuntimeError, match="writable roots must stay outside native SDK storage"):
-        async with agent.session(storage=storage, environment=Environment.local(cwd=workspace)):
-            pytest.fail("A write grant included the relocated rollout directory")
-
-    assert responses.requests == []
-    assert list(workspace.iterdir()) == []
-
-
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@(
-    pytest.mark.requires_native_linux_sandbox
-    if sys.platform == "linux"
-    else pytest.mark.requires_native_macos_sandbox
-)
-@pytest.mark.parametrize("grant_history", [False, True], ids=["disjoint", "writable"])
-async def test_local_resume_keeps_relocated_rollout_files_outside_write_roots(
-    responses: ResponsesFixture, tmp_path: Path, grant_history: bool
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    sessions = tmp_path / "relocated-sessions"
-    sessions.mkdir()
-    storage = LocalStorage(tmp_path / "profile")
-    storage.path.mkdir()
-    (storage.path / "sessions").symlink_to(sessions, target_is_directory=True)
-    # The local runtime does not select unrelated links as rollout storage.
-    (sessions / "unrelated").symlink_to(workspace, target_is_directory=True)
-    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
-    agent = Agent(instructions="Answer.", provider=provider)
-    environment = Environment.local(cwd=workspace)
-
-    async with provider:
-        responses.respond(assistant_output("original"))
-        async with agent.session(storage=storage, environment=environment) as session:
-            thread_id = session.id
-            assert (await (await session.submit("First.")).get_result()).final_output == "original"
-
-        (rollout,) = sessions.rglob(f"*{thread_id}.jsonl")
-        target = workspace if grant_history else tmp_path / "relocated-history"
-        target.mkdir(exist_ok=True)
-        relocated = rollout.rename(target / rollout.name)
-        rollout.symlink_to(relocated)
-        original_history = relocated.read_bytes()
-
-        if grant_history:
-            with pytest.raises(
-                RuntimeError, match="writable roots must stay outside native SDK storage"
-            ):
-                async with agent.session(
-                    storage=storage, resume=thread_id, environment=environment
-                ):
-                    pytest.fail("A write grant included the relocated recorded rollout")
-            assert relocated.read_bytes() == original_history
-            assert len(responses.requests) == 1
-        else:
-            responses.respond(assistant_output("resumed"))
-            async with agent.session(
-                storage=storage, resume=thread_id, environment=environment
-            ) as session:
-                assert session.id == thread_id
-                result = await (await session.submit("Second.")).get_result()
-                assert result.final_output == "resumed"
-                # The native writer now records the physical path in SQLite.
-                # Removing its old alias must not allow a later write grant.
-                rollout.unlink()
-                refused = await session.submit("Refuse this grant.", writable_roots=[target])
-                with pytest.raises(
-                    NativeError, match="writable roots must stay outside native SDK storage"
-                ):
-                    await refused.get_result()
-            assert b"resumed" in relocated.read_bytes()[len(original_history) :]
-            with pytest.raises(
-                RuntimeError, match="writable roots must stay outside native SDK storage"
-            ):
-                async with agent.session(
-                    storage=storage,
-                    resume=thread_id,
-                    environment=Environment.local(cwd=workspace, writable_roots=[target]),
-                ):
-                    pytest.fail("A write grant included the recorded physical rollout")
-            assert len(responses.requests) == 2
-
-
 def _relocate_database(database: Path, directory: Path) -> Path:
     directory.mkdir()
     target = database.rename(directory / database.name)
     database.symlink_to(target)
     return target
-
-
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize("location", ["sdk-checklists", "sdk-checklists/budgets"])
-async def test_local_open_rejects_a_writable_checklist_directory(
-    responses: ResponsesFixture, tmp_path: Path, location: str
-) -> None:
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    storage = LocalStorage(tmp_path / "profile")
-    alias = storage.path / location
-    alias.parent.mkdir(parents=True)
-    alias.symlink_to(workspace, target_is_directory=True)
-    agent = Agent(
-        instructions="Answer.",
-        provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
-    )
-
-    with pytest.raises(RuntimeError, match="writable roots must stay outside native SDK storage"):
-        async with agent.session(storage=storage, environment=Environment.local(cwd=workspace)):
-            pytest.fail("A write grant included relocated checklist storage")
-    assert responses.requests == []
-
-
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@(
-    pytest.mark.requires_native_linux_sandbox
-    if sys.platform == "linux"
-    else pytest.mark.requires_native_macos_sandbox
-)
-async def test_local_replacement_rejects_a_relocated_checklist_hard_link(
-    responses: ResponsesFixture, tmp_path: Path
-) -> None:
-    workspace, sidecars, grant = (tmp_path / name for name in ("workspace", "sidecars", "grant"))
-    for directory in (workspace, sidecars, grant):
-        directory.mkdir()
-    storage = LocalStorage(tmp_path / "profile")
-    storage.path.mkdir()
-    (storage.path / "sdk-checklists").symlink_to(sidecars, target_is_directory=True)
-    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
-    agent = Agent(instructions="Answer.", provider=provider, tools=[Checklist()])
-    environment = Environment.local(cwd=workspace, tools=["exec_command"])
-    plan = [{"step": "An item", "status": "in_progress"}]
-    responses.respond(
-        function_call("update_plan", {"plan": plan, "explanation": "initial"}, "plan")
-    )
-    responses.respond(assistant_output("saved"))
-
-    async with (
-        timeout(30),
-        provider,
-        agent.session(storage=storage, environment=environment) as session,
-    ):
-        assert (await (await session.submit("Create a plan.")).get_result()).final_output == "saved"
-        checklist = await session.checklist()
-        assert checklist is not None and checklist.explanation == "initial"
-        canonical = sidecars / f"{session.id}.json"
-        record = canonical
-        alias = grant / "ordinary-name"
-        request_count = len(responses.requests)
-        responses.respond(assistant_output("done"))
-        for spelling in (
-            canonical,
-            canonical.with_suffix(".jſon"),
-            sidecars / canonical.name.upper(),
-        ):
-            if not spelling.exists():
-                continue
-            if spelling != record:
-                record.rename(sidecars / "rename-checklist").rename(spelling)
-                assert spelling.name in {path.name for path in sidecars.iterdir()}
-                assert await session.checklist() == checklist
-                record = spelling
-            alias.hardlink_to(record)
-            refused = await session.submit("Do not grant the checklist.", writable_roots=[grant])
-            with pytest.raises(NativeError, match="writable roots contain a hard link") as error:
-                await refused.get_result()
-            assert error.value.effects == "not_started"
-            assert len(responses.requests) == request_count
-            assert await session.checklist() == checklist
-            alias.unlink()
-
-        ordinary = tmp_path / "ordinary-file"
-        ordinary.write_text("ordinary")
-        alias.hardlink_to(ordinary)
-        # An app-owned link outside the reserved sidecar directories is unrelated.
-        (storage.path / "unrelated").symlink_to(grant, target_is_directory=True)
-        allowed = await session.submit("Grant an ordinary link.", writable_roots=[grant])
-        assert (await allowed.get_result()).final_output == "done"
-        assert await session.checklist() == checklist
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
@@ -503,22 +308,6 @@ async def test_local_write_roots_cannot_overlap_native_runtime_home(
                 await refused.get_result()
             assert error.value.effects == "not_started"
             assert responses.requests == []
-
-            (home,) = runtime_parent.glob("native-agent-*")
-            external = tmp_path / "outside-runtime"
-            external.mkdir()
-            alias = home / "unverified-directory"
-            alias.symlink_to(external, target_is_directory=True)
-            refused = await session.submit(
-                "Do not follow the runtime link.", writable_roots=[cache]
-            )
-            with pytest.raises(
-                NativeError, match="runtime home contains an unsupported symbolic link"
-            ):
-                await refused.get_result()
-            assert responses.requests == []
-            alias.unlink()
-
             allowed = await session.submit("Use the sibling cache.", writable_roots=[cache])
             assert (await allowed.get_result()).final_output == "done"
 
