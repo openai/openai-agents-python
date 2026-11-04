@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import os
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +18,7 @@ from examples.supervised_worker import __main__ as worker
 from tests._asyncio import timeout
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Uses Unix artifact flags")
 @pytest.mark.parametrize(
     ("name_length", "trailing", "accepted"),
     [(117, b"extra bytes\n", False), (118, b"", True)],
@@ -87,3 +91,196 @@ async def test_worker_preserves_primary_error_when_joining_turn(
 
     assert cancel_joined.is_set()
     assert observer_closed.is_set()
+
+
+@pytest.mark.parametrize(
+    ("failure", "output_suffix"),
+    [(None, ""), ("session", ""), ("provider", ""), ("cancel", ""), (None, "\n")],
+    ids=["success", "session-close", "provider-close", "cancel-close", "stale-check"],
+)
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Uses Unix artifact flags")
+async def test_worker_accepts_only_after_owned_resources_close(
+    tmp_path, monkeypatch, failure, output_suffix
+):
+    from argparse import Namespace
+
+    closing, release = asyncio.Event(), asyncio.Event()
+    order = []
+    cleanup = RuntimeError("Could not close the owned resource")
+    directory = tmp_path / "alpha"
+
+    class Session:
+        id = "session"
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            order.append("session")
+            closing.set()
+            await release.wait()
+            if failure == "session":
+                raise cleanup
+
+        async def submit(self, *args, **kwargs):
+            (directory / "workspace" / worker.ARTIFACT).write_text("alpha: verified\n")
+            return SimpleNamespace(turn_id="turn")
+
+        async def items(self):
+            yield {
+                "type": "command_execution",
+                "turn_id": "turn",
+                "status": "completed",
+                "exit_code": 0,
+                "cwd": (directory / "workspace").as_uri(),
+                "argv": [worker.VERIFY_COMMAND],
+                "output": "alpha: verified\n" + output_suffix,
+                "id": "check",
+            }
+
+        async def turns(self):
+            yield {"id": "turn", "receipt": {"verified": True}}
+
+        def rate_limits(self):
+            return SimpleNamespace(requests=None)
+
+    class Provider:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            order.append("provider")
+            if failure == "provider":
+                raise cleanup
+
+    class Agent:
+        def __class_getitem__(cls, item):
+            return cls
+
+        def __init__(self, **kwargs):
+            pass
+
+        def session(self, **kwargs):
+            return Session()
+
+    async def supervise(active_worker, turn, trace, **kwargs):
+        trace.steering.extend(["correction"] * len(worker.CORRECTIONS))
+        return SimpleNamespace(
+            final_output=worker.ArtifactResult(artifact="summary.txt", check="artifact checked"),
+            usage=None,
+        )
+
+    monkeypatch.setattr(worker, "NativeProvider", Provider)
+    monkeypatch.setattr(worker, "Agent", Agent)
+    monkeypatch.setattr(worker, "supervise", supervise)
+    args = Namespace(
+        command="work",
+        directory=directory,
+        pause_after_effect=False,
+        mcp_url=None,
+        startup_timeout=5,
+        turn_timeout=5,
+        instruction_file=[],
+    )
+    task = asyncio.create_task(worker.run_worker(args))
+    try:
+        await asyncio.wait_for(closing.wait(), 5)
+        assert worker.read_record(directory, "accepted") is None
+        monkeypatch.setattr(sys, "argv", ["worker", "publish", str(directory)])
+        with pytest.raises(SystemExit) as publication:
+            worker.main()
+        assert publication.value.code == 2
+        assert worker.read_record(directory, "published") is None
+        if failure == "cancel":
+            task.cancel()
+        else:
+            release.set()
+        if failure == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif failure:
+            with pytest.raises(RuntimeError) as caught:
+                await task
+            assert caught.value is cleanup
+        else:
+            result = await task
+            assert result["status"] == ("rejected" if output_suffix else "accepted")
+            if not output_suffix:
+                assert worker.read_record(directory, "accepted") == {
+                    key: value for key, value in result.items() if key != "status"
+                }
+        assert order == ["session", "provider"]
+        if failure or output_suffix:
+            assert worker.read_record(directory, "accepted") is None
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Uses Unix artifact flags")
+def test_worker_artifact_close_keeps_primary_read_error(tmp_path, monkeypatch, caplog, read_fails):
+    active_worker = worker.Worker(tmp_path, False)
+    active_worker.workspace.mkdir()
+    (active_worker.workspace / worker.ARTIFACT).write_text(active_worker.expected_text)
+    primary = ValueError("Could not read artifact")
+    cleanup = OSError("Could not close artifact")
+    fdopen = os.fdopen
+    closes = []
+
+    class Artifact:
+        def __init__(self, fd, mode):
+            self.file = fdopen(fd, mode)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.close()
+
+        def fileno(self):
+            return self.file.fileno()
+
+        def read(self, size):
+            if read_fails:
+                raise primary
+            return self.file.read(size)
+
+        def close(self):
+            closes.append(True)
+            self.file.close()
+            raise cleanup
+
+    monkeypatch.setattr(os, "fdopen", Artifact)
+    with pytest.raises(ValueError if read_fails else OSError) as caught:
+        active_worker.read_artifact()
+    assert caught.value is (primary if read_fails else cleanup)
+    assert closes == [True]
+    if read_fails:
+        assert any(record.exc_info and record.exc_info[1] is cleanup for record in caplog.records)
+
+
+async def test_prior_accepted_snapshot_remains_publishable(tmp_path, monkeypatch):
+    from argparse import Namespace
+
+    directory = tmp_path / "alpha"
+    directory.mkdir()
+    text = "alpha: verified\n"
+    accepted = {
+        "session_id": "previous",
+        "text": text,
+        "sha256": hashlib.sha256(text.encode()).hexdigest(),
+    }
+    worker.record_once(directory, "identity", {"session_id": "previous"})
+    worker.record_once(directory, "accepted", accepted)
+    with pytest.raises(ValueError, match="fresh worker directory"):
+        await worker.run_worker(
+            Namespace(command="work", directory=directory, pause_after_effect=False)
+        )
+    assert worker.read_record(directory, "accepted") == accepted
+    monkeypatch.setattr(sys, "argv", ["worker", "publish", str(directory)])
+    worker.main()
+    assert worker.read_record(directory, "published") == accepted
