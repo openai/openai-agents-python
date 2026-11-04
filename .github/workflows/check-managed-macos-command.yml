@@ -65,7 +65,7 @@ jobs:
           export OPENAI_AGENTS_DISPOSABLE_SITE="$work/site"
           export CODEX_EXEC_SERVER_TEST_BINARY="$work/donor/exec-server-fixture"
           unset OPENAI_AGENTS_EXPECT_HELPER_ALIAS_REJECT OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX
-          cat > tests/test_darwin_disjoint_alias.py <<'PROBE'
+          cat > tests/test_darwin_private_readable_alias.py <<'PROBE'
           import os
           import shlex
           import shutil
@@ -207,43 +207,65 @@ jobs:
                           print(f"Post-admission helper hardlink: {disposition}")
                           new_alias.unlink(missing_ok=True)
 
-                          source = store / "read-only-second-name"
-                          os.link(helper, source)
-                          assert helper.stat().st_nlink == 2
-                          before = helper.read_text()
-                          alias_target = disjoint / "link-from-disjoint-source"
-                          local_source = disjoint / "local-hardlink-source"
-                          local_target = disjoint / "local-hardlink-target"
-                          status = disjoint / "readable-alias-link-result"
-                          disjoint_marker = "r20-disjoint-source-marker"
-                          command = (
-                              f"{{ if /bin/cat {quoted(source)} > /dev/null; then printf readable; "
-                              f"else printf unreadable; fi; "
-                              f"if /bin/ln {quoted(source)} {quoted(alias_target)}; then printf :linked; "
-                              f"else printf :refused; fi; "
-                              f"if test -e {quoted(alias_target)} && "
-                              f"(printf %s {quoted(disjoint_marker)} >> {quoted(alias_target)}); "
-                              f"then printf :wrote; else printf :unchanged; fi; "
-                              f"printf local > {quoted(local_source)}; "
-                              f"if /bin/ln {quoted(local_source)} {quoted(local_target)}; "
-                              f"then printf :local-linked; else printf :local-refused; fi; }} > {quoted(status)}"
+                          read_only_platform_roots = (Path("/opt/homebrew/lib"), Path("/usr/local/lib"))
+                          platform_root = next(
+                              (
+                                  root
+                                  for root in read_only_platform_roots
+                                  if root.is_dir()
+                                  and os.access(root, os.W_OK)
+                                  and root.stat().st_dev == helper.stat().st_dev
+                              ),
+                              None,
                           )
-                          output = await run_command(command, disjoint, "outside-alias")
-                          assert status.exists(), output
-                          disposition = status.read_text()
-                          readable, linked, written, internal = disposition.split(":")
-                          assert readable in ("readable", "unreadable")
-                          assert linked in ("linked", "refused")
-                          assert written in ("wrote", "unchanged")
-                          assert internal in ("local-linked", "local-refused")
-                          assert helper.read_text() == before + (disjoint_marker if written == "wrote" else "")
-                          if fixed:
-                              assert written == "unchanged"
-                          print(f"Post-admission link from disjoint helper alias: {disposition}")
+                          assert platform_root is not None, "No same-volume writable platform-read-only probe root"
+                          with tempfile.TemporaryDirectory(prefix="agents-helper-alias-", dir=platform_root) as read_root:
+                              directory = Path(read_root)
+                              metadata = directory.stat()
+                              assert metadata.st_uid == os.geteuid()
+                              assert stat.S_IMODE(metadata.st_mode) == 0o700
+                              source = directory / "read-only-second-name"
+                              os.link(helper, source)
+                              helper_info, alias_info = helper.stat(), source.stat()
+                              assert (alias_info.st_dev, alias_info.st_ino, alias_info.st_nlink) == (
+                                  helper_info.st_dev, helper_info.st_ino, 2,
+                              )
+                              before = helper.read_text()
+                              alias_target = disjoint / "link-from-readable-source"
+                              local_source = disjoint / "local-hardlink-source"
+                              local_target = disjoint / "local-hardlink-target"
+                              status = disjoint / "readable-alias-link-result"
+                              disjoint_marker = "r20-readable-source-marker"
+                              command = (
+                                  f"{{ if /bin/cat {quoted(source)} > /dev/null; then printf readable; "
+                                  f"else printf unreadable; fi; "
+                                  f"if (printf %s direct-marker >> {quoted(source)}); then printf :direct-writable; "
+                                  f"else printf :direct-denied; fi; "
+                                  f"if /bin/ln {quoted(source)} {quoted(alias_target)}; then printf :linked; "
+                                  f"if (printf %s {quoted(disjoint_marker)} >> {quoted(alias_target)}); "
+                                  f"then printf :wrote; else printf :unchanged; fi; "
+                                  f"else printf :refused:unchanged; fi; "
+                                  f"printf local > {quoted(local_source)}; "
+                                  f"if /bin/ln {quoted(local_source)} {quoted(local_target)}; "
+                                  f"then printf :local-linked; else printf :local-refused; fi; }} > {quoted(status)}"
+                              )
+                              output = await run_command(command, disjoint, "platform-read-only-alias")
+                              assert status.exists(), output
+                              disposition = status.read_text()
+                              print(f"Post-admission link from platform-readable helper alias {source}: {disposition}")
+                              readable, direct, linked, written, internal = disposition.split(":")
+                              assert readable == "readable", output
+                              assert direct == "direct-denied", output
+                              assert linked in ("linked", "refused")
+                              assert written in ("wrote", "unchanged")
+                              assert internal == "local-linked", output
+                              assert helper.read_text() == before + (disjoint_marker if written == "wrote" else "")
+                              if fixed:
+                                  assert written == "unchanged"
                   finally:
                       saved.replace(helper)
           PROBE
-          printf '%s  %s\n' e905a019b0a8a911936e385d6f749a11d44e2b2deb8d4713d1c29c400f74d636 tests/test_darwin_disjoint_alias.py | shasum -a 256 -c -
+          printf '%s  %s\n' 0e68f25cab5b94beb821ef86dc4dc77fa6af7067c244b23dcac896083eafa0a2 tests/test_darwin_private_readable_alias.py | shasum -a 256 -c -
           .venv/bin/python -I -B - "$work/results.xml" <<'PY'
           import hashlib, os, platform, sys, xml.etree.ElementTree as ET
           from pathlib import Path
@@ -261,7 +283,7 @@ jobs:
           print('Verified isolated packaged helper:', helper, helper_sha)
           sys.path.insert(1, os.getcwd())
           result = pytest.main(['-q', '-s', '-rA', '-o', 'pythonpath=', '--junitxml=' + sys.argv[1],
-                                'tests/test_darwin_disjoint_alias.py::test_installed_darwin_helper_alias'])
+                                'tests/test_darwin_private_readable_alias.py::test_installed_darwin_helper_alias'])
           assert hashlib.file_digest(helper.open('rb'), 'sha256').hexdigest() == helper_sha
           if result:
               sys.exit(result)
