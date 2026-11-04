@@ -414,7 +414,7 @@ async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
                 ):
                     raise
                 session = await open_session(
-                    (call.reconcile(outcome="applied", result=EFFECT_RESULT),)
+                    (call.reconcile(outcome="applied", result=effect["result"]),)
                 )
             startup_ms = (monotonic() - started) * 1000
             record_once(directory, "identity", {"session_id": session.id})
@@ -443,25 +443,27 @@ async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
                 ),
                 args.turn_timeout,
             )
-            result = await supervise(worker, turn, trace, timeout=args.turn_timeout)
+            result = await supervise(
+                worker, turn, trace, timeout=args.turn_timeout + trace.started - monotonic()
+            )
             if isinstance(result, TurnNeedsAttention):
                 return {"status": result.reason, "stage": stage}
             if args.command == "effect":
                 effect = read_record(directory, "effect")
-                if (
-                    effect is None
-                    or result.turn.turn_id is None
-                    or effect.get("session_id") != session.id
-                    or effect.get("turn_id") != result.turn.turn_id
-                    or effect.get("result") != EFFECT_RESULT
-                ):
-                    return {
-                        "status": "rejected",
-                        "stage": stage,
-                        "reason": "The application journal did not confirm this turn's handoff.",
-                    }
-                return {"status": "completed", "session_id": session.id, "result": EFFECT_RESULT}
-            return {"status": "completed", "session_id": session.id, "result": result.final_output}
+                turn_id = result.turn.turn_id
+                if turn_id is None or (effect is not None and effect.get("turn_id") != turn_id):
+                    effect = None
+            if (
+                effect is None
+                or effect.get("session_id") != session.id
+                or effect.get("result") != EFFECT_RESULT
+            ):
+                return {
+                    "status": "rejected",
+                    "stage": stage,
+                    "reason": "The application journal did not confirm this turn's handoff.",
+                }
+            return {"status": "completed", "session_id": session.id, "result": effect["result"]}
     except LocalRecoveryRequired:
         return {"status": "recovery_required", "stage": stage}
     except (TimeoutError, asyncio.TimeoutError):

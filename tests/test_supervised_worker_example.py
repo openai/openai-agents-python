@@ -9,6 +9,7 @@ import os
 import shlex
 import signal
 import sys
+from argparse import Namespace
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -18,6 +19,8 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
+from agents import Session
+from examples.supervised_worker import __main__ as worker
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -307,7 +310,7 @@ async def test_two_workers_revise_reconnect_recover_and_publish_once(
         assert refusal == {"status": "recovery_required", "stage": "startup"}
         assert len(responses.requests) == request_count
 
-        responses.respond(assistant_output(EFFECT_RESULT))
+        responses.respond(assistant_output("This text is not the application result."))
         recovered = await invoke(
             "recover", alpha, responses.url, "--mcp-url", alpha_mcp, *method_options
         )
@@ -354,3 +357,47 @@ async def test_worker_joins_interrupt_and_result_timeout(
             finally:
                 release.set()
         assert not (tmp_path / "deadline" / "accepted.json").exists()
+
+
+@pytest.mark.parametrize("command", ("effect", "recover"))
+async def test_handoff_deadline_includes_submission(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    directory = tmp_path / "deadline"
+    async with timeout(45):
+        responses.respond(function_call("brief", {}, "interrupt-brief"))
+        assert (await invoke("interrupt", directory, responses.url))["status"] == "interrupted"
+        if command == "recover":
+            responses.respond(function_call("record_effect", {}, "handoff"))
+            responses.respond(assistant_output(EFFECT_RESULT))
+            assert (await invoke("effect", directory, responses.url))["status"] == "completed"
+
+        monkeypatch.setenv("OPENAI_API_KEY", "synthetic-supervised-worker")
+        monkeypatch.setenv("OPENAI_BASE_URL", responses.url)
+        monkeypatch.delenv("WORKER_MODEL", raising=False)
+        original_submit = Session.submit
+
+        async def submit(session: Session[Any, Any], *args: Any, **kwargs: Any) -> Any:
+            turn = await original_submit(session, *args, **kwargs)
+            # Simulate an acknowledgement that consumes the worker's turn budget.
+            deadline = worker.monotonic() + 10
+            monkeypatch.setattr(worker, "monotonic", lambda: deadline)
+            return turn
+
+        monkeypatch.setattr(Session, "submit", submit)
+        responses.respond(assistant_output("The model reports a handoff."))
+        outcome = await worker.run_worker(
+            Namespace(
+                command=command,
+                directory=directory,
+                instruction_file=[],
+                mcp_url=None,
+                pause_after_effect=False,
+                startup_timeout=25,
+                turn_timeout=10,
+            )
+        )
+        assert outcome == {"status": "timed_out", "stage": "turn"}
