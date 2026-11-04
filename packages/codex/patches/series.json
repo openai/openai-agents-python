@@ -111,7 +111,11 @@
     {
       "path": "0028-own-managed-local-launch-before-payload.patch",
       "sha256": "9ceb1de13400e03331bf5fd97ec407cca776dfdc454d493fb047ace030ba4628"
+    },
+    {
+      "path": "0029-own-managed-darwin-command-cohort.patch",
+      "sha256": "c396cfdaead91f902fe5952a80e91445469036461cacf17e84931faf1ea69ac8"
     }
   ],
-  "result_tree": "51f958be7a7fbb8833686164a71aa0e6ad8240e4"
+  "result_tree": "b37a0851ccab813f064a4a14fefda386f1c19332"
 }

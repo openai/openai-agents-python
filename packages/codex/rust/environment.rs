@@ -977,6 +977,15 @@ async fn probe_local_sandbox(
     cwd: &PathUri,
     profile: PermissionProfile,
 ) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let runtime = environment
+            .local_runtime_paths()
+            .context("local executor requires the native macOS helper")?;
+        codex_exec_server::darwin_command::check_supported(runtime.codex_self_exe.as_path())
+            .await
+            .context("local executor could not establish managed macOS command cleanup")?;
+    }
     // The direct local backend has no transport handshake. A fixed command
     // verifies that this process can launch the requested sandbox.
     let params = ExecParams {
