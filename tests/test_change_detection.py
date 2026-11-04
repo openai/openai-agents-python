@@ -150,6 +150,8 @@ def test_manual_verification_checks_unchanged_tree_without_deploying(
         (".github/scripts/run_repo_skill_tests.py", True, False, False, False),
         (".github/workflows/tests.yml", True, True, False, False),
         (".github/workflows/release-readiness-refresh.yml", True, False, False, False),
+        (".github/workflows/codex-python-qualify.yml", True, False, False, False),
+        (".github/workflows/native-python-push.yml", True, False, False, False),
         (".github/workflows/docs.yml", True, True, False, True),
         (".github/workflows/publish.yml", True, False, False, False),
         (".github/workflows/repo-skills.yml", True, False, False, False),
@@ -628,12 +630,18 @@ def test_single_sdk_producer_checks_installed_wheel_before_upload() -> None:
     assert "prospective-release-contract" not in jobs
     assert not any(name.startswith("packaged-contract-") for name in jobs)
     for platform in ("linux", "macos"):
-        assert jobs[f"native-{platform}"]["needs"] == "changes"
-        assert jobs[f"native-{platform}"]["if"] == "needs.changes.outputs.code == 'true'"
-    workflow = yaml.safe_load((ROOT / ".github/workflows/codex-python.yml").read_text())
+        assert jobs[f"produce-{platform}"]["needs"] == "changes"
+        assert jobs[f"produce-{platform}"]["if"] == "needs.changes.outputs.code == 'true'"
+        assert set(jobs[f"native-{platform}"]["needs"]) == {
+            "changes",
+            "produce-linux",
+            "produce-windows",
+            "produce-macos",
+        }
+    workflow = yaml.safe_load((ROOT / ".github/workflows/codex-python-qualify.yml").read_text())
     steps = workflow["jobs"]["build"]["steps"]
     names = [step.get("name", "") for step in steps]
-    build = names.index("Build the SDK and native runtime together")
+    build = names.index("Repack the current Python SDK with the verified native snapshot")
     verify = names.index("Test fresh installations without a checkout on the import path")
     upload = names.index("Share the package and test executor")
     assert build < verify < upload
@@ -678,7 +686,7 @@ def test_committed_version_controls_windows_scheduling(
     gate = next(step for step in changes["steps"] if step.get("id") == "release-windows")
     assert gate["env"] == {
         "V1_QUALIFICATION": (
-            "${{ github.ref_name == 'feat/codex-harness' || "
+            "${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || "
             "github.base_ref == 'feat/codex-harness' || "
             "github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}"
         ),
@@ -795,16 +803,17 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
     assert "workflow_dispatch" in workflow["on"]
     jobs = workflow["jobs"]
     for platform in ("linux", "macos"):
-        producer = jobs[f"native-{platform}"]
+        producer = jobs[f"produce-{platform}"]
         assert producer["needs"] == "changes"
         assert producer["if"] == "needs.changes.outputs.code == 'true'"
-    producer = jobs["native-windows"]
+    producer = jobs["produce-windows"]
     assert producer["needs"] == "changes"
     assert producer["if"] == (
         "needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'"
     )
     suites = jobs["tests-windows"]
-    assert suites["needs"] == "native-windows" and "if" not in suites
+    assert suites["needs"] == "native-windows"
+    assert suites["if"] == "${{ !inputs.native_only }}"
     assert suites["strategy"]["matrix"]["python-version"] == ["3.10", "3.14"]
     assert suites["runs-on"] == (
         "${{ fromJSON(github.repository == 'openai/openai-agents-python' && "
@@ -819,7 +828,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
         '\'{"group":"codex-runners","labels":"codex-linux-x64"}\' || '
         "'\"ubuntu-latest\"') }}"
     )
-    assert "if" not in win_typecheck
+    assert win_typecheck["if"] == "${{ !inputs.native_only }}"
 
 
 @pytest.mark.parametrize(
@@ -883,6 +892,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         step for step in workflow["jobs"]["changes"]["steps"] if step.get("id") == "native-source"
     )
     values = {
+        "inputs.native_only": False,
         "steps.changes.outputs.run": code,
         "github.event_name": event,
         "github.ref_name": ref,
@@ -897,7 +907,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "example/sdk", "openai/openai-agents-python"
     )
     condition = re.sub(
-        r"\b(?:steps|github)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+",
+        r"\b(?:steps|github|inputs)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+",
         lambda match: repr(values[match.group()]),
         selection["if"],
     )
@@ -909,6 +919,34 @@ def test_native_selection_only_runs_for_trusted_code_events(
     "scenario",
     [
         "reuse",
+        "branch_same",
+        "branch_merge_python",
+        "branch_merge_native_changed",
+        "branch_nullable_association",
+        "branch_copied",
+        "branch_null_context",
+        "branch_missing_callee",
+        "branch_retargeted_callee",
+        "branch_untrusted",
+        "branch_pre_pr",
+        "branch_other_pr",
+        "branch_wrong_base",
+        "branch_wrong_head_repo",
+        "branch_corrupt_identity",
+        "branch_capture_attempt_changed",
+        "branch_identity_replaced",
+        "branch_corrupt_archive",
+        "branch_wait_success",
+        "branch_completed_precedence",
+        "branch_active_incompatible",
+        "branch_wait_changed_source",
+        "branch_wait_failed",
+        "branch_wait_cancelled",
+        "branch_wait_attempt",
+        "branch_wait_timeout",
+        "branch_wait_missing_artifact",
+        "branch_wait_missing",
+        "branch_wait_api_error",
         "trusted_push_to_pr",
         "stacked_pr",
         "stacked_pr_native_changed",
@@ -919,6 +957,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "wrong_workflow",
         "wrong_branch",
         "dispatch",
+        "manual_dispatch",
         "in_progress",
         "failed_run",
         "pending_python_producer_failed",
@@ -944,6 +983,8 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "producer_changed",
         "forwarding_changed",
         "selector_changed",
+        "extra_caller_job",
+        "qualification_recipe_changed",
         "historical_repack",
         "native_workflow_changed",
         "redirected_download",
@@ -956,6 +997,16 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "incomplete_jobs",
         "incomplete_artifacts",
         "api_error",
+        "cross_platform_interleaving",
+        "replacement_artifact",
+        "equal_publication_sdk",
+        "equal_fractional_publication_sdk",
+        "qualification_failed",
+        "latest_qualification_failed",
+        "missing_sdk_start",
+        "queued_sdk",
+        "earlier_attempt_sdk",
+        "invalid_snapshot_digest",
         "pr_same",
         "pr_default_merged",
         "feature_push",
@@ -963,6 +1014,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "pr_other_number",
         "pr_wrong_ref",
         "pr_missing_context",
+        "pr_missing_qualification_context",
         "pr_null_context",
         "pr_null_association",
         "pr_bad_execution_sha",
@@ -1035,7 +1087,7 @@ def test_native_build_selection(
     changes = workflow["jobs"]["changes"]
     selection = next(step for step in changes["steps"] if step.get("id") == "native-source")
     assert selection["env"]["REQUIRE_WINDOWS"] == "${{ steps.release-windows.outputs.run }}"
-    for name in ("native-linux", "native-windows", "native-macos"):
+    for name in ("produce-linux", "produce-windows", "produce-macos"):
         assert workflow["jobs"][name]["with"]["native_source_run"] == (
             "${{ needs.changes.outputs.native_source_run }}"
         )
@@ -1043,6 +1095,18 @@ def test_native_build_selection(
     for path, contents in (
         (workflow_path, workflow_text),
         (native_workflow_path, native_workflow_text),
+        (
+            ".github/workflows/native-python-push.yml",
+            (ROOT / ".github/workflows/native-python-push.yml").read_text(),
+        ),
+        (
+            ".github/scripts/download-native-snapshot.py",
+            (ROOT / ".github/scripts/download-native-snapshot.py").read_text(),
+        ),
+        (
+            ".github/workflows/codex-python-qualify.yml",
+            (ROOT / ".github/workflows/codex-python-qualify.yml").read_text(),
+        ),
     ):
         target = repo / path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -1051,6 +1115,14 @@ def test_native_build_selection(
         (repo / workflow_path).write_text(
             workflow_text.replace("# Search a bounded history.", "# Prior selector.")
         )
+    if scenario == "extra_caller_job":
+        (repo / workflow_path).write_text(
+            workflow_text + "\n  corrupt-snapshot:\n    runs-on: ubuntu-latest\n"
+            "    steps:\n      - run: echo corrupt\n"
+        )
+    if scenario == "qualification_recipe_changed":
+        path = repo / ".github/workflows/codex-python-qualify.yml"
+        path.write_text(path.read_text() + "# Different qualification recipe.\n")
     if scenario == "forwarding_changed":
         (repo / workflow_path).write_text(
             workflow_text.replace(
@@ -1062,7 +1134,8 @@ def test_native_build_selection(
     if scenario == "redirected_download":
         native_workflow.write_text(
             native_workflow_text.replace(
-                "run-id: ${{ steps.native-source.outputs.run_id }}", "run-id: 999"
+                "NATIVE_SOURCE_RUN: ${{ steps.native-source.outputs.run_id }}",
+                "NATIVE_SOURCE_RUN: 999",
             )
         )
     if scenario == "native_workflow_changed":
@@ -1150,6 +1223,9 @@ def test_native_build_selection(
             payload_files[0].write_text("unreviewed compiler flags\n")
     native_workflow.write_text(native_workflow_text)
     (repo / workflow_path).write_text(workflow_text)
+    (repo / ".github/workflows/codex-python-qualify.yml").write_bytes(
+        (ROOT / ".github/workflows/codex-python-qualify.yml").read_bytes()
+    )
     if scenario.startswith("retired_realtime_extra"):
         project = project.replace(realtime_project, "")
         lock = (
@@ -1314,7 +1390,24 @@ def test_native_build_selection(
     repository = "openai/openai-agents-python"
     pr_donor = scenario.startswith("pr_") or scenario == "push_pr_source"
     current_pr = pr_donor and scenario not in {"pr_default_merged", "push_pr_source"}
+    branch_push = scenario.startswith("branch_")
+    current_pr = current_pr or branch_push
+    if scenario in {
+        "branch_merge_python",
+        "branch_merge_native_changed",
+        "branch_active_incompatible",
+    }:
+        _git(repo, "checkout", "-b", "advanced-base", base)
+        _commit(
+            repo,
+            "src/agents/base.py"
+            if scenario == "branch_merge_python"
+            else "packages/codex/Cargo.toml",
+        )
+        _git(repo, "merge", "--no-ff", "--no-commit", head)
+        _commit(repo)
     source = {
+        "run_attempt": 1,
         "id": 456 if scenario == "current_run" else 123,
         "head_sha": donor,
         "repository": {"full_name": repository, "id": 10},
@@ -1324,15 +1417,21 @@ def test_native_build_selection(
             else repository,
             "id": 10,
         },
-        "path": ".github/workflows/other.yml" if scenario == "wrong_workflow" else workflow_path,
+        "path": ".github/workflows/other.yml"
+        if scenario == "wrong_workflow"
+        else native_workflow_path
+        if scenario == "manual_dispatch"
+        else ".github/workflows/native-python-push.yml"
+        if branch_push
+        else workflow_path,
         "event": "pull_request"
         if pr_donor
         else "workflow_dispatch"
-        if scenario == "dispatch"
+        if scenario in {"dispatch", "manual_dispatch"}
         else "push",
         "head_branch": (
             "feature"
-            if pr_donor or scenario == "wrong_branch"
+            if pr_donor or branch_push or scenario == "wrong_branch"
             else "feat/codex-harness"
             if scenario.startswith("feature_push")
             else "main"
@@ -1344,6 +1443,22 @@ def test_native_build_selection(
         if scenario == "failed_run"
         else "success",
     }
+    source["referenced_workflows"] = [
+        {
+            "path": f"{repository}/{path}@{donor}",
+            "sha": donor,
+            "ref": "refs/heads/" + source["head_branch"],
+        }
+        for path in (native_workflow_path, ".github/workflows/codex-python-qualify.yml")
+    ]
+    if branch_push:
+        source["referenced_workflows"].append(
+            {
+                "path": f"{repository}/{workflow_path}@{donor}",
+                "sha": donor,
+                "ref": "refs/heads/feature",
+            }
+        )
     if pr_donor:
         # Bind the producer to the actual immutable merge used by its reusable workflow.
         execution_sha = _git(
@@ -1364,6 +1479,13 @@ def test_native_build_selection(
                 "sha": execution_sha,
             }
         ]
+        source["referenced_workflows"].append(
+            {
+                "path": f"{repository}/.github/workflows/codex-python-qualify.yml@{execution_sha}",
+                "ref": "refs/pull/199/merge",
+                "sha": execution_sha,
+            }
+        )
         source["pull_requests"] = [{"number": 200 if scenario == "pr_other_number" else 199}]
         if scenario == "pr_null_association":
             source["pull_requests"] = None
@@ -1395,6 +1517,8 @@ def test_native_build_selection(
             source["referenced_workflows"][0]["ref"] = "refs/pull/200/merge"
         if scenario == "pr_missing_context":
             source["referenced_workflows"] = []
+        if scenario == "pr_missing_qualification_context":
+            source["referenced_workflows"].pop()
         if scenario == "pr_null_context":
             source["referenced_workflows"] = None
         if scenario == "pr_bad_execution_sha":
@@ -1410,6 +1534,10 @@ def test_native_build_selection(
             )
             source["referenced_workflows"][0].update(
                 sha=execution_sha, path=f"{repository}/{native_workflow_path}@{execution_sha}"
+            )
+            source["referenced_workflows"][1].update(
+                sha=execution_sha,
+                path=f"{repository}/.github/workflows/codex-python-qualify.yml@{execution_sha}",
             )
             native_workflow.write_text(native_workflow_text)
             _git(repo, "add", native_workflow_path)
@@ -1441,9 +1569,35 @@ def test_native_build_selection(
                 "Current PR execution merge",
             )
             _git(repo, "checkout", "--detach", execution_head)
+    if scenario == "branch_null_context":
+        source["referenced_workflows"] = None
+    if scenario == "branch_missing_callee":
+        source["referenced_workflows"].pop()
+    if scenario == "branch_retargeted_callee":
+        source["referenced_workflows"][0]["sha"] = initial
+    if scenario == "branch_untrusted":
+        source["head_repository"]["full_name"] = "example/fork"
+    if scenario in {
+        "branch_wait_success",
+        "branch_wait_failed",
+        "branch_wait_cancelled",
+        "branch_wait_attempt",
+        "branch_wait_timeout",
+        "branch_active_incompatible",
+        "branch_wait_changed_source",
+        "branch_wait_missing_artifact",
+        "branch_wait_missing",
+        "branch_wait_api_error",
+    }:
+        source["head_sha"] = head
+        source.update(status="in_progress", conclusion=None)
+        for reference in source["referenced_workflows"]:
+            reference["sha"] = head
+            reference["path"] = reference["path"].split("@", 1)[0] + "@" + head
+
     jobs = [
         {
-            "name": f"native-{name} / Native package ({runner})",
+            "name": f"produce-{name} / Native snapshot ({runner})",
             "status": "completed",
             "conclusion": "success",
             "steps": [
@@ -1461,6 +1615,12 @@ def test_native_build_selection(
                     if scenario in {"reused_push", "historical_repack", "pr_repacked"}
                     else "success",
                 },
+                {
+                    "name": "Publish the native snapshot",
+                    "conclusion": "success",
+                    "started_at": "2026-11-04T01:00:00Z",
+                    "completed_at": "2026-11-04T01:00:10Z",
+                },
             ],
         }
         for name, runner in (
@@ -1476,8 +1636,20 @@ def test_native_build_selection(
     if scenario in {"missing_job", "pre_native"}:
         jobs.pop()
     artifacts = [
-        {"name": name, "expired": scenario == "expired"}
-        for name in ("native-Linux-X64", "native-Windows-X64", "native-macOS-ARM64")
+        {
+            "name": name,
+            "expired": scenario == "expired",
+            "id": index + 1000,
+            "digest": "sha256:" + "a" * 64,
+            "created_at": "2026-11-04T01:00:05Z",
+        }
+        for index, name in enumerate(
+            (
+                "native-snapshot-Linux-X64",
+                "native-snapshot-Windows-X64",
+                "native-snapshot-macOS-ARM64",
+            )
+        )
     ]
     if scenario == "missing_artifact":
         artifacts.pop()
@@ -1496,16 +1668,179 @@ def test_native_build_selection(
     if scenario == "release_expired_windows_artifact":
         artifacts[1]["expired"] = True
     if scenario == "paginated":
-        jobs[:0] = [{"name": "other", "conclusion": "success", "steps": []} for _ in range(100)]
+        jobs[:0] = [
+            {
+                "name": "other",
+                "conclusion": "success",
+                "steps": [],
+                "started_at": "2026-11-04T01:00:20Z",
+            }
+            for _ in range(100)
+        ]
         artifacts[:0] = [{"name": "other", "expired": False} for _ in range(100)]
     if pending_python or scenario == "failed_run":
         jobs.append(
             {
                 "name": "tests (3.14)",
+                "started_at": "2026-11-04T01:00:20Z",
                 "status": "in_progress" if pending_python else "completed",
                 "conclusion": None if pending_python else "failure",
             }
         )
+
+    jobs.extend(
+        {
+            "name": f"native-{name} / Native package ({runner})",
+            "status": "completed",
+            "conclusion": "success",
+            "run_attempt": 1,
+            "started_at": "2026-11-04T01:00:20Z",
+            "steps": [],
+        }
+        for name, runner in (
+            ("linux", "ubuntu-24.04"),
+            ("windows", "windows-latest"),
+            ("macos", "macos-latest"),
+        )
+    )
+    if scenario == "cross_platform_interleaving":
+        jobs.append({"name": "tests (3.11)", "started_at": "2026-11-04T01:00:04Z"})
+    if scenario == "replacement_artifact":
+        artifacts[0].update(id=9999, created_at="2026-11-04T01:00:30Z")
+    if scenario == "equal_publication_sdk":
+        jobs[-1]["started_at"] = "2026-11-04T01:00:10Z"
+    if scenario == "equal_fractional_publication_sdk":
+        jobs[0]["steps"][-1]["completed_at"] = "2026-11-04T01:00:20.000Z"
+    if scenario == "qualification_failed":
+        jobs[-1]["conclusion"] = "failure"
+    if scenario == "missing_sdk_start":
+        jobs[-1]["started_at"] = None
+    if scenario == "queued_sdk":
+        jobs.append(
+            {"name": "tests (3.10)", "started_at": None, "conclusion": None, "status": "queued"}
+        )
+    if scenario == "latest_qualification_failed":
+        jobs.append({**jobs[-1], "run_attempt": 2, "conclusion": "failure"})
+    if scenario == "earlier_attempt_sdk":
+        jobs.append(
+            {
+                "name": "native-linux / Native package (ubuntu-24.04)",
+                "conclusion": "failure",
+                "run_attempt": 0,
+                "started_at": "2026-11-04T00:59:59Z",
+            }
+        )
+    if scenario == "invalid_snapshot_digest":
+        artifacts[0]["digest"] = "invalid"
+
+    import time
+    from zipfile import ZipFile
+
+    provenance = {
+        "repository_id": "10",
+        "source_sha": source["head_sha"],
+        "head_ref": source["head_branch"],
+        "run_id": str(source["id"]),
+        "run_attempt": "1",
+        "pull_request": None,
+    }
+    if branch_push:
+        provenance["pull_request"] = {
+            "number": 199,
+            "base_repo_id": "10",
+            "head_repo_id": "10",
+            "base_ref": "main",
+            "head_ref": "feature",
+        }
+    if scenario == "branch_pre_pr":
+        provenance["pull_request"] = None
+    if scenario == "branch_other_pr":
+        provenance["pull_request"]["number"] = 200
+    if scenario == "branch_wrong_base":
+        provenance["pull_request"]["base_ref"] = "other"
+    if scenario == "branch_wrong_head_repo":
+        provenance["pull_request"]["head_repo_id"] = "20"
+    if scenario == "branch_corrupt_identity":
+        provenance["source_sha"] = initial
+    if scenario == "branch_capture_attempt_changed":
+        provenance["run_attempt"] = "2"
+    if scenario == "branch_nullable_association":
+        source["pull_requests"] = None  # Historical association is not authority.
+    identity_archive = io.BytesIO()
+    with ZipFile(identity_archive, "w") as bundle:
+        bundle.writestr("native-provenance.json", json.dumps(provenance))
+    import hashlib
+
+    identity_digest = "sha256:" + hashlib.sha256(identity_archive.getvalue()).hexdigest()
+    artifacts.append(
+        {
+            "name": "native-provenance",
+            "expired": False,
+            "id": 9001,
+            "digest": identity_digest,
+            "created_at": "2026-11-04T00:59:05Z",
+        }
+    )
+    jobs.append(
+        {
+            "name": "changes",
+            "run_attempt": 1,
+            "conclusion": "success",
+            "steps": [
+                {
+                    "name": "Publish native producer identity",
+                    "conclusion": "success",
+                    "started_at": "2026-11-04T00:59:00Z",
+                    "completed_at": "2026-11-04T00:59:10Z",
+                }
+            ],
+        }
+    )
+    if branch_push:
+        for job in jobs:
+            job["name"] = "native-only / " + job["name"]
+    if scenario == "branch_identity_replaced":
+        artifacts[-1]["created_at"] = "2026-11-04T01:00:30Z"
+    if scenario == "branch_copied":
+        for job in jobs:
+            if " / Native snapshot (" in job["name"]:
+                for step in job["steps"]:
+                    if step["name"] in {
+                        "Build the SDK and native runtime together",
+                        "Build the shared test executor",
+                    }:
+                        step["conclusion"] = "skipped"
+                    if step["name"] == "Download the qualified native build":
+                        step["conclusion"] = "success"
+    real_run = subprocess.run
+
+    def tool(command, **kwargs):
+        if command[:2] != ["gh", "api"]:
+            return real_run(command, **kwargs)
+        if command[-1].endswith("/zip"):
+            kwargs["stdout"].write(
+                identity_archive.getvalue()
+                + (b"changed" if scenario == "branch_corrupt_archive" else b"")
+            )
+            return subprocess.CompletedProcess(command, 0)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(
+                {
+                    "workflow_run": {"id": source["id"]},
+                    "name": "native-provenance",
+                    "expired": False,
+                    "digest": identity_digest,
+                }
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", tool)
+    elapsed = [0]
+    polls = []
+    monkeypatch.setattr(time, "monotonic", lambda: elapsed[0])
+    monkeypatch.setattr(time, "sleep", lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds))
 
     def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
         url = request.full_url
@@ -1521,6 +1856,36 @@ def test_native_build_selection(
             }
             if scenario == "release_split_donors":
                 response["workflow_runs"].append({**source, "id": 124})
+            if scenario == "branch_completed_precedence":
+                active = {
+                    **source,
+                    "id": 124,
+                    "head_sha": head,
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "referenced_workflows": [
+                        {**ref, "sha": head, "path": ref["path"].split("@", 1)[0] + "@" + head}
+                        for ref in source["referenced_workflows"]
+                    ],
+                }
+                response["workflow_runs"].insert(0, active)
+        elif url.endswith("/runs/123"):
+            polls.append(url)
+            if scenario == "branch_wait_missing":
+                raise urllib.error.HTTPError(url, 404, "missing", {}, None)
+            if scenario == "branch_wait_api_error":
+                raise urllib.error.HTTPError(url, 500, "unavailable", {}, None)
+            response = dict(source)
+            if scenario != "branch_wait_timeout":
+                response.update(status="completed", conclusion="success")
+            if scenario == "branch_wait_failed":
+                response["conclusion"] = "failure"
+            if scenario == "branch_wait_cancelled":
+                response["conclusion"] = "cancelled"
+            if scenario == "branch_wait_attempt":
+                response["run_attempt"] = 2
+            if scenario == "branch_wait_changed_source":
+                response["head_sha"] = initial
         elif "/pulls/" in url:
             response = {
                 "merged": True,
@@ -1531,12 +1896,16 @@ def test_native_build_selection(
         else:
             key = "jobs" if "/jobs?" in url else "artifacts"
             items = jobs if key == "jobs" else artifacts
+            if scenario == "branch_wait_missing_artifact" and key == "artifacts":
+                items = [item for item in artifacts if item["name"] != "native-snapshot-Linux-X64"]
             if scenario == "release_split_donors" and "/runs/124/" in url:
                 items = (
                     [
                         {
                             "name": "native-windows / Native package (windows-latest)",
                             "conclusion": "success",
+                            "started_at": "2026-11-04T01:00:20Z",
+                            "run_attempt": 1,
                         }
                     ]
                     if key == "jobs"
@@ -1556,9 +1925,12 @@ def test_native_build_selection(
     output = repo / "output"
     for key, value in {
         "GITHUB_REPOSITORY": repository,
+        "GITHUB_REPOSITORY_ID": "10",
+        "CURRENT_HEAD_REF": "feature",
+        "CURRENT_BASE_REF": "main",
         "GITHUB_API_URL": "https://api.example.invalid",
         "GITHUB_SERVER_URL": "https://github.example.invalid",
-        "GITHUB_SHA": head,
+        "GITHUB_SHA": _git(repo, "rev-parse", "HEAD"),
         "GITHUB_RUN_ID": "456",
         "GITHUB_HEAD_REF": "feature",
         "CURRENT_PR": (
@@ -1595,26 +1967,61 @@ def test_native_build_selection(
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
             exec(compile(script, workflow_path, "exec"), {})
-    elif scenario in {"pr_bad_execution_sha", "pr_ambiguous_context"}:
-        with pytest.raises(SystemExit, match="native producer execution"):
+    elif scenario == "invalid_snapshot_digest":
+        with pytest.raises(SystemExit, match="Invalid native snapshot digest"):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario == "missing_sdk_start":
+        with pytest.raises(SystemExit, match="Incomplete SDK execution history"):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario in {"branch_corrupt_identity", "branch_capture_attempt_changed"}:
+        with pytest.raises(SystemExit, match="Inconsistent native producer identity"):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario == "branch_corrupt_archive":
+        with pytest.raises(ValueError, match="digest mismatch"):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario == "branch_wait_api_error":
+        with pytest.raises(urllib.error.HTTPError):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario == "branch_wait_changed_source":
+        with pytest.raises(SystemExit, match="Inconsistent pinned push producer"):
             exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "api_error":
         with pytest.raises(urllib.error.URLError, match="API unavailable"):
             exec(compile(script, workflow_path, "exec"), {})
     else:
         exec(compile(script, workflow_path, "exec"), {})
+    if scenario.startswith("branch_wait_"):
+        assert len(polls) == (75 if scenario == "branch_wait_timeout" else 1)
+        assert elapsed[0] <= 75 * 60
+    else:
+        assert not polls
     assert (output.read_text() if output.exists() else "") == (
-        "run_id=123\n"
+        "run_id=123\nartifacts="
+        + json.dumps(
+            {
+                identity: {
+                    "id": index + 1000,
+                    "digest": "sha256:" + "a" * 64,
+                    "provenance": provenance,
+                }
+                for index, identity in enumerate(("Linux-X64", "Windows-X64", "macOS-ARM64"))
+                if identity != "Windows-X64" or os.environ["REQUIRE_WINDOWS"] != "false"
+            },
+            sort_keys=True,
+        )
+        + "\n"
         if scenario
         in {
             "reuse",
-            "in_progress",
-            "failed_run",
             "trusted_push_to_pr",
             "stacked_pr",
-            "selector_changed",
-            "pr_same",
-            "pr_base_python_changed",
+            "queued_sdk",
+            "branch_same",
+            "branch_merge_python",
+            "branch_nullable_association",
+            "branch_copied",
+            "branch_wait_success",
+            "branch_completed_precedence",
             "feature_push",
             "feature_push_to_pr",
             "version_and_docs",

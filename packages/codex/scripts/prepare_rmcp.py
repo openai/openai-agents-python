@@ -1,6 +1,7 @@
 """Prepare the existing pinned RMCP workspace with its reviewed codec patch."""
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -27,9 +28,25 @@ def prepare_rmcp(root: Path, source: Path | None = None) -> None:
         if source is None:
             source = Path(temporary) / "source"
             subprocess.run(["git", "init", "--bare", str(source)], check=True)
+            print(f"Fetching pinned RMCP source {identity['rev']}", flush=True)
             subprocess.run(
-                ["git", "-C", str(source), "fetch", "--depth=1", identity["git"], identity["rev"]],
+                [
+                    "git",
+                    "-c",
+                    "http.lowSpeedLimit=1024",
+                    "-c",
+                    "http.lowSpeedTime=120",
+                    "-C",
+                    str(source),
+                    "fetch",
+                    "--progress",
+                    "--depth=1",
+                    identity["git"],
+                    identity["rev"],
+                ],
                 check=True,
+                timeout=300,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             )
         _extract_archive(source, identity["rev"], destination, temporary)
         record_rmcp_source(root, source)

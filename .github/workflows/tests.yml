@@ -9,6 +9,12 @@ on:
     # All PRs, including stacked PRs
   merge_group:
     types: [checks_requested]
+  workflow_call:
+    inputs:
+      native_only:
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
   # Use GitHub's Re-run failed jobs action to retry this run.
 
@@ -23,14 +29,18 @@ env:
 
 jobs:
   changes:
+    if: github.event_name != 'push' || !github.event.deleted
     runs-on: ubuntu-latest
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       code: ${{ steps.changes.outputs.run }}
       windows: ${{ steps.release-windows.outputs.run }}
       native_source_run: ${{ steps.native-source.outputs.run_id }}
+      native_artifacts: ${{ steps.native-source.outputs.artifacts }}
+      native_provenance: ${{ steps.producer-identity.outputs.provenance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -41,7 +51,7 @@ jobs:
       - name: Select Windows test coverage
         id: release-windows
         env:
-          V1_QUALIFICATION: ${{ github.ref_name == 'feat/codex-harness' || github.base_ref == 'feat/codex-harness' || github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}
+          V1_QUALIFICATION: ${{ inputs.native_only || github.ref_name == 'feat/codex-harness' || github.base_ref == 'feat/codex-harness' || github.event.merge_group.base_ref == 'refs/heads/feat/codex-harness' }}
           DEFAULT_BRANCH_PUSH: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch }}
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
@@ -81,232 +91,444 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
               output.write(f"run={str(manual or default_push or versions[0] != versions[1]).lower()}\n")
           PYTHON
+      - name: Capture native producer identity
+        id: producer-identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRODUCER_BRANCH: ${{ github.ref_name }}
+          PRODUCER_SHA: ${{ github.sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+          from pathlib import Path
+
+          record = {"repository_id": os.environ["GITHUB_REPOSITORY_ID"],
+                    "source_sha": os.environ["PRODUCER_SHA"],
+                    "head_ref": os.environ["PRODUCER_BRANCH"],
+                    "run_id": os.environ["GITHUB_RUN_ID"],
+                    "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"], "pull_request": None}
+          if (os.environ["GITHUB_EVENT_NAME"] == "push"
+                  and record["head_ref"] not in {os.environ["DEFAULT_BRANCH"], "feat/codex-harness"}):
+              query = urllib.parse.urlencode({"state": "open", "head": os.environ["GITHUB_REPOSITORY_OWNER"] + ":" + record["head_ref"], "per_page": 100})
+              url = os.environ["GITHUB_API_URL"] + "/repos/" + os.environ["GITHUB_REPOSITORY"] + "/pulls?" + query
+              request = urllib.request.Request(url, headers={"Authorization": "Bearer " + os.environ["GH_TOKEN"],
+                                                          "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  pulls = json.load(response)
+              if len(pulls) >= 100:
+                  raise SystemExit("Incomplete open PR metadata; cannot capture native producer identity")
+              # More than one page cannot establish a unique open association.
+              if len(pulls) < 100:
+                  matches = [pr for pr in pulls if pr["head"]["sha"] == record["source_sha"]
+                             and pr["head"]["ref"] == record["head_ref"]
+                             and str((pr["head"].get("repo") or {}).get("id")) == record["repository_id"]
+                             and str((pr["base"].get("repo") or {}).get("id")) == record["repository_id"]]
+                  if len(matches) == 1:
+                      pr = matches[0]
+                      record["pull_request"] = {"number": pr["number"],
+                                                "base_repo_id": str(pr["base"]["repo"]["id"]),
+                                                "head_repo_id": str(pr["head"]["repo"]["id"]),
+                                                "base_ref": pr["base"]["ref"], "head_ref": pr["head"]["ref"]}
+          encoded = json.dumps(record, sort_keys=True)
+          (Path(os.environ["RUNNER_TEMP"]) / "native-provenance.json").write_text(encoded)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("provenance=" + encoded + "\n")
+              if record["pull_request"]:
+                  output.write("pr_number=" + str(record["pull_request"]["number"]) + "\n")
+                  output.write("base_ref=" + record["pull_request"]["base_ref"] + "\n")
+          PYTHON
+      - name: Publish native producer identity
+        if: github.event_name == 'push' && steps.changes.outputs.run == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-provenance
+          path: ${{ runner.temp }}/native-provenance.json
+          if-no-files-found: error
+          retention-days: 14
       - name: Select a qualified native build
         id: native-source
         if: >-
           github.repository == 'openai/openai-agents-python' && steps.changes.outputs.run == 'true' &&
           ((github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch ||
-          github.ref_name == 'feat/codex-harness')) ||
+          github.ref_name == 'feat/codex-harness' || inputs.native_only)) ||
           (github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository))
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_BRANCH: ${{ (github.base_ref || github.ref_name) == 'feat/codex-harness' && 'feat/codex-harness' || github.event.repository.default_branch }}
-          CURRENT_PR: ${{ github.event.pull_request.number || '' }}
-          CURRENT_PR_HEAD: ${{ github.event.pull_request.head.sha || '' }}
+          SOURCE_BRANCH: ${{ (github.base_ref || steps.producer-identity.outputs.base_ref || github.ref_name) == 'feat/codex-harness' && 'feat/codex-harness' || github.event.repository.default_branch }}
+          CURRENT_PR: ${{ github.event.pull_request.number || steps.producer-identity.outputs.pr_number || '' }}
+          CURRENT_PR_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
+          CURRENT_HEAD_REF: ${{ github.head_ref || github.ref_name }}
+          CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
         run: |
           python - <<'PYTHON'
           import json
           import os
           import re
+          import runpy
           import subprocess
+          import tempfile
+          import time
+          import urllib.error
           import urllib.parse
           import urllib.request
+          from datetime import datetime
           from pathlib import Path
+          from zipfile import ZipFile
           try:
               import tomllib
-          except ImportError:  # Python 3.10 test jobs already install tomli with pytest.
+          except ImportError:
               import tomli as tomllib
 
-          repo = os.environ["GITHUB_REPOSITORY"]
-          repo_api = os.environ["GITHUB_API_URL"] + "/repos/" + repo
-          api = repo_api + "/actions"
-          headers = {"Authorization": "Bearer " + os.environ["GH_TOKEN"],
-                     "Accept": "application/vnd.github+json"}
+          repo = os.environ['GITHUB_REPOSITORY']
+          api = os.environ['GITHUB_API_URL'] + '/repos/' + repo + '/actions'
+          headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
+          download_archive = runpy.run_path('.github/scripts/download-native-snapshot.py')['download_archive']
+
           def get(url):
               with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
                   return json.load(response)
 
           def records(url, key):
-              results = []
-              page = 1
+              results, page = [], 1
               while True:
-                  response = get(url + f"&per_page=100&page={page}")
+                  response = get(url + f'&per_page=100&page={page}')
                   batch = response[key]
                   results.extend(batch)
-                  if len(results) == response["total_count"]:
+                  if len(results) == response['total_count']:
                       return results
-                  if not batch or len(results) > response["total_count"]:
-                      raise SystemExit("Incomplete source metadata; cannot verify native build provenance")
+                  if not batch or len(results) > response['total_count']:
+                      raise SystemExit('Incomplete source metadata; cannot verify native build provenance')
                   page += 1
 
-          def job_block(workflow, name):
-              match = re.search(rf"(?m)^  {name}:\n(?:(?!^  \S).*\n)*", workflow)
-              return match[0] if match else None
-
           def ancestor(before, after):
-              return bool(re.fullmatch(r"[0-9a-f]{40}", before or "")) and subprocess.run(
-                  ["git", "merge-base", "--is-ancestor", before, after], stderr=subprocess.DEVNULL
+              return bool(re.fullmatch(r'[0-9a-f]{40}', before or '')) and subprocess.run(
+                  ['git', 'merge-base', '--is-ancestor', before, after], stderr=subprocess.DEVNULL
               ).returncode == 0
 
-          def parents(revision):
-              commit = subprocess.check_output(["git", "cat-file", "commit", revision], text=True)
-              return [line.removeprefix("parent ") for line in commit.split("\n\n", 1)[0].splitlines()
-                      if line.startswith("parent ")]
+          def timestamp(value):
+              parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+              if parsed.utcoffset() is None:
+                  raise SystemExit('Incomplete native publication timestamp')
+              return parsed
 
-          def qualified(run):
-              if (repo != 'openai/openai-agents-python'
-                      or run["repository"]["full_name"] != repo
-                      or (run.get("head_repository") or {}).get("full_name") != repo
-                      or run["path"] != ".github/workflows/tests.yml"
-                      or str(run["id"]) == os.environ["GITHUB_RUN_ID"]):
+          def compatible(run):
+              if (repo != 'openai/openai-agents-python' or run['event'] != 'push'
+                      or run['repository']['full_name'] != repo
+                      or str(run['repository']['id']) != os.environ['GITHUB_REPOSITORY_ID']
+                      or (run.get('head_repository') or {}).get('full_name') != repo
+                      or str(run['id']) == os.environ['GITHUB_RUN_ID']):
                   return False
-              source = run["head_sha"]
-              if run["event"] == "push":
-                  if run["head_branch"] != os.environ["SOURCE_BRANCH"] or not ancestor(source, "HEAD"):
+              branch_source = run['path'] == '.github/workflows/native-python-push.yml'
+              canonical_source = run['path'] == '.github/workflows/tests.yml'
+              if branch_source:
+                  if (not os.environ.get('CURRENT_PR') or run['head_branch'] != os.environ['CURRENT_HEAD_REF']
+                          or not ancestor(run['head_sha'], os.environ['CURRENT_PR_HEAD'])):
                       return False
-              elif run["event"] == "pull_request" and os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
-                  number = os.environ["CURRENT_PR"]
-                  if not number or not any(str(pr["number"]) == number for pr in (run.get("pull_requests") or [])):
+              elif canonical_source:
+                  if run['head_branch'] != os.environ['SOURCE_BRANCH'] or not ancestor(run['head_sha'], 'HEAD'):
                       return False
-                  if not ancestor(source, os.environ["CURRENT_PR_HEAD"]):
-                      return False
-                  references = [item for item in (run.get("referenced_workflows") or [])
-                                if item["path"].split("@", 1)[0] == repo + "/.github/workflows/codex-python.yml"]
-                  if not references:
-                      return False
-                  if len(references) != 1:
-                      raise SystemExit("Ambiguous native producer execution context")
-                  reference = references[0]
-                  if reference["ref"] != f"refs/pull/{number}/merge":
-                      return False
-                  execution = reference["sha"]
-                  if not re.fullmatch(r"[0-9a-f]{40}", execution):
-                      raise SystemExit("Invalid native producer execution SHA")
-                  if reference["path"] != f"{repo}/.github/workflows/codex-python.yml@{execution}":
-                      raise SystemExit("Inconsistent native producer execution reference")
-                  if subprocess.run(["git", "cat-file", "-e", execution + "^{commit}"],
-                                    stderr=subprocess.DEVNULL).returncode:
-                      subprocess.run(["git", "fetch", "--no-tags", "origin", execution], check=True, timeout=60)
-                  prior_parents, current_parents = parents(execution), parents("HEAD")
-                  if (len(prior_parents) != 2 or prior_parents[1] != source or len(current_parents) != 2
-                          or current_parents[1] != os.environ["CURRENT_PR_HEAD"]):
-                      return False
-                  source = execution
               else:
                   return False
-              run_api = api + "/runs/" + str(run["id"])
-              required = {
-                  "native-linux / Native package (ubuntu-24.04)": "native-Linux-X64",
-                  "native-macos / Native package (macos-latest)": "native-macOS-ARM64",
-              }
-              # Only a known routine run can omit Windows. A release consumes
-              # one complete qualified donor for all three platforms.
-              if os.environ.get("REQUIRE_WINDOWS") != "false":
-                  required["native-windows / Native package (windows-latest)"] = "native-Windows-X64"
-              jobs = records(run_api + "/jobs?filter=latest", "jobs")
-              # Native jobs qualify the artifacts independently of unrelated tests.
-              for name in required:
-                  producers = [job for job in jobs if job["name"] == name]
-                  if len(producers) != 1 or producers[0]["conclusion"] != "success":
-                      return False
-                  steps = {step["name"]: step.get("conclusion") for step in producers[0].get("steps", [])}
-                  if (steps.get("Build the SDK and native runtime together") != "success"
-                          or steps.get("Build the shared test executor") != "success"
-                          or steps.get("Download the qualified native build") != "skipped"):
-                      return False
-              native_workflow = ".github/workflows/codex-python.yml"
-              if subprocess.check_output(["git", "show", f"{source}:{native_workflow}"]) != Path(native_workflow).read_bytes():
+              expected = {'.github/workflows/codex-python.yml', '.github/workflows/codex-python-qualify.yml'}
+              if branch_source:
+                  expected.add('.github/workflows/tests.yml')
+              references = run.get('referenced_workflows') or []
+              if not references:
                   return False
-              tests_workflow = ".github/workflows/tests.yml"
-              prior_tests = subprocess.check_output(["git", "show", f"{source}:{tests_workflow}"], text=True)
-              current_tests = Path(tests_workflow).read_text()
-              # A fresh build under the same producer recipe does not depend on the donor selector.
-              for name in ("native-linux", "native-windows", "native-macos"):
-                  before, after = (job_block(text, name) for text in (prior_tests, current_tests))
-                  if not before or not after or before != after:
+              if (len(references) != len(expected)
+                      or {item['path'].split('@', 1)[0] for item in references} != {repo + '/' + path for path in expected}):
+                  return False
+              for item in references:
+                  if (item['sha'] != run['head_sha']
+                          or item['path'] != item['path'].split('@', 1)[0] + '@' + run['head_sha']
+                          or item['ref'] != 'refs/heads/' + run['head_branch']):
+                      return False
+              source = run['head_sha']
+              for path in expected | {run['path'], '.github/workflows/tests.yml'}:
+                  prior = subprocess.run(['git', 'show', f'{source}:{path}'], capture_output=True)
+                  if prior.returncode or prior.stdout != Path(path).read_bytes():
                       return False
               changed = set(subprocess.check_output(
-                  ["git", "diff", "--name-only", "--no-renames", "-z", source, "HEAD", "--"]
-              ).split(b"\0")) - {b""}
-              # Refresh Python payloads only when build settings and dependencies match.
-              # Version and test selection do not change the compiled native assets.
-              for filename in ("pyproject.toml", "uv.lock"):
+                  ['git', 'diff', '--name-only', '--no-renames', '-z', source, 'HEAD', '--']
+              ).split(b'\0')) - {b''}
+              # Only version and test selection can differ in otherwise identical build settings.
+              for filename in ('pyproject.toml', 'uv.lock'):
                   if filename.encode() not in changed:
                       continue
-                  prior = subprocess.run(["git", "show", f"{source}:{filename}"], capture_output=True, text=True)
+                  prior = subprocess.run(['git', 'show', f'{source}:{filename}'], capture_output=True, text=True)
                   if prior.returncode or not Path(filename).is_file():
                       return False
                   try:
                       before, after = tomllib.loads(prior.stdout), tomllib.loads(Path(filename).read_text())
                       for data in (before, after):
-                          if filename == "pyproject.toml":
-                              data["project"].pop("version")
-                              data.get("tool", {}).get("pytest", {}).get("ini_options", {}).pop("testpaths", None)
+                          if filename == 'pyproject.toml':
+                              data['project'].pop('version')
+                              data.get('tool', {}).get('pytest', {}).get('ini_options', {}).pop('testpaths', None)
                           else:
-                              for package in data["package"]:
-                                  if package["name"] == "openai-agents" and package["source"] == {"editable": "."}:
-                                      package.pop("version")
-                  except (KeyError, StopIteration, tomllib.TOMLDecodeError):
+                              for package in data['package']:
+                                  if package['name'] == 'openai-agents' and package['source'] == {'editable': '.'}:
+                                      package.pop('version')
+                  except (KeyError, tomllib.TOMLDecodeError):
                       return False
                   if before != after:
                       return False
                   changed.remove(filename.encode())
               allowed = re.compile(
-                  rb"(?:src/agents/|packages/codex/tests/|tests/|examples/).+\.py\Z"
-                  rb"|(?:README|CHANGELOG-alpha|examples/README|packages/codex/README|\.github/RELEASING|docs/.+)\.md\Z"
-                  rb"|(?:release-please-config|\.release-please-manifest|pyrightconfig)\.json\Z"
-                  rb"|tests/fixtures/released_api_contract\.json\Z"
-                  rb"|packages/codex/(?:AGENTS|MAINTAINING)\.md\Z"
-                  rb"|packages/codex/docs/.+\.md\Z"
-                  rb"|packages/codex/scripts/verify_installed\.py\Z"
-                  rb"|(?:Makefile|mkdocs\.yml|tests/README\.md)\Z"
-                  rb"|\.github/workflows/(?:tests|codex-python|alpha-install)\.yml\Z"
-                  rb"|docs/assets/images/.+\.(?:png|jpg|jpeg|gif|svg|webp)\Z"
+                  rb'(?:src/agents/|packages/codex/tests/|tests/|examples/).+\.py\Z'
+                  rb'|(?:README|CHANGELOG-alpha|examples/README|packages/codex/README|\.github/RELEASING|docs/.+)\.md\Z'
+                  rb'|(?:release-please-config|\.release-please-manifest|pyrightconfig)\.json\Z'
+                  rb'|tests/fixtures/released_api_contract\.json\Z'
+                  rb'|packages/codex/(?:AGENTS|MAINTAINING)\.md\Z'
+                  rb'|packages/codex/docs/.+\.md\Z'
+                  rb'|packages/codex/scripts/verify_installed\.py\Z'
+                  rb'|(?:Makefile|mkdocs\.yml|tests/README\.md)\Z'
+                  rb'|\.github/workflows/alpha-install\.yml\Z'
+                  rb'|docs/assets/images/.+\.(?:png|jpg|jpeg|gif|svg|webp)\Z'
               )
-              if any(not allowed.fullmatch(path) for path in changed):
-                  return False
-              artifacts = records(run_api + "/artifacts?", "artifacts")
-              return set(required.values()) <= {
-                  item["name"] for item in artifacts if not item["expired"]
-              }
+              return not any(not allowed.fullmatch(path) for path in changed)
 
-          # Search a bounded history. API errors fail instead of silently starting a cold build.
+          def qualified(run):
+              if run['status'] != 'completed' or run['conclusion'] != 'success' or not compatible(run):
+                  return None
+              run_api = api + '/runs/' + str(run['id'])
+              jobs = records(run_api + '/jobs?filter=all', 'jobs')
+              prefix = 'native-only / ' if run['path'].endswith('native-python-push.yml') else ''
+              sdk_starts = []
+              for job in jobs:
+                  name = job['name'].removeprefix(prefix)
+                  if name.startswith('produce-') or name == 'changes' or job.get('conclusion') == 'skipped':
+                      continue
+                  if not job['started_at']:
+                      if job.get('status') == 'queued':
+                          continue
+                      raise SystemExit('Incomplete SDK execution history')
+                  sdk_starts.append(timestamp(job['started_at']))
+              if not sdk_starts:
+                  return None
+              earliest_sdk = min(sdk_starts)
+              artifacts = records(run_api + '/artifacts?', 'artifacts')
+              # This small record was captured once, before any native or SDK qualification.
+              captures = []
+              for job in jobs:
+                  if job['name'] != prefix + 'changes':
+                      continue
+                  for step in job.get('steps', []):
+                      if step['name'] != 'Publish native producer identity' or step.get('conclusion') != 'success':
+                          continue
+                      for artifact in artifacts:
+                          if (artifact['name'] == 'native-provenance' and not artifact['expired']
+                                  and timestamp(step['started_at']) <= timestamp(artifact['created_at'])
+                                  <= timestamp(step['completed_at']) < earliest_sdk):
+                              captures.append((artifact, job['run_attempt']))
+              if len(captures) != 1:
+                  return None
+              capture, attempt = captures[0]
+              with tempfile.TemporaryFile() as archive:
+                  download_archive(capture['id'], capture['digest'], str(run['id']), 'native-provenance', archive)
+                  with ZipFile(archive) as bundle:
+                      if bundle.namelist() != ['native-provenance.json']:
+                          raise SystemExit('Invalid native producer identity archive')
+                      provenance = json.loads(bundle.read('native-provenance.json'))
+              if (provenance['source_sha'] != run['head_sha'] or provenance['run_id'] != str(run['id'])
+                      or provenance['run_attempt'] != str(attempt)
+                      or provenance['repository_id'] != os.environ['GITHUB_REPOSITORY_ID']
+                      or provenance['head_ref'] != run['head_branch']):
+                  raise SystemExit('Inconsistent native producer identity')
+              if run['path'].endswith('native-python-push.yml'):
+                  pr = provenance['pull_request']
+                  if (not pr or str(pr['number']) != os.environ.get('CURRENT_PR')
+                          or pr['head_repo_id'] != os.environ['GITHUB_REPOSITORY_ID']
+                          or pr['base_repo_id'] != os.environ['GITHUB_REPOSITORY_ID']
+                          or pr['head_ref'] != os.environ['CURRENT_HEAD_REF']
+                          or pr['base_ref'] != os.environ['CURRENT_BASE_REF']):
+                      return None
+              elif provenance['pull_request'] is not None:
+                  raise SystemExit('Canonical native producer has unexpected PR scope')
+              platforms = {'linux': ('ubuntu-24.04', 'Linux-X64'), 'macos': ('macos-latest', 'macOS-ARM64')}
+              if os.environ.get('REQUIRE_WINDOWS') != 'false':
+                  platforms['windows'] = ('windows-latest', 'Windows-X64')
+              selected = {}
+              for platform, (runner, identity) in platforms.items():
+                  qualifiers = [job for job in jobs if job['name'] == prefix + f'native-{platform} / Native package ({runner})']
+                  if not qualifiers:
+                      return None
+                  latest_attempt = max(job['run_attempt'] for job in qualifiers)
+                  qualifiers = [job for job in qualifiers if job['run_attempt'] == latest_attempt]
+                  if len(qualifiers) != 1 or qualifiers[0]['conclusion'] != 'success':
+                      return None
+                  valid = []
+                  for producer in jobs:
+                      if (producer['name'] != prefix + f'produce-{platform} / Native snapshot ({runner})'
+                              or producer['conclusion'] != 'success'):
+                          continue
+                      steps = {step['name']: step for step in producer.get('steps', [])}
+                      fresh = (steps.get('Build the SDK and native runtime together', {}).get('conclusion') == 'success'
+                               and steps.get('Build the shared test executor', {}).get('conclusion') == 'success'
+                               and steps.get('Download the qualified native build', {}).get('conclusion') == 'skipped')
+                      copied = (steps.get('Build the SDK and native runtime together', {}).get('conclusion') == 'skipped'
+                                and steps.get('Build the shared test executor', {}).get('conclusion') == 'skipped'
+                                and steps.get('Download the qualified native build', {}).get('conclusion') == 'success')
+                      if not (fresh or copied):
+                          continue
+                      publication = steps.get('Publish the native snapshot', {})
+                      if publication.get('conclusion') != 'success':
+                          continue
+                      for artifact in artifacts:
+                          if (artifact['name'] == 'native-snapshot-' + identity and not artifact['expired']
+                                  and timestamp(publication['started_at']) <= timestamp(artifact['created_at'])
+                                  <= timestamp(publication['completed_at']) < earliest_sdk):
+                              if not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact['digest']):
+                                  raise SystemExit('Invalid native snapshot digest')
+                              valid.append({'id': artifact['id'], 'digest': artifact['digest'], 'provenance': provenance})
+                  if len(valid) != 1:
+                      return None
+                  selected[identity] = valid[0]
+              return selected
+
+          # Search a bounded history. API errors fail visibly.
           def candidates():
-              if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
-                  query = urllib.parse.urlencode({"branch": os.environ["GITHUB_HEAD_REF"],
-                                                  "event": "pull_request", "per_page": 20})
-                  yield from get(api + "/workflows/tests.yml/runs?" + query)["workflow_runs"]
-              query = urllib.parse.urlencode({"branch": os.environ["SOURCE_BRANCH"],
-                                              "event": "push", "per_page": 20})
-              yield from get(api + "/workflows/tests.yml/runs?" + query)["workflow_runs"]
+              if os.environ.get('CURRENT_PR'):
+                  query = urllib.parse.urlencode({'branch': os.environ['CURRENT_HEAD_REF'], 'event': 'push', 'per_page': 20})
+                  yield from get(api + '/workflows/native-python-push.yml/runs?' + query)['workflow_runs']
+              query = urllib.parse.urlencode({'branch': os.environ['SOURCE_BRANCH'], 'event': 'push', 'per_page': 20})
+              yield from get(api + '/workflows/tests.yml/runs?' + query)['workflow_runs']
 
+          selected, chosen, active = None, None, None
           for run in candidates():
-              if qualified(run):
-                  with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-                      output.write(f"run_id={run['id']}\n")
-                  print(f"Reusing native build from {repo} run {run['id']} with run head {run['head_sha']}")
+              selected = qualified(run)
+              if selected:
+                  chosen = run
                   break
+              if (active is None and os.environ.get('GITHUB_EVENT_NAME') == 'pull_request'
+                      and run['status'] in {'queued', 'in_progress', 'waiting', 'pending'}
+                      and run['path'] == '.github/workflows/native-python-push.yml'
+                      and run['head_sha'] == os.environ['CURRENT_PR_HEAD'] and compatible(run)):
+                  active = run
+          if chosen is None and active is not None:
+              print(f"Waiting up to 75 minutes for push run {active['id']} attempt {active['run_attempt']}")
+              pinned_attempt = active['run_attempt']
+              deadline = time.monotonic() + 75 * 60
+              while time.monotonic() + 60 <= deadline:
+                  time.sleep(60)
+                  try:
+                      current = get(api + '/runs/' + str(active['id']))
+                  except urllib.error.HTTPError as error:
+                      if error.code == 404:
+                          break
+                      raise
+                  if current['run_attempt'] != pinned_attempt:
+                      break
+                  if (current['id'] != active['id'] or current['head_sha'] != active['head_sha']
+                          or current['path'] != active['path']
+                          or current['repository']['id'] != active['repository']['id']):
+                      raise SystemExit('Inconsistent pinned push producer')
+                  if current['status'] == 'completed':
+                      selected = qualified(current)
+                      if selected:
+                          chosen = current
+                      break
+                  if current['status'] not in {'queued', 'in_progress', 'waiting', 'pending'}:
+                      break
+                  if not compatible(current):
+                      break
+          if chosen:
+              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                  output.write(f"run_id={chosen['id']}\n")
+                  output.write('artifacts=' + json.dumps(selected, sort_keys=True) + '\n')
+              print(f"Reusing native build from {repo} push run {chosen['id']} at {chosen['head_sha']}")
           else:
-              print("No compatible retained native build found; building the native runtime once per platform.")
+              print('No compatible retained native build found; building the native runtime once per platform.')
           PYTHON
 
-  native-linux:
+  produce-linux:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: ubuntu-24.04
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
+      native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
-  native-windows:
+  produce-windows:
     needs: changes
     if: needs.changes.outputs.code == 'true' && needs.changes.outputs.windows == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: windows-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
+      native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
-  native-macos:
+  produce-macos:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     uses: ./.github/workflows/codex-python.yml
     with:
       runner: macos-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
+      native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  native-linux:
+    needs: [changes, produce-linux, produce-windows, produce-macos]
+    if: >-
+      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
+      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: ubuntu-24.04
+      artifact_id: ${{ needs.produce-linux.outputs.artifact_id }}
+      artifact_digest: ${{ needs.produce-linux.outputs.artifact_digest }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  native-windows:
+    needs: [changes, produce-linux, produce-windows, produce-macos]
+    if: >-
+      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
+      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped')) && needs.changes.outputs.windows == 'true'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: windows-latest
+      artifact_id: ${{ needs.produce-windows.outputs.artifact_id }}
+      artifact_digest: ${{ needs.produce-windows.outputs.artifact_digest }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
+
+  native-macos:
+    needs: [changes, produce-linux, produce-windows, produce-macos]
+    if: >-
+      !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.code == 'true' &&
+      needs.produce-linux.result == 'success' && needs.produce-macos.result == 'success' &&
+      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: macos-latest
+      artifact_id: ${{ needs.produce-macos.outputs.artifact_id }}
+      artifact_digest: ${{ needs.produce-macos.outputs.artifact_digest }}
+      native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   lint:
+    needs: [changes, produce-linux, produce-windows, produce-macos]
+    if: >-
+      !inputs.native_only &&
+      !cancelled() && needs.changes.result == 'success' &&
+      ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
+      needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
+      (needs.changes.outputs.code == 'true' && needs.produce-linux.result == 'success' &&
+      needs.produce-macos.result == 'success' &&
+      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
     env:
       UV_NO_SYNC: "1"
       PYTHONPATH: src
@@ -342,6 +564,7 @@ jobs:
         run: echo "Skipping lint for non-code changes."
 
   typecheck:
+    if: ${{ !inputs.native_only }}
     needs: native-linux
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
@@ -383,6 +606,7 @@ jobs:
         run: echo "Skipping typecheck for non-code changes."
 
   mypy-win32:
+    if: ${{ !inputs.native_only }}
     needs: native-linux
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
@@ -426,6 +650,7 @@ jobs:
   tests:
     needs: [changes, native-linux]
     if: >-
+      !inputs.native_only &&
       !cancelled() && needs.changes.result == 'success' &&
       ((needs.changes.outputs.code == 'false' && needs.native-linux.result == 'skipped') ||
       (needs.changes.outputs.code == 'true' && needs.native-linux.result == 'success'))
@@ -555,6 +780,7 @@ jobs:
         run: echo "Skipping tests for non-code changes."
 
   native-macos-sandbox:
+    if: ${{ !inputs.native_only }}
     needs: native-macos
     runs-on: macos-latest
     timeout-minutes: 100
@@ -594,6 +820,7 @@ jobs:
         run: echo "Skipping native macOS sandbox tests for non-code changes."
 
   tests-windows:
+    if: ${{ !inputs.native_only }}
     needs: native-windows
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-windows-x64"}' || '"windows-latest"') }}
     timeout-minutes: 100
@@ -641,6 +868,16 @@ jobs:
         run: echo "Skipping tests for non-code changes."
 
   build-docs:
+    needs: [changes, produce-linux, produce-windows, produce-macos]
+    if: >-
+      !inputs.native_only &&
+      !cancelled() && needs.changes.result == 'success' &&
+      ((needs.changes.outputs.code == 'false' && needs.produce-linux.result == 'skipped' &&
+      needs.produce-windows.result == 'skipped' && needs.produce-macos.result == 'skipped') ||
+      (needs.changes.outputs.code == 'true' && needs.produce-linux.result == 'success' &&
+      needs.produce-macos.result == 'success' &&
+      ((needs.changes.outputs.windows == 'true' && needs.produce-windows.result == 'success') ||
+      (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     timeout-minutes: 100
     env:

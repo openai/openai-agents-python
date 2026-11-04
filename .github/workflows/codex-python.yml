@@ -3,6 +3,9 @@ name: Build installable SDK package
 on:
   workflow_call:
     inputs:
+      native_provenance:
+        type: string
+        required: true
       runner:
         type: string
         required: true
@@ -10,6 +13,15 @@ on:
         type: string
         required: false
         default: ''
+      native_artifacts:
+        type: string
+        required: false
+        default: "{}"
+    outputs:
+      artifact_id:
+        value: ${{ jobs.build.outputs.artifact_id }}
+      artifact_digest:
+        value: ${{ jobs.build.outputs.artifact_digest }}
   workflow_dispatch:
     inputs:
       runner:
@@ -23,13 +35,18 @@ permissions:
 
 jobs:
   build:
-    name: Native package (${{ inputs.runner }})
+    name: Native snapshot (${{ inputs.runner }})
     runs-on: >-
       ${{ fromJSON(
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64"}' ||
         github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64"}' ||
         toJSON(inputs.runner)
       ) }}
+    outputs:
+      artifact_id: ${{ steps.snapshot.outputs.artifact-id }}
+      artifact_digest: ${{ steps.snapshot.outputs.artifact-digest }}
+      native_provenance: ${{ steps.producer-identity.outputs.provenance }}
+      direct_manual: ${{ steps.producer-identity.outputs.direct_manual }}
     # Allow cold builds of the bundled Codex runtime on macOS and Windows.
     timeout-minutes: ${{ (startsWith(inputs.runner, 'windows-') || startsWith(inputs.runner, 'macos-')) && 180 || 100 }}
     defaults:
@@ -37,7 +54,7 @@ jobs:
         shell: bash
     env:
       CARGO_INCREMENTAL: "0"
-      NATIVE_CACHE_PUSH: ${{ github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch || (github.repository == 'openai/openai-agents-python' && github.ref_name == 'feat/codex-harness')) }}
+      NATIVE_CACHE_PUSH: ${{ github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch || github.ref_name == 'feat/codex-harness') }}
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: "1"
       # PEP 517 frontends may copy only the wheel out of the backend directory.
@@ -46,6 +63,7 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -84,7 +102,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
-          enable-cache: true
+          enable-cache: ${{ env.NATIVE_CACHE_PUSH == 'true' }}
       - name: Install native build tools
         # Free Linux disk space before restoring the large dependency cache.
         if: >-
@@ -111,10 +129,7 @@ jobs:
               output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
           PYTHON
       - name: Restore Rust dependencies
-        # Touch the shared cache on trusted branch pushes, even when reusing a wheel.
-        if: >-
-          inputs.native_source_run == '' ||
-          env.NATIVE_CACHE_PUSH == 'true'
+        if: env.NATIVE_CACHE_PUSH == 'true'
         id: rust-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -141,12 +156,12 @@ jobs:
           echo "run_id=$NATIVE_SOURCE_RUN" >> "$GITHUB_OUTPUT"
       - name: Download the qualified native build
         if: steps.native-source.outputs.run_id != ''
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: native-${{ runner.os }}-${{ runner.arch }}
-          path: ${{ runner.temp }}/agents-native-qualified
-          github-token: ${{ github.token }}
-          run-id: ${{ steps.native-source.outputs.run_id }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_ARTIFACTS: ${{ inputs.native_artifacts }}
+          NATIVE_SOURCE_RUN: ${{ steps.native-source.outputs.run_id }}
+          SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
+        run: python .github/scripts/download-native-snapshot.py
       - name: Select the qualified wheel and test executor
         if: steps.native-source.outputs.run_id != ''
         run: |
@@ -159,6 +174,8 @@ jobs:
           name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
           Path("dist").mkdir(exist_ok=True)
           shutil.copy2(source / name, Path("dist") / name)
+          shutil.copy2(wheel, Path("dist") / wheel.name)
+          shutil.copy2(wheel.with_name(wheel.name + ".pristine.json"), Path("dist") / (wheel.name + ".pristine.json"))
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\n")
           PYTHON
@@ -175,6 +192,7 @@ jobs:
               shutil.rmtree(timings)
           PYTHON
       - name: Build the SDK and native runtime together
+        if: steps.native-source.outputs.run_id == ''
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
       - name: Build the shared test executor
         if: steps.native-source.outputs.run_id == ''
@@ -260,12 +278,7 @@ jobs:
               shutil.rmtree(staging)
           PYTHON
       - name: Save Rust dependencies
-        if: >-
-          steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true' &&
-          (env.NATIVE_CACHE_PUSH == 'true' || github.event_name == 'workflow_dispatch' ||
-          (github.repository == 'openai/openai-agents-python' && github.event_name == 'pull_request' &&
-          github.event.pull_request.head.repo.full_name == github.repository))
-        # PR caches stay in their merge ref; trusted branch pushes warm shared caches.
+        if: steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true' && env.NATIVE_CACHE_PUSH == 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
@@ -275,148 +288,45 @@ jobs:
             ${{ env.CARGO_TARGET_DIR }}
             ${{ env.OPENAI_AGENTS_BUILD_SOURCE }}/packages/codex/.cache/v8
           key: ${{ steps.rust-cache.outputs.cache-primary-key }}
-      - name: Install Linux sandbox runtime for fresh-wheel checks
-        if: runner.os == 'Linux'
+      - name: Preserve captured producer identity
+        id: producer-identity
+        env:
+          NATIVE_PROVENANCE: ${{ inputs.native_provenance }}
+          CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap dnsmasq-base
-      - name: Test fresh installations without a checkout on the import path
-        if: runner.os == 'Linux'
-        run: |
-          cp packages/codex/scripts/verify_installed.py "$RUNNER_TEMP/verify_installed.py"
-          uv export --frozen --no-default-groups --no-emit-workspace --no-hashes \
-            --format requirements.txt --output-file "$RUNNER_TEMP/sdk-install-constraints.txt"
-          for version in 3.10 3.11 3.12; do
-            uv venv --seed --python "$version" "$RUNNER_TEMP/sdk-$version"
-            "$RUNNER_TEMP/sdk-$version/bin/python" -m pip install \
-              --constraint "$RUNNER_TEMP/sdk-install-constraints.txt" dist/*.whl
-            helper="$("$RUNNER_TEMP/sdk-$version/bin/python" -I - <<'PYTHON'
+          python - <<'PYTHON'
+          import json
           import os
-          import sysconfig
           from pathlib import Path
-          import agents
-          helper = (Path(agents.__file__).resolve().parent / "bin" / "codex-linux-sandbox").resolve()
-          libraries = {Path(sysconfig.get_path(kind)).resolve() for kind in ("purelib", "platlib")}
-          assert any(helper.is_relative_to(base) for base in libraries), "helper is outside the fresh environment"
-          assert helper.is_file() and os.access(helper, os.X_OK), "installed Linux helper is not executable"
-          runtime = helper.with_name("codex-sdk-runtime")
-          assert runtime.is_file() and os.access(runtime, os.X_OK), "installed runtime is not executable"
-          print(helper)
+          direct_manual = (os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+                           and os.environ["CALLER_WORKFLOW_REF"].split("@", 1)[0]
+                           == os.environ["GITHUB_REPOSITORY"] + "/.github/workflows/codex-python.yml")
+          value = os.environ["NATIVE_PROVENANCE"]
+          if direct_manual:
+              value = json.dumps({"repository_id": os.environ["GITHUB_REPOSITORY_ID"],
+                                  "source_sha": os.environ["GITHUB_SHA"],
+                                  "head_ref": os.environ["GITHUB_REF_NAME"],
+                                  "run_id": os.environ["GITHUB_RUN_ID"],
+                                  "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                                  "pull_request": None}, sort_keys=True)
+          elif not value:
+              raise SystemExit("Native producer identity is required outside direct manual runs")
+          json.loads(value)
+          Path("dist/native-provenance.json").write_text(value)
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write("provenance=" + value + "\n")
+              output.write("direct_manual=" + str(direct_manual).lower() + "\n")
           PYTHON
-            )"
-            userns_restriction=unavailable
-            profile_loaded=false
-            if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
-              case "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" in
-                0) userns_restriction=0 ;;
-                1) userns_restriction=1 ;;
-                *) userns_restriction=other ;;
-              esac
-              profile="agents-sdk-installed-linux-${version//./}"
-              sudo tee "/etc/apparmor.d/$profile" > /dev/null <<EOF
-          abi <abi/4.0>,
-          include <tunables/global>
-          profile $profile "$helper" flags=(unconfined) {
-            userns,
-          }
-          profile $profile-runtime "${helper%/*}/codex-sdk-runtime" flags=(unconfined) {
-            userns,
-          }
-          EOF
-              sudo apparmor_parser -r "/etc/apparmor.d/$profile"
-              profile_loaded=true
-            fi
-            printf 'Installed Linux sandbox host setup: userns_restriction=%s helper_profile_loaded=%s\n' "$userns_restriction" "$profile_loaded"
-            (
-              cd "$RUNNER_TEMP"
-              env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
-                "$RUNNER_TEMP/sdk-$version/bin/python" -I verify_installed.py \
-                --output "$RUNNER_TEMP/installed-$version.json"
-            )
-          done
-          cp "$RUNNER_TEMP"/installed-*.json dist/
-      - name: Qualify offline Unix sockets with the installed Linux wheel
-        if: runner.os == 'Linux'
-        run: |
-          stage=$(mktemp -d "$RUNNER_TEMP/offline-ipc.XXXXXX")
-          mkdir -p "$stage/tests/qualification" "$stage/home"
-          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
-          cp tests/qualification/{offline_ipc.py,unix_socket_command.py,unix_peer_approval.py,offline_executor.sh} "$stage/tests/qualification"
-          python="$RUNNER_TEMP/sdk-3.12/bin/python"
-          uv export --frozen --only-group dev --no-emit-workspace --no-hashes \
-            --format requirements.txt --output-file "$stage/test-constraints.txt"
-          "$python" -m pip install --constraint "$stage/test-constraints.txt" aiohttp pytest pytest-asyncio
-          (
-            cd "$stage"
-            env -i HOME="$stage/home" PATH=/usr/bin:/bin timeout 90 \
-              "$python" -I -B -m pytest -q -o "pythonpath=$stage" tests/qualification/unix_peer_approval.py
-          )
-          chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
-          sudo unshare --mount --net --propagation private -- /bin/bash tests/qualification/run_offline_ipc.sh \
-            "$(readlink /proc/self/ns/net)" "$(readlink /proc/self/ns/mnt)" "$(id -u)" "$(id -g)" \
-            "$stage" "$python" "$GITHUB_WORKSPACE/dist/exec-server-fixture"
-      - name: Test native macOS Unix socket policy with the installed wheel
-        if: runner.os == 'macOS'
-        run: |
-          stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
-          mkdir -p "$stage/tests/qualification" "$stage/home"
-          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
-          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
-          uv venv --seed --python "$(command -v python)" "$stage/venv"
-          uv export --frozen --group dev --no-emit-workspace --no-hashes \
-            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
-          python="$stage/venv/bin/python"
-          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
-          fixture="$GITHUB_WORKSPACE/dist/exec-server-fixture"
-          chmod +x "$fixture"
-          cd "$stage"
-          env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
-            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
-      - name: Test Windows named pipes and Unix peer approval with the installed wheel
-        if: runner.os == 'Windows'
-        run: |
-          stage=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/windows-ipc.XXXXXX")
-          mkdir -p "$stage/tests/qualification"
-          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
-          cp tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/tests/qualification"
-          uv venv --seed --python 3.12 "$stage/venv"
-          uv export --frozen --group dev --no-emit-workspace --no-hashes \
-            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
-          "$stage/venv/Scripts/python.exe" -m pip install --constraint "$stage/constraints.txt" \
-            dist/*-win_amd64.whl aiohttp pytest pytest-asyncio
-          python -I - "$stage" <<'PYTHON'
-          import os
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          stage = Path(sys.argv[1]).resolve(strict=True)
-          fixture = Path("dist/exec-server-fixture.exe").resolve(strict=True)
-          keep = set("""
-              ALLUSERSPROFILE APPDATA COMMONPROGRAMFILES COMMONPROGRAMFILES(X86) COMMONPROGRAMW6432
-              COMPUTERNAME COMSPEC HOMEDRIVE HOMEPATH LOCALAPPDATA NUMBER_OF_PROCESSORS OS PATH PATHEXT
-              PROCESSOR_ARCHITECTURE PROGRAMDATA PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PUBLIC
-              SYSTEMDRIVE SYSTEMROOT TEMP TMP USERDOMAIN USERNAME USERPROFILE WINDIR
-          """.split())
-          env = {key: value for key, value in os.environ.items() if key.upper() in keep}
-          subprocess.run(
-              [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
-               "import os, sys, pytest; sys.path.insert(0, os.getcwd()); "
-               "sys.exit(pytest.main(['-q', 'tests/qualification/unix_peer_approval.py']))"],
-              cwd=stage, env=env, check=True, timeout=90,
-          )
-          subprocess.run(
-              [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
-               "import os, runpy, sys; sys.path.insert(0, os.getcwd()); "
-               "runpy.run_module('tests.qualification.windows_ipc', run_name='__main__')", fixture],
-              cwd=stage, env=env, check=True,
-          )
-          PYTHON
-      - name: Share the package and test executor
+      - name: Publish the native snapshot
+        id: snapshot
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: native-${{ runner.os }}-${{ runner.arch }}
-          path: dist/
+          name: native-snapshot-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            dist/*.whl
+            dist/*.whl.pristine.json
+            dist/exec-server-fixture*
+            dist/native-provenance.json
           if-no-files-found: error
           retention-days: 14
       - name: Report native build configuration
@@ -460,3 +370,13 @@ jobs:
           path: ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
           if-no-files-found: ignore
           retention-days: 7
+
+  qualify-manual:
+    needs: build
+    if: needs.build.outputs.direct_manual == 'true'
+    uses: ./.github/workflows/codex-python-qualify.yml
+    with:
+      runner: ${{ inputs.runner }}
+      artifact_id: ${{ needs.build.outputs.artifact_id }}
+      artifact_digest: ${{ needs.build.outputs.artifact_digest }}
+      native_provenance: ${{ needs.build.outputs.native_provenance }}
