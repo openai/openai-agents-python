@@ -107,7 +107,11 @@
     {
       "path": "0027-join-linux-sandbox-namespace.patch",
       "sha256": "ed695b5e678fa85ce4472fc0d533830ed007298c888b540f1830deab5fe5b93e"
+    },
+    {
+      "path": "0028-own-managed-local-launch-before-payload.patch",
+      "sha256": "9ceb1de13400e03331bf5fd97ec407cca776dfdc454d493fb047ace030ba4628"
     }
   ],
-  "result_tree": "1aa3c8d74c0d3a780a724303345f4cdc64a6c36f"
+  "result_tree": "51f958be7a7fbb8833686164a71aa0e6ad8240e4"
 }
