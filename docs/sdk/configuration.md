@@ -32,57 +32,64 @@ API-key connections use these defaults.
 
 The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
 
-### Sign in with ChatGPT (experimental)
+### Reuse a Codex login (experimental)
 
-Sign in with ChatGPT lets an eligible application use a user's ChatGPT plan for model requests. API-key authentication remains the default.
+Pass `NativeProvider(auth=CodexLogin())` to reuse an existing Codex-managed ChatGPT OAuth login. API-key authentication remains the default when `auth` is omitted.
 
-!!! warning "Experimental"
-    This feature may change or be removed. The public beta and general availability of the Agents SDK may ship without this feature.
+!!! warning "Local experimental use only"
+    This feature may change or be removed. The public beta and general availability of the Agents SDK may ship without this feature. Follow the official [Codex authentication guidance](https://learn.chatgpt.com/docs/auth) and [application authentication policy](https://learn.chatgpt.com/docs/app-server#auth-endpoints) for permitted uses.
 
-Check the official [eligibility and approval guidance](https://developers.openai.com/siwc/quickstart) before choosing this mode. The [ChatGPT plan usage guide](https://developers.openai.com/siwc/token-sharing-open-source) covers open-source and locally hosted apps. Use its interest form for paid or remotely hosted apps. A successful identity sign-in alone does not authorize ChatGPT plan usage.
+Complete `codex login` separately before opening an SDK Session. This mode reads the ChatGPT login saved in `auth.json`. If Codex uses the operating system credential store, configure file storage and sign in again. See [Codex credential storage](https://learn.chatgpt.com/docs/auth#credential-storage) to configure file storage. Protect the login file and keep its tokens out of logs and source control.
 
-Your application owns OAuth sign-in, account selection, protected credential storage, and token refresh. Follow the [registration and sign-in guide](https://developers.openai.com/siwc/token-sharing-open-source/sign-in) to validate the user's identity and granted permissions. Keep each registration's issued client ID, selected account and workspace, and credentials together. Keep the host identifier stable for that host.
+`CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the workspace differs.
 
-Pass an async callback with no arguments to `SignInWithChatGPT`. The callback must return the selected registration's OAuth access token as a string. The token must authorize the public Responses API and include `chatgpt.tokens.use.direct`. The callback must keep using the same selected account and workspace for this Agent's conversation.
+#### Run a coding turn without an API key
 
-This fragment uses your application's `selected_account` credential manager. Its `get_valid_access_token()` method refreshes credentials when needed and returns the current access token. Set `selected_model` to a model available to the selected account. The SDK requires a model whose native catalog marks it as supporting Responses Lite, the protocol it uses to send tool declarations.
+This complete script makes a live model request using the saved login. Run it with an SDK build that includes this experimental API:
 
 ```python
-from agents import Agent, NativeProvider, SignInWithChatGPT
+import asyncio
+
+from agents import Agent, CodexLogin, NativeProvider
 
 
-async def get_access_token() -> str:
-    return await selected_account.get_valid_access_token()
+async def main() -> None:
+    async with NativeProvider(auth=CodexLogin()) as provider:
+        agent = Agent(
+            instructions="Write concise Python code with unit tests.",
+            provider=provider,
+        )
+        async with agent.session() as session:
+            account = session.codex_account
+            if account is None:
+                raise RuntimeError("Expected a saved Codex login")
+            print("Saved login plan:", account.plan_type)
+            turn = await session.submit(
+                "Write an is_prime(n: int) -> bool function and three unit tests."
+            )
+            result = await turn.get_result()
+            print(result.final_output)
 
 
-async with NativeProvider(
-    auth=SignInWithChatGPT(get_access_token=get_access_token),
-) as provider:
-    agent = Agent(instructions="Answer clearly.", model=selected_model, provider=provider)
-    async with agent.session() as session:
-        turn = await session.submit("Hello.")
-        result = await turn.get_result()
-        print(result.final_output)
-        state = await session.save_state()
-
-    # A new Session obtains a current token for the same registration.
-    async with agent.session(state=state) as session:
-        turn = await session.submit("Continue our conversation.")
-        result = await turn.get_result()
-        print(result.final_output)
+if __name__ == "__main__":
+    asyncio.run(main())
 ```
 
-When your application opens a Session, the SDK calls the callback once and keeps that token for the Session, including retries and repairs. To use a renewed token, save an idle Session, close it, and open a new Session with the saved state. Keep the same ChatGPT registration. See [save and restore](sessions.md#compact-save-and-restore). API-key Sessions and Sign in with ChatGPT Sessions cannot restore each other's saved state.
+Save the script as `coding_turn.py`. On macOS or Linux, run it with both API-key variables unset.
 
-When `DeferredTools.start()` restores a deferred job, it opens a new Session and obtains a current token for the same ChatGPT registration.
+```bash
+env -u OPENAI_API_KEY -u CODEX_API_KEY python coding_turn.py
+```
 
-Follow the [account and refresh guidance](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). Serialize refreshes for the same credential record. Store the latest rotating refresh token with the updated access token. Keep tokens out of logs and conversation state. Link your application's usage page to [ChatGPT Settings → Usage](https://chatgpt.com/settings/usage), where users can review usage and manage access.
+The example asks for code and tests in the answer. To execute commands or edit workspace files, configure an [execution Environment](tools.md#remote-execution).
 
-This mode uses HTTP server-sent events at `https://api.openai.com/v1/responses`. The SDK fixes the endpoint and disables WebSockets. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If sign-in, token retrieval, or inference fails, the SDK reports the error and keeps the selected billing mode. A stream that fails after it opens ends the operation without an automatic replay.
+#### Account identity, refresh, and usage
 
-For a plan usage failure after a stream opens, read `NativeError.code`. `subscription_sharing_usage_limit_exceeded` means the request hit a usage limit. `subscription_sharing_usage_unavailable` means OpenAI could not check usage availability. See the [Sign in with ChatGPT error recovery guide](https://developers.openai.com/siwc/token-sharing-open-source/errors-and-recovery).
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. `account_id` identifies the saved ChatGPT workspace. `plan_type` comes from saved login metadata and may be `"unknown"`. Use the saved plan type to identify the login before submitting work. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
 
-Sign in with ChatGPT supports local function tools. It excludes programmatic tool calling, deferred tool loading, hosted Apps MCP, and `WebSearch`. See the official [inference guide](https://developers.openai.com/siwc/token-sharing-open-source/models-and-inference) for the public Responses request contract.
+The native runtime refreshes the saved login for the same user and workspace. Portable restore and local conversation resume must use that same identity. If you switch users or workspaces, start a new conversation. See [save and restore](sessions.md#compact-save-and-restore).
+
+This mode uses HTTP on the standard Codex backend. Workspaces that require a separate backend need their own integration. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If the saved login fails, the SDK stops even when API keys or other credentials are set.
 
 ### Provider lifetime
 
