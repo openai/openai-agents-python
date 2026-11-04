@@ -13,12 +13,14 @@ from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, fields, replace
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias, TypeVar, cast
 
+from .rate_limits import ApiRateLimits
 from .usage import TokenUsageInfo
 
 if TYPE_CHECKING:
     from .turn import Turn
 
 __all__ = [
+    "ApiRateLimitsUpdated",
     "ContextCompacted",
     "EventGap",
     "EventStream",
@@ -84,6 +86,14 @@ class UsageUpdated(_SubmissionEvent):
 
     usage: TokenUsageInfo | None
     type: Literal["usage_updated"] = field(default="usage_updated", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ApiRateLimitsUpdated(_SubmissionEvent):
+    """Rate-limit fields reported on a provider response for this turn."""
+
+    snapshot: ApiRateLimits
+    type: Literal["api_rate_limits_updated"] = field(default="api_rate_limits_updated", init=False)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -164,6 +174,7 @@ Observation: TypeAlias = (
     | SubagentLifecycle
     | OutputTextDelta
     | UsageUpdated
+    | ApiRateLimitsUpdated
     | ContextCompacted
     | ToolStarted
     | ToolFinished

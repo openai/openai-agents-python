@@ -6370,7 +6370,7 @@ pub(crate) mod tests {
             "name":"update_plan", "namespace":"functions",
             "arguments":"{\"plan\":[]}", "encrypted_function_args":[],
         }));
-        let original = serde_json::to_value(&item).unwrap();
+        assert_eq!(item.id().unwrap().as_str(), "fc_server");
         let upstream = Box::pin(stream::iter(vec![
             Ok(ResponseEvent::Created {
                 response_id: Some("real-provider".into()),
@@ -6386,7 +6386,7 @@ pub(crate) mod tests {
         let mut intercepted = Box::new(request).intercept(upstream);
         assert!(matches!(
             intercepted.next().await,
-            Some(Ok(ResponseEvent::Created { .. }))
+            Some(Ok(ResponseEvent::Created { response_id: Some(id) })) if id == "real-provider"
         ));
         let edit = async {
             let req = control.next().await.unwrap();
@@ -6404,16 +6404,21 @@ pub(crate) mod tests {
         let Some(Ok(ResponseEvent::OutputItemDone(item))) = event else {
             panic!("missing actual item")
         };
-        let mut actual = serde_json::to_value(item).unwrap();
+        assert!(item.id().is_none());
+        assert!(matches!(&item, ResponseItem::FunctionCall { call_id, .. }
+            if call_id == "real-native-call"));
         assert_eq!(
-            serde_json::from_str::<Value>(actual["arguments"].as_str().unwrap()).unwrap(),
-            json!({"plan":[],"explanation":"effective"})
+            serde_json::to_value(item).unwrap(),
+            json!({
+                "type": "function_call", "call_id": "real-native-call",
+                "name": "update_plan", "namespace": "functions",
+                "arguments": json!({"plan": [], "explanation": "effective"}).to_string(),
+                "encrypted_function_args": [],
+            })
         );
-        actual["arguments"] = original["arguments"].clone();
-        assert_eq!(actual, original); // including encrypted flags, id, name, namespace and metadata
         assert!(matches!(
             intercepted.next().await,
-            Some(Ok(ResponseEvent::Created { .. }))
+            Some(Ok(ResponseEvent::Created { response_id: Some(id) })) if id == "next-provider-event"
         ));
         assert!(intercepted.next().await.is_none());
     }
@@ -6477,7 +6482,7 @@ pub(crate) mod tests {
                 "arguments":r#"{"task_name":"old","message":"opaque"}"#,
                 "encrypted_function_args":metadata,
             }));
-            let original = serde_json::to_value(&item).unwrap();
+            assert_eq!(item.id().unwrap().as_str(), "fc_original");
             let request = direct_request(control.clone(), "turn");
             let edit = async {
                 let req = control.next().await.unwrap();
@@ -6488,13 +6493,20 @@ pub(crate) mod tests {
             };
             let (result, ()) = tokio::join!(request.before(item, None), edit);
             if accepted {
-                let mut actual = serde_json::to_value(result.unwrap().0).unwrap();
-                assert_eq!(
-                    serde_json::from_str::<Value>(actual["arguments"].as_str().unwrap()).unwrap(),
-                    value
-                );
-                actual["arguments"] = original["arguments"].clone();
-                assert_eq!(actual, original);
+                let (item, changed, _) = result.unwrap();
+                assert!(changed);
+                assert!(item.id().is_none());
+                assert!(matches!(&item, ResponseItem::FunctionCall { call_id, .. }
+                    if call_id == "original"));
+                let mut expected = json!({
+                    "type": "function_call", "call_id": "original",
+                    "name": "spawn_agent", "namespace": "collaboration",
+                    "arguments": value.to_string(),
+                });
+                if !metadata.is_null() {
+                    expected["encrypted_function_args"] = metadata;
+                }
+                assert_eq!(serde_json::to_value(item).unwrap(), expected);
             } else {
                 assert!(
                     matches!(result, Err(ModelResponseError::InvalidRequest { message })

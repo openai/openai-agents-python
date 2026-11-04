@@ -81,6 +81,7 @@ from .native_interception import (
     _NativeInterception,
 )
 from .observation import (
+    ApiRateLimitsUpdated,
     ContextCompacted,
     EventStream,
     OutputTextDelta,
@@ -92,6 +93,7 @@ from .observation import (
     UsageUpdated,
     _ObservationBuffer,
 )
+from .rate_limits import ApiRateLimits, _api_rate_limits
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
@@ -105,7 +107,7 @@ from .tools import (
     _CapturedFunction,
     _ToolCatalog,
 )
-from .turn import PendingRequests, Turn, _child_turn, _root_turn
+from .turn import PendingRequests, SteeringReceipt, Turn, _child_turn, _root_turn
 from .usage import TokenUsageInfo, _token_usage_info
 
 _MutationResultT = TypeVar("_MutationResultT")
@@ -400,6 +402,7 @@ class NativeError(RuntimeError):
     """
 
     _effects: Literal["not_started", "unknown", "recorded"] = "unknown"
+    _interrupted: bool = False
 
     def __init__(
         self,
@@ -2267,6 +2270,8 @@ class Session(Generic[ContextT, OutputT]):
         self._fail_unhandled_questions = False
         self._close_task: asyncio.Task[None] | None = None
         self._observations = _ObservationBuffer(self.id)
+        self._api_rate_limit_snapshot = ApiRateLimits()
+        self._rate_limit_parent: Session[Any, Any] | None = None
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
         self._reader = asyncio.create_task(self._read_events())
@@ -2595,6 +2600,16 @@ class Session(Generic[ContextT, OutputT]):
                 return self._last_turn
         return None
 
+    def rate_limits(self) -> ApiRateLimits:
+        """Read the latest available limits reported by this API-key provider.
+
+        This includes requests that correct prompted output.
+        Missing values are unknown. This snapshot cannot determine account
+        plan limits, credit balances or whether the provider will admit work.
+        """
+        self._check_loop()
+        return self._api_rate_limit_snapshot
+
     @property
     def restored_turn(self) -> Turn[Any] | None:
         """The initially restored pending root, even after another turn starts.
@@ -2659,8 +2674,8 @@ class Session(Generic[ContextT, OutputT]):
         tools=None uses this Session's last accepted update, or opening defaults. An explicit
         sequence selects only already bound tools; [] permits no model tools. A new
         submit rejects busy work by default; if_busy="queue" registers FIFO new work.
-        if_busy="steer" disallows all overrides even when idle and awaits a real
-        steering receipt for the exact captured active root. It never retries.
+        if_busy="steer" disallows overrides and awaits native acceptance for
+        the captured active root. Use Turn.steer_exact to target one native root turn.
         New work returns before native admission; await Turn.get_result() for completion.
         before_step(turn, *, step_index) may narrow admitted tools before
         sampling. Return None to use the captured operation default, or a
@@ -2712,25 +2727,36 @@ class Session(Generic[ContextT, OutputT]):
             parts, output, tools=tools, before_step=before_step, enqueue=if_busy != "reject"
         )
 
-    async def _steer(self, turn: Turn[Any], input: UserInput) -> None:
+    async def _steer(
+        self, turn: Turn[Any], input: UserInput, *, expected_turn_id: str | None = None
+    ) -> SteeringReceipt | None:
         self._check_owner(turn)
         self._check_open()
         self._check_callback_operation("steer its own Session")
         self._check_graph_admission()
         if turn.child_id is not None:
+            if expected_turn_id is not None:
+                raise ValueError("Exact steering requires a root Turn")
             assert turn.instance_id is not None
             await self._submit_child_input(
                 turn.child_id, turn.instance_id, turn._native.incarnation, input, turn
             )
-            return
+            return None
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
-        if any(state.issued is turn for state, _ in self._pending):
+        if expected_turn_id is None and any(state.issued is turn for state, _ in self._pending):
             raise RuntimeError("Cannot steer queued work")
         parts = _native_input(input)
         while True:
             state = self._owned_submission(turn)
-            if state is None:
+            if state is None or (
+                expected_turn_id is not None
+                and (
+                    state.handle is None
+                    or state.handle.turn_id != expected_turn_id
+                    or state.terminal.done()
+                )
+            ):
                 raise StaleTurnError("Turn is no longer active")
             if state.stopping or state.failure.done() or state.restored_pending or state.repairing:
                 raise RuntimeError("Current turn cannot accept steering input")
@@ -2741,9 +2767,14 @@ class Session(Generic[ContextT, OutputT]):
                 raise RuntimeError("Current turn cannot accept steering input")
             # Revalidation above can wait for an owned successor before sending.
             # After sending, surface Core's receipt without retry or retarget.
-            encoded = json.dumps(
-                {"mode": "steer", "expected_turn_id": handle.turn_id, "input": parts}
-            )
+            request: dict[str, Any] = {
+                "mode": "steer",
+                "expected_turn_id": handle.turn_id,
+                "input": parts,
+            }
+            if expected_turn_id is not None:
+                request["exact_steering"] = True
+            encoded = json.dumps(request)
             try:
                 response = await self._native._submit(encoded)
             except RuntimeError as exc:
@@ -2757,7 +2788,12 @@ class Session(Generic[ContextT, OutputT]):
                 raise StaleTurnError("Native Turn no longer accepts this steering input")
             if receipt["status"] != "steered" or receipt["turn_id"] != handle.turn_id:
                 raise NativeError(f"Native input was not submitted: {receipt.get('reason')}")
-            return
+            if expected_turn_id is not None:
+                input_id = receipt.get("input_id")
+                if not isinstance(input_id, str) or not input_id:
+                    raise NativeError("Native steering acceptance did not include an input ID")
+                return SteeringReceipt(self.id, expected_turn_id, handle.submission_id, input_id)
+            return None
 
     async def _start_child(self, child: Subagent, input: UserInput) -> Turn[str]:
         if child._session is not self:
@@ -4131,8 +4167,13 @@ class Session(Generic[ContextT, OutputT]):
                     raise NativeError("Child callback cleanup failed") from state.cleanup_error
                 if native_error is not None and state.terminal.done():
                     terminal = state.terminal.result()
-                    if terminal is not None and terminal.get("error"):
-                        native_error = _native_error(terminal["error"], str(native_error))
+                    if terminal is not None:
+                        if terminal.get("error"):
+                            native_error = _native_error(terminal["error"], str(native_error))
+                        elif terminal["type"] == "turn_aborted" and (
+                            terminal.get("reason") == "interrupted"
+                        ):
+                            native_error._interrupted = True
             if native_error is not None:
                 raise native_error
             return cast(
@@ -5148,6 +5189,7 @@ class Session(Generic[ContextT, OutputT]):
                 raise state.failure.result()
             repair = await Session._open(declaration, _captured_api_key=self._model_api_key)
             repair._observations.repair_parent = (self._observations, handle.submission_id)
+            repair._rate_limit_parent = self
             try:
                 if state.graceful_requested:
                     raise asyncio.CancelledError()
@@ -5235,6 +5277,19 @@ class Session(Generic[ContextT, OutputT]):
         message = event["msg"]
         kind = message["type"]
         if kind == "token_count" and event["id"] == handle.turn_id:
+            if "api_rate_limits" in message:
+                snapshot = _api_rate_limits(message["api_rate_limits"])
+                if snapshot is not None:
+                    self._observations.append(
+                        ApiRateLimitsUpdated(
+                            session_id=self.id,
+                            turn_id=handle.turn_id,
+                            submission_id=handle.submission_id,
+                            snapshot=snapshot,
+                        )
+                    )
+                if message.get("info") is None and message.get("rate_limits") is None:
+                    return
             self._observations.append(
                 UsageUpdated(
                     session_id=self.id,
@@ -5750,6 +5805,12 @@ class Session(Generic[ContextT, OutputT]):
                 if event is None:
                     break
                 message = event.get("msg", {})
+                if message.get("type") == "token_count" and "api_rate_limits" in message:
+                    snapshot = _api_rate_limits(message["api_rate_limits"])
+                    if snapshot is not None:
+                        self._api_rate_limit_snapshot = snapshot
+                        if self._rate_limit_parent is not None:
+                            self._rate_limit_parent._api_rate_limit_snapshot = snapshot
                 if message.get("type") == "elicitation_status":
                     key = (message["server_name"], message["request_id"])
                     url_question = self._url_completions.get(key)
@@ -6101,14 +6162,22 @@ class Session(Generic[ContextT, OutputT]):
                 and not state.terminal.done()
                 and not state.failure.done()
             ):
-                state.failure.set_result(NativeError("Native event stream ended before settlement"))
+                state.failure.set_result(
+                    NativeError(
+                        "Native event stream ended before settlement", category="connection_failed"
+                    )
+                )
             if self._native_agents is not None:
                 cast(Any, self._native)._finish_child_event_reader()
                 for child in self._child_callbacks.values():
                     if not child.observed.done():
                         child.observed.set_result(None)
                     if not child.completion.done() and not child.failure.done():
-                        child.failure.set_result(NativeError("Native child event stream ended"))
+                        child.failure.set_result(
+                            NativeError(
+                                "Native child event stream ended", category="connection_failed"
+                            )
+                        )
             self._finish_failed_observations()
 
     async def _read_mcp_results(self) -> None:

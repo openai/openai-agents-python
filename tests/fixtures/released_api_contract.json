@@ -312,18 +312,20 @@
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnFinished(_SubmissionEvent):\n    status: Literal['completed', 'failed', 'cancelled']\n    error_type: str | None = None\n    type: Literal['turn_finished'] = field(default='turn_finished', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass OutputTextDelta(_SubmissionEvent):\n    item_id: str\n    delta: str\n    type: Literal['output_text_delta'] = field(default='output_text_delta', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UsageUpdated(_SubmissionEvent):\n    usage: TokenUsageInfo | None\n    type: Literal['usage_updated'] = field(default='usage_updated', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitsUpdated(_SubmissionEvent):\n    snapshot: ApiRateLimits\n    type: Literal['api_rate_limits_updated'] = field(default='api_rate_limits_updated', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ContextCompacted(_SubmissionEvent):\n    item_id: str\n    type: Literal['context_compacted'] = field(default='context_compacted', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ToolStarted(_SubmissionEvent):\n    call_id: str\n    name: str\n    namespace: str | None\n    family: Literal['function', 'mcp'] = 'function'\n    type: Literal['tool_started'] = field(default='tool_started', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ToolFinished(_SubmissionEvent):\n    call_id: str\n    name: str\n    namespace: str | None\n    status: Literal['completed', 'failed', 'cancelled']\n    family: Literal['function', 'mcp'] = 'function'\n    type: Literal['tool_finished'] = field(default='tool_finished', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SubagentLifecycle(_Event):\n    subagent_id: str\n    parent_agent_id: str\n    status: str\n    kind: Literal['created', 'active', 'closed', 'snapshot'] = 'snapshot'\n    type: Literal['subagent_lifecycle'] = field(default='subagent_lifecycle', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SessionEnded(_Event):\n    reason: Literal['closed', 'failed']\n    type: Literal['session_ended'] = field(default='session_ended', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass EventGap(_Event):\n    first_sequence: int\n    type: Literal['gap'] = field(default='gap', init=False)",
-          "Observation: TypeAlias = TurnStarted | TurnFinished | SubagentLifecycle | OutputTextDelta | UsageUpdated | ContextCompacted | ToolStarted | ToolFinished | SessionEnded | EventGap",
+          "Observation: TypeAlias = TurnStarted | TurnFinished | SubagentLifecycle | OutputTextDelta | UsageUpdated | ApiRateLimitsUpdated | ContextCompacted | ToolStarted | ToolFinished | SessionEnded | EventGap",
           "_ObservationT = TypeVar('_ObservationT', bound=Observation)",
           "class _ObservationBuffer:\n\n    def __init__(self, session_id: str) -> None:\n        pass\n\n    def notify(self) -> None:\n        pass\n\n    def append(self, event: _ObservationT) -> _ObservationT | None:\n        pass\n\n    def finish(self, reason: Literal['closed', 'failed']) -> None:\n        pass",
           "class EventStream(AsyncIterator[Observation]):\n\n    def __init__(self, buffer: _ObservationBuffer, *, after: int, _turn: Turn[Any] | None=None) -> None:\n        pass\n\n    def __aiter__(self) -> EventStream:\n        pass\n\n    async def __anext__(self) -> Observation:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
         ],
         "exports": {
+          "ApiRateLimitsUpdated": "agents.observation.ApiRateLimitsUpdated",
           "ContextCompacted": "agents.observation.ContextCompacted",
           "EventGap": "agents.observation.EventGap",
           "EventStream": "agents.observation.EventStream",
@@ -341,13 +343,31 @@
           "from collections.abc import AsyncIterator",
           "from dataclasses import dataclass, field",
           "from typing import Any, Literal, TypeAlias, TypeVar",
+          "from .rate_limits import ApiRateLimits",
           "from .usage import TokenUsageInfo",
           "from .turn import Turn"
         ],
         "references": {
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
           "TokenUsageInfo": "agents.usage.TokenUsageInfo",
           "Turn": "agents.turn.Turn"
         }
+      },
+      "agents.rate_limits": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitWindow:\n    limit: int | None = None\n    remaining: int | None = None\n    reset_after_seconds: Decimal | None = None",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimits:\n    requests: ApiRateLimitWindow | None = None\n    tokens: ApiRateLimitWindow | None = None\n    project_tokens: ApiRateLimitWindow | None = None\n    retry_after_seconds: int | None = None\n    retry_at: datetime | None = None"
+        ],
+        "exports": {
+          "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits"
+        },
+        "imports": [
+          "from dataclasses import dataclass",
+          "from datetime import datetime",
+          "from decimal import Decimal"
+        ],
+        "references": {}
       },
       "agents.schema": {
         "declarations": [
@@ -386,12 +406,12 @@
           "@dataclass(frozen=True)\nclass FeatureSupport:\n    status: Literal['supported', 'limited', 'unsupported']\n    reason: str\n    scope: str",
           "FeatureName: TypeAlias = Literal['native_output', 'prompted_output', 'manual_suspend', 'native_output_manual_restore', 'tool_selection', 'function_policy', 'mcp_before_policy', 'mcp_result_policy', 'environment_before_policy', 'environment_code_result_policy', 'native_agents', 'remote_skills', 'checklist']",
           "class Capabilities:\n\n    def __init__(self, session: Session[Any, Any]) -> None:\n        pass\n\n    @property\n    def websockets_allowed(self) -> bool:\n        pass\n\n    def get(self, feature: FeatureName) -> FeatureSupport:\n        pass\n\n    def require(self, feature: FeatureName, *, allow_limited: bool=False) -> None:\n        pass",
-          "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None) -> None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
+          "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None) -> None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
           "@dataclass(frozen=True)\nclass Completed(Generic[OutputT]):\n    turn: Turn[OutputT]\n    final_output: OutputT\n    usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
           "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None]:\n        pass",
-          "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    def events(self, *, after: int=0) -> EventStream:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject') -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject') -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject') -> Turn[Any]:\n        pass\n\n    async def compact(self, *, summary: str | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass"
+          "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    def events(self, *, after: int=0) -> EventStream:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject') -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject') -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject') -> Turn[Any]:\n        pass\n\n    async def compact(self, *, summary: str | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass"
         ],
         "exports": {
           "Capabilities": "agents.session.Capabilities",
@@ -422,6 +442,7 @@
           "from .mcp import _MCP",
           "from .native_agents import NativeAgents",
           "from .observation import EventStream",
+          "from .rate_limits import ApiRateLimits",
           "from .schema import OutputSpec, _PreparedOutput",
           "from .state import ChecklistState, CheckpointStatus, NativeGoal, SessionState",
           "from .subagents import Subagent",
@@ -431,6 +452,7 @@
         ],
         "references": {
           "ActionReply": "agents.manual.ActionReply",
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
           "ChecklistState": "agents.state.ChecklistState",
           "CheckpointStatus": "agents.state.CheckpointStatus",
           "ContextT": "agents.agent.ContextT",
@@ -632,12 +654,16 @@
         "declarations": [
           "OutputT = TypeVar('OutputT')",
           "@dataclass(frozen=True)\nclass PendingRequests(Generic[OutputT]):\n    turn: Turn[OutputT]\n    requests: tuple[Interaction, ...] = field(repr=False)",
-          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0) -> EventStream:\n        pass"
+          "@dataclass(frozen=True, slots=True)\nclass SteeringReceipt:\n    session_id: str\n    turn_id: str\n    submission_id: str\n    input_id: str",
+          "@dataclass(frozen=True, slots=True)\nclass TurnNeedsAttention:\n    reason: Literal['interrupted', 'connection_lost', 'quota_blocked', 'rate_limited']\n    error: NativeError | TurnStoppedError\n    rate_limits: ApiRateLimits",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0) -> EventStream:\n        pass"
         ],
         "exports": {
           "OutputT": "OutputT",
           "PendingRequests": "agents.turn.PendingRequests",
-          "Turn": "agents.turn.Turn"
+          "SteeringReceipt": "agents.turn.SteeringReceipt",
+          "Turn": "agents.turn.Turn",
+          "TurnNeedsAttention": "agents.turn.TurnNeedsAttention"
         },
         "imports": [
           "import asyncio",
@@ -646,13 +672,17 @@
           "from .input import UserInput",
           "from .manual import Interaction",
           "from .observation import EventStream",
-          "from .session import Completed, Session"
+          "from .rate_limits import ApiRateLimits",
+          "from .session import Completed, NativeError, Session, TurnStoppedError"
         ],
         "references": {
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
           "Completed": "agents.session.Completed",
           "EventStream": "agents.observation.EventStream",
           "Interaction": "agents.manual.Interaction",
+          "NativeError": "agents.session.NativeError",
           "Session": "agents.session.Session",
+          "TurnStoppedError": "agents.session.TurnStoppedError",
           "UserInput": "agents.input.UserInput"
         }
       },
@@ -681,6 +711,8 @@
       "ActionRequested": "agents.manual.ActionRequested",
       "Agent": "agents.agent.Agent",
       "Allow": "agents.native_interception.Allow",
+      "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
+      "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
       "ApprovalRequest": "agents.manual.ApprovalRequest",
       "Capabilities": "agents.session.Capabilities",
       "CapabilityError": "agents.session.CapabilityError",
@@ -729,6 +761,7 @@
       "SessionState": "agents.state.SessionState",
       "StaleTurnError": "agents.session.StaleTurnError",
       "StdioMCP": "agents.mcp.StdioMCP",
+      "SteeringReceipt": "agents.turn.SteeringReceipt",
       "StopTurn": "agents.native_interception.StopTurn",
       "Subagent": "agents.subagents.Subagent",
       "Tool": "agents._function_tools.Tool",
@@ -739,6 +772,7 @@
       "ToolOutputText": "agents.tools.ToolOutputText",
       "ToolRef": "agents.tools.ToolRef",
       "Turn": "agents.turn.Turn",
+      "TurnNeedsAttention": "agents.turn.TurnNeedsAttention",
       "TurnStoppedError": "agents.session.TurnStoppedError",
       "UserInput": "agents.input.UserInput",
       "UserMessage": "agents.input.UserMessage",
@@ -882,6 +916,8 @@
       "ActionRequested",
       "Agent",
       "Allow",
+      "ApiRateLimitWindow",
+      "ApiRateLimits",
       "ApprovalRequest",
       "Capabilities",
       "CapabilityError",
@@ -930,6 +966,7 @@
       "SessionState",
       "StaleTurnError",
       "StdioMCP",
+      "SteeringReceipt",
       "StopTurn",
       "Subagent",
       "Tool",
@@ -940,6 +977,7 @@
       "ToolOutputText",
       "ToolRef",
       "Turn",
+      "TurnNeedsAttention",
       "TurnStoppedError",
       "UserInput",
       "UserMessage",
@@ -957,12 +995,13 @@
       "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPCallContext as MCPCallContext, MCPResultContext as MCPResultContext, StdioMCP as StdioMCP",
       "from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents, NativeRole as NativeRole",
       "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
+      "from .rate_limits import ApiRateLimits as ApiRateLimits, ApiRateLimitWindow as ApiRateLimitWindow",
       "from .schema import NativeOutput as NativeOutput, OutputSpec as OutputSpec, OutputValidationError as OutputValidationError, PromptedOutput as PromptedOutput",
       "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError",
       "from .state import ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
       "from .subagents import Subagent as Subagent",
       "from .tools import Checklist as Checklist, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, WebSearch as WebSearch",
-      "from .turn import PendingRequests as PendingRequests, Turn as Turn"
+      "from .turn import PendingRequests as PendingRequests, SteeringReceipt as SteeringReceipt, Turn as Turn, TurnNeedsAttention as TurnNeedsAttention"
     ]
   }
 }
