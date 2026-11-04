@@ -54,7 +54,6 @@ jobs:
         shell: bash
     env:
       CARGO_INCREMENTAL: "0"
-      NATIVE_CACHE_PUSH: ${{ github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch || github.ref_name == 'feat/codex-harness') }}
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: "1"
       # PEP 517 frontends may copy only the wheel out of the backend directory.
@@ -68,6 +67,7 @@ jobs:
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+          echo "UV_CACHE_DIR=$RUNNER_TEMP/agents-native-uv" >> "$GITHUB_ENV"
           # Match Maturin's macOS environment before compiling shared dependencies.
           if [[ "$RUNNER_OS" == macOS ]]; then
             echo "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}" >> "$GITHUB_ENV"
@@ -102,12 +102,9 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
-          enable-cache: ${{ env.NATIVE_CACHE_PUSH == 'true' }}
+          enable-cache: false
       - name: Install native build tools
-        # Free Linux disk space before restoring the large dependency cache.
-        if: >-
-          inputs.native_source_run == '' ||
-          env.NATIVE_CACHE_PUSH == 'true'
+        if: inputs.native_source_run == ''
         uses: ./.github/actions/setup-native
       - name: Prepare the source distribution
         # Use one stable source path for Cargo, the wheel and the test executor.
@@ -128,42 +125,16 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
           PYTHON
-      - name: Restore Rust dependencies
-        if: env.NATIVE_CACHE_PUSH == 'true'
-        id: rust-cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-            ${{ env.CARGO_TARGET_DIR }}
-            ${{ env.OPENAI_AGENTS_BUILD_SOURCE }}/packages/codex/.cache/v8
-          key: native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runner }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('packages/codex/CODEX_REVISION', 'packages/codex/patches/**', 'packages/codex/rmcp-patches/**') }}-${{ hashFiles('packages/codex/Cargo.lock', 'packages/codex/Cargo.toml', 'packages/codex/scripts/*.py', 'pyproject.toml', '.github/actions/setup-native/action.yml', '.github/workflows/codex-python.yml') }}
-          restore-keys: |
-            native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runner }}-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('packages/codex/CODEX_REVISION', 'packages/codex/patches/**', 'packages/codex/rmcp-patches/**') }}-
-            native-deps-v2-${{ runner.os }}-${{ runner.arch }}-${{ inputs.runner }}-${{ env.RUSTUP_TOOLCHAIN }}-
-      - name: Select native build or reuse
-        id: native-source
-        env:
-          NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
-          WARM_SHARED_CACHE: ${{ env.NATIVE_CACHE_PUSH == 'true' && steps.rust-cache.outputs.cache-hit != 'true' }}
-        run: |
-          if [[ "$WARM_SHARED_CACHE" == true ]]; then
-            echo "Building native dependencies to warm the trusted branch cache."
-            NATIVE_SOURCE_RUN=''
-          fi
-          echo "run_id=$NATIVE_SOURCE_RUN" >> "$GITHUB_OUTPUT"
       - name: Download the qualified native build
-        if: steps.native-source.outputs.run_id != ''
+        if: inputs.native_source_run != ''
         env:
           GH_TOKEN: ${{ github.token }}
           NATIVE_ARTIFACTS: ${{ inputs.native_artifacts }}
-          NATIVE_SOURCE_RUN: ${{ steps.native-source.outputs.run_id }}
+          NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
           SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
         run: python .github/scripts/download-native-snapshot.py
       - name: Select the qualified wheel and test executor
-        if: steps.native-source.outputs.run_id != ''
+        if: inputs.native_source_run != ''
         run: |
           python - <<'PYTHON'
           import os
@@ -179,23 +150,11 @@ jobs:
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
               output.write(f"OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\n")
           PYTHON
-      - name: Clear previous compilation timings
-        id: clear-timings
-        if: steps.native-source.outputs.run_id == ''
-        run: |
-          python - <<'PYTHON'
-          import os
-          import shutil
-          from pathlib import Path
-          timings = Path(os.environ["CARGO_TARGET_DIR"]) / "cargo-timings"
-          if timings.exists():
-              shutil.rmtree(timings)
-          PYTHON
       - name: Build the SDK and native runtime together
-        if: steps.native-source.outputs.run_id == ''
+        if: inputs.native_source_run == ''
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
       - name: Build the shared test executor
-        if: steps.native-source.outputs.run_id == ''
+        if: inputs.native_source_run == ''
         run: |
           python - <<'PYTHON'
           import os
@@ -256,38 +215,6 @@ jobs:
                       raise SystemExit(f"Deferred symbols in {product.name}:\n{result.stdout}")
                   print(f"Verified linked imports: {product.name}")
           PYTHON
-      - name: Remove SDK outputs from the dependency cache
-        if: steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true'
-        # Reproducible sdists normalize mtimes, so never restore compiled SDK sources.
-        run: |
-          python - <<'PYTHON'
-          import os
-          import shutil
-          import subprocess
-          import sys
-          from pathlib import Path
-          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
-          sys.path.insert(0, str(root / "scripts"))
-          from native_env import build_environment, cargo_build_options
-          environment = build_environment(root)
-          options, _ = cargo_build_options(root, environment)
-          subprocess.run(["cargo", "clean", "--release", "--locked", "--package", "codex-agents-python", *options],
-                         cwd=root, env=environment, check=True)
-          staging = Path(environment["CARGO_TARGET_DIR"]) / "maturin"
-          if staging.exists():
-              shutil.rmtree(staging)
-          PYTHON
-      - name: Save Rust dependencies
-        if: steps.native-source.outputs.run_id == '' && steps.rust-cache.outputs.cache-hit != 'true' && env.NATIVE_CACHE_PUSH == 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-            ${{ env.CARGO_TARGET_DIR }}
-            ${{ env.OPENAI_AGENTS_BUILD_SOURCE }}/packages/codex/.cache/v8
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
       - name: Preserve captured producer identity
         id: producer-identity
         env:
@@ -332,38 +259,27 @@ jobs:
       - name: Report native build configuration
         if: always()
         env:
-          NATIVE_SOURCE_RUN: ${{ steps.native-source.outputs.run_id }}
-          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
-          RUST_CACHE_MATCHED_KEY: ${{ steps.rust-cache.outputs.cache-matched-key }}
-          RUST_CACHE_OUTCOME: ${{ steps.rust-cache.outcome }}
+          NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
         run: |
           python - <<'PYTHON'
           import os
           from pathlib import Path
           donor = os.environ["NATIVE_SOURCE_RUN"]
           if donor:
-              cache = f"Qualified native artifact from run {donor}"
+              source = f"Qualified native artifact from run {donor}"
           else:
-              cache = "Compiled native package"
-          if os.environ["RUST_CACHE_HIT"] == "true":
-              cache += "; Rust dependency cache exact hit"
-          elif os.environ["RUST_CACHE_MATCHED_KEY"]:
-              cache += "; Rust dependency cache prefix hit"
-          elif os.environ["RUST_CACHE_OUTCOME"] == "success":
-              cache += "; Rust dependency cache miss"
-          else:
-              cache += "; Rust dependency cache skipped or unavailable"
+              source = "Compiled native package"
           cpus = os.cpu_count()
           jobs = os.environ.get("CARGO_BUILD_JOBS", f"Cargo default ({cpus} logical CPUs)")
           with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a", encoding="utf-8") as summary:
-              summary.write(f"### Native build\n\n{cache}\n\n")
+              summary.write(f"### Native build\n\n{source}\n\n")
               summary.write(f"Runner: {os.environ.get('RUNNER_OS')} / {os.environ.get('RUNNER_ARCH')}; Cargo jobs: {jobs}\n\n")
-              summary.write("See the named workflow steps for cache transfer, wheel build, executor build and installation-check durations.\n")
+              summary.write("See the named workflow steps for snapshot transfer, wheel build, executor build and installation-check durations.\n")
               if not donor:
                   summary.write("Cargo compilation and concurrency reports, when produced, are in the native-timings artifact.\n")
           PYTHON
       - name: Share native compilation timings
-        if: always() && steps.native-source.outputs.run_id == '' && steps.clear-timings.outcome == 'success'
+        if: always() && inputs.native_source_run == ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: native-timings-${{ runner.os }}-${{ runner.arch }}

@@ -1134,7 +1134,7 @@ def test_native_build_selection(
     if scenario == "redirected_download":
         native_workflow.write_text(
             native_workflow_text.replace(
-                "NATIVE_SOURCE_RUN: ${{ steps.native-source.outputs.run_id }}",
+                "NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}",
                 "NATIVE_SOURCE_RUN: 999",
             )
         )
