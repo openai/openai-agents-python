@@ -7,8 +7,9 @@ import os
 import stat
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
+from pydantic import TypeAdapter, ValidationError
 from typing_extensions import TypedDict
 
 __all__ = [
@@ -83,6 +84,9 @@ class TurnReceipt(TypedDict):
     executors: list[ExecutorPolicyReceipt] | None
 
 
+_TURN_RECEIPT: TypeAdapter[TurnReceipt] = TypeAdapter(TurnReceipt)
+
+
 def _open_instruction_file(path: str, flags: int) -> int:
     # Resolve intentional symlinks first, then refuse links at the resolved leaf.
     return os.open(path, flags | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0))
@@ -136,26 +140,13 @@ def _project_turn_receipt(payload: dict[str, Any]) -> TurnReceipt | None:
         or raw["version"] != 1
         or not isinstance(turn_id, str)
         or not turn_id
-        or not isinstance(raw.get("thread_id"), str)
-        or not raw["thread_id"]
     ):
         return None
-    fields = TurnReceipt.__required_keys__ - {"turn_id"}
-    if not fields.issubset(raw):
+    try:
+        receipt = _TURN_RECEIPT.validate_python({**raw, "turn_id": turn_id}, strict=True)
+    except ValidationError:
         return None
-    projected = {key: raw[key] for key in fields}
-    executors = raw["executors"]
-    if executors is not None:
-        if not isinstance(executors, list):
-            return None
-        executor_fields = ExecutorPolicyReceipt.__required_keys__
-        public_executors = []
-        for executor in executors:
-            if not isinstance(executor, dict) or not executor_fields.issubset(executor):
-                return None
-            public_executors.append({key: executor[key] for key in executor_fields})
-        projected["executors"] = public_executors
-    return cast(TurnReceipt, projected | {"turn_id": turn_id})
+    return receipt if receipt["thread_id"] else None
 
 
 def _redact_checkpoint_executor_receipts(payload: dict[str, Any]) -> None:

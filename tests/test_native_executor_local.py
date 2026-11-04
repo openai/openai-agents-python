@@ -266,12 +266,8 @@ async def test_local_shell_patch_and_linked_worktree_respect_explicit_roots(
     assert (linked / ".agents" / "protected").read_text() == "metadata"
 
 
-@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@(
-    pytest.mark.requires_native_linux_sandbox
-    if sys.platform == "linux"
-    else pytest.mark.requires_native_macos_sandbox
-)
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux write-root replacement")
+@pytest.mark.requires_native_linux_sandbox
 async def test_local_write_root_replacement_survives_portable_resume(
     responses: ResponsesFixture, tmp_path: Path
 ) -> None:
@@ -320,7 +316,7 @@ async def test_local_write_root_replacement_survives_portable_resume(
     if sys.platform == "linux"
     else pytest.mark.requires_native_macos_sandbox
 )
-async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_policy(
+async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
     responses: ResponsesFixture, tmp_path: Path
 ) -> None:
     work, first, second, third = (tmp_path / name for name in ("work", "first", "second", "third"))
@@ -337,6 +333,8 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
     selected = Environment.local(
         cwd=work, writable_roots=[first, second], tools=["exec_command"], network=network
     )
+    applied_roots = (second, first) if sys.platform == "darwin" else (third,)
+    excluded_roots = (third,) if sys.platform == "darwin" else (first, second)
     denials = {
         "blocked.example.invalid": (
             "domain is explicitly denied by policy and cannot be approved from this prompt"
@@ -391,11 +389,11 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
             after = await run_turn(
                 session,
                 "replacement",
-                command(allow=(work, third), deny=(first, second)),
-                writable_roots=[third.resolve()],
+                command(allow=(work, *applied_roots), deny=excluded_roots),
+                writable_roots=[root.resolve() for root in applied_roots],
             )
             inherited = await run_turn(
-                session, "inherited", command(allow=(work, third), deny=(first, second))
+                session, "inherited", command(allow=(work, *applied_roots), deny=excluded_roots)
             )
             receipts = {
                 turn["id"]: turn["receipt"]["executors"][0]
@@ -406,8 +404,10 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
                 path.resolve().as_uri() for path in (first, second, work)
             }
             assert set(receipts[after]["writable_roots"]) == {
-                path.resolve().as_uri() for path in (third, work)
+                path.resolve().as_uri() for path in (work, *applied_roots)
             }
+            if sys.platform == "darwin":
+                assert receipts[after] == receipts[before]
             assert receipts[inherited] == receipts[after]
             assert "permission_profile" not in receipts[after]
             assert receipts[before]["network_sandbox"] == receipts[after]["network_sandbox"]
@@ -418,10 +418,14 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
             }
 
         with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
-            async with agent.session(storage=storage, resume=session_id, environment=selected):
-                pytest.fail("Reopen accepted superseded grants")
-        replacement = Environment.local(
-            cwd=work, writable_roots=[third], tools=["exec_command"], network=network
+            async with agent.session(
+                storage=storage,
+                resume=session_id,
+                environment=replace(selected, writable_roots=excluded_roots),
+            ):
+                pytest.fail("Reopen accepted different grants")
+        replacement = (
+            selected if sys.platform == "darwin" else replace(selected, writable_roots=[third])
         )
         changed_network = replace(replacement, network=NetworkPolicy(allow_all_unix_sockets=True))
         request_count = len(responses.requests)
@@ -440,12 +444,77 @@ async def test_turn_replaces_additional_roots_and_reopen_checks_the_applied_poli
                 if turn["id"] == inherited
             ]
             assert restored_policy == receipts[inherited]
-            await run_turn(
-                session,
-                "cleared",
-                command(allow=(work,), deny=(first, second, third)),
-                writable_roots=[],
-            )
+            if sys.platform == "linux":
+                await run_turn(
+                    session,
+                    "cleared",
+                    command(allow=(work,), deny=(first, second, third)),
+                    writable_roots=[],
+                )
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="requires macOS Seatbelt")
+@pytest.mark.requires_native_macos_sandbox
+async def test_macos_refuses_to_change_roots_after_a_detached_command(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    cwd, extra, sibling = (tmp_path / name for name in ("cwd", "extra", "sibling"))
+    for directory in (cwd, extra, sibling):
+        directory.mkdir()
+    ready, release, witness = cwd / "ready", cwd / "release", extra / "witness"
+    # The child has a different session and no inherited output pipes. It
+    # exits when released or after a bounded wait, including on test failure.
+    script = """
+        my ($ready, $release, $witness) = @ARGV;
+        $SIG{HUP} = "IGNORE";
+        my $pid = fork();
+        die "fork: $!" unless defined $pid;
+        exit 0 if $pid;
+        setsid() >= 0 or die "setsid: $!";
+        close STDIN;
+        close STDOUT;
+        close STDERR;
+        open my $started, ">", $ready or die;
+        close $started or die;
+        for (1..300) {
+            if (-e $release) {
+                open my $out, ">", $witness or die;
+                print $out "old grant";
+                close $out or die;
+                exit 0;
+            }
+            select undef, undef, undef, 0.1;
+        }
+    """
+    cmd = shlex.join(
+        ["/usr/bin/perl", "-MPOSIX=setsid", "-e", script, *map(str, (ready, release, witness))]
+    )
+    responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, "detach"))
+    responses.respond(assistant_output("parent exited"))
+    responses.respond(assistant_output("unexpectedly admitted"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-model-key")
+    agent = Agent(instructions="Use the selected tools.", provider=provider)
+    environment = Environment.local(cwd=cwd, writable_roots=[extra], tools=["exec_command"])
+    async with timeout(40), provider, agent.session(environment=environment) as session:
+        try:
+            started = await session.submit("Detach a child.")
+            assert (await started.get_result()).final_output == "parent exited"
+            assert "Process exited with code 0" in tool_output(responses.requests[1], "detach")
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+
+            for roots in ([], [extra.resolve(), sibling.resolve()]):
+                refused = await session.submit("Change roots.", writable_roots=roots)
+                with pytest.raises(
+                    NativeError, match="macOS executors require fixed writable roots"
+                ) as failure:
+                    await refused.get_result()
+                assert failure.value.effects == "not_started"
+                assert len(responses.requests) == 2
+        finally:
+            release.touch()
+        while not witness.exists() or witness.read_text() != "old grant":
+            await asyncio.sleep(0.01)
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")

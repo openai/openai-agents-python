@@ -120,7 +120,21 @@ def test_old_context_or_unknown_receipt_version_is_unavailable():
     assert _project_turn_receipt({"turn_id": "new-turn", "sdk_receipt": {"version": 2}}) is None
 
 
-def test_executor_receipt_projects_only_the_public_policy_fields():
+@pytest.mark.parametrize(
+    "approval_policy",
+    [
+        "on-failure",
+        {
+            "granular": {
+                "sandbox_approval": True,
+                "rules": True,
+                "mcp_elicitations": False,
+            },
+        },
+    ],
+    ids=["legacy-alias", "granular-defaults"],
+)
+def test_executor_receipt_projects_only_the_public_policy_fields(approval_policy):
     public_executor = {
         "environment_id": "test-executor",
         "transport": "local",
@@ -150,13 +164,16 @@ def test_executor_receipt_projects_only_the_public_policy_fields():
                 "user_config_applied": False,
                 "codex_revision": "test-revision",
                 "codex_source_tree": "test-tree",
-                "approval_policy": "never",
+                "approval_policy": approval_policy,
+                "strict_executor_writes": True,
                 "executors": [native_executor],
             },
         }
     )
 
     assert projected is not None
+    assert projected["approval_policy"] == approval_policy
+    assert "strict_executor_writes" not in projected
     assert projected["executors"] == [public_executor]
     assert native_executor["permission_profile"] == permission_profile
 
@@ -252,6 +269,53 @@ async def test_native_receipt_matches_provider_input_and_survives_restore(tmp_pa
                     receipts[-1]["developer_instructions_sha256"]
                     == hashlib.sha256(b"Use the new instructions.").hexdigest()
                 )
+
+
+@pytest.mark.parametrize(
+    "invalid_fields",
+    [{"model": None}, {"instruction_files": 5}],
+    ids=["model", "instruction-files"],
+)
+async def test_invalid_latest_sample_is_unavailable_until_a_valid_sample(
+    invalid_fields: dict[str, object],
+) -> None:
+    async with timeout(30), peer() as provider:
+        agent = Agent(instructions="Remember atlas.", provider=provider.provider())
+        async with agent.session() as source:
+            provider.replies.append(message("Remembered.", "first"))
+            turn = await source.submit("Remember atlas.")
+            await turn.get_result()
+            raw = json.loads((await source.save_state()).to_json())
+
+        [index] = [
+            index
+            for index, record in enumerate(raw["history"])
+            if record["type"] == "turn_context"
+            and record["payload"].get("turn_id") == turn.turn_id
+            and record["payload"].get("sdk_receipt") is not None
+        ]
+        observed = raw["history"][index]
+        context = observed["payload"]
+        receipt = context["sdk_receipt"]
+        raw["history"].insert(
+            index + 1,
+            {**observed, "payload": {**context, "sdk_receipt": {**receipt, **invalid_fields}}},
+        )
+
+        state = SessionState.from_json(json.dumps(raw))
+        async with agent.session(state=state) as restored:
+            [recorded] = [row async for row in restored.turns() if row["id"] == turn.turn_id]
+            assert "receipt" not in recorded
+
+        latest = {**receipt, "model": "next-sampled-model"}
+        raw["history"].insert(
+            index + 2,
+            {**observed, "payload": {**context, "sdk_receipt": latest}},
+        )
+        state = SessionState.from_json(json.dumps(raw))
+        async with agent.session(state=state) as restored:
+            [recorded] = [row async for row in restored.turns() if row["id"] == turn.turn_id]
+            assert recorded["receipt"]["model"] == "next-sampled-model"
 
 
 @pytest.mark.parametrize("receipt_kind", ["malformed", "foreign"])

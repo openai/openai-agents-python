@@ -431,17 +431,30 @@ async def test_local_resume_requires_explicit_strict_writes_even_without_extra_r
         )
         extra = executor.root / "extra"
         extra.mkdir()
-        opening = replace(selected, writable_roots=[extra])
+        opening = (
+            selected if sys.platform == "darwin" else replace(selected, writable_roots=[extra])
+        )
         model.respond(assistant_output("ready"))
         model.respond(assistant_output("cleared"))
         async with agent.session(storage=storage, environment=opening) as session:
             session_id = session.id
             assert (await (await session.submit("Start.")).get_result()).final_output == "ready"
+            if sys.platform == "darwin":
+                added = await session.submit("Add an extra root.", writable_roots=[extra.resolve()])
+                with pytest.raises(
+                    NativeError, match="macOS executors require fixed writable roots"
+                ) as refused:
+                    await added.get_result()
+                assert refused.value.effects == "not_started"
+                assert len(model.requests) == 1
             changed = await session.submit("Clear extra roots.", writable_roots=[])
             assert (await changed.get_result()).final_output == "cleared"
             first, last = [turn["receipt"] async for turn in session.turns() if "receipt" in turn]
             assert first["executors"] and last["executors"]
-            assert extra.resolve().as_uri() in first["executors"][0]["writable_roots"]
+            opening_roots = {executor.root.resolve().as_uri()}
+            if sys.platform == "linux":
+                opening_roots.add(extra.resolve().as_uri())
+            assert set(first["executors"][0]["writable_roots"]) == opening_roots
             assert last["executors"][0]["writable_roots"] == [executor.root.resolve().as_uri()]
         async with agent.session(
             storage=storage, resume=session_id, environment=selected
@@ -742,7 +755,7 @@ async def test_repeated_write_root_alias_cannot_grant_a_new_target(
             cwd=str(executor.root),
             tools=["exec_command"],
             headers={"Authorization": "Bearer " + executor.token},
-            writable_roots=[alias],
+            writable_roots=[alias, added] if sys.platform == "darwin" else [alias],
         )
         agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
         storage = LocalStorage(tmp_path / "profile") if transition == "reopen" else None
@@ -751,11 +764,9 @@ async def test_repeated_write_root_alias_cannot_grant_a_new_target(
         )
         model.respond(assistant_output("original"))
         assert (await (await session.submit("Start.")).get_result()).final_output == "original"
-        model.respond(assistant_output("stable alias and new root"))
-        mixed = await session.submit(
-            "Keep the alias and add a root.", writable_roots=[alias, added]
-        )
-        assert (await mixed.get_result()).final_output == "stable alias and new root"
+        model.respond(assistant_output("stable alias"))
+        mixed = await session.submit("Select roots with the alias.", writable_roots=[alias, added])
+        assert (await mixed.get_result()).final_output == "stable alias"
         if transition == "compaction":
             await session.compact(summary="A caller supplied this summary.")
         elif transition == "reopen":
@@ -787,12 +798,21 @@ async def test_repeated_write_root_alias_cannot_grant_a_new_target(
         explicit = await session.submit(
             "Grant the replacement directory explicitly.", writable_roots=[replacement, added]
         )
-        assert (await explicit.get_result()).final_output == "explicit replacement"
+        if sys.platform == "darwin":
+            with pytest.raises(
+                NativeError, match="macOS executors require fixed writable roots"
+            ) as refused:
+                await explicit.get_result()
+            assert refused.value.effects == "not_started"
+            assert len(model.requests) == 3
+        else:
+            assert (await explicit.get_result()).final_output == "explicit replacement"
         policies = [turn["receipt"]["executors"][0] async for turn in session.turns()]
         workspace = executor.root.resolve().as_uri()
         common = {workspace, added.resolve().as_uri()}
         assert set(policies[-2]["writable_roots"]) == common | {original.resolve().as_uri()}
-        assert set(policies[-1]["writable_roots"]) == common | {replacement.resolve().as_uri()}
+        final_root = original if sys.platform == "darwin" else replacement
+        assert set(policies[-1]["writable_roots"]) == common | {final_root.resolve().as_uri()}
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
@@ -800,6 +820,8 @@ async def test_repeated_write_root_alias_cannot_grant_a_new_target(
 async def test_new_write_root_alias_cannot_widen_policy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, regrant: bool
 ) -> None:
+    if regrant and sys.platform == "darwin":
+        pytest.skip("requires revoking a root between turns")
     async with (
         timeout(45),
         ExecutorPeer(tmp_path / "remote").serve() as executor,
@@ -847,6 +869,14 @@ async def test_new_write_root_alias_cannot_widen_policy(
             canonical = await session.submit(
                 "Grant the target explicitly.", writable_roots=[target.resolve()]
             )
+            if sys.platform == "darwin":
+                with pytest.raises(
+                    NativeError, match="macOS executors require fixed writable roots"
+                ) as refused:
+                    await canonical.get_result()
+                assert refused.value.effects == "not_started"
+                assert len(model.requests) == prior_requests
+                return
             assert (await canonical.get_result()).final_output == "canonical target"
             model.respond(assistant_output("same grant"))
             repeated = await session.submit("Alias the same target.", writable_roots=[alias])

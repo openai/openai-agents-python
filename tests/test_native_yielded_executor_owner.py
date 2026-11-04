@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from contextlib import AsyncExitStack, asynccontextmanager
 from types import SimpleNamespace
 
@@ -221,7 +222,12 @@ async def test_writable_roots_cannot_change_while_a_yielded_cell_owns_them(
                 before = len(responses.requests)
                 responses.respond(assistant_output("same roots accepted"))
                 refused = await session.submit("Narrow the roots", writable_roots=[])
-                with pytest.raises(NativeError, match="old executor work") as failure:
+                refusal = (
+                    "macOS executors require fixed writable roots"
+                    if sys.platform == "darwin"
+                    else "old executor work"
+                )
+                with pytest.raises(NativeError, match=refusal) as failure:
                     await refused.get_result()
                 assert failure.value.effects == "not_started"
                 assert len(responses.requests) == before
@@ -240,9 +246,16 @@ async def test_writable_roots_cannot_change_while_a_yielded_cell_owns_them(
                 assert "late command complete" in output_for(responses, "collect-cell")
                 assert len(peer.synthetic_process_starts) == 1
 
+                before = len(responses.requests)
                 responses.respond(assistant_output("narrower roots accepted"))
                 narrower = await session.submit("Now narrow the roots", writable_roots=[])
-                assert (await narrower.get_result()).final_output == "narrower roots accepted"
+                if sys.platform == "darwin":
+                    with pytest.raises(NativeError, match=refusal) as failure:
+                        await narrower.get_result()
+                    assert failure.value.effects == "not_started"
+                    assert len(responses.requests) == before
+                else:
+                    assert (await narrower.get_result()).final_output == "narrower roots accepted"
             finally:
                 gate.release_call.set()
 

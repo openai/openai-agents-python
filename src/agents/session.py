@@ -2785,11 +2785,13 @@ class Session(Generic[ContextT, OutputT]):
         can be cancelled before any model request.
         Keep this Turn to wait with the chosen type, steer or cancel exactly it.
 
-        writable_roots replaces the additional directories granted to new
-        executor work, starting with this native turn. The Environment cwd
-        remains writable. An empty sequence clears additional grants and
-        None keeps the last applied policy. The network rules stay fixed.
-        This control requires a strict Environment and an idle graph.
+        On Linux executors, writable_roots replaces the additional write
+        grants starting with this turn. An empty sequence clears those grants.
+        macOS executors keep the opening write roots for the whole Session.
+        Detached processes there can keep their original sandbox permissions.
+        None keeps the current policy. The working directory remains writable,
+        and the network policy stays fixed. Changing roots requires a strict
+        Environment and an idle graph.
         Selection cannot install new declarations, endpoints or credentials.
         Each native step retains its immutable selected router for
         direct, deferred-search and generated-code calls.

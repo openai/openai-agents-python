@@ -1,6 +1,6 @@
 //! Bind the selected executor and its application-owned policy.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -836,6 +836,7 @@ pub(crate) async fn replace_writable_roots(
         .get_environment(&selection.environment_id)
         .context("selected executor was not registered")?;
     let info = executor_info(&environment).await?;
+    let platform = Platform::from_platform_os(info.platform_os.as_deref());
     let (profile, workspace_root, writes) =
         strict_write_profile(&environment, &info, &selection.cwd, &writable_roots, local).await?;
     ensure!(
@@ -870,13 +871,19 @@ pub(crate) async fn replace_writable_roots(
             info.capabilities.network_proxy_launch,
             "network policy requires an executor with managed proxy launch"
         );
-        validate_environment_network_policy(
-            network,
-            &profile,
-            Platform::from_platform_os(info.platform_os.as_deref()),
-        )?;
+        validate_environment_network_policy(network, &profile, platform)?;
     }
-    settings.permission_profile = PermissionProfileSnapshot::legacy(profile);
+    if platform == Platform::Macos {
+        // A detached process can outlive its tracked command with its original
+        // Seatbelt policy. Adding a root can also add read-only carveouts.
+        ensure!(
+            current.roots.values().collect::<HashSet<_>>()
+                == writes.roots.values().collect::<HashSet<_>>(),
+            "macOS executors require fixed writable roots for the Session"
+        );
+    } else {
+        settings.permission_profile = PermissionProfileSnapshot::legacy(profile);
+    }
     Ok((selection, writes))
 }
 
