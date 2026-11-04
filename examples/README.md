@@ -30,6 +30,7 @@ If an example imports `agents`, install the matching preview wheel and any extra
 These recipes use the same preview wheel and may need extra dependencies.
 
 - [Task recipe chooser](../docs/sdk/recipes.md): typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval and application memory. Each entry identifies synthetic or live execution and its limits.
+- [Bounded MCP reports](recipes/mcp_reports.md): keep successful native MCP text and structured results in owner-scoped memory, with model-visible previews, private retrieval and Session cleanup.
 - [Complete service and browser](web_starter/README.md): request ownership, approvals, bounded admission, typed final results and authorized artifact downloads with a pinned browser client.
 - [Trace walkthrough](observability/README.md): a local collector/viewer and worked history reader for tool, validation and provider failures.
 - [Evaluation runner](evaluation/README.md): repeatable cases, recorded configurations, baseline comparisons, and failure artifacts. Synthetic checks do not measure live model quality.
