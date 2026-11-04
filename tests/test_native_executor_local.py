@@ -338,9 +338,17 @@ async def test_local_replacement_rejects_a_relocated_checklist_hard_link(
         checklist = await session.checklist()
         assert checklist is not None and checklist.explanation == "initial"
         record = sidecars / f"{session.id}.json"
+        upper = record.with_name(record.name.upper())
+        case_insensitive = upper.exists()
+        if case_insensitive:
+            record.rename(sidecars / "rename-checklist").rename(upper)
+            assert upper.name in {path.name for path in sidecars.iterdir()}
+            assert await session.checklist() == checklist
+            record = upper
         alias = grant / "ordinary-name"
         alias.hardlink_to(record)
         request_count = len(responses.requests)
+        responses.respond(assistant_output("done"))
 
         refused = await session.submit("Do not grant the checklist.", writable_roots=[grant])
         with pytest.raises(NativeError, match="writable roots contain a hard link") as error:
@@ -355,7 +363,8 @@ async def test_local_replacement_rejects_a_relocated_checklist_hard_link(
         alias.hardlink_to(ordinary)
         # Unrecognized children of the relocated directory are not storage routes.
         (sidecars / "unrelated").symlink_to(grant, target_is_directory=True)
-        responses.respond(assistant_output("done"))
+        if not case_insensitive:
+            upper.symlink_to(alias)
         allowed = await session.submit("Grant an ordinary link.", writable_roots=[grant])
         assert (await allowed.get_result()).final_output == "done"
         assert await session.checklist() == checklist
