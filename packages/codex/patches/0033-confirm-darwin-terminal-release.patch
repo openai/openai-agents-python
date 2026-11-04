@@ -1,0 +1,125 @@
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index c1f3e98d8d071a1048a21507527bfdffab9826ad..b0fc76fdeb1bf4808c3cb3f897cbe03ad63f998c 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -462,14 +462,18 @@ async fn finish_deferred_network_approval_after_process_exit_for_session(
+     finish_deferred_network_approval_for_session(session, deferred).await
+ }
+ 
+-fn fail_process_with_message(process: &UnifiedExecProcess, message: String) -> UnifiedExecError {
+-    if let Some(message) = process.failure_message() {
+-        process.terminate();
+-        return UnifiedExecError::process_failed(message);
+-    }
+-
++async fn fail_process_with_message(
++    process: &UnifiedExecProcess,
++    message: String,
++) -> UnifiedExecError {
+     process.fail_and_terminate(message.clone());
+-    UnifiedExecError::process_failed(process.failure_message().unwrap_or(message))
++    let message = process.failure_message().unwrap_or(message);
++    if process.needs_darwin_cleanup() {
++        // Keep the denied command's old write policy fenced until its trusted
++        // supervisor confirms cleanup. Release retains the entry on failure.
++        process.terminate_and_join().await;
++    }
++    UnifiedExecError::process_failed(message)
+ }
+ 
+ #[allow(clippy::too_many_arguments)]
+@@ -526,7 +530,7 @@ fn terminate_process_on_network_denial(
+         }
+         let session = session.upgrade();
+         let message = network_denial_message_for_session(session.as_ref(), Some(deferred)).await;
+-        process.fail_and_terminate(message);
++        fail_process_with_message(&process, message).await;
+     })
+ }
+ 
+@@ -856,9 +860,10 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
++            let error = fail_process_with_message(process.as_ref(), message).await;
+             self.release_initial_process_id(request.process_id, &request.process_id_generation)
+                 .await;
+-            return Err(fail_process_with_message(process.as_ref(), message));
++            return Err(error);
+         }
+         if let Some(message) = process.failure_message() {
+             let finish_result = finish_deferred_network_approval_for_session(
+@@ -879,12 +884,11 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
++            let message = finish_result.err().unwrap_or(message);
++            let error = fail_process_with_message(process.as_ref(), message).await;
+             self.release_initial_process_id(request.process_id, &request.process_id_generation)
+                 .await;
+-            if let Err(message) = finish_result {
+-                return Err(fail_process_with_message(process.as_ref(), message));
+-            }
+-            return Err(UnifiedExecError::process_failed(message));
++            return Err(error);
+         }
+         let process_id = request.process_id;
+         let (response_process_id, exit_code) = if process_started_alive {
+@@ -902,7 +906,9 @@ impl UnifiedExecProcessManager {
+                         )
+                         .await
+                     {
+-                        return Err(fail_process_with_message(entry.process.as_ref(), message));
++                        return Err(
++                            fail_process_with_message(entry.process.as_ref(), message).await
++                        );
+                     }
+                     if !completion
+                         .as_ref()
+@@ -959,9 +965,10 @@ impl UnifiedExecProcessManager {
+                     wall_time,
+                 )
+                 .await;
++                let error = fail_process_with_message(process.as_ref(), message).await;
+                 self.release_initial_process_id(request.process_id, &request.process_id_generation)
+                     .await;
+-                return Err(fail_process_with_message(process.as_ref(), message));
++                return Err(error);
+             }
+             let exit_code = process.exit_code();
+             let exit = exit_code.unwrap_or(-1);
+@@ -1223,8 +1230,9 @@ impl UnifiedExecProcessManager {
+             let message =
+                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
+                     .await;
++            let error = fail_process_with_message(process.as_ref(), message).await;
+             self.release_process_id(process_id, &process).await;
+-            return Err(fail_process_with_message(process.as_ref(), message));
++            return Err(error);
+         }
+         if let Some(message) = process.failure_message() {
+             let finish_result = finish_deferred_network_approval_for_session(
+@@ -1232,11 +1240,10 @@ impl UnifiedExecProcessManager {
+                 network_approval.clone(),
+             )
+             .await;
++            let message = finish_result.err().unwrap_or(message);
++            let error = fail_process_with_message(process.as_ref(), message).await;
+             self.release_process_id(process_id, &process).await;
+-            if let Err(message) = finish_result {
+-                return Err(fail_process_with_message(process.as_ref(), message));
+-            }
+-            return Err(UnifiedExecError::process_failed(message));
++            return Err(error);
+         }
+ 
+         // After polling, refresh_process_state tells us whether the PTY is
+@@ -1259,7 +1266,7 @@ impl UnifiedExecProcessManager {
+                 if let Err(message) =
+                     finish_network_approval_after_process_exit_for_entry(&entry).await
+                 {
+-                    return Err(fail_process_with_message(entry.process.as_ref(), message));
++                    return Err(fail_process_with_message(entry.process.as_ref(), message).await);
+                 }
+                 (None, exit_code, call_id)
+             }
