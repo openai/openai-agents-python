@@ -159,7 +159,11 @@
     {
       "path": "0040-protect-physical-local-write-roots.patch",
       "sha256": "8f6395a1b8d253170db019319cdaeff855ce1798efcc20eed704689fe070d994"
+    },
+    {
+      "path": "0044-scan-deep-helper-hard-links.patch",
+      "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
     }
   ],
-  "result_tree": "508adc6a0777c6b61a2abbeeafbc24a5f2e39914"
+  "result_tree": "0429c4208ab3424b70262ee45e748b95092f9285"
 }
