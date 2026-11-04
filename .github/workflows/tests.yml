@@ -84,13 +84,16 @@ jobs:
       - name: Select a qualified native build
         id: native-source
         if: >-
-          steps.changes.outputs.run == 'true' &&
-          ((github.event_name == 'push' && github.ref_name == github.event.repository.default_branch) ||
+          github.repository == 'openai/openai-agents-python' && steps.changes.outputs.run == 'true' &&
+          ((github.event_name == 'push' && (github.ref_name == github.event.repository.default_branch ||
+          github.ref_name == 'feat/codex-harness')) ||
           (github.event_name == 'pull_request' &&
           github.event.pull_request.head.repo.full_name == github.repository))
         env:
           GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SOURCE_BRANCH: ${{ (github.base_ref || github.ref_name) == 'feat/codex-harness' && 'feat/codex-harness' || github.event.repository.default_branch }}
+          CURRENT_PR: ${{ github.event.pull_request.number || '' }}
+          CURRENT_PR_HEAD: ${{ github.event.pull_request.head.sha || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
         run: |
           python - <<'PYTHON'
@@ -137,16 +140,51 @@ jobs:
                   ["git", "merge-base", "--is-ancestor", before, after], stderr=subprocess.DEVNULL
               ).returncode == 0
 
+          def parents(revision):
+              commit = subprocess.check_output(["git", "cat-file", "commit", revision], text=True)
+              return [line.removeprefix("parent ") for line in commit.split("\n\n", 1)[0].splitlines()
+                      if line.startswith("parent ")]
+
           def qualified(run):
-              if (run["repository"]["full_name"] != repo
+              if (repo != 'openai/openai-agents-python'
+                      or run["repository"]["full_name"] != repo
                       or (run.get("head_repository") or {}).get("full_name") != repo
                       or run["path"] != ".github/workflows/tests.yml"
-                      or str(run["id"]) == os.environ["GITHUB_RUN_ID"]
-                      or run["event"] != "push"
-                      or run["head_branch"] != os.environ["DEFAULT_BRANCH"]):
+                      or str(run["id"]) == os.environ["GITHUB_RUN_ID"]):
                   return False
               source = run["head_sha"]
-              if not ancestor(source, "HEAD"):
+              if run["event"] == "push":
+                  if run["head_branch"] != os.environ["SOURCE_BRANCH"] or not ancestor(source, "HEAD"):
+                      return False
+              elif run["event"] == "pull_request" and os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+                  number = os.environ["CURRENT_PR"]
+                  if not number or not any(str(pr["number"]) == number for pr in run.get("pull_requests", [])):
+                      return False
+                  if not ancestor(source, os.environ["CURRENT_PR_HEAD"]):
+                      return False
+                  references = [item for item in run.get("referenced_workflows", [])
+                                if item["path"].split("@", 1)[0] == repo + "/.github/workflows/codex-python.yml"]
+                  if not references:
+                      return False
+                  if len(references) != 1:
+                      raise SystemExit("Ambiguous native producer execution context")
+                  reference = references[0]
+                  if reference["ref"] != f"refs/pull/{number}/merge":
+                      return False
+                  execution = reference["sha"]
+                  if not re.fullmatch(r"[0-9a-f]{40}", execution):
+                      raise SystemExit("Invalid native producer execution SHA")
+                  if reference["path"] != f"{repo}/.github/workflows/codex-python.yml@{execution}":
+                      raise SystemExit("Inconsistent native producer execution reference")
+                  if subprocess.run(["git", "cat-file", "-e", execution + "^{commit}"],
+                                    stderr=subprocess.DEVNULL).returncode:
+                      subprocess.run(["git", "fetch", "--no-tags", "origin", execution], check=True, timeout=60)
+                  prior_parents, current_parents = parents(execution), parents("HEAD")
+                  if (len(prior_parents) != 2 or prior_parents[1] != source or len(current_parents) != 2
+                          or current_parents[1] != os.environ["CURRENT_PR_HEAD"]):
+                      return False
+                  source = execution
+              else:
                   return False
               run_api = api + "/runs/" + str(run["id"])
               required = {
@@ -159,17 +197,23 @@ jobs:
                   required["native-windows / Native package (windows-latest)"] = "native-Windows-X64"
               jobs = records(run_api + "/jobs?filter=latest", "jobs")
               # Native jobs qualify the artifacts independently of unrelated tests.
-              if not required.keys() <= {job["name"] for job in jobs if job["conclusion"] == "success"}:
-                  return False
+              for name in required:
+                  producers = [job for job in jobs if job["name"] == name]
+                  if len(producers) != 1 or producers[0]["conclusion"] != "success":
+                      return False
+                  steps = {step["name"]: step.get("conclusion") for step in producers[0].get("steps", [])}
+                  if (steps.get("Build the SDK and native runtime together") != "success"
+                          or steps.get("Build the shared test executor") != "success"
+                          or steps.get("Download the qualified native build") != "skipped"):
+                      return False
               native_workflow = ".github/workflows/codex-python.yml"
               if subprocess.check_output(["git", "show", f"{source}:{native_workflow}"]) != Path(native_workflow).read_bytes():
                   return False
               tests_workflow = ".github/workflows/tests.yml"
               prior_tests = subprocess.check_output(["git", "show", f"{source}:{tests_workflow}"], text=True)
               current_tests = Path(tests_workflow).read_text()
-              # Reject artifacts made before this policy, including old push runs that
-              # repacked PR artifacts. Every accepted producer uses this same selector.
-              for name in ("changes", "native-linux", "native-windows", "native-macos"):
+              # A fresh build under the same producer recipe does not depend on the donor selector.
+              for name in ("native-linux", "native-windows", "native-macos"):
                   before, after = (job_block(text, name) for text in (prior_tests, current_tests))
                   if not before or not after or before != after:
                       return False
@@ -220,7 +264,11 @@ jobs:
 
           # Search a bounded history. API errors fail instead of silently starting a cold build.
           def candidates():
-              query = urllib.parse.urlencode({"branch": os.environ["DEFAULT_BRANCH"],
+              if os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
+                  query = urllib.parse.urlencode({"branch": os.environ["GITHUB_HEAD_REF"],
+                                                  "event": "pull_request", "per_page": 20})
+                  yield from get(api + "/workflows/tests.yml/runs?" + query)["workflow_runs"]
+              query = urllib.parse.urlencode({"branch": os.environ["SOURCE_BRANCH"],
                                               "event": "push", "per_page": 20})
               yield from get(api + "/workflows/tests.yml/runs?" + query)["workflow_runs"]
 

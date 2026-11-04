@@ -850,6 +850,7 @@ def test_windows_jobs_follow_the_selected_native_producer() -> None:
             "pull_request", "199/merge", "main", "example/fork", "true", False, id="fork-pr"
         ),
         pytest.param("push", "main", "", "", "true", True, id="default-push"),
+        pytest.param("push", "feat/codex-harness", "", "", "true", True, id="feature-push"),
         pytest.param("push", "feature/parent", "", "", "true", False, id="other-push"),
         pytest.param(
             "merge_group",
@@ -888,10 +889,13 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "github.base_ref": base,
         "github.event.repository.default_branch": "main",
         "github.event.pull_request.head.repo.full_name": head_repo,
-        "github.repository": "example/sdk",
+        "github.repository": "openai/openai-agents-python",
     }
     # Evaluate the workflow's actual Boolean condition with event values, including
     # an absent PR head for pushes. Unknown contexts fail rather than becoming truthy.
+    values["github.event.pull_request.head.repo.full_name"] = head_repo.replace(
+        "example/sdk", "openai/openai-agents-python"
+    )
     condition = re.sub(
         r"\b(?:steps|github)(?:\.[a-zA-Z_][a-zA-Z_0-9]*)+",
         lambda match: repr(values[match.group()]),
@@ -954,6 +958,26 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "api_error",
         "pr_same",
         "pr_default_merged",
+        "feature_push",
+        "feature_push_to_pr",
+        "pr_other_number",
+        "pr_wrong_ref",
+        "pr_missing_context",
+        "pr_bad_execution_sha",
+        "pr_ambiguous_context",
+        "pr_missing_number",
+        "pr_untrusted",
+        "pr_unrelated_head",
+        "pr_base_python_changed",
+        "pr_base_recipe_changed",
+        "pr_base_fixture_changed",
+        "pr_execution_head_mismatch",
+        "pr_execution_recipe_changed",
+        "pr_fixture_changed",
+        "pr_repacked",
+        "push_pr_source",
+        "fresh_build_missing",
+        "qualified_download_used",
         "push_session_storage",
         "push_session_storage_native_build_changed",
         "push_session_storage_other_doc_changed",
@@ -1285,14 +1309,17 @@ def test_native_build_selection(
         _git(repo, "checkout", "main")
     else:
         donor = base
-    repository = "example/sdk"
-    pr_donor = scenario in {"pr_same", "pr_default_merged"}
+    repository = "openai/openai-agents-python"
+    pr_donor = scenario.startswith("pr_") or scenario == "push_pr_source"
+    current_pr = pr_donor and scenario not in {"pr_default_merged", "push_pr_source"}
     source = {
         "id": 456 if scenario == "current_run" else 123,
         "head_sha": donor,
         "repository": {"full_name": repository, "id": 10},
         "head_repository": {
-            "full_name": "example/fork" if scenario == "untrusted" else repository,
+            "full_name": "example/fork"
+            if scenario in {"untrusted", "pr_untrusted"}
+            else repository,
             "id": 10,
         },
         "path": ".github/workflows/other.yml" if scenario == "wrong_workflow" else workflow_path,
@@ -1301,7 +1328,13 @@ def test_native_build_selection(
         else "workflow_dispatch"
         if scenario == "dispatch"
         else "push",
-        "head_branch": "feature" if pr_donor or scenario == "wrong_branch" else "main",
+        "head_branch": (
+            "feature"
+            if pr_donor or scenario == "wrong_branch"
+            else "feat/codex-harness"
+            if scenario.startswith("feature_push")
+            else "main"
+        ),
         "status": "in_progress" if pending_python else "completed",
         "conclusion": None
         if pending_python
@@ -1310,7 +1343,7 @@ def test_native_build_selection(
         else "success",
     }
     if pr_donor:
-        # Supply a valid old-policy PR, including its immutable execution commit.
+        # Bind the producer to the actual immutable merge used by its reusable workflow.
         execution_sha = _git(
             repo,
             "commit-tree",
@@ -1318,7 +1351,7 @@ def test_native_build_selection(
             "-p",
             initial,
             "-p",
-            base,
+            initial if scenario == "pr_execution_head_mismatch" else base,
             "-m",
             "Synthetic PR execution merge",
         )
@@ -1329,6 +1362,79 @@ def test_native_build_selection(
                 "sha": execution_sha,
             }
         ]
+        source["pull_requests"] = [{"number": 200 if scenario == "pr_other_number" else 199}]
+        if scenario == "pr_unrelated_head":
+            source["head_sha"] = _git(
+                repo,
+                "commit-tree",
+                _git(repo, "rev-parse", f"{base}^{{tree}}"),
+                "-p",
+                initial,
+                "-m",
+                "Unrelated PR head",
+            )
+            execution_sha = _git(
+                repo,
+                "commit-tree",
+                _git(repo, "rev-parse", f"{base}^{{tree}}"),
+                "-p",
+                initial,
+                "-p",
+                source["head_sha"],
+                "-m",
+                "Unrelated PR execution",
+            )
+            source["referenced_workflows"][0].update(
+                sha=execution_sha, path=f"{repository}/{native_workflow_path}@{execution_sha}"
+            )
+        if scenario == "pr_wrong_ref":
+            source["referenced_workflows"][0]["ref"] = "refs/pull/200/merge"
+        if scenario == "pr_missing_context":
+            source["referenced_workflows"] = []
+        if scenario == "pr_bad_execution_sha":
+            source["referenced_workflows"][0]["sha"] = "invalid-sha"
+        if scenario == "pr_ambiguous_context":
+            source["referenced_workflows"] *= 2
+        if scenario == "pr_execution_recipe_changed":
+            native_workflow.write_text(native_workflow_text + "# different producer recipe\n")
+            _git(repo, "add", native_workflow_path)
+            tree = _git(repo, "write-tree")
+            execution_sha = _git(
+                repo, "commit-tree", tree, "-p", initial, "-p", base, "-m", "Changed merge recipe"
+            )
+            source["referenced_workflows"][0].update(
+                sha=execution_sha, path=f"{repository}/{native_workflow_path}@{execution_sha}"
+            )
+            native_workflow.write_text(native_workflow_text)
+            _git(repo, "add", native_workflow_path)
+        if scenario == "pr_fixture_changed":
+            head = _commit(repo, "packages/codex/tests/fixtures/exec_server.rs")
+        if current_pr:
+            if scenario == "pr_base_recipe_changed":
+                native_workflow.write_text(
+                    native_workflow_text + "# base producer recipe changed\n"
+                )
+            if scenario == "pr_base_fixture_changed":
+                fixture = repo / "packages/codex/tests/fixtures/exec_server.rs"
+                fixture.parent.mkdir(parents=True, exist_ok=True)
+                fixture.write_text("fn main() {}\n")
+            current_base = (
+                _commit(repo, "src/agents/new_base_python.py")
+                if scenario.startswith("pr_base_")
+                else initial
+            )
+            execution_head = _git(
+                repo,
+                "commit-tree",
+                _git(repo, "rev-parse", "HEAD^{tree}"),
+                "-p",
+                current_base,
+                "-p",
+                head,
+                "-m",
+                "Current PR execution merge",
+            )
+            _git(repo, "checkout", "--detach", execution_head)
     jobs = [
         {
             "name": f"native-{name} / Native package ({runner})",
@@ -1336,11 +1442,19 @@ def test_native_build_selection(
             "conclusion": "success",
             "steps": [
                 {
+                    "name": "Build the SDK and native runtime together",
+                    "conclusion": "skipped" if scenario == "fresh_build_missing" else "success",
+                },
+                {
+                    "name": "Download the qualified native build",
+                    "conclusion": "success" if scenario == "qualified_download_used" else "skipped",
+                },
+                {
                     "name": "Build the shared test executor",
                     "conclusion": "skipped"
-                    if scenario in {"reused_push", "historical_repack"}
+                    if scenario in {"reused_push", "historical_repack", "pr_repacked"}
                     else "success",
-                }
+                },
             ],
         }
         for name, runner in (
@@ -1393,6 +1507,7 @@ def test_native_build_selection(
             raise urllib.error.URLError("API unavailable")
         if "/workflows/" in url:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            assert query["event"] in [["push"], ["pull_request"]]
             status_matches = "status" not in query or source["status"] in query["status"]
             # Return PR runs even for a filtered search to exercise the trust gate itself.
             response = {
@@ -1442,13 +1557,22 @@ def test_native_build_selection(
         "GITHUB_HEAD_REF": "feature",
         "CURRENT_PR": (
             "199"
-            if scenario in {"pr_same", "trusted_push_to_pr"} or scenario.startswith("stacked_pr")
+            if current_pr
+            or scenario in {"trusted_push_to_pr", "feature_push_to_pr"}
+            or scenario.startswith("stacked_pr")
             else ""
         ),
         "CURRENT_PR_HEAD": head,
         "GITHUB_BASE_REF": "feature/parent" if scenario.startswith("stacked_pr") else "main",
         "GITHUB_OUTPUT": str(output),
-        "DEFAULT_BRANCH": "main",
+        "SOURCE_BRANCH": "feat/codex-harness" if scenario.startswith("feature_push") else "main",
+        "GITHUB_EVENT_NAME": (
+            "pull_request"
+            if current_pr
+            or scenario in {"trusted_push_to_pr", "feature_push_to_pr"}
+            or scenario.startswith("stacked_pr")
+            else "push"
+        ),
         "GH_TOKEN": "placeholder",
         "REQUIRE_WINDOWS": (
             ""
@@ -1459,9 +1583,14 @@ def test_native_build_selection(
         ),
     }.items():
         monkeypatch.setenv(key, value)
+    if scenario == "pr_missing_number":
+        monkeypatch.setenv("CURRENT_PR", "")
     script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
+            exec(compile(script, workflow_path, "exec"), {})
+    elif scenario in {"pr_bad_execution_sha", "pr_ambiguous_context"}:
+        with pytest.raises(SystemExit, match="native producer execution"):
             exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "api_error":
         with pytest.raises(urllib.error.URLError, match="API unavailable"):
@@ -1477,7 +1606,11 @@ def test_native_build_selection(
             "failed_run",
             "trusted_push_to_pr",
             "stacked_pr",
-            "reused_push",
+            "selector_changed",
+            "pr_same",
+            "pr_base_python_changed",
+            "feature_push",
+            "feature_push_to_pr",
             "version_and_docs",
             "paginated",
             "push_native_config",
