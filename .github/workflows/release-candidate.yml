@@ -64,7 +64,7 @@ jobs:
         with:
           ref: ${{ needs.discover.outputs.commit_sha }}
           persist-credentials: false
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
         with:
           version: '0.11.14'
           python-version: '3.14'
