@@ -120,13 +120,25 @@ class Worker:
             fd = os.open(self.workspace / ARTIFACT, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
             return None
-        with os.fdopen(fd, "rb") as artifact:
+        artifact = os.fdopen(fd, "rb")
+        failed = False
+        try:
             if not stat.S_ISREG(os.fstat(artifact.fileno()).st_mode):
                 return None
             expected_text = self.expected_text
             expected_bytes = expected_text.encode()
             if artifact.read(len(expected_bytes) + 1) != expected_bytes:
                 return None
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            try:
+                artifact.close()
+            except BaseException:
+                if not failed:
+                    raise
+                logger.exception("Could not close the worker artifact.")
         return expected_text
 
 
@@ -292,7 +304,7 @@ async def work(
                 and not (cwd.netloc or cwd.query or cwd.fragment)
                 and unquote_to_bytes(cwd.path).rstrip(b"/") == bytes(worker.workspace)
                 and item.get("argv", [])[-1:] == [VERIFY_COMMAND]
-                and (item["output"] or "").rstrip("\n") == worker.expected_text.rstrip("\n")
+                and item["output"] == worker.expected_text
             ]
             steering = [receipt for draft in traces for receipt in draft.steering]
             if artifact is not None and commands and len(steering) == len(CORRECTIONS):
@@ -330,7 +342,6 @@ async def work(
                     "usage": asdict(result.usage) if result.usage is not None else None,
                     "follow_up_ms": [draft.completion_ms for draft in traces[1:]],
                 }
-                record_once(worker.directory, "accepted", accepted)
                 return {"status": "accepted", **accepted}
             reason = (
                 "The file or successful check is missing."
@@ -344,8 +355,7 @@ async def work(
     return {"status": "rejected", "session_id": session.id, "rejections": rejections}
 
 
-async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
-    directory = args.directory.resolve()
+async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", directory.name):
         raise ValueError("Use a worker directory name like alpha or worker-2.")
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -477,6 +487,18 @@ async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
         return {"status": "timed_out", "stage": stage}
 
 
+async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
+    directory = args.directory.resolve()
+    result = await _run_worker(args, directory)
+    if result["status"] == "accepted":
+        record_once(
+            directory,
+            "accepted",
+            {key: value for key, value in result.items() if key != "status"},
+        )
+    return result
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -493,6 +515,7 @@ def main() -> None:
         math.isfinite(value) and value > 0 for value in (args.startup_timeout, args.turn_timeout)
     ):
         parser.error("Deadlines must be finite positive numbers of seconds.")
+    args.directory = args.directory.resolve()
 
     status: dict[str, Any]
     if args.command == "status":

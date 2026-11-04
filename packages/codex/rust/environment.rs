@@ -1,5 +1,6 @@
 //! Bind the selected executor and its application-owned policy.
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
@@ -35,6 +36,9 @@ use codex_protocol::protocol::{
     TurnSettingsUpdate, TurnSettingsUpdateOutcome,
 };
 use codex_protocol::sandbox::SandboxType;
+use codex_rollout::{
+    ARCHIVED_SESSIONS_SUBDIR, SESSIONS_SUBDIR, plain_rollout_path, rollout_id_from_path,
+};
 use codex_utils_path_uri::{PathConvention, PathUri, Platform};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Value, json};
@@ -43,6 +47,15 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::{Error as WebSocketError, error::TlsError};
 
 use crate::local_sandbox::SYSTEM_EXECUTABLE_PATH;
+use crate::storage::{LOCAL_CHECKLIST_BUDGETS_DIRECTORY, LOCAL_CHECKLIST_DIRECTORY};
+
+const STORAGE_OVERLAP: &str = "local executor writable roots must stay outside native SDK storage";
+
+#[derive(Clone, Copy)]
+pub(crate) struct LocalStorageHome<'a> {
+    pub path: &'a Path,
+    pub persistent_rollouts: bool,
+}
 
 pub async fn for_unattached_threads(
     config: &Config,
@@ -191,6 +204,40 @@ pub(crate) struct StrictExecutorWrites {
     roots: HashMap<PathUri, PathUri>,
 }
 
+impl StrictExecutorWrites {
+    pub(crate) async fn check_local_resume_rollout_path(
+        &self,
+        home: &Path,
+        path: &Path,
+    ) -> Result<()> {
+        let path = if path.is_relative() {
+            Cow::Owned(home.join(path))
+        } else {
+            Cow::Borrowed(path)
+        };
+        let existing = codex_rollout::existing_rollout_path(&path).await;
+        self.check_local_rollout_path(existing.as_deref().unwrap_or(&path))
+    }
+
+    pub(crate) fn check_local_rollout_path(&self, path: &Path) -> Result<()> {
+        let roots = self
+            .roots
+            .values()
+            .map(PathUri::to_abs_path)
+            .collect::<std::io::Result<Vec<_>>>()?;
+        let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
+        let mut files = Vec::new();
+        collect_local_rollout_files(path, &roots, &mut files)?;
+        ensure!(
+            !roots.contains_hard_link_to_any(&files).context(
+                "could not check writable roots for native SDK hard links; use readable writable roots"
+            )?,
+            "local executor writable roots contain a hard link to a private native SDK file"
+        );
+        Ok(())
+    }
+}
+
 impl EnvironmentOptions {
     fn id(&self) -> &'static str {
         if self.local {
@@ -212,10 +259,10 @@ impl EnvironmentOptions {
         capability_roots(self.id(), self.capability_directories.as_deref())
     }
 
-    pub async fn connect(
+    pub(crate) async fn connect(
         &self,
         config: &Config,
-        storage_home: Option<&Path>,
+        storage_home: Option<LocalStorageHome<'_>>,
     ) -> Result<EnvironmentManager> {
         self.check_config(config)?;
         if self.local {
@@ -401,7 +448,7 @@ impl EnvironmentOptions {
         environment: &Environment,
         info: &EnvironmentInfo,
         config: &Config,
-        storage_home: Option<&Path>,
+        storage_home: Option<LocalStorageHome<'_>>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
         if self.strict_writes() {
             strict_write_profile(
@@ -427,7 +474,7 @@ impl EnvironmentOptions {
         &self,
         config: &Config,
         manager: &EnvironmentManager,
-        storage_home: Option<&Path>,
+        storage_home: Option<LocalStorageHome<'_>>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
         self.check_config(config)?;
         let environment = manager
@@ -656,7 +703,7 @@ async fn strict_write_profile(
     additional: &[PathUri],
     local: bool,
     codex_home: &Path,
-    storage_home: Option<&Path>,
+    storage_home: Option<LocalStorageHome<'_>>,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -744,37 +791,32 @@ async fn strict_write_profile(
 fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
-    storage_home: Option<&Path>,
+    storage_home: Option<LocalStorageHome<'_>>,
 ) -> Result<()> {
+    let persistent_rollouts = storage_home.is_some_and(|home| home.persistent_rollouts);
     let storage_home = storage_home
-        .map(|home| {
-            check_local_write_root_overlap(
-                home,
-                roots,
-                "local executor writable roots must stay outside native SDK storage",
-            )
-        })
+        .map(|home| check_local_write_root_overlap(home.path, roots, STORAGE_OVERLAP))
         .transpose()?;
     let runtime_home = check_local_write_root_overlap(
         codex_home,
         roots,
         "local executor writable roots must stay outside the native SDK runtime home",
     )?;
-    let mut protected_files = storage_home
-        .as_deref()
-        .map(|home| relocated_database_files(home, roots))
-        .transpose()?
-        .unwrap_or_default();
+    let mut protected_files = Vec::new();
+    if let Some(home) = storage_home.as_deref() {
+        protected_files.extend(relocated_database_files(home, roots)?);
+        if persistent_rollouts {
+            protected_files.extend(relocated_rollout_files(home, roots)?);
+            protected_files.extend(relocated_checklist_files(home, roots)?);
+        }
+    }
     // A restored goal store may share the runtime home.
     let private_dirs = match storage_home {
         Some(home) if runtime_home.starts_with(&home) => vec![home],
-        Some(home) if !home.starts_with(&runtime_home) => vec![runtime_home, home],
-        _ => vec![runtime_home],
+        Some(home) if !home.starts_with(&runtime_home) => vec![runtime_home.clone(), home],
+        _ => vec![runtime_home.clone()],
     };
-    protected_files.extend(
-        linked_private_files(private_dirs)
-            .context("could not check native SDK storage and runtime home for hard links")?,
-    );
+    protected_files.extend(linked_private_files(private_dirs, &runtime_home)?);
     ensure!(
         !roots.contains_hard_link_to_any(&protected_files).context(
             "could not check writable roots for native SDK hard links; use readable writable roots"
@@ -884,7 +926,6 @@ fn check_local_write_root_overlap(
 
 fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
     let sqlite = SqliteConfig::from_sqlite_home(AbsolutePathBuf::from_absolute_path(home)?);
-    let overlap = "local executor writable roots must stay outside native SDK storage";
     let mut files = Vec::new();
     for database in sqlite.runtime_db_paths() {
         match database.path.symlink_metadata() {
@@ -893,7 +934,7 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(_) => anyhow::bail!("could not check native SDK storage databases"),
         }
-        let target = check_local_write_root_overlap(&database.path, roots, overlap)?;
+        let target = check_local_write_root_overlap(&database.path, roots, STORAGE_OVERLAP)?;
         // SQLite opens journals beside the resolved database, including when
         // the profile's database entry points outside the profile directory.
         let companions = ["-wal", "-shm", "-journal"].map(|suffix| {
@@ -904,7 +945,7 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
         for file in std::iter::once(target).chain(companions) {
             match file.symlink_metadata() {
                 Ok(metadata) if metadata.is_file() => {
-                    ensure!(!roots.contains_entry(&file)?, "{overlap}");
+                    ensure!(!roots.contains_entry(&file)?, "{STORAGE_OVERLAP}");
                     files.push(file);
                 }
                 Ok(_) => {}
@@ -916,31 +957,174 @@ fn relocated_database_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<
     Ok(files)
 }
 
+fn relocated_checklist_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
+    const INSPECT_ERROR: &str = "could not inspect native SDK checklist storage";
+    let checklists = home.join(LOCAL_CHECKLIST_DIRECTORY);
+    let budgets = checklists.join(LOCAL_CHECKLIST_BUDGETS_DIRECTORY);
+    let mut files = Vec::new();
+    for directory in [checklists, budgets] {
+        let directory = check_local_write_root_overlap(&directory, roots, STORAGE_OVERLAP)?;
+        let relocated = !directory.starts_with(home);
+        let entries = match std::fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => return Err(error).context(INSPECT_ERROR),
+        };
+        for entry in entries {
+            let entry = entry.context(INSPECT_ERROR)?;
+            // The filesystem may equate different spellings with the name
+            // the store opens. Protect entries in these dedicated directories
+            // without relying on filenames or walking other directories.
+            let metadata = match entry.metadata() {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => return Err(error).context(INSPECT_ERROR),
+            };
+            let path = entry.path();
+            if metadata.is_symlink() {
+                let target = check_local_write_root_overlap(&path, roots, STORAGE_OVERLAP)?;
+                collect_existing_private_file(target, &mut files).context(INSPECT_ERROR)?;
+            } else if relocated && metadata.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn relocated_rollout_files(home: &Path, roots: &LocalWriteRoots<'_>) -> Result<Vec<PathBuf>> {
+    // Core writes active rollouts under sessions/YYYY/MM/DD and archives in a
+    // flat directory. Resolve only those directory entries and recognized
+    // rollout filenames. Core's resume writer follows the recorded file path.
+    let dates = [(4, 9999), (2, 12), (2, 31)];
+    let mut pending = vec![
+        (
+            check_local_write_root_overlap(&home.join(SESSIONS_SUBDIR), roots, STORAGE_OVERLAP)?,
+            dates.as_slice(),
+        ),
+        (
+            check_local_write_root_overlap(
+                &home.join(ARCHIVED_SESSIONS_SUBDIR),
+                roots,
+                STORAGE_OVERLAP,
+            )?,
+            &[][..],
+        ),
+    ];
+    let mut files = Vec::new();
+    while let Some((directory, date_parts)) = pending.pop() {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).context("could not inspect native SDK rollout storage");
+            }
+        };
+        for entry in entries {
+            let entry = entry.context("could not inspect native SDK rollout storage")?;
+            let kind = match entry.file_type() {
+                Ok(kind) => kind,
+                Err(error) if error.kind() == ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(error).context("could not inspect native SDK rollout storage");
+                }
+            };
+            let path = entry.path();
+            if let Some((&(width, max), remaining)) = date_parts.split_first()
+                && (kind.is_dir() || kind.is_symlink())
+                && entry.file_name().to_str().is_some_and(|name| {
+                    name.len() == width
+                        && name.bytes().all(|digit| digit.is_ascii_digit())
+                        && name
+                            .parse::<u16>()
+                            .is_ok_and(|value| (1..=max).contains(&value))
+                })
+            {
+                let directory = if kind.is_symlink() {
+                    check_local_write_root_overlap(&path, roots, STORAGE_OVERLAP)?
+                } else {
+                    path
+                };
+                pending.push((directory, remaining));
+            } else if (kind.is_symlink() || kind.is_file() && !path.starts_with(home))
+                && rollout_id_from_path(&path).is_some()
+            {
+                collect_local_rollout_files(&path, roots, &mut files)?;
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn collect_local_rollout_files(
+    path: &Path,
+    roots: &LocalWriteRoots<'_>,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
+    let target = check_local_write_root_overlap(path, roots, STORAGE_OVERLAP)?;
+    // Core may materialize a compressed rollout beside the resolved file.
+    let plain = plain_rollout_path(&target);
+    let companion = if plain != target {
+        Some(check_local_write_root_overlap(
+            &plain,
+            roots,
+            STORAGE_OVERLAP,
+        )?)
+    } else {
+        None
+    };
+    for file in std::iter::once(target).chain(companion) {
+        collect_existing_private_file(file, files)
+            .context("could not inspect native SDK rollout storage")?;
+    }
+    Ok(())
+}
+
+fn collect_existing_private_file(file: PathBuf, files: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    match file.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => files.push(file),
+        Ok(_) => {}
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
-fn linked_private_files(mut directories: Vec<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+fn linked_private_files(
+    mut directories: Vec<PathBuf>,
+    runtime_home: &Path,
+) -> Result<Vec<PathBuf>> {
     use std::os::unix::fs::MetadataExt;
 
+    const INSPECT_ERROR: &str =
+        "could not check native SDK storage and runtime home for hard links";
     let mut files = Vec::new();
     while let Some(directory) = directories.pop() {
         let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
             // A fresh profile may not exist, and live storage may remove files.
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(error) => return Err(error).context(INSPECT_ERROR),
         };
         for entry in entries {
-            let entry = entry?;
+            let entry = entry.context(INSPECT_ERROR)?;
             // DirEntry::metadata does not follow symlinks. Only visit contents
             // of the verified private directories.
             let metadata = match entry.metadata() {
                 Ok(metadata) => metadata,
                 Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => return Err(error),
+                Err(error) => return Err(error).context(INSPECT_ERROR),
             };
+            let path = entry.path();
+            ensure!(
+                !metadata.is_symlink() || !path.starts_with(runtime_home),
+                "native SDK runtime home contains an unsupported symbolic link"
+            );
             if metadata.is_dir() {
-                directories.push(entry.path());
+                directories.push(path);
             } else if metadata.is_file() && metadata.nlink() > 1 {
-                files.push(entry.path());
+                files.push(path);
             }
         }
     }
@@ -948,7 +1132,7 @@ fn linked_private_files(mut directories: Vec<PathBuf>) -> std::io::Result<Vec<Pa
 }
 
 #[cfg(not(unix))]
-fn linked_private_files(_directories: Vec<PathBuf>) -> std::io::Result<Vec<PathBuf>> {
+fn linked_private_files(_directories: Vec<PathBuf>, _runtime_home: &Path) -> Result<Vec<PathBuf>> {
     Ok(Vec::new())
 }
 
@@ -1007,7 +1191,7 @@ pub(crate) async fn replace_writable_roots(
     manager: &EnvironmentManager,
     current: &StrictExecutorWrites,
     writable_roots: Vec<PathUri>,
-    storage_home: Option<&Path>,
+    storage_home: Option<LocalStorageHome<'_>>,
 ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
@@ -1430,6 +1614,49 @@ mod tests {
     use serde_json::json;
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_resume_refuses_the_selected_compressed_rollout() -> anyhow::Result<()> {
+        use codex_utils_path_uri::PathUri;
+        use std::fs;
+        use std::os::unix::fs::symlink;
+        use std::path::Path;
+
+        use super::{STORAGE_OVERLAP, StrictExecutorWrites};
+
+        let fixture = tempfile::tempdir()?;
+        let home = fixture.path().join("profile");
+        let workspace = fixture.path().join("workspace");
+        let relocated = fixture.path().join("relocated");
+        for directory in [&home, &workspace, &relocated] {
+            fs::create_dir(directory)?;
+        }
+        let requested = Path::new("../relocated/rollout.jsonl");
+        let plain = relocated.join("rollout.jsonl");
+        let compressed = workspace.join("rollout.jsonl.zst");
+        fs::write(&compressed, b"compressed rollout")?;
+        symlink(&compressed, plain.with_extension("jsonl.zst"))?;
+        let root = PathUri::from_host_native_path(workspace.canonicalize()?)?;
+        let writes = StrictExecutorWrites {
+            roots: [(root.clone(), root)].into(),
+        };
+
+        assert_eq!(
+            writes
+                .check_local_resume_rollout_path(&home, requested)
+                .await
+                .unwrap_err()
+                .to_string(),
+            STORAGE_OVERLAP
+        );
+
+        // A plain file in the disjoint location takes precedence.
+        fs::write(plain, b"plain rollout")?;
+        writes
+            .check_local_resume_rollout_path(&home, requested)
+            .await
+    }
 
     #[cfg(unix)]
     #[tokio::test]
