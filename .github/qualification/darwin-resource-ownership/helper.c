@@ -65,8 +65,11 @@ int main(int argc, char **argv)
     sigset_t unblock;
     sigemptyset(&unblock);
     sigaddset(&unblock, SIGALRM);
+    struct sigaction reap = {.sa_handler = SIG_DFL};
+    sigemptyset(&reap.sa_mask);
     if (signal(SIGALRM, SIG_DFL) == SIG_ERR ||
-        sigprocmask(SIG_UNBLOCK, &unblock, NULL) != 0) {
+        sigprocmask(SIG_UNBLOCK, &unblock, NULL) != 0 ||
+        sigaction(SIGCHLD, &reap, NULL) != 0) {
         return 1;
     }
     alarm(lifetime);

@@ -71,19 +71,22 @@ class Darwin:
         check(cid != 0, f"no resource coalition for {pid}")
         return cid
 
-    def counters(self, cid, expected=None):
+    def counters(self, cid, expected=None, missing_ok=False):
         # XNU copies at most the requested size. These are the first two fields.
         counts = (U64 * 2)()
         deadline = time.monotonic() + 2
         while True:
             c.set_errno(0)
             rc = self.usage(cid, counts, c.sizeof(counts))
-            check(rc == 0, f"coalition_info_resource_usage({cid}) = {rc}, errno={c.get_errno()}")
+            error = c.get_errno()
+            if rc == -1 and error == errno.ESRCH and missing_ok:
+                return None
+            check(rc == 0, f"coalition_info_resource_usage({cid}) = {rc}, errno={error}")
             # Task teardown may finish just after the BSD process disappears.
             if (expected is None or counts[0] != expected[0] or counts[1] >= expected[1]
                     or time.monotonic() >= deadline):
                 return tuple(counts)
-            time.sleep(0.025)
+            time.sleep(0.001 if missing_ok else 0.025)
 
     def task_name_token(self, pid):
         name_for_pid = self.system.task_name_for_pid
@@ -186,6 +189,13 @@ def ping(peer):
     check(read_exact(peer, 1) == b"p", "helper did not echo the ping")
 
 
+def wait_for_exit(api, pid):
+    deadline = time.monotonic() + 3
+    while api.identity(pid, missing_ok=True) is not None:
+        check(time.monotonic() < deadline, f"PID {pid} is still present")
+        time.sleep(0.025)
+
+
 def inspect_token(api, pid, version, role, peer=None):
     try:
         token = api.task_name_token(pid)
@@ -205,10 +215,10 @@ def smoke(stack, directory, domain):
     listener.bind(str(directory / "sock"))
     listener.listen(3)
     listener.settimeout(4)
-    job = load_job(stack, directory, domain, label + ".target", "h")
-    helper, helper_token = accept_peer(stack, listener, b"h", job)
-    job = load_job(stack, directory, domain, label + ".control", "c")
-    control, control_token = accept_peer(stack, listener, b"c", job)
+    target_job = load_job(stack, directory, domain, label + ".target", "h")
+    helper, helper_token = accept_peer(stack, listener, b"h", target_job)
+    control_job = load_job(stack, directory, domain, label + ".control", "c")
+    control, control_token = accept_peer(stack, listener, b"c", control_job)
     helper_pid, control_pid = helper_token[5], control_token[5]
     check(helper_pid != control_pid, "helper and control must be separate processes")
 
@@ -217,7 +227,11 @@ def smoke(stack, directory, domain):
     caller_cid = api.member(os.getpid())
     print(f"resource coalitions: caller={caller_cid} helper={cid} control={control_cid}")
     baseline = api.counters(cid)
+    started, exited = baseline
+    expected = [baseline, (started + 2, exited), (started + 2, exited + 1),
+                (started + 2, exited + 2), (started + 2, exited + 3)]
 
+    fork_at = time.monotonic()
     helper.sendall(b"f")
     parent_pid = struct.unpack("=I", read_exact(helper, 4))[0]
     child, token = accept_peer(stack, listener, b"d")
@@ -237,12 +251,22 @@ def smoke(stack, directory, domain):
     running = api.counters(cid)
     parent_token = inspect_token(api, parent_pid, parent_id[2], "noncooperating parent")
 
+    # The live parent holds its child PID even if the child exits. Only test
+    # during the first part of both processes' finite lifetimes.
+    check(time.monotonic() - fork_at < 10, "stale token probe missed its time window")
+    ping(child)
+    stale = TOKEN(*token)
+    stale[7] ^= 1 << 31
+    stale_rc = api.send_signal(c.byref(stale), signal.SIGWINCH)
+    ping(child)
+    print(f"stale PID version signal returned {stale_rc} (expected ESRCH={errno.ESRCH})")
+
     helper.sendall(b"e")
     check(read_exact(helper, 1) == b"r", "helper did not reap the tracked parent")
     check(api.identity(parent_pid, missing_ok=True) is None, "tracked parent still exists")
     ping(child)
     orphan_cid = api.member(child_pid, token[7])
-    orphan = api.counters(cid, expected=(3, 1))
+    orphan = api.counters(cid, expected=expected[2])
     print(f"resource coalition after parent exit: detached child={orphan_cid}")
     child_name_token = inspect_token(api, child_pid, token[7], "orphan", token)
 
@@ -250,25 +274,36 @@ def smoke(stack, directory, domain):
     rc = api.send_signal(c.byref(TOKEN(*(child_name_token or token))), signal.SIGKILL)
     check(rc == 0, f"proc_signal_with_audittoken(SIGKILL) returned {rc} ({os.strerror(rc)})")
     check(child.recv(1) == b"", "detached child socket did not close after SIGKILL")
-    deadline = time.monotonic() + 3
-    while api.identity(child_pid, missing_ok=True) is not None:
-        check(time.monotonic() < deadline, "detached child PID is still present")
-        time.sleep(0.025)
+    wait_for_exit(api, child_pid)
     ping(control)
     ping(helper)
     check(api.member(control_pid, control_token[7]) == control_cid,
           "unrelated control membership changed")
-    after = api.counters(cid, expected=(3, 2))
+    after = api.counters(cid, expected=expected[3])
     print("audit-token SIGKILL passed, detached child gone and control survived")
 
-    # Exact counts detect other tasks even if neither comparison PID shares the coalition.
+    # Keep the launchd registration until the last read so the job may retain
+    # the coalition after its last task exits.
+    helper.shutdown(socket.SHUT_WR)
+    zero = api.counters(cid, expected=expected[4], missing_ok=True)
+    check(helper.recv(1) == b"", "helper socket stayed open after orderly shutdown")
+    wait_for_exit(api, helper_pid)
+    ping(control)
+    registered = launchctl("print", target_job).returncode == 0
+    print(f"target still registered after helper exit: {registered}")
+    print(f"final resource counters: {zero if zero is not None else 'coalition reaped (ESRCH)'}")
+    print("unrelated control answered after target helper exit")
+
     snapshots = [baseline, running, orphan, after]
     print(f"resource counters (tasks_started, tasks_exited): {snapshots}")
     dedicated = (cid == parent_cid == child_cid == orphan_cid
                  and cid not in {caller_cid, control_cid}
-                 and snapshots == [(1, 0), (3, 0), (3, 1), (3, 2)])
+                 and started > 0 and started - exited == 1
+                 and snapshots == expected[:4])
     print(f"dedicated resource coalition observed: {dedicated}")
     check(dedicated, "dedicated resource coalition criteria failed")
+    check(zero == expected[4], "kernel counters did not prove zero live target tasks")
+    check(stale_rc == errno.ESRCH, "kernel did not reject the stale PID version")
     check(parent_token is not None and child_name_token is not None,
           "read-only identity route was unavailable")
 
