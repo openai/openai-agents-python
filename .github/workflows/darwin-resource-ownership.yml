@@ -1,0 +1,32 @@
+name: Check local process ownership on Darwin
+on:
+  push:
+    branches: [test/darwin-resource-ownership-20261104]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-latest]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - name: Check process ownership as the runner user
+        run: |
+          set -eu
+          sw_vers
+          uname -m
+          user_id=$(id -u)
+          if /bin/launchctl print "gui/$user_id" >/dev/null 2>&1; then
+            domain=gui
+          else
+            domain=user
+          fi
+          python3 -u .github/qualification/darwin-resource-ownership/smoke.py "$domain"
