@@ -159,7 +159,15 @@
     {
       "path": "0040-protect-physical-local-write-roots.patch",
       "sha256": "8f6395a1b8d253170db019319cdaeff855ce1798efcc20eed704689fe070d994"
+    },
+    {
+      "path": "0041-stop-owned-auto-compaction.patch",
+      "sha256": "c4b0c94c11802793558a561f6afdd1fbbe1f3dd154fadc7bea435cda8687b2cb"
+    },
+    {
+      "path": "0042-sdk-provider-compaction-admission.patch",
+      "sha256": "922d61467fdac4dac29f2ae66e8d433740586ad4d20f3dc46cc3cece20481e2b"
     }
   ],
-  "result_tree": "508adc6a0777c6b61a2abbeeafbc24a5f2e39914"
+  "result_tree": "8de419409a46ca2b268135ab1f83626fa6122b37"
 }
