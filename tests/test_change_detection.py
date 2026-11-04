@@ -963,6 +963,8 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "pr_other_number",
         "pr_wrong_ref",
         "pr_missing_context",
+        "pr_null_context",
+        "pr_null_association",
         "pr_bad_execution_sha",
         "pr_ambiguous_context",
         "pr_missing_number",
@@ -1363,6 +1365,8 @@ def test_native_build_selection(
             }
         ]
         source["pull_requests"] = [{"number": 200 if scenario == "pr_other_number" else 199}]
+        if scenario == "pr_null_association":
+            source["pull_requests"] = None
         if scenario == "pr_unrelated_head":
             source["head_sha"] = _git(
                 repo,
@@ -1391,6 +1395,8 @@ def test_native_build_selection(
             source["referenced_workflows"][0]["ref"] = "refs/pull/200/merge"
         if scenario == "pr_missing_context":
             source["referenced_workflows"] = []
+        if scenario == "pr_null_context":
+            source["referenced_workflows"] = None
         if scenario == "pr_bad_execution_sha":
             source["referenced_workflows"][0]["sha"] = "invalid-sha"
         if scenario == "pr_ambiguous_context":

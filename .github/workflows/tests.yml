@@ -158,11 +158,11 @@ jobs:
                       return False
               elif run["event"] == "pull_request" and os.environ.get("GITHUB_EVENT_NAME") == "pull_request":
                   number = os.environ["CURRENT_PR"]
-                  if not number or not any(str(pr["number"]) == number for pr in run.get("pull_requests", [])):
+                  if not number or not any(str(pr["number"]) == number for pr in (run.get("pull_requests") or [])):
                       return False
                   if not ancestor(source, os.environ["CURRENT_PR_HEAD"]):
                       return False
-                  references = [item for item in run.get("referenced_workflows", [])
+                  references = [item for item in (run.get("referenced_workflows") or [])
                                 if item["path"].split("@", 1)[0] == repo + "/.github/workflows/codex-python.yml"]
                   if not references:
                       return False
