@@ -1,0 +1,73 @@
+diff --git a/codex-rs/sandboxing/src/local_write_roots.rs b/codex-rs/sandboxing/src/local_write_roots.rs
+index f12a1aae9676081d291713b3aab0c1674a20b68e..32f30b560220ff7cd359713d2fae2a1851a1c41d 100644
+--- a/codex-rs/sandboxing/src/local_write_roots.rs
++++ b/codex-rs/sandboxing/src/local_write_roots.rs
+@@ -1,12 +1,12 @@
+ use codex_utils_absolute_path::AbsolutePathBuf;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ use std::collections::HashSet;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ use std::fs;
+ use std::io;
+ #[cfg(target_os = "linux")]
+ use std::os::unix::ffi::OsStringExt;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ use std::os::unix::fs::MetadataExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+@@ -48,8 +48,8 @@ impl<'a> LocalWriteRoots<'a> {
+         Ok(false)
+     }
+ 
+-    /// Detect ordinary hard links to resolved helper files in Linux write grants.
+-    #[cfg(target_os = "linux")]
++    /// Detect ordinary hard links to resolved helper files in local write grants.
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
+     pub fn contains_hard_link_to_any(&self, paths: &[PathBuf]) -> io::Result<bool> {
+         let mut linked_helpers = HashSet::new();
+         for path in paths {
+@@ -91,7 +91,7 @@ impl<'a> LocalWriteRoots<'a> {
+         Ok(false)
+     }
+ 
+-    #[cfg(not(target_os = "linux"))]
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     pub fn contains_hard_link_to_any(&self, _paths: &[PathBuf]) -> io::Result<bool> {
+         Ok(false)
+     }
+@@ -320,7 +320,7 @@ pub fn decode_mountinfo_path(encoded: &[u8]) -> io::Result<PathBuf> {
+     Ok(path)
+ }
+ 
+-#[cfg(all(test, target_os = "linux"))]
++#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+ mod tests {
+     use super::*;
+ 
+@@ -346,6 +346,7 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[cfg(target_os = "linux")]
+     #[test]
+     fn protected_mount_backed_by_a_child_of_a_write_grant() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;
+@@ -388,6 +389,7 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[cfg(target_os = "linux")]
+     #[test]
+     fn nested_mount_exposes_the_helper_identity() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;
+@@ -420,6 +422,7 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[cfg(target_os = "linux")]
+     #[test]
+     fn aliases_of_the_same_file_include_a_mount_inside_the_protected_directory() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;

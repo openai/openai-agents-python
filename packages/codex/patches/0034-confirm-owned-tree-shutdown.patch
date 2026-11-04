@@ -1,0 +1,40 @@
+diff --git a/codex-rs/core/src/thread_manager/shutdown.rs b/codex-rs/core/src/thread_manager/shutdown.rs
+index f009ab513906c43a984d005a3cc1fb841a5b8e43..e02bfec9c220425df65b776b84c9ee76333b186a 100644
+--- a/codex-rs/core/src/thread_manager/shutdown.rs
++++ b/codex-rs/core/src/thread_manager/shutdown.rs
+@@ -1,6 +1,7 @@
+ //! Fences and signals one local agent tree, then exposes its teardown result.
+ 
+ use super::ThreadManager;
++use crate::CodexThread;
+ use crate::agent::control::AgentTreeShutdownState;
+ use codex_protocol::ThreadId;
+ use codex_protocol::error::Result as CodexResult;
+@@ -34,13 +35,19 @@ impl ThreadManager {
+         &self,
+         thread_id: ThreadId,
+     ) -> CodexResult<AgentTreeShutdown> {
+-        let thread = self.get_thread(thread_id).await?;
+-        Ok(AgentTreeShutdown {
+-            state: thread
+-                .session
+-                .services
+-                .local_agent_runtime
+-                .request_shutdown(),
+-        })
++        Ok(self
++            .get_thread(thread_id)
++            .await?
++            .request_agent_tree_shutdown())
++    }
++}
++
++impl CodexThread {
++    /// Request shutdown of the exact tree owned by this thread handle.
++    #[doc(hidden)]
++    pub fn request_agent_tree_shutdown(&self) -> AgentTreeShutdown {
++        AgentTreeShutdown {
++            state: self.session.services.local_agent_runtime.request_shutdown(),
++        }
+     }
+ }

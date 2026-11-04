@@ -1911,6 +1911,7 @@ impl ThreadState {
             events.children.clear();
             events.graph.close();
         }
+        let mut process_shutdown_error = None;
         tokio::time::timeout(CLOSE_TIMEOUT, async {
             self.thread.shutdown_and_wait().await?;
             // Shut down parents before rediscovering children created during shutdown.
@@ -1937,6 +1938,13 @@ impl ThreadState {
                     break;
                 }
             }
+            // Core's per-thread join waits for loop exit. Check managed process
+            // cleanup across the exact tree before releasing its ownership.
+            process_shutdown_error = self
+                .thread
+                .shutdown_agent_tree_and_check_managed_processes()
+                .await
+                .err();
             // Retain ancestors until every descendant has stopped, even without a graph store.
             for (id, thread) in stopped {
                 self.engine
@@ -1959,6 +1967,9 @@ impl ThreadState {
             .retain(|_, owner| *owner != self.id);
         self.child_questions.lock().await.clear();
         self.closed.store(true, Ordering::Release);
+        if let Some(error) = process_shutdown_error {
+            return Err(error.into());
+        }
         Ok(())
     }
 

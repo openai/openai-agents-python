@@ -288,7 +288,7 @@ Environment options have these limits:
 - `capability_directories` contains absolute paths or `file:` URIs on the selected executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots.
 - `network` accepts immutable `NetworkPolicy` or a same-field dictionary. Explicit policies require `"exec_command"` and a compatible Linux or macOS managed-proxy executor. Windows rejects them in this revision. The Python controller may run on another OS. See [network and local socket access](tools.md#network-and-local-socket-access).
 
-Use [`Environment.local()`](tools.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. A WSS Environment opts into the strict write policy when it supplies this argument. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](tools.md#replace-write-roots-between-turns) for policy changes and restore.
+Use [`Environment.local()`](tools.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in `cwd`. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](tools.md#replace-write-roots-between-turns) for policy changes and restore.
 
 For a Windows x64 job-local named pipe, omit `network` and `writable_roots`. `cwd` is the provisioner's canonical workspace path. See [Windows named pipes in an offline job](tools.md#windows-named-pipes-in-an-offline-job) and [remote execution](tools.md#remote-execution).
 

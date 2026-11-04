@@ -1,4 +1,4 @@
-name: Probe packaged Python helper aliases on macOS
+name: Qualify the final Python SDK wheel on macOS
 on:
   push:
     branches: [test/managed-macos-command-qualification-20261104]
@@ -8,64 +8,209 @@ permissions:
   actions: read
 
 jobs:
-  probe:
-    name: Run the installed R14 macOS helper alias probe
+  build:
+    name: Qualify final Python SDK wheel and tests
     runs-on: macos-latest
-    timeout-minutes: 20
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTUP_TOOLCHAIN: 1.95.0
+      OPENAI_AGENTS_NATIVE_TIMINGS: "1"
+      # PEP 517 frontends may copy only the wheel out of the backend directory.
+      OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 40c77d8b2d95eef2d709976b9623358c33e59cfa
+          ref: d4270e04380882eda242490fa53a3d0ae9dd6809
           persist-credentials: false
+      - name: Verify exact SDK checkout
+        run: |
+          test "$(git rev-parse HEAD)" = 'd4270e04380882eda242490fa53a3d0ae9dd6809'
+          test "$(git rev-parse HEAD^{tree})" = 'c1d0cbbfdbb7026926529de648c3d6aa6b61c0ca'
+          git show -s --format='%H %T %s' HEAD
+      - name: Select shared Cargo directories
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+      - name: Configure Linux dependency registries
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME"
+          if [[ -e "$CARGO_HOME/config" || -e "$CARGO_HOME/config.toml" ]]; then
+            echo "Unexpected Cargo configuration in fresh CI directory." >&2
+            exit 1
+          fi
+          cat > "$CARGO_HOME/config.toml" <<'TOML'
+          [source.crates-io]
+          replace-with = "socket-firewall"
+
+          [source.socket-firewall]
+          registry = "sparse+https://openai.firewall.socket.dev/cargo/"
+          TOML
+          {
+            for variable in NPM_CONFIG_REGISTRY npm_config_registry PNPM_CONFIG_REGISTRY pnpm_config_registry COREPACK_NPM_REGISTRY YARN_NPM_REGISTRY_SERVER BUN_CONFIG_REGISTRY; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/npm/'
+            done
+            for variable in UV_DEFAULT_INDEX UV_INDEX_URL PIP_INDEX_URL; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
+            done
+          } >> "$GITHUB_ENV"
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
-          python-version: '3.12'
+          python-version: "3.12"
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
-      - name: Verify and install the R14 donor wheel
-        env:
-          GH_TOKEN: ${{ github.token }}
+        with:
+          enable-cache: true
+      - name: Install native build tools
+        # Free Linux disk space before restoring the large dependency cache.
+        if: >-
+          true ||
+          (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+        uses: ./.github/actions/setup-native
+      - name: Prepare the source distribution
+        # Use one stable source path for Cargo, the wheel and the test executor.
         run: |
-          set -euo pipefail
-          sw_vers
-          test "$(uname -m)" = arm64
-          test "$(git rev-parse HEAD)" = 40c77d8b2d95eef2d709976b9623358c33e59cfa
-          test "$(git rev-parse 'HEAD^{tree}')" = 9971fa63a88d4520bde6ae0dca1bcdc1f8a0f636
-          git show -s --format='%H %T %s' HEAD
-          work="$RUNNER_TEMP/python-helper-alias"
-          mkdir -p "$work/donor" "$work/site"
-          api=repos/openai/openai-agents-python/actions/artifacts/13319641662
-          gh api "$api" > "$work/donor.json"
-          python - "$work/donor.json" <<'PY'
-          import json, sys
-          receipt = json.load(open(sys.argv[1]))
-          assert receipt['id'] == 13319641662
-          assert receipt['name'] == 'native-macOS-ARM64' and not receipt['expired']
-          assert receipt['digest'] == 'sha256:746d52bf5ecb7afe0f47090b03f30404f5e3f094b2e65d607c9ba04f19110709'
-          assert receipt['workflow_run']['id'] == 41816235005
-          assert receipt['workflow_run']['head_sha'] == '40c77d8b2d95eef2d709976b9623358c33e59cfa'
-          print('Verified R14 Mac donor metadata:', receipt['id'], receipt['workflow_run'], receipt['digest'])
-          PY
-          gh api "$api/zip" > "$work/donor.zip"
-          printf '%s  %s\n' 746d52bf5ecb7afe0f47090b03f30404f5e3f094b2e65d607c9ba04f19110709 "$work/donor.zip" | shasum -a 256 -c -
-          unzip -q "$work/donor.zip" -d "$work/donor"
-          wheel="$work/donor/openai_agents-0.24.0a6-cp310-abi3-macosx_11_0_arm64.whl"
-          printf '%s  %s\n' bc5a664802e7e85d3f2635a177fc20fa6ecacf8c50569ab200bbbdfeb8c59b86 "$wheel" | shasum -a 256 -c -
-          chmod +x "$work/donor/exec-server-fixture"
-          uv sync --frozen --group dev --no-install-project
-          uv pip install --no-deps --python .venv/bin/python --target "$work/site" "$wheel"
-      - name: Probe preexisting and newly created helper aliases
+          uv build --sdist
+          python - <<'PYTHON'
+          import os
+          import tarfile
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-source"
+          source.mkdir()
+          archive_path, = Path("dist").glob("openai_agents-*.tar.gz")
+          with tarfile.open(archive_path) as archive:
+              archive.extractall(source, filter="data")
+          extracted, = source.iterdir()
+          project = source / "project"
+          extracted.rename(project)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
+          PYTHON
+      - name: Restore Rust dependencies
+        # Touch the shared cache on default-branch runs, even when reusing a wheel.
+        if: >-
+          true ||
+          (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+        id: rust-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+            ${{ env.CARGO_TARGET_DIR }}
+            ${{ env.OPENAI_AGENTS_BUILD_SOURCE }}/packages/codex/.cache/v8
+          key: native-deps-v2-${{ runner.os }}-${{ runner.arch }}-macos-latest-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('packages/codex/CODEX_REVISION', 'packages/codex/patches/**', 'packages/codex/rmcp-patches/**') }}-${{ hashFiles('packages/codex/Cargo.lock', 'packages/codex/Cargo.toml', 'packages/codex/scripts/*.py', 'pyproject.toml', '.github/actions/setup-native/action.yml', '.github/workflows/codex-python.yml') }}
+          restore-keys: |
+            native-deps-v2-${{ runner.os }}-${{ runner.arch }}-macos-latest-${{ env.RUSTUP_TOOLCHAIN }}-${{ hashFiles('packages/codex/CODEX_REVISION', 'packages/codex/patches/**', 'packages/codex/rmcp-patches/**') }}-
+            native-deps-v2-${{ runner.os }}-${{ runner.arch }}-macos-latest-${{ env.RUSTUP_TOOLCHAIN }}-
+      - name: Select native build or reuse
+        id: native-source
+        env:
+          NATIVE_SOURCE_RUN: ''
+          WARM_SHARED_CACHE: ${{ github.event_name == 'push' && github.ref_name == github.event.repository.default_branch && steps.rust-cache.outputs.cache-hit != 'true' }}
+        run: |
+          if [[ "$WARM_SHARED_CACHE" == true ]]; then
+            echo "Building native dependencies to warm the default-branch cache."
+            NATIVE_SOURCE_RUN=''
+          fi
+          echo "run_id=$NATIVE_SOURCE_RUN" >> "$GITHUB_OUTPUT"
+      - name: Download the qualified native build
+        if: steps.native-source.outputs.run_id != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ runner.temp }}/agents-native-qualified
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.native-source.outputs.run_id }}
+      - name: Select the qualified wheel and test executor
+        if: steps.native-source.outputs.run_id != ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-qualified"
+          wheel, = source.glob("openai_agents-*.whl")
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          Path("dist").mkdir(exist_ok=True)
+          shutil.copy2(source / name, Path("dist") / name)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\n")
+          PYTHON
+      - name: Clear previous compilation timings
+        id: clear-timings
+        if: steps.native-source.outputs.run_id == ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+          timings = Path(os.environ["CARGO_TARGET_DIR"]) / "cargo-timings"
+          if timings.exists():
+              shutil.rmtree(timings)
+          PYTHON
+      - name: Build the SDK and native runtime together
+        run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
+      - name: Build the shared test executor
+        if: steps.native-source.outputs.run_id == ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          fixture = Path("tests/fixtures/exec_server.rs")
+          (root / fixture).parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(Path("packages/codex") / fixture, root / fixture)
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, build_target = cargo_build_options(root, environment)
+          subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
+          target = Path(environment["CARGO_TARGET_DIR"])
+          if not target.is_absolute():
+              target = root / target
+          if build_target:
+              target /= Path(build_target).stem
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          shutil.copy2(target / "release" / "examples" / name, Path("dist") / name)
+          PYTHON
+      - name: Test native macOS Unix socket policy with the installed wheel
+        if: runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
+          uv venv --seed --python "$(command -v python)" "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          python="$stage/venv/bin/python"
+          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          fixture="$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          chmod +x "$fixture"
+          cd "$stage"
+          env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
+            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
+      - name: Run SDK acceptance with the installed wheel
         env:
           OPENAI_API_KEY: fake-for-tests
+          CODEX_EXEC_SERVER_TEST_BINARY: ${{ github.workspace }}/dist/exec-server-fixture
+          RUST_MIN_STACK: '16777216'
         run: |
-          set -euo pipefail
-          work="$RUNNER_TEMP/python-helper-alias"
-          export OPENAI_AGENTS_DISPOSABLE_SITE="$work/site"
-          export CODEX_EXEC_SERVER_TEST_BINARY="$work/donor/exec-server-fixture"
-          unset OPENAI_AGENTS_EXPECT_HELPER_ALIAS_REJECT OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX
-          cat > tests/test_darwin_fresh_alias.py <<'PROBE'
+          set -eu
+          sw_vers
+          export UV_PROJECT_ENVIRONMENT="$RUNNER_TEMP/python-verified-wheel"
+          uv sync --frozen --group dev --no-install-project
+          uv pip install --python "$UV_PROJECT_ENVIRONMENT/bin/python" --no-deps dist/*.whl
+          cat > tests/test_darwin_fresh_alias.py <<'DARWIN_ALIAS_PROBE'
           import os
           import shlex
           import shutil
@@ -207,39 +352,67 @@ jobs:
                           print(f"Post-admission helper hardlink: {disposition}")
                   finally:
                       saved.replace(helper)
-          PROBE
-          printf '%s  %s\n' 459493a90ddf1de2afccc5015c087c91276406f46eb9efcdde585dd747c8c74e tests/test_darwin_fresh_alias.py | shasum -a 256 -c -
-          .venv/bin/python -I -B - "$work/results.xml" <<'PY'
-          import hashlib, os, platform, sys, xml.etree.ElementTree as ET
-          from pathlib import Path
-          import pytest
+          DARWIN_ALIAS_PROBE
+          printf '%s  %s\n' '459493a90ddf1de2afccc5015c087c91276406f46eb9efcdde585dd747c8c74e' 'tests/test_darwin_fresh_alias.py' | shasum -a 256 -c -
+          export OPENAI_AGENTS_EXPECT_HELPER_ALIAS_REJECT=1
+          env -u PYTHONPATH -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX "$UV_PROJECT_ENVIRONMENT/bin/python" -I -B - "$RUNNER_TEMP/local-session.xml" <<'PYTEST'
+          import hashlib, os, pathlib, platform, sys, sysconfig, xml.etree.ElementTree as ET
+          import agents._native, agents.session, pytest
           assert sys.platform == 'darwin' and platform.machine() == 'arm64'
-          site = Path(os.environ['OPENAI_AGENTS_DISPOSABLE_SITE']).resolve()
-          sys.path.insert(0, str(site))
-          import agents._native, agents.session
+          installed = pathlib.Path(sysconfig.get_path('platlib')).resolve()
           for module in (agents, agents._native, agents.session):
-              assert Path(module.__file__).resolve().is_relative_to(site), module.__file__
-          assert hashlib.sha256(Path(agents.session.__file__).read_bytes()).hexdigest() == '8e0c585689f89b5408254196a40df4add9da12d5c57dd7d812ad7b2990843b84'
-          helper = Path(agents.__file__).parent / 'bin' / 'codex-code-mode-host'
-          helper_sha = hashlib.file_digest(helper.open('rb'), 'sha256').hexdigest()
-          assert helper_sha == '2693b5c45f934e72bc892edda3a9d8185909ca9f444f79033b73431943316de7'
-          print('Verified isolated packaged helper:', helper, helper_sha)
-          sys.path.insert(1, os.getcwd())
-          result = pytest.main(['-q', '-s', '-rA', '-o', 'pythonpath=', '--junitxml=' + sys.argv[1],
-                                'tests/test_darwin_fresh_alias.py::test_installed_darwin_helper_alias'])
-          assert hashlib.file_digest(helper.open('rb'), 'sha256').hexdigest() == helper_sha
-          if result:
-              sys.exit(result)
-          cases = ET.parse(sys.argv[1]).findall('.//testcase')
-          assert [case.attrib['name'] for case in cases] == ['test_installed_darwin_helper_alias']
-          assert all(cases[0].find(tag) is None for tag in ('failure', 'error', 'skipped'))
-          PY
+              assert pathlib.Path(module.__file__).resolve().is_relative_to(installed), module.__file__
+          assert hashlib.sha256(pathlib.Path(agents.session.__file__).read_bytes()).hexdigest() == '985c33dc0987d290a69216bb0763b52671d8af1966346e7d3742aa4ada3e5801'
+          assert installed.is_relative_to(pathlib.Path(os.environ['RUNNER_TEMP']).resolve())
+          os.environ['OPENAI_AGENTS_DISPOSABLE_SITE'] = str(installed)
+          helper = pathlib.Path(agents.__file__).parent / 'bin' / 'codex-code-mode-host'
+          with helper.open('rb') as stream:
+              helper_digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          print('Installed Code Mode helper SHA256:', helper_digest)
+          sys.path.insert(0, os.getcwd())
+          junit = sys.argv[1]
+          status = pytest.main([
+              '-q', '-rA', '--junitxml=' + junit,
+              'tests/test_native_executor_local.py',
+              'tests/test_native_yielded_executor_owner.py',
+              'tests/test_native_executor_policies.py::test_force_stop_fences_sampling_before_executor_result_settles',
+              'tests/test_native_compaction_admission.py::test_stop_during_compaction_setup_fences_provider_admission',
+              'tests/test_supervised_worker_example.py::test_two_workers_revise_reconnect_recover_and_publish_once',
+              'tests/test_darwin_fresh_alias.py::test_installed_darwin_helper_alias',
+          ])
+          with helper.open('rb') as stream:
+              assert hashlib.file_digest(stream, 'sha256').hexdigest() == helper_digest
+          if status:
+              sys.exit(status)
+          required = {
+              'test_installed_darwin_helper_alias',
+              'test_macos_session_close_stops_child_after_command_exit',
+              'test_macos_local_command_cannot_delegate_execution_to_launchd',
+              'test_local_write_root_replacement_survives_portable_resume',
+              'test_turn_write_policy_and_reopen_checks_the_applied_policy',
+              'test_steer_twice_and_interrupt_running_local_command',
+              'test_local_write_roots_cannot_overlap_native_runtime_home',
+              'test_stop_during_compaction_setup_fences_provider_admission[False]',
+              'test_stop_during_compaction_setup_fences_provider_admission[True]',
+              'test_two_workers_revise_reconnect_recover_and_publish_once',
+          }
+          required.update(
+              f'test_force_stop_fences_sampling_before_executor_result_settles[{case}]'
+              for case in ('turn-False-False', 'turn-False-True', 'turn-True-False', 'continuation-False-False', 'graph-False-False', 'close-False-False')
+          )
+          passed = {
+              case.attrib['name'] for case in ET.parse(junit).findall('.//testcase')
+              if all(case.find(tag) is None for tag in ('skipped', 'failure', 'error'))
+          }
+          assert required <= passed, sorted(required - passed)
+          print('Verified installed-wheel cases:', sorted(required))
+          PYTEST
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        if: always()
         with:
-          name: python-r14-macos-helper-alias-observation
+          name: verified-final-python-wheel-macos
           path: |
-            ${{ runner.temp }}/python-helper-alias/donor.json
-            ${{ runner.temp }}/python-helper-alias/results.xml
-          if-no-files-found: ignore
+            dist/*.whl
+            dist/*.pristine.json
+            ${{ runner.temp }}/local-session.xml
+          if-no-files-found: error
           retention-days: 7

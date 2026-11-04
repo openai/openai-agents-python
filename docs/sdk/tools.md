@@ -451,7 +451,7 @@ Install the wheel and native helpers outside the workspace and any additional wr
 
 Writes to host files are limited to `cwd` and the additional `writable_roots`. On Linux, a command can also write to a private temporary filesystem. Those writes disappear when the sandbox exits. The runtime resolves the paths on the executor. It keeps its protections for native metadata. For a linked Git worktree that needs to update Git state, explicitly grant the required Git directories after checking which paths they expose.
 
-Pass `writable_roots` when constructing the local Environment or a compatible Linux or macOS WSS Environment. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in the working directory. Passing `None` uses the default WSS policy. The policy disables native sandbox escalation and permission requests that could widen the grants.
+Pass `writable_roots` when constructing the local Environment or a compatible Linux or macOS WSS Environment. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in the working directory. The strict policy disables native sandbox escalation and permission requests that could widen the grants. Passing `None` uses the default WSS policy.
 
 Use a supported local executor or Linux WSS executor to change write grants between turns. With macOS WSS, choose the write roots in the Environment when opening the Session. The SDK cannot confirm that processes from earlier remote commands have exited. You can resubmit an equivalent grant if the paths pass validation.
 
@@ -645,7 +645,7 @@ An empty destination list does not prevent proxy hostname lookups before denial.
 
 The SDK cannot infer an offline boundary from a URL. The backend must verify it.
 
-Supply the same normalized network policy when restoring a checkpoint or reopening a local conversation with a recorded policy. Your application grants access through its current Environment. The SDK compares the current policy with the saved policy. Start a new conversation to change the network policy.
+When restoring a portable checkpoint, keep the recorded network policy. When reopening with `LocalStorage`, supply the same normalized network policy for a local executor or WSS with strict writes. If the recorded executor used implicit WSS writes (`writable_roots=None`), you can omit the Environment to reopen for model-only work, even if the executor used a managed network policy. If you keep the WSS Environment, supply the same normalized network policy. Start a new conversation to change the network policy.
 
 Python callbacks can run fixed operations directly in the application's worker. See [Restore an Environment](sessions.md#compact-save-and-restore).
 

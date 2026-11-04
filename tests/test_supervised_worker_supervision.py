@@ -1,4 +1,4 @@
-"""Check the worker's exception and turn cleanup behavior without an executor."""
+"""Check artifact verification and turn cleanup without an executor."""
 
 from __future__ import annotations
 
@@ -13,6 +13,22 @@ import pytest
 from agents import Turn
 from examples.supervised_worker import __main__ as worker
 from tests._asyncio import timeout
+
+
+@pytest.mark.parametrize(
+    ("name_length", "trailing", "accepted"),
+    [(117, b"extra bytes\n", False), (118, b"", True)],
+    ids=["reject-trailing-bytes", "accept-complete-long-artifact"],
+)
+def test_worker_verifies_complete_artifact(
+    tmp_path: Path, name_length: int, trailing: bytes, accepted: bool
+) -> None:
+    active_worker = worker.Worker(tmp_path / ("a" * name_length), False)
+    active_worker.workspace.mkdir(parents=True)
+    expected = active_worker.expected_text
+    (active_worker.workspace / worker.ARTIFACT).write_bytes(expected.encode() + trailing)
+
+    assert active_worker.read_artifact() == (expected if accepted else None)
 
 
 @pytest.mark.parametrize("cleanup_fails", [False, True], ids=["caller-cancel", "both-fail"])
