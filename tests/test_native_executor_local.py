@@ -174,31 +174,44 @@ async def test_local_write_roots_cannot_overlap_native_storage(
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
-@pytest.mark.parametrize("location", ["sessions", "session-year", "archived_sessions"])
+@pytest.mark.parametrize(
+    "location", ["sessions", "session-year", "session-date-grant", "archived_sessions"]
+)
 async def test_local_write_roots_cannot_overlap_relocated_rollout_directories(
     responses: ResponsesFixture, tmp_path: Path, location: str
 ) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    target = workspace.with_name("WORKSPACE")
+    if target.exists():
+        assert target.samefile(workspace)
+    else:
+        target = workspace
+
     storage = LocalStorage(tmp_path / "profile")
-    alias = (
-        storage.path / "sessions" / str(datetime.now(timezone.utc).astimezone().year)
-        if location == "session-year"
-        else storage.path / location
-    )
+    cwd = workspace
+    date = datetime.now(timezone.utc).astimezone()
+    alias = storage.path / location
+    if location == "session-year":
+        alias = storage.path / "sessions" / str(date.year)
+    elif location == "session-date-grant":
+        alias = storage.path / "sessions"
+        # A fresh recorder will create the missing day directory inside this grant.
+        cwd = workspace / str(date.year) / f"{date.month:02d}"
+        cwd.mkdir(parents=True)
     alias.parent.mkdir(parents=True)
-    alias.symlink_to(workspace, target_is_directory=True)
+    alias.symlink_to(target, target_is_directory=True)
     agent = Agent(
         instructions="Answer.",
         provider=NativeProvider(base_url=responses.url, api_key="synthetic-model-key"),
     )
 
     with pytest.raises(RuntimeError, match="writable roots must stay outside native SDK storage"):
-        async with agent.session(storage=storage, environment=Environment.local(cwd=workspace)):
+        async with agent.session(storage=storage, environment=Environment.local(cwd=cwd)):
             pytest.fail("A write grant included the relocated rollout directory")
 
     assert responses.requests == []
-    assert list(workspace.iterdir()) == []
+    assert list(cwd.iterdir()) == []
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
