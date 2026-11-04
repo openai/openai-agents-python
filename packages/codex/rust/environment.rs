@@ -761,9 +761,10 @@ fn check_local_helper_write_roots(
         .context("local executor requires native helper paths")?;
     let runtime = paths.codex_self_exe.as_path();
     // A later Session can select the packaged host even if this one does not use it.
-    let code_mode = (cfg!(target_os = "linux") && runtime.ends_with("codex-sdk-runtime"))
-        .then(|| runtime.with_file_name("codex-code-mode-host"))
-        .filter(|path| path.is_file());
+    let code_mode = (cfg!(any(target_os = "linux", target_os = "macos"))
+        && runtime.ends_with("codex-sdk-runtime"))
+    .then(|| runtime.with_file_name("codex-code-mode-host"))
+    .filter(|path| path.is_file());
     let packaged_helpers = std::iter::once(runtime)
         .chain(
             paths
