@@ -337,34 +337,37 @@ async def test_local_replacement_rejects_a_relocated_checklist_hard_link(
         assert (await (await session.submit("Create a plan.")).get_result()).final_output == "saved"
         checklist = await session.checklist()
         assert checklist is not None and checklist.explanation == "initial"
-        record = sidecars / f"{session.id}.json"
-        upper = record.with_name(record.name.upper())
-        case_insensitive = upper.exists()
-        if case_insensitive:
-            record.rename(sidecars / "rename-checklist").rename(upper)
-            assert upper.name in {path.name for path in sidecars.iterdir()}
-            assert await session.checklist() == checklist
-            record = upper
+        canonical = sidecars / f"{session.id}.json"
+        record = canonical
         alias = grant / "ordinary-name"
-        alias.hardlink_to(record)
         request_count = len(responses.requests)
         responses.respond(assistant_output("done"))
+        for spelling in (
+            canonical,
+            canonical.with_suffix(".jſon"),
+            sidecars / canonical.name.upper(),
+        ):
+            if not spelling.exists():
+                continue
+            if spelling != record:
+                record.rename(sidecars / "rename-checklist").rename(spelling)
+                assert spelling.name in {path.name for path in sidecars.iterdir()}
+                assert await session.checklist() == checklist
+                record = spelling
+            alias.hardlink_to(record)
+            refused = await session.submit("Do not grant the checklist.", writable_roots=[grant])
+            with pytest.raises(NativeError, match="writable roots contain a hard link") as error:
+                await refused.get_result()
+            assert error.value.effects == "not_started"
+            assert len(responses.requests) == request_count
+            assert await session.checklist() == checklist
+            alias.unlink()
 
-        refused = await session.submit("Do not grant the checklist.", writable_roots=[grant])
-        with pytest.raises(NativeError, match="writable roots contain a hard link") as error:
-            await refused.get_result()
-        assert error.value.effects == "not_started"
-        assert len(responses.requests) == request_count
-        assert await session.checklist() == checklist
-
-        alias.unlink()
         ordinary = tmp_path / "ordinary-file"
         ordinary.write_text("ordinary")
         alias.hardlink_to(ordinary)
-        # Unrecognized children of the relocated directory are not storage routes.
-        (sidecars / "unrelated").symlink_to(grant, target_is_directory=True)
-        if not case_insensitive:
-            upper.symlink_to(alias)
+        # An app-owned link outside the reserved sidecar directories is unrelated.
+        (storage.path / "unrelated").symlink_to(grant, target_is_directory=True)
         allowed = await session.submit("Grant an ordinary link.", writable_roots=[grant])
         assert (await allowed.get_result()).final_output == "done"
         assert await session.checklist() == checklist

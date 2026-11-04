@@ -1206,7 +1206,7 @@ fn checklist_error(error: impl std::fmt::Display) -> ThreadStoreError {
     }
 }
 
-pub(crate) fn checklist_path(directory: &Path, id: ThreadId) -> PathBuf {
+fn checklist_path(directory: &Path, id: ThreadId) -> PathBuf {
     directory.join(format!("{id}.json"))
 }
 
