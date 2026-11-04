@@ -1,4 +1,4 @@
-name: Check launchd delegation from the packaged local sandbox
+name: Compare the managed command before and after launchd port isolation
 on:
   push:
     branches: [test/darwin-resource-ownership-20261104]
@@ -14,7 +14,7 @@ jobs:
       matrix:
         runner: [macos-15, macos-latest]
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 12
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -37,6 +37,13 @@ jobs:
           version: "0.11.14"
           enable-cache: false
           python-version: "3.14"
+      - name: Build the unchanged and isolated command wrappers
+        run: |
+          set -eu
+          rustup toolchain install 1.95.0 --profile minimal
+          pair="$GITHUB_WORKSPACE/validation/.github/qualification/darwin-resource-ownership/bootstrap-port-qualification"
+          CARGO_TARGET_DIR="$pair/target" sh "$pair/build-pair.sh"
+          printf 'SDK_WRAPPER_STOCK=%s\nSDK_WRAPPER_CLEARED=%s\n' "$pair/target/debug/bootstrap-stock" "$pair/target/debug/bootstrap-cleared" >> "$GITHUB_ENV"
       - name: Install the exact earlier wheel and add the focused test
         working-directory: sdk
         run: |
@@ -49,8 +56,9 @@ jobs:
           cd "$GITHUB_WORKSPACE/sdk"
           uv sync --frozen --group dev --no-install-project
           uv pip install --python .venv/bin/python --no-deps "$OPENAI_AGENTS_NATIVE_WHEEL"
-          mkdir -p tests/sdk_seatbelt_qualification
-          cp ../validation/.github/qualification/darwin-resource-ownership/delegation/probe.c ../validation/.github/qualification/darwin-resource-ownership/delegation/test_sdk_seatbelt.py tests/sdk_seatbelt_qualification/
+          mkdir -p tests/sdk_bootstrap_qualification
+          pair="../validation/.github/qualification/darwin-resource-ownership/bootstrap-port-qualification"
+          cp "$pair/probe.c" "$pair/test_sdk_seatbelt.py" "$pair/"*.sbpl tests/sdk_bootstrap_qualification/
       - name: Check sandboxed launchd and helper access
         working-directory: sdk
         env:
@@ -69,5 +77,5 @@ jobs:
           assert sys.platform == "darwin" and platform.machine() == "arm64"
           assert pathlib.Path(agents._native.__file__).resolve().is_relative_to(pathlib.Path(sysconfig.get_path("platlib")).resolve())
           sys.path.insert(0, os.getcwd())
-          sys.exit(pytest.main(["-q", "-rA", "-s", "tests/sdk_seatbelt_qualification/test_sdk_seatbelt.py"]))
+          sys.exit(pytest.main(["-q", "-rA", "-s", "tests/sdk_bootstrap_qualification/test_sdk_seatbelt.py"]))
           PYTEST

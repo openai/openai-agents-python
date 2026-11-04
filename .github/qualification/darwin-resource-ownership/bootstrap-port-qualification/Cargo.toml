@@ -1,0 +1,26 @@
+[package]
+name = "sdk-darwin-wrapper-qualification"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+[[bin]]
+name = "sdk-darwin-bootstrap-entry"
+path = "entry.rs"
+
+[features]
+clear-bootstrap = []
+
+[dependencies]
+anyhow = "=1.0.103"
+codex-utils-pty = { path = "../wrapper-qualification/pty" }
+codex-uds = { path = "../wrapper-qualification/uds" }
+libc = "=0.2.186"
+rustix = { version = "=1.1.4", features = ["fs", "net"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.149"
+tempfile = "=3.27.0"
+tokio = { version = "=1.52.3", features = ["io-util", "net", "rt", "sync", "time"] }
+tracing = "=0.1.44"
+uuid = { version = "=1.20.0", features = ["v4"] }
