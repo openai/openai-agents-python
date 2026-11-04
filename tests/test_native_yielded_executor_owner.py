@@ -184,6 +184,10 @@ async def no_private_output(run, responses):
     assert (await run.first.get_result()).final_output == "original cached completion"
 
 
+@pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="requires Linux or macOS executor write policies",
+)
 async def test_writable_roots_cannot_change_while_a_yielded_cell_owns_them(
     responses, tmp_path, monkeypatch
 ):

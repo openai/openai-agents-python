@@ -23,6 +23,7 @@ from agents import (
     NativeError,
     NativeRole,
     ReplaceArguments,
+    TurnStoppedError,
     function_tool,
 )
 from agents.observation import ExecutionItemCompleted
@@ -41,6 +42,8 @@ from tests.test_native_child_tool_integration import PendingChildCallsPeer
 from tests.test_native_code_mode import code_call, code_output
 from tests.test_native_executor_tools import declaration
 from tests.test_native_mcp_tools import Peer, mcp_call
+from tests.test_native_provider_websockets import peer as model_peer
+from tests.test_review_ii_steering_tail import ProjectContinuation
 
 
 @pytest.mark.parametrize("kind", ["exec_command", "apply_patch"])
@@ -651,6 +654,106 @@ async def test_cancel_waits_for_entered_executor_policy_and_discards_late_result
         assert calls == 1
         assert "late-executor-9410" not in json.dumps(responses.requests)
         assert "late-executor-9410" not in json.dumps(items)
+
+
+@pytest.mark.parametrize(
+    ("stop", "websocket"),
+    [
+        ("turn", False),
+        ("turn", True),
+        ("continuation", False),
+        ("graph", False),
+        ("close", False),
+    ],
+)
+async def test_force_stop_fences_sampling_before_executor_result_settles(
+    tmp_path, monkeypatch, stop, websocket
+) -> None:
+    entered, cancelled, release_callback = (asyncio.Event() for _ in range(3))
+    interrupt_entered, release_interrupt = asyncio.Event(), asyncio.Event()
+    gated = stop in ("turn", "continuation")
+
+    async def transform(context: ExecutorContext[None], value: Any) -> Any:
+        assert context.call_id == "held"
+        entered.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            cancelled.set()
+            await release_callback.wait()
+        return value
+
+    class GatedInterrupt(OutputEvents):
+        async def _interrupt_session(self, *args, **kwargs):
+            interrupt_entered.set()
+            await release_interrupt.wait()
+            return await self.native._interrupt_session(*args, **kwargs)
+
+    async with (
+        timeout(20),
+        model_peer() as model,
+        ExecutorPeer(
+            tmp_path / "remote", synthetic_process_output="private-held-result"
+        ).serve() as executor,
+    ):
+        trust(executor, tmp_path, monkeypatch)
+        if stop == "continuation":
+            model.respond(assistant_output("first native step"))
+        model.respond(function_call("exec_command", {"cmd": "synthetic-no-execution"}, "held"))
+        model.respond(assistant_output("successor"))
+        async with Agent(
+            instructions="Use the executor.",
+            tools=[],
+            provider=model.provider(websocket=websocket),
+        ).session(
+            environment=declaration(
+                executor, transform_result=transform, approval=lambda *_: True, policy_timeout=10
+            )
+        ) as session:
+            if stop == "continuation":
+                session._native = ProjectContinuation(session._native)
+            if gated:
+                session._native = GatedInterrupt(session._native)
+            turn = await session.submit("Inspect the controlled result.")
+            await entered.wait()
+            request_count = 2 if stop == "continuation" else 1
+            assert len(model.requests) == request_count
+            if gated:
+                stopping = asyncio.create_task(turn.cancel())
+            elif stop == "graph":
+                stopping = asyncio.create_task(session.cancel_all())
+            else:
+                stopping = asyncio.create_task(session._aclose())
+            try:
+                if gated:
+                    await interrupt_entered.wait()
+                await cancelled.wait()
+                assert not stopping.done()
+                release_callback.set()
+                if gated:
+                    # Leave the native interrupt paused while the callback settles.
+                    # An unfenced turn sends another request during this interval.
+                    try:
+                        async with timeout(2):
+                            while len(model.requests) == request_count:
+                                await asyncio.sleep(0.01)
+                    except TimeoutError:
+                        pass
+                    assert len(model.requests) == request_count, "Cancelled turn sampled again"
+            finally:
+                release_callback.set()
+                release_interrupt.set()
+                await stopping
+            assert len(model.requests) == request_count
+            with pytest.raises(TurnStoppedError):
+                await turn.get_result()
+            if stop != "close":
+                successor = await session.submit("Continue without tools.")
+                assert (await successor.get_result()).final_output == "successor"
+                assert len(model.requests) == request_count + 1
+            assert bool(model.frames) == websocket
+            assert bool(model.http_requests) != websocket
+            assert "private-held-result" not in json.dumps(model.requests)
 
 
 class ChildExecutorPolicyPeer(PendingChildCallsPeer):

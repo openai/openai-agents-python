@@ -1239,7 +1239,7 @@ mod steering_capture_tests {
                     .thread_extension_data()
                     .get::<crate::python_tools::PythonTools>()
                     .unwrap();
-                let _stop = stop.then(|| root_tools.request_graph_interrupt().unwrap());
+                let _stop = stop.then(|| root_tools.request_graph_interrupt(false).unwrap());
                 let successor = continue_retained(&state, &original).await.unwrap();
                 if stop {
                     assert!(successor.is_none());

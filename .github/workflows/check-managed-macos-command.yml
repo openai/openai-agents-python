@@ -1,4 +1,4 @@
-name: Check the managed local command in the Python wheel
+name: Qualify the final Python SDK wheel on macOS
 on:
   push:
     branches: [test/managed-macos-command-qualification-20261104]
@@ -9,9 +9,9 @@ permissions:
 
 jobs:
   build:
-    name: Build and test the exact Python SDK package
+    name: Qualify final Python SDK wheel and tests
     runs-on: macos-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
@@ -24,12 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
-          ref: 902b813d72a79ab325defa61c6c77fd1a90b1a94
+          ref: 2c3046ca903a513548c847b6a85f16c365efd750
           persist-credentials: false
       - name: Verify exact SDK checkout
         run: |
-          test "$(git rev-parse HEAD)" = '902b813d72a79ab325defa61c6c77fd1a90b1a94'
-          test "$(git rev-parse HEAD^{tree})" = 'f2d7539c176cc795ae826b531dfd40fc8cdb3863'
+          test "$(git rev-parse HEAD)" = '2c3046ca903a513548c847b6a85f16c365efd750'
+          test "$(git rev-parse HEAD^{tree})" = '88d2ef6d320399e0f9d11994a21ad4dbb398ecd3'
           git show -s --format='%H %T %s' HEAD
       - name: Select shared Cargo directories
         run: |
@@ -156,39 +156,102 @@ jobs:
           PYTHON
       - name: Build the SDK and native runtime together
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
-      - name: Run public local Session tests against the installed wheel
+      - name: Build the shared test executor
+        if: steps.native-source.outputs.run_id == ''
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          fixture = Path("tests/fixtures/exec_server.rs")
+          (root / fixture).parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(Path("packages/codex") / fixture, root / fixture)
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, build_target = cargo_build_options(root, environment)
+          subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
+          target = Path(environment["CARGO_TARGET_DIR"])
+          if not target.is_absolute():
+              target = root / target
+          if build_target:
+              target /= Path(build_target).stem
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          shutil.copy2(target / "release" / "examples" / name, Path("dist") / name)
+          PYTHON
+      - name: Test native macOS Unix socket policy with the installed wheel
+        if: runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
+          uv venv --seed --python "$(command -v python)" "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          python="$stage/venv/bin/python"
+          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          fixture="$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          chmod +x "$fixture"
+          cd "$stage"
+          env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
+            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
+      - name: Run SDK acceptance with the installed wheel
         env:
           OPENAI_API_KEY: fake-for-tests
+          CODEX_EXEC_SERVER_TEST_BINARY: ${{ github.workspace }}/dist/exec-server-fixture
+          RUST_MIN_STACK: '16777216'
         run: |
           set -eu
           sw_vers
           uv sync --frozen --group dev --no-install-project
           uv pip install --python .venv/bin/python --no-deps dist/*.whl
-          .venv/bin/python -I -B - "$RUNNER_TEMP/local-session.xml" <<'PYTEST'
-          import os, pathlib, platform, sys, sysconfig
-          import agents._native, pytest
-          assert sys.platform == "darwin" and platform.machine() == "arm64"
-          assert pathlib.Path(agents._native.__file__).resolve().is_relative_to(pathlib.Path(sysconfig.get_path("platlib")).resolve())
+          env -u PYTHONPATH -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX .venv/bin/python -I -B - "$RUNNER_TEMP/local-session.xml" <<'PYTEST'
+          import hashlib, os, pathlib, platform, sys, sysconfig, xml.etree.ElementTree as ET
+          import agents._native, agents.session, pytest
+          assert sys.platform == 'darwin' and platform.machine() == 'arm64'
+          installed = pathlib.Path(sysconfig.get_path('platlib')).resolve()
+          for module in (agents, agents._native, agents.session):
+              assert pathlib.Path(module.__file__).resolve().is_relative_to(installed), module.__file__
+          assert hashlib.sha256(pathlib.Path(agents.session.__file__).read_bytes()).hexdigest() == '69954f1f52e07e323fd99d7354c044a2d566c5d1decec48c98a867e2eaed3797'
           sys.path.insert(0, os.getcwd())
-          sys.exit(pytest.main(["-q", "-rA", "tests/test_native_executor_local.py", "--junitxml="+sys.argv[1]]))
+          junit = sys.argv[1]
+          status = pytest.main([
+              '-q', '-rA', '--junitxml=' + junit,
+              'tests/test_native_executor_local.py',
+              'tests/test_native_yielded_executor_owner.py',
+              'tests/test_native_executor_policies.py::test_force_stop_fences_sampling_before_executor_result_settles',
+              'tests/test_supervised_worker_example.py::test_two_workers_revise_reconnect_recover_and_publish_once',
+          ])
+          if status:
+              sys.exit(status)
+          required = {
+              'test_macos_session_close_stops_child_after_command_exit',
+              'test_macos_local_command_cannot_delegate_execution_to_launchd',
+              'test_local_write_root_replacement_survives_portable_resume',
+              'test_turn_write_policy_and_reopen_checks_the_applied_policy',
+              'test_two_workers_revise_reconnect_recover_and_publish_once',
+          }
+          required.update(
+              f'test_force_stop_fences_sampling_before_executor_result_settles[{case}]'
+              for case in ('turn-False', 'turn-True', 'continuation-False', 'graph-False', 'close-False')
+          )
+          passed = {
+              case.attrib['name'] for case in ET.parse(junit).findall('.//testcase')
+              if all(case.find(tag) is None for tag in ('skipped', 'failure', 'error'))
+          }
+          assert required <= passed, sorted(required - passed)
+          print('Verified installed-wheel cases:', sorted(required))
           PYTEST
-          python3 - "$RUNNER_TEMP/local-session.xml" <<'VERIFY'
-          import sys
-          import xml.etree.ElementTree as ET
-          cases = ET.parse(sys.argv[1]).findall(".//testcase")
-          required = {"test_macos_session_close_stops_child_after_command_exit",
-                      "test_local_write_root_replacement_survives_portable_resume",
-                      "test_turn_write_policy_and_reopen_checks_the_applied_policy"}
-          passed = {c.get("name","").split("[")[0] for c in cases if all(c.find(tag) is None for tag in ("skipped","failure","error"))}
-          assert required <= passed, sorted(required-passed)
-          print("Verified installed-wheel cases:", sorted(required))
-          VERIFY
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: verified-managed-local-python-wheel
+          name: verified-final-python-wheel-macos
           path: |
             dist/*.whl
-            dist/*.json
+            dist/*.pristine.json
             ${{ runner.temp }}/local-session.xml
           if-no-files-found: error
           retention-days: 7

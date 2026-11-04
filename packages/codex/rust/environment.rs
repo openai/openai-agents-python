@@ -1303,7 +1303,7 @@ mod tests {
         use std::fs;
         use std::os::unix::fs::symlink;
 
-        use super::{EnvironmentManager, ExecServerRuntimeOptions, PathUri};
+        use super::{AbsolutePathBuf, EnvironmentManager, ExecServerRuntimeOptions};
 
         let fixture = tempfile::tempdir()?;
         let workspace = fixture.path().join("workspace");
@@ -1321,7 +1321,7 @@ mod tests {
         let paths = ExecServerRuntimeOptions::new(launcher, None)?;
         let manager = EnvironmentManager::create_for_tests(None, Some(paths)).await;
         let environment = manager.try_local_environment().unwrap();
-        let write_root = PathUri::from_host_native_path(workspace.canonicalize()?)?;
+        let write_root = AbsolutePathBuf::try_from(workspace.canonicalize()?)?;
 
         assert_eq!(
             super::check_local_helper_write_roots(&environment, &[write_root])
