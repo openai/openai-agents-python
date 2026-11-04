@@ -355,8 +355,7 @@ async def work(
     return {"status": "rejected", "session_id": session.id, "rejections": rejections}
 
 
-async def _run_worker(args: argparse.Namespace) -> dict[str, Any]:
-    directory = args.directory.resolve()
+async def _run_worker(args: argparse.Namespace, directory: Path) -> dict[str, Any]:
     if not re.fullmatch(r"[a-z][a-z0-9-]{0,31}", directory.name):
         raise ValueError("Use a worker directory name like alpha or worker-2.")
     directory.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -489,10 +488,11 @@ async def _run_worker(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def run_worker(args: argparse.Namespace) -> dict[str, Any]:
-    result = await _run_worker(args)
+    directory = args.directory.resolve()
+    result = await _run_worker(args, directory)
     if result["status"] == "accepted":
         record_once(
-            args.directory.resolve(),
+            directory,
             "accepted",
             {key: value for key, value in result.items() if key != "status"},
         )
