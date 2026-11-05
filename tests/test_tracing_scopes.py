@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import FrozenInstanceError
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+from urllib.parse import unquote
 
 import pytest
 
@@ -198,6 +201,9 @@ def test_credentials_are_copied_redacted_and_released_after_admission(
 ) -> None:
     headers = {"authorization": "synthetic-secret"}
     credential = telemetry.TraceExportCredentials(headers=headers)
+    assert credential == telemetry.TraceExportCredentials(headers=dict(headers))
+    with pytest.raises(FrozenInstanceError):
+        credential.headers = {}  # type: ignore[misc]
     headers["authorization"] = "changed"
     assert "synthetic-secret" not in repr(credential)
     with pytest.raises(TypeError):
@@ -208,6 +214,92 @@ def test_credentials_are_copied_redacted_and_released_after_admission(
         assert native.credential_headers == [{"authorization": "synthetic-secret"}]
         assert native.credential_releases == ["private-credential-ref"]
         assert "synthetic-secret" not in json.dumps(native.starts)
+
+
+@pytest.mark.parametrize("failure", ["key", "value", "iteration"])
+def test_rejected_credentials_leave_no_private_mapping_in_sdk_tracebacks(failure: str) -> None:
+    secret = "synthetic-private-credential"
+
+    class InterruptedMapping(Mapping[str, str]):
+        def __iter__(self) -> Iterator[str]:
+            yield "authorization"
+            raise RuntimeError("mapping interrupted")
+
+        def __getitem__(self, key: str) -> str:
+            return secret
+
+        def __len__(self) -> int:
+            return 2
+
+    headers: Any = (
+        InterruptedMapping()
+        if failure == "iteration"
+        else {"authorization": secret, 1: "invalid"}
+        if failure == "key"
+        else {"authorization": secret, "invalid": 1}
+    )
+    with pytest.raises((TypeError, RuntimeError)) as raised:
+        telemetry.TraceExportCredentials(headers=headers)
+    pending = [raised.value]
+    seen: set[int] = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        pending.extend(link for link in (error.__context__, error.__cause__) if link is not None)
+        traceback = error.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            if (
+                Path(frame.f_code.co_filename) == Path(telemetry.__file__)
+                or frame.f_code.co_filename == "<string>"
+            ):
+                for name, value in frame.f_locals.items():
+                    retained = getattr(value, "headers", None) if name == "self" else value
+                    assert not isinstance(retained, Mapping) or secret not in retained.values(), (
+                        frame.f_code.co_name,
+                        name,
+                    )
+            traceback = traceback.tb_next
+    assert headers["authorization"] == secret
+
+
+def test_credentials_preserve_empty_runtime_mapping() -> None:
+    assert dict(telemetry.TraceExportCredentials(headers=None).headers) == {}  # type: ignore[arg-type]
+
+
+async def test_mcp_notice_restores_its_exact_owner_over_an_unrelated_scope(
+    native: NativeTracing,
+) -> None:
+    from agents.session import Session
+
+    with telemetry.trace(
+        "native MCP owner", options=telemetry.TraceOptions(disabled=True)
+    ) as owner:
+        retained = native.retain_trace_context(owner.context._handle)
+    observed: list[telemetry.SpanContext] = []
+
+    async def transform(state: Any, notice: Any) -> None:
+        current = telemetry.current_context()
+        assert current is not None and current.disabled
+        observed.append(current)
+        await asyncio.sleep(0)
+        assert telemetry.current_context() is current
+
+    state = SimpleNamespace(failure=asyncio.get_running_loop().create_future())
+    session: Any = SimpleNamespace(_invoke_mcp_policy_body=transform)
+    try:
+        with telemetry.trace("unrelated dispatcher") as ambient:
+            await Session._invoke_mcp_policy(session, state, {"tracing_context": retained})
+            assert telemetry.current_context() is ambient.context
+            assert not ambient.context.disabled
+        assert len(observed) == 1
+        assert observed[0].span_id != owner.context.span_id
+        assert native.starts[-1]["parent"] == retained
+        assert telemetry.current_context() is None
+    finally:
+        native.release_trace_context(retained)
 
 
 def test_invalid_json_rejected_before_credential_registration(native: NativeTracing) -> None:
@@ -299,6 +391,56 @@ async def test_flush_preserves_partial_result_and_budget(native: NativeTracing) 
     assert native.flushes == [123]
     with pytest.raises(ValueError):
         await telemetry.force_flush(timeout_ms=0)
+
+
+@pytest.mark.parametrize("budget", [0, True, "10", 1.5, 60_001])
+@pytest.mark.parametrize("previous_loop", [False, True])
+def test_invalid_flush_preserves_queued_records_and_processor_owner(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, budget: Any, previous_loop: bool
+) -> None:
+    received: list[Any] = []
+    drains: list[int] = []
+
+    class Processor:
+        def on_trace_event(self, event: Mapping[str, Any]) -> None:
+            received.append(event)
+
+    telemetry.add_trace_processor(Processor())
+    if previous_loop:
+
+        async def prior() -> None:
+            telemetry._ensure_processor_pump()
+
+        asyncio.run(prior())
+    original = telemetry._processor_task
+    identifier = next(iter(telemetry._processors))
+    native.batches.put_nowait(
+        {"events": [{"processor_ids": [identifier], "sequence": 1}], "through_sequence": 1}
+    )
+    drain = native.drain_trace_events
+
+    async def observe(count: int) -> str:
+        drains.append(count)
+        return await drain(count)
+
+    monkeypatch.setattr(native, "drain_trace_events", observe)
+
+    async def reject() -> None:
+        try:
+            with pytest.raises(ValueError, match="timeout_ms"):
+                await telemetry.force_flush(timeout_ms=budget)
+            for _ in range(5):
+                await asyncio.sleep(0)
+            assert telemetry._processor_task is original
+            assert native.batches.qsize() == 1
+            assert not drains and not received and not native.flushes and not native.acks
+        finally:
+            if original is not None and telemetry._processor_task is original:
+                assert original.done()
+                telemetry._processor_task = None
+            await _stop_processor_pump()
+
+    asyncio.run(reject())
 
 
 @pytest.mark.parametrize("with_instruction_files", [False, True])
@@ -1530,8 +1672,8 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
     roots = (
         None if roots_kind == "inherit" else [] if roots_kind == "clear" else [tmp_path / "first"]
     )
-    expected = None if roots is None else tuple(path.as_uri() for path in roots)
-    applied = opening if expected is None else expected
+    expected = None if roots is None else tuple(unquote(path.as_uri()) for path in roots)
+    applied = opening
     try:
         with telemetry.trace("admitting workflow"):
             turn = await session.submit(
@@ -1543,7 +1685,12 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
             state, _ = session._pending[0]
             assert state.tracing is not None
             trace_owner = state.tracing.context
-            assert state.writable_roots == expected
+            captured_roots = state.writable_roots
+            assert (
+                None if captured_roots is None else tuple(unquote(uri) for uri in captured_roots)
+            ) == expected
+            if captured_roots is not None:
+                applied = captured_roots
         if roots is not None:
             roots.append(tmp_path / "later mutation")
         with telemetry.trace("unrelated caller"):
@@ -1559,7 +1706,8 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
         if expected is None:
             assert "writable_roots" not in requests[0]
         else:
-            assert requests[0]["writable_roots"] == list(expected)
+            assert captured_roots is not None
+            assert requests[0]["writable_roots"] == list(captured_roots)
         if not refuse:
             assert len(requests) == 2
             assert requests[1]["mode"] == "continue_if_idle"

@@ -264,10 +264,14 @@ class TraceExportCredentials:
 
     headers: Mapping[str, str] = field(repr=False)
 
-    def __post_init__(self) -> None:
+    def __init__(self, *, headers: Mapping[str, str]) -> None:
         from types import MappingProxyType
 
-        object.__setattr__(self, "headers", MappingProxyType(_string_map(self.headers, "headers")))
+        try:
+            object.__setattr__(self, "headers", MappingProxyType(_string_map(headers, "headers")))
+        finally:
+            # Rejected mappings must not survive in constructor traceback frames.
+            del headers, self
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -915,10 +919,9 @@ async def force_flush(*, timeout_ms: int = 10_000) -> FlushResult:
 
     if _engine_options is None:
         raise RuntimeError("Configure telemetry successfully before force_flush")
+    budget = _timeout(timeout_ms)
     _ensure_processor_pump()
-    result = await _join(
-        asyncio.ensure_future(_native_tracing().force_flush_telemetry(_timeout(timeout_ms)))
-    )
+    result = await _join(asyncio.ensure_future(_native_tracing().force_flush_telemetry(budget)))
     return FlushResult(**json.loads(result))
 
 

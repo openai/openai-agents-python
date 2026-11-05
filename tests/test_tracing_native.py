@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from agents import (
     Agent,
     FunctionTool,
+    HttpMCP,
     NativeProvider,
     OutputValidationError,
     TurnStoppedError,
@@ -127,6 +128,7 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "flush_budget",
         "manual_restore",
         "shutdown_budget",
+        "mcp_policy",
     ],
 )
 def test_native_tracing_contract(case: str) -> None:
@@ -208,11 +210,65 @@ async def _native_case(case: str) -> None:
                     await _flush_budget(shutdown=True)
                 elif case == "manual_restore":
                     await _manual_restore(fixture, provider, peer)
+                elif case == "mcp_policy":
+                    await _mcp_policy(fixture, provider, recorder)
                 else:
                     raise AssertionError(case)
             finally:
                 await provider.aclose()
                 await telemetry.shutdown(timeout_ms=5000)
+
+
+async def _mcp_policy(
+    fixture: ResponsesFixture, provider: NativeProvider, recorder: Recorder
+) -> None:
+    from tests.test_native_mcp_tools import Peer, mcp_call
+
+    seen: list[tuple[telemetry.SpanContext, telemetry.SpanContext]] = []
+
+    async def transform(context: Any, value: dict[str, Any]) -> dict[str, Any]:
+        current = telemetry.current_context()
+        assert current is not None
+        with telemetry.span(
+            "MCP policy child", options=telemetry.TraceOptions(include_sensitive_data=True)
+        ) as child:
+            seen.append((current, child.context))
+        return value
+
+    for disabled in (False, True):
+        expected_id = ("b" if disabled else "a") * 32
+        fixture.respond(mcp_call("search", "mcp__docs", "mcp-context-call"))
+        _answer(fixture, "done")
+        async with Peer(names=("search",)).serve() as url:
+            agent = Agent(
+                instructions="Read the record.",
+                provider=provider,
+                tools=[HttpMCP(name="docs", url=url, tools=["search"], transform_result=transform)],
+            )
+            assert telemetry.current_context() is None
+            async with agent.session(
+                trace_options=telemetry.TraceOptions(
+                    trace_id=expected_id, disabled=disabled, include_sensitive_data=False
+                )
+            ) as session:
+                assert (await (await session.submit("read")).get_result()).final_output == "done"
+                assert "tracing_context" not in (await session.save_state()).to_json()
+        current, child = seen[-1]
+        assert current.trace_id == child.trace_id == expected_id
+        assert current.disabled == child.disabled == disabled
+        assert not current.include_sensitive_data and not child.include_sensitive_data
+        assert child.parent_span_id == current.span_id
+        assert telemetry.current_context() is None
+    assert len(seen) == 2
+    flushed = await telemetry.force_flush(timeout_ms=2000)
+    assert flushed.status == "success", flushed
+    ended = [event for event in recorder.events if event["lifecycle"] == "end"]
+    callbacks = [event for event in ended if event["name"] == "MCP callback"]
+    children = [event for event in ended if event["name"] == "MCP policy child"]
+    assert len(callbacks) == len(children) == 1
+    assert callbacks[0]["trace_id"] == "a" * 32
+    assert children[0]["parent_span_id"] == callbacks[0]["span_id"]
+    assert not any(event["trace_id"] == "b" * 32 for event in recorder.events)
 
 
 async def _flush_budget(*, shutdown: bool = False) -> None:

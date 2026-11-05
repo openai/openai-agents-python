@@ -153,6 +153,9 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
 pub async fn shutdown(timeout_ms: Option<u32>) -> Result<()> {
     let timeout = timeout(timeout_ms)?;
     let started = std::time::Instant::now();
+    // Publish before owner admission: an older flush may hold STATE until this
+    // terminal call's entire budget expires. Its worker must still stop.
+    codex_otel::sdk_trace_routes::begin_shutdown(started + timeout);
     TRACE_INITIALIZED.store(false, Ordering::Release);
     ACTIVE.store(false, Ordering::Release);
     codex_otel::sdk_trace::configure_pipeline(false);

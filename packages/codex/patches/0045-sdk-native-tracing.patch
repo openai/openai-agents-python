@@ -327,7 +327,7 @@ index 690fdd9094decfb1c1a99ca2164534192697b550..51f5dd4ce9246eed52d86fe9bd1596a2
  mod tool_result;
  
 diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
-index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e241b160d 100644
+index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b3f2c49ec 100644
 --- a/codex-rs/otel/src/provider.rs
 +++ b/codex-rs/otel/src/provider.rs
 @@ -28,15 +28,13 @@ use opentelemetry_sdk::Resource;
@@ -355,7 +355,15 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
  use std::time::Duration;
  use tracing::debug;
  use tracing_subscriber::Layer;
-@@ -84,10 +83,10 @@ struct GlobalTracer {
+@@ -64,6 +63,7 @@ pub struct OtelProvider {
+     pub tracer_provider: Option<SdkTracerProvider>,
+     pub tracer: Option<Tracer>,
+     pub metrics: Option<MetricsClient>,
++    trace_shutdown: Option<crate::sdk_trace_routes::BatchShutdown>,
+     shutdown_started: AtomicBool,
+     shutdown_worker: Option<mpsc::SyncSender<ShutdownWorker>>,
+ }
+@@ -84,10 +84,10 @@ struct GlobalTracer {
  }
  
  impl opentelemetry::trace::Tracer for GlobalTracer {
@@ -368,7 +376,17 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
      }
  }
  
-@@ -109,6 +108,80 @@ impl OtelProvider {
+@@ -98,6 +98,9 @@ impl OtelProvider {
+             return;
+         }
+ 
++        if let Some(owner) = &self.trace_shutdown {
++            owner.begin(std::time::Instant::now() + Duration::from_secs(10));
++        }
+         if let Some(tracer_provider) = &self.tracer_provider {
+             let _ = tracer_provider.shutdown();
+         }
+@@ -109,6 +112,80 @@ impl OtelProvider {
          }
      }
  
@@ -449,7 +467,17 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
      /// Starts the detached shutdown worker before shutdown-time resource pressure.
      fn prepare_shutdown_worker(&mut self) -> io::Result<()> {
          self.prepare_shutdown_worker_with_spawner(|startup| {
-@@ -193,7 +266,8 @@ impl OtelProvider {
+@@ -156,6 +233,9 @@ impl OtelProvider {
+ 
+     /// Shuts down exporters on a prepared detached thread within a time budget.
+     pub async fn shutdown_with_timeout(mut self, timeout: Duration) -> io::Result<()> {
++        if let Some(owner) = &self.trace_shutdown {
++            owner.begin(std::time::Instant::now() + timeout);
++        }
+         let Some(worker_tx) = self.shutdown_worker.take() else {
+             // Best-effort shutdown must not run a potentially blocking destructor
+             // when its worker could not be prepared.
+@@ -193,7 +273,8 @@ impl OtelProvider {
  
      pub fn try_new(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
          let log_enabled = !matches!(settings.exporter, OtelExporter::None);
@@ -459,7 +487,22 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
          let metric_exporter = crate::config::resolve_exporter(&settings.metrics_exporter);
          let metrics_enabled = !matches!(metric_exporter, OtelExporter::None);
  
-@@ -405,7 +479,9 @@ fn tracer_provider_builder(
+@@ -263,6 +344,14 @@ impl OtelProvider {
+             tracer_provider,
+             tracer,
+             metrics,
++            trace_shutdown: if !matches!(
++                crate::config::resolve_exporter(&settings.trace_exporter),
++                OtelExporter::None
++            ) {
++                crate::sdk_trace_routes::shutdown_owner()
++            } else {
++                None
++            },
+             shutdown_started: AtomicBool::default(),
+             shutdown_worker: None,
+         };
+@@ -405,7 +494,9 @@ fn tracer_provider_builder(
      resource: &Resource,
      span_attributes: BTreeMap<String, String>,
  ) -> TracerProviderBuilder {
@@ -470,7 +513,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
      if span_attributes.is_empty() {
          builder
      } else {
-@@ -424,6 +500,17 @@ struct SpanAttributesProcessor {
+@@ -424,6 +515,17 @@ struct SpanAttributesProcessor {
      attributes: BTreeMap<String, String>,
  }
  
@@ -488,7 +531,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
  impl SpanProcessor for SpanAttributesProcessor {
      fn on_start(&self, span: &mut Span, _cx: &Context) {
          for (key, value) in self.attributes.iter() {
-@@ -531,8 +618,62 @@ fn build_tracer_provider(
+@@ -531,8 +633,62 @@ fn build_tracer_provider(
      span_attributes: BTreeMap<String, String>,
      factory: &codex_http_client::HttpClientFactory,
  ) -> Result<SdkTracerProvider, Box<dyn Error>> {
@@ -552,7 +595,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
          OtelExporter::Statsig => unreachable!("statsig exporter should be resolved"),
          OtelExporter::OtlpGrpc {
              endpoint,
-@@ -567,39 +708,6 @@ fn build_tracer_provider(
+@@ -567,39 +723,6 @@ fn build_tracer_provider(
          } => {
              debug!("Using OTLP Http exporter for traces: {endpoint}");
  
@@ -592,7 +635,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
              let protocol = match protocol {
                  OtelHttpProtocol::Binary => Protocol::HttpBinary,
                  OtelHttpProtocol::Json => Protocol::HttpJson,
-@@ -611,7 +719,9 @@ fn build_tracer_provider(
+@@ -611,7 +734,9 @@ fn build_tracer_provider(
                  .with_protocol(protocol)
                  .with_headers(headers);
  
@@ -603,7 +646,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
                  let client = crate::otlp::build_async_http_client(
                      factory,
                      tls.as_ref(),
-@@ -628,15 +738,113 @@ fn build_tracer_provider(
+@@ -628,15 +753,116 @@ fn build_tracer_provider(
          }
      };
  
@@ -675,6 +718,9 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
 +        }
 +        let mut failed = Vec::new();
 +        for (credential, spans) in groups {
++            if receipt.terminal_expired() {
++                return Err(());
++            }
 +            let records: Vec<_> = spans.iter().map(|e| e.record_sequence).collect();
 +            let spans = spans.into_iter().map(|e| e.span).collect();
 +            let result = if let Some(credential) = credential {
@@ -725,7 +771,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
  }
  
  #[cfg(test)]
-@@ -836,6 +1044,95 @@ mod tests {
+@@ -836,6 +1062,96 @@ mod tests {
          Ok(())
      }
  
@@ -750,6 +796,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
 +            tracer_provider: Some(tracer_provider),
 +            tracer: Some(tracer.clone()),
 +            metrics: None,
++            trace_shutdown: None,
 +            shutdown_started: AtomicBool::new(false),
 +            shutdown_worker: None,
 +        };
@@ -821,7 +868,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
      fn test_otel_settings() -> OtelSettings {
          OtelSettings {
              http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-@@ -845,6 +1142,7 @@ mod tests {
+@@ -845,6 +1161,7 @@ mod tests {
              codex_home: PathBuf::from("."),
              exporter: OtelExporter::None,
              trace_exporter: OtelExporter::None,
@@ -829,6 +876,18 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..871293f944aaf192e016dbed1d5fd69e
              metrics_exporter: OtelExporter::None,
              runtime_metrics: false,
              span_attributes: BTreeMap::new(),
+diff --git a/codex-rs/otel/src/provider_shutdown_tests.rs b/codex-rs/otel/src/provider_shutdown_tests.rs
+index 768aa0f473c2e0c4a905cd159dc603bca0d9be8a..d5ad46eb98cdb9f44b1237d98054f9e6dba66756 100644
+--- a/codex-rs/otel/src/provider_shutdown_tests.rs
++++ b/codex-rs/otel/src/provider_shutdown_tests.rs
+@@ -159,6 +159,7 @@ fn test_provider(behavior: ShutdownBehavior) -> TestProvider {
+             tracer_provider: Some(tracer_provider),
+             tracer: None,
+             metrics: None,
++            trace_shutdown: None,
+             shutdown_started: AtomicBool::default(),
+             shutdown_worker: None,
+         },
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..2b1ed5123d67a1b6bcf9e3f7317521bb8748e2ee
@@ -1706,10 +1765,10 @@ index 0000000000000000000000000000000000000000..2b1ed5123d67a1b6bcf9e3f7317521bb
 +}
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0ed6936c7
+index 0000000000000000000000000000000000000000..a0f910fff5b074ebe4b08d4bb9324baa49adbd3e
 --- /dev/null
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
-@@ -0,0 +1,1219 @@
+@@ -0,0 +1,1453 @@
 +//! Bounded SDK lifecycle delivery and private exporter credentials.
 +use opentelemetry::Context;
 +use opentelemetry::trace::Span as _;
@@ -2017,6 +2076,63 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +    }
 +}
 +
++/// Seal the current owned queue before waiting for the provider or flush owner.
++/// Later terminal calls may shorten the deadline, but cannot extend it.
++pub(crate) struct BatchShutdown(std::sync::Weak<BatchShared>);
++impl BatchShutdown {
++    pub(crate) fn begin(&self, deadline: Instant) {
++        if let Some(batch) = self.0.upgrade() {
++            batch.begin_shutdown(deadline);
++        }
++    }
++}
++pub(crate) fn shutdown_owner() -> Option<BatchShutdown> {
++    lock().batch.clone().map(BatchShutdown)
++}
++pub fn begin_shutdown(deadline: Instant) {
++    let batch = {
++        let mut routes = lock();
++        routes.default_available = false;
++        routes.batch.as_ref().and_then(std::sync::Weak::upgrade)
++    };
++    if let Some(batch) = batch {
++        batch.begin_shutdown(deadline);
++    }
++}
++fn discard_envelopes(envelopes: Vec<TraceEnvelope>) {
++    let sequences: Vec<_> = envelopes
++        .iter()
++        .map(|envelope| envelope.record_sequence)
++        .collect();
++    drop(envelopes);
++    let mut routes = lock();
++    for sequence in sequences {
++        dropped(&mut routes, sequence);
++    }
++}
++async fn terminal_deadline(mut changed: tokio::sync::watch::Receiver<Option<Instant>>) {
++    loop {
++        let deadline = *changed.borrow_and_update();
++        match deadline {
++            Some(deadline) => {
++                if deadline <= Instant::now() {
++                    return;
++                }
++                tokio::select! {
++                    biased;
++                    _ = tokio::time::sleep_until(deadline.into()) => return,
++                    update = changed.changed() => { if update.is_err() { std::future::pending::<()>().await; } }
++                }
++            }
++            None => {
++                if changed.changed().await.is_err() {
++                    std::future::pending::<()>().await;
++                }
++            }
++        }
++    }
++}
++
 +/// A span and its private credential share exactly one bounded queue lifetime.
 +pub(crate) struct TraceEnvelope {
 +    pub(crate) span: SpanData,
@@ -2026,19 +2142,30 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +}
 +/// A partition removes its records only after delivery succeeds. Cancellation
 +/// therefore counts remaining records without reclassifying delivered partitions.
-+pub(crate) struct BatchReceipt(Mutex<BTreeSet<u64>>);
++pub(crate) struct BatchReceipt {
++    pending: Mutex<BTreeSet<u64>>,
++    terminal: tokio::sync::watch::Receiver<Option<Instant>>,
++}
 +impl BatchReceipt {
-+    fn new(sequences: &[u64]) -> Self {
-+        Self(Mutex::new(sequences.iter().copied().collect()))
++    fn new(sequences: &[u64], terminal: tokio::sync::watch::Receiver<Option<Instant>>) -> Self {
++        Self {
++            pending: Mutex::new(sequences.iter().copied().collect()),
++            terminal,
++        }
++    }
++    pub(crate) fn terminal_expired(&self) -> bool {
++        self.terminal
++            .borrow()
++            .is_some_and(|deadline| deadline <= Instant::now())
 +    }
 +    pub(crate) fn succeeded(&self, sequences: &[u64]) {
-+        let mut pending = self.0.lock().unwrap_or_else(|e| e.into_inner());
++        let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
 +        for sequence in sequences {
 +            pending.remove(sequence);
 +        }
 +    }
 +    fn remaining(&self) -> Vec<u64> {
-+        self.0
++        self.pending
 +            .lock()
 +            .unwrap_or_else(|e| e.into_inner())
 +            .iter()
@@ -2115,6 +2242,36 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +    state: Mutex<BatchState>,
 +    changed: std::sync::Condvar,
 +    settings: BatchSettings,
++    terminal: tokio::sync::watch::Sender<Option<Instant>>,
++}
++impl BatchShared {
++    fn begin_shutdown(&self, deadline: Instant) {
++        self.terminal.send_if_modified(|current| {
++            if current.is_none_or(|old| deadline < old) {
++                *current = Some(deadline);
++                true
++            } else {
++                false
++            }
++        });
++        let expired = self
++            .terminal
++            .borrow()
++            .is_some_and(|deadline| deadline <= Instant::now());
++        let discarded = {
++            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
++            state.shutdown = true;
++            let discarded = if expired {
++                state.queue.drain(..).collect()
++            } else {
++                Vec::new()
++            };
++            self.changed.notify_all();
++            discarded
++        };
++        // Producers lock routing before queue admission. Never invert that order.
++        discard_envelopes(discarded);
++    }
 +}
 +impl std::fmt::Debug for BatchShared {
 +    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2131,7 +2288,9 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +        F: Fn() -> Result<E, String> + Send + Sync + 'static,
 +        E: EnvelopeExporter,
 +    {
++        let (terminal, _) = tokio::sync::watch::channel(None);
 +        let shared = Arc::new(BatchShared {
++            terminal,
 +            state: Mutex::new(BatchState {
 +                workers: settings.concurrency,
 +                ..Default::default()
@@ -2214,9 +2373,13 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +                                    .unwrap_or_else(|e| e.into_inner())
 +                                    .0;
 +                            }
-+                            if state.shutdown && state.queue.is_empty() {
++                            if worker.terminal.borrow().is_some_and(|deadline| deadline <= Instant::now()) {
++                                let discarded = state.queue.drain(..).collect();
++                                drop(state);
++                                discard_envelopes(discarded);
 +                                break;
 +                            }
++                            if state.shutdown && state.queue.is_empty() { break; }
 +                            let mut count = state.queue.len().min(worker.settings.batch);
 +                            if !state.shutdown && state.flush > state.completed {
 +                                count = state
@@ -2236,15 +2399,15 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +                        let first = batch.first().map(|e| e.sequence).unwrap_or_default();
 +                        let last = batch.last().map(|e| e.sequence).unwrap_or_default();
 +                        let records: Vec<_> = batch.iter().map(|e| e.record_sequence).collect();
-+                        let receipt = BatchReceipt::new(&records);
++                        let receipt = BatchReceipt::new(&records, worker.terminal.subscribe());
 +                        let outcome =
 +                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
 +                                runtime.block_on(async {
-+                                    tokio::time::timeout(
-+                                        worker.settings.timeout,
-+                                        exporter.export(batch, &receipt),
-+                                    )
-+                                    .await
++                                    tokio::select! {
++                                        biased;
++                                        _ = terminal_deadline(worker.terminal.subscribe()) => Err(()),
++                                        result = tokio::time::timeout(worker.settings.timeout, exporter.export(batch, &receipt)) => result.map_err(|_| ()),
++                                    }
 +                                })
 +                            }));
 +                        match outcome {
@@ -2315,6 +2478,9 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +    }
 +    fn wait(&self, timeout: Duration, shutdown: bool) -> OTelSdkResult {
 +        let deadline = Instant::now() + timeout;
++        if shutdown {
++            self.shared.begin_shutdown(deadline);
++        }
 +        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
 +        let target = if shutdown {
 +            state.admitted
@@ -2324,7 +2490,7 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +        state.flush = state.flush.max(target);
 +        state.shutdown |= shutdown;
 +        self.shared.changed.notify_all();
-+        while state.completed < target || (shutdown && !state.stopped) {
++        while !state.stopped && (state.completed < target || shutdown) {
 +            let remaining = deadline.saturating_duration_since(Instant::now());
 +            if remaining.is_zero() {
 +                return Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
@@ -2337,6 +2503,11 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +                .wait_timeout(state, remaining)
 +                .unwrap_or_else(|e| e.into_inner())
 +                .0;
++        }
++        if !shutdown && state.completed < target {
++            return Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
++                "trace export stopped during flush".into(),
++            ));
 +        }
 +        Ok(())
 +    }
@@ -2927,6 +3098,128 @@ index 0000000000000000000000000000000000000000..3279648e153554aca399b5073d82c8d0
 +        assert_eq!(attributes[&first], "first");
 +        assert_eq!(attributes[&second], "second");
 +        assert_eq!(snapshot["dropped_attributes_count"], 3);
++    }
++    #[test]
++    fn terminal_deadline_cancels_all_workers_discards_queue_and_releases_credentials() {
++        use std::sync::mpsc;
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        struct Exporter {
++            entered: mpsc::Sender<()>,
++        }
++        impl EnvelopeExporter for Exporter {
++            async fn export(
++                &self,
++                _batch: Vec<TraceEnvelope>,
++                _: &BatchReceipt,
++            ) -> Result<Vec<u64>, ()> {
++                self.entered.send(()).unwrap();
++                std::future::pending().await
++            }
++        }
++        let (entered_tx, entered_rx) = mpsc::channel();
++        let worker = Arc::new(
++            TraceBatchProcessor::new(
++                BatchSettings {
++                    queue: 4,
++                    batch: 1,
++                    delay: Duration::from_millis(5),
++                    timeout: Duration::from_secs(30),
++                    concurrency: 2,
++                },
++                move || {
++                    Ok(Exporter {
++                        entered: entered_tx.clone(),
++                    })
++                },
++            )
++            .unwrap(),
++        );
++        let span = sample_span();
++        let credential = Arc::new(TraceCredentials {
++            headers: HashMap::new(),
++        });
++        let retained = Arc::downgrade(&credential);
++        assert!(worker.enqueue(span.clone(), Some(credential.clone()), 1));
++        assert!(worker.enqueue(span.clone(), Some(credential.clone()), 2));
++        for _ in 0..2 {
++            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
++        }
++        for sequence in 3..=6 {
++            assert!(worker.enqueue(span.clone(), Some(credential.clone()), sequence));
++        }
++        drop(credential);
++        let flushing = worker.clone();
++        let (flushed_tx, flushed_rx) = mpsc::channel();
++        std::thread::spawn(move || {
++            flushed_tx.send(flushing.force_flush()).unwrap();
++        });
++        let deadline = Instant::now() + Duration::from_millis(25);
++        begin_shutdown(deadline);
++        // The provider's later shutdown call must not reset the short budget.
++        worker
++            .shutdown_with_timeout(Duration::from_secs(1))
++            .unwrap();
++        assert!(Instant::now() < deadline + Duration::from_millis(200));
++        assert_eq!(*worker.shared.terminal.borrow(), Some(deadline));
++        assert!(
++            flushed_rx
++                .recv_timeout(Duration::from_secs(1))
++                .unwrap()
++                .is_err()
++        );
++        assert!(retained.upgrade().is_none());
++        assert!(worker.shared.state.lock().unwrap().queue.is_empty());
++        assert!(
++            entered_rx.try_recv().is_err(),
++            "shutdown must not start the queued exports"
++        );
++        assert_eq!(lock().failed, 2);
++        assert_eq!(lock().dropped, 4);
++        assert!(!worker.enqueue(span, None, 7));
++    }
++
++    #[test]
++    fn expired_terminal_deadline_discards_partial_batch_without_export() {
++        use std::sync::atomic::{AtomicUsize, Ordering};
++        let _test = TEST_LOCK.lock().unwrap();
++        *lock() = Routes::default();
++        struct Exporter(Arc<AtomicUsize>);
++        impl EnvelopeExporter for Exporter {
++            async fn export(
++                &self,
++                _: Vec<TraceEnvelope>,
++                _: &BatchReceipt,
++            ) -> Result<Vec<u64>, ()> {
++                self.0.fetch_add(1, Ordering::Relaxed);
++                Ok(Vec::new())
++            }
++        }
++        let calls = Arc::new(AtomicUsize::new(0));
++        let recorded = calls.clone();
++        let worker = TraceBatchProcessor::new(
++            BatchSettings {
++                queue: 2,
++                batch: 2,
++                delay: Duration::from_secs(60),
++                timeout: Duration::from_secs(30),
++                concurrency: 1,
++            },
++            move || Ok(Exporter(recorded.clone())),
++        )
++        .unwrap();
++        let credential = Arc::new(TraceCredentials {
++            headers: HashMap::new(),
++        });
++        let retained = Arc::downgrade(&credential);
++        assert!(worker.enqueue(sample_span(), Some(credential), 1));
++        begin_shutdown(Instant::now());
++        worker
++            .shutdown_with_timeout(Duration::from_secs(1))
++            .unwrap();
++        assert_eq!(calls.load(Ordering::Relaxed), 0);
++        assert!(retained.upgrade().is_none());
++        assert_eq!(lock().dropped, 1);
 +    }
 +}
 diff --git a/codex-rs/otel/src/tool_result.rs b/codex-rs/otel/src/tool_result.rs
