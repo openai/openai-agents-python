@@ -22,6 +22,7 @@ from agents import (
     PromptedOutput,
     Session,
     SessionBusyError,
+    SessionState,
     TurnStoppedError,
     function_tool,
 )
@@ -164,45 +165,51 @@ async def test_original_callback_failure_stops_further_repair_work(
                 output_type=PromptedOutput(Report, 3),
             )
             async with agent.session() as session:
-                original_open = Session._open
-
-                async def hold_open(cls, *args, **kwargs):
-                    repair = await original_open(*args, **kwargs)
-                    if at_failure == "opening" and kwargs.get("_captured_api_key") is not None:
-                        at_repair.set()
-                        await release_repair.wait()
-                    return repair
-
-                monkeypatch.setattr(Session, "_open", classmethod(hold_open))
-                turn = await session.submit("read a record")
-                await peer.call_entered.wait()
-                await at_repair.wait()
-                count = 2 if at_failure == "opening" else 3
-                assert len(responses.requests) == count
-                assert code_output(responses.requests[1], "original-cell").startswith(
-                    "Script running with cell ID "
-                )
-                peer.release_call.set()
-                # Synchronize on the actual original callback failure before
-                # releasing real native opening or the held model response.
-                assert session._active is not None
-                failure = await asyncio.shield(session._active.failure)
-                assert isinstance(failure, NativeError)
-                assert len(seen) == len(peer.calls) == 1 and seen[0].submission is turn
-                if at_failure != "active-repair":
-                    release_repair.set()
-                # An original failure must stop a still-held billable repair.
-                # Keep its provider response blocked through result delivery.
                 try:
-                    for _ in range(2):
-                        async with timeout(3):
-                            with pytest.raises(NativeError, match="MCP result policy failed"):
-                                await turn.get_result()
-                finally:
+                    original_open = Session._open
+
+                    async def hold_open(cls, *args, **kwargs):
+                        repair = await original_open(*args, **kwargs)
+                        if at_failure == "opening" and kwargs.get("_captured_api_key") is not None:
+                            at_repair.set()
+                            await release_repair.wait()
+                        return repair
+
+                    monkeypatch.setattr(Session, "_open", classmethod(hold_open))
+                    turn = await session.submit("read a record")
+                    await peer.call_entered.wait()
+                    await at_repair.wait()
+                    count = 2 if at_failure == "opening" else 3
+                    assert len(responses.requests) == count
+                    assert code_output(responses.requests[1], "original-cell").startswith(
+                        "Script running with cell ID "
+                    )
+                    peer.release_call.set()
+                    # Synchronize on the actual original callback failure before
+                    # releasing real native opening or the held model response.
+                    assert session._active is not None
+                    failure = await asyncio.shield(session._active.failure)
+                    assert isinstance(failure, NativeError)
+                    assert len(seen) == len(peer.calls) == 1 and seen[0].submission is turn
+                    if at_failure != "active-repair":
+                        release_repair.set()
+                    # An original failure must stop a still-held billable repair.
+                    # Keep its provider response blocked through result delivery.
+                    try:
+                        for _ in range(2):
+                            async with timeout(3):
+                                with pytest.raises(NativeError, match="MCP result policy failed"):
+                                    await turn.get_result()
+                    finally:
+                        release_repair.set()
+                    assert len(responses.requests) == count
+                    if at_failure == "invalid-correction":
+                        assert function_declarations(responses.requests[-1]) == []
+                except BaseException:
+                    # Release test gates before Session joins owned repair on failure.
+                    peer.release_call.set()
                     release_repair.set()
-                assert len(responses.requests) == count
-                if at_failure == "invalid-correction":
-                    assert function_declarations(responses.requests[-1]) == []
+                    raise
     finally:
         peer.release_call.set()
         release_repair.set()
@@ -319,6 +326,18 @@ async def test_repair_has_effective_updated_model_auth_accounting_and_real_histo
             assert t["session_id"] != session.id
             assert t["status"] == "completed"
             assert t["usage"] is not None and t["usage"]["total_tokens"] == 14
+            assert len(t["responses"]) == 1
+            response = t["responses"][0]
+            assert response["thread_id"] == t["session_id"]
+            assert response["turn_id"] == t["id"]
+            assert response["usage_source"] == "received"
+            assert response["status"] == "completed"
+        repair_responses = [t["responses"] for t in one.repair_attempts]
+        assert len({responses[0]["id"] for responses in repair_responses}) == 2
+        assert [responses[0]["response_id"] for responses in repair_responses] == [
+            "resp_4",
+            "resp_5",
+        ]
         items = [i async for i in session.items()]
         history = json.dumps(items)
         assert "preceding-history" in history and "private-result" in history
@@ -351,7 +370,11 @@ async def test_repair_has_effective_updated_model_auth_accounting_and_real_histo
         usages = [e for e in events if isinstance(e, UsageUpdated) and e.parent_submission_id]
         assert usages and {e.turn_id for e in usages} == {t["id"] for t in one.repair_attempts}
         assert (await session.checkpoint_status(kind="idle")).status == "ready"
-        assert len((await session.fork()).repair_turns) == 2
+        forked = await session.fork()
+        assert len(forked.repair_turns) == 2
+        assert [t["responses"] for t in forked.repair_turns] == repair_responses
+        wire = SessionState.from_json(forked.to_json())
+        assert [t["responses"] for t in wire.repair_turns] == repair_responses
         later = await session.submit("later")
         assert (await later.get_result()).final_output == "later-original-root"
         assert await turn.get_result() is one

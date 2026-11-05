@@ -1,0 +1,702 @@
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 98219bdf8bd693971bf16f6057d44345ed138199..68fd5a0af08232b9a174369e0b2e8257bedc1678 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -968,6 +968,65 @@ mod tests {
+     use std::collections::HashMap;
+     use std::sync::Arc;
+
++    #[tokio::test]
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "the test must hold the socket lock across invocation to prevent a network write"
++    )]
++    async fn dropping_invocation_receiver_while_connection_is_locked_sends_no_frame() {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let (_tx_message, rx_message) = mpsc::unbounded_channel();
++        let stream = WsStream {
++            tx_command,
++            rx_message,
++            pump_task: tokio::spawn(std::future::pending::<()>()),
++            upgrade_rate_limits: None,
++        };
++        let connection =
++            ResponsesWebsocketConnection::new(stream, Duration::from_secs(1), false, None, None);
++        // stream_request returns its receiver before its worker acquires this
++        // lock. The caller may already have observed client invocation.
++        let held = connection.stream.lock().await;
++        let request = ResponsesApiRequest {
++            model: "test-model".into(),
++            input: Vec::new(),
++            tools: None,
++            tool_choice: "auto".into(),
++            parallel_tool_calls: false,
++            reasoning: None,
++            store: false,
++            stream: true,
++            stream_options: None,
++            include: Vec::new(),
++            service_tier: None,
++            prompt_cache_key: None,
++            text: None,
++            client_metadata: None,
++            access_programs: None,
++        };
++        let response = connection
++            .stream_request(
++                ResponsesWsRequest::ResponseCreate(ResponseCreateWsRequest::from(&request)),
++                false,
++                None,
++            )
++            .await
++            .expect("invocation returns before the socket lock is acquired");
++        drop(response);
++        drop(held);
++        tokio::time::timeout(Duration::from_secs(1), async {
++            while Arc::strong_count(&connection.stream) > 1 {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("the dropped receiver retires the invocation worker");
++        assert!(
++            rx_command.try_recv().is_err(),
++            "no response.create reaches the socket pump"
++        );
++    }
++
+     #[tokio::test]
+     async fn websocket_observes_incomplete_before_returning_existing_error() {
+         let (tx_command, mut rx_command) = mpsc::channel(1);
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 6aa1f046d67094df2ccaabd8f1f3a3a1b35e2b21..cb98f828bbed447c96a5b0dd9ecab20aa3698c7f 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1756,6 +1756,7 @@ impl ModelClientSession {
+             }
+             let request_session_telemetry =
+                 session_telemetry_for_request(session_telemetry, &request);
++            let observation_is_reviewer = is_guardian_reviewer(&responses_headers);
+             options.extra_headers.extend(responses_headers);
+             let interceptors = crate::model_request::prepare(
+                 &self.client.request_contributors,
+@@ -1785,17 +1786,34 @@ impl ModelClientSession {
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+             crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
++            let request_observation = if observation_is_reviewer {
++                None
++            } else {
++                crate::request_observation::dispatching(
++                    prompt.tool_admission.as_ref(),
++                    &request.model,
++                    request.reasoning.as_ref(),
++                    request.service_tier.as_deref(),
++                    if model_info.use_responses_lite {
++                        codex_extension_api::ModelRequestWire::ResponsesLite
++                    } else {
++                        codex_extension_api::ModelRequestWire::Responses
++                    },
++                    codex_extension_api::ModelRequestTransport::HttpSse,
++                )
++            };
+             let stream_result = client.stream_request(request, options).await;
+
+             match stream_result {
+                 Ok(stream) => {
+-                    let (stream, _) = map_response_stream(
++                    let (mut stream, _) = map_response_stream(
+                         stream,
+                         request_session_telemetry,
+                         inference_trace_attempt,
+                         Arc::clone(&self.client.state.provider),
+                         interceptors,
+                     );
++                    stream.request_observation = request_observation;
+                     return Ok(stream);
+                 }
+                 Err(ApiError::Transport(unauthorized_transport))
+@@ -2098,6 +2116,23 @@ impl ModelClientSession {
+             );
+             crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
++            let request_observation = if warmup || is_guardian_reviewer(&responses_headers) {
++                None
++            } else {
++                let ResponsesWsRequest::ResponseCreate(payload) = &ws_request;
++                crate::request_observation::dispatching(
++                    prompt.tool_admission.as_ref(),
++                    payload.model,
++                    payload.reasoning,
++                    payload.service_tier,
++                    if model_info.use_responses_lite {
++                        codex_extension_api::ModelRequestWire::ResponsesLite
++                    } else {
++                        codex_extension_api::ModelRequestWire::Responses
++                    },
++                    codex_extension_api::ModelRequestTransport::Websocket,
++                )
++            };
+             let stream_result = websocket_connection
+                 .stream_request(
+                     ws_request,
+@@ -2122,13 +2157,14 @@ impl ModelClientSession {
+                 );
+                 err
+             })?;
+-            let (stream, last_request_rx) = map_response_stream(
++            let (mut stream, last_request_rx) = map_response_stream(
+                 stream_result,
+                 request_session_telemetry,
+                 inference_trace_attempt,
+                 Arc::clone(&self.client.state.provider),
+                 interceptors,
+             );
++            stream.request_observation = request_observation;
+             self.websocket_session.last_response_rx = Some(last_request_rx);
+             return Ok(WebsocketStreamOutcome::Stream(stream));
+         }
+@@ -2558,6 +2594,7 @@ where
+         ResponseStream {
+             observation_processed: observation_processed_for_stream,
+             observation_pending: false,
++            request_observation: None,
+             rx_event,
+             interrupt: None,
+             consumer_dropped: consumer_dropped_for_stream,
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 41ef1f0d8dbcb3d644c1f6d2ef46ec9f61682fe9..b36753d97772d16c92b43d3c4c5877f828ce6fe4 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -128,6 +128,8 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
+ pub struct ResponseStream {
+     pub(crate) observation_processed: Arc<Notify>,
+     pub(crate) observation_pending: bool,
++    pub(crate) request_observation:
++        Option<Arc<crate::request_observation::RequestObservationContext>>,
+     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
+     pub(crate) interrupt: Option<oneshot::Sender<()>>,
+     /// Signals the mapper task that the consumer stopped polling before the
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index bb266ca2c7fbb92bfbcad80f919f8ba1f7a704a3..604c5e0dbd056071cfc813162c38961e6b2163e4 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -848,6 +848,7 @@ mod tests {
+         ResponseStream {
+             observation_processed: Arc::new(tokio::sync::Notify::new()),
+             observation_pending: false,
++            request_observation: None,
+             rx_event,
+             interrupt: None,
+             consumer_dropped: CancellationToken::new(),
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 5a5ae1d2c56ba260486336404a586652845a300e..669e33df55c11457a4b676e333de82a2e8cb49cc 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -15,6 +15,7 @@ mod realtime_context;
+ mod realtime_conversation;
+ mod realtime_history;
+ mod realtime_prompt;
++mod request_observation;
+ mod responses_headers;
+ pub use responses_headers::CodexResponsesHeaders;
+ mod responses_metadata;
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index bd14832c53491306aca18c98b781ab3fdafbd826..d228557f2d322b6cbaaa64e20d1d700f9bf5a7ac 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -32,6 +32,7 @@ async fn interceptors_forward_before_completion_in_order_and_cancel_upstream() {
+             ResponseStream {
+                 observation_processed: Arc::new(tokio::sync::Notify::new()),
+                 observation_pending: false,
++                request_observation: None,
+                 rx_event,
+                 interrupt: None,
+                 consumer_dropped,
+diff --git a/codex-rs/core/src/request_observation.rs b/codex-rs/core/src/request_observation.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf67bf31212260bcfa58703dedcdfe466540ac66
+--- /dev/null
++++ b/codex-rs/core/src/request_observation.rs
+@@ -0,0 +1,103 @@
++//! Final scalar projection at selected client invocation; delivery is best effort.
++use codex_api::Reasoning;
++use codex_extension_api::ModelRequestDispatching;
++use codex_extension_api::ModelRequestEffort;
++use codex_extension_api::ModelRequestObservation;
++use codex_extension_api::ModelRequestObservationRoute;
++use codex_extension_api::ModelRequestTransport;
++use codex_extension_api::ModelRequestWire;
++use codex_extension_api::ModelResponseLinked;
++use codex_extension_api::ModelToolAdmission;
++use std::sync::Arc;
++
++/// Transient request identity and the original immutable SDK submission route.
++#[derive(Debug)]
++pub(crate) struct RequestObservationContext {
++    // Retain original store object identity; never re-query a current turn.
++    _admission: Arc<dyn ModelToolAdmission>,
++    request_id: String,
++    thread_id: String,
++    turn_id: String,
++    route: Arc<ModelRequestObservationRoute>,
++}
++impl RequestObservationContext {
++    pub(crate) fn response_linked(&self, response_observation_id: &str) {
++        self.route
++            .0
++            .observe(ModelRequestObservation::ResponseLinked(
++                ModelResponseLinked {
++                    request_id: self.request_id.clone(),
++                    thread_id: self.thread_id.clone(),
++                    turn_id: self.turn_id.clone(),
++                    response_observation_id: response_observation_id.to_owned(),
++                },
++            ));
++    }
++}
++
++/// Serialize only Reasoning so effort follows the native wire serializer exactly.
++/// A projection failure drops metadata; it must never reject an inference request.
++fn resolved_reasoning(
++    reasoning: Option<&Reasoning>,
++) -> Option<(Option<ModelRequestEffort>, Option<String>)> {
++    let Some(reasoning) = reasoning else {
++        return Some((None, None));
++    };
++    let value = serde_json::to_value(reasoning).ok()?;
++    let effort = match value.get("effort") {
++        None | Some(serde_json::Value::Null) => None,
++        Some(serde_json::Value::String(value)) => Some(ModelRequestEffort::Text(value.clone())),
++        Some(value) => Some(ModelRequestEffort::Integer(value.as_u64()?)),
++    };
++    let summary = match value.get("summary") {
++        None | Some(serde_json::Value::Null) => None,
++        Some(value) => Some(value.as_str()?.to_owned()),
++    };
++    Some((effort, summary))
++}
++
++/// Invoke synchronously after applicable existing checks, before entering the API.
++/// The transport may still fail encoding or send zero bytes. Its internal retries
++/// share this invocation; later client invocations call this function afresh.
++pub(crate) fn dispatching(
++    admission: Option<&Arc<dyn ModelToolAdmission>>,
++    model: &str,
++    reasoning: Option<&Reasoning>,
++    service_tier: Option<&str>,
++    wire: ModelRequestWire,
++    transport: ModelRequestTransport,
++) -> Option<Arc<RequestObservationContext>> {
++    let admission = admission?;
++    let route = admission
++        .turn_store()
++        .get::<ModelRequestObservationRoute>()?;
++    let (reasoning_effort, reasoning_summary) = resolved_reasoning(reasoning)?;
++    let context = Arc::new(RequestObservationContext {
++        _admission: Arc::clone(admission),
++        request_id: uuid::Uuid::now_v7().to_string(),
++        thread_id: admission.thread_id().to_owned(),
++        turn_id: admission.turn_store().level_id().to_owned(),
++        route,
++    });
++    context
++        .route
++        .0
++        .observe(ModelRequestObservation::Dispatching(
++            ModelRequestDispatching {
++                request_id: context.request_id.clone(),
++                thread_id: context.thread_id.clone(),
++                turn_id: context.turn_id.clone(),
++                model: model.to_owned(),
++                reasoning_effort,
++                reasoning_summary,
++                service_tier: service_tier.map(str::to_owned),
++                wire,
++                transport,
++            },
++        ));
++    Some(context)
++}
++
++#[cfg(test)]
++#[path = "request_observation_tests.rs"]
++mod tests;
+diff --git a/codex-rs/core/src/request_observation_tests.rs b/codex-rs/core/src/request_observation_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9665e6413c739db672f0da2877561e5e2497d14f
+--- /dev/null
++++ b/codex-rs/core/src/request_observation_tests.rs
+@@ -0,0 +1,205 @@
++use super::*;
++use codex_extension_api::ExtensionData;
++use codex_extension_api::ModelRequestObserver;
++use codex_protocol::config_types::ReasoningSummary;
++use codex_protocol::models::ResponseItem;
++use codex_protocol::openai_models::ReasoningEffort;
++use serde_json::json;
++use std::sync::atomic::{AtomicBool, Ordering};
++use tokio::sync::mpsc;
++
++#[derive(Debug)]
++struct BoundedRoute {
++    sender: mpsc::Sender<ModelRequestObservation>,
++    retired: AtomicBool,
++}
++impl ModelRequestObserver for BoundedRoute {
++    fn observe(&self, observation: ModelRequestObservation) {
++        if !self.retired.load(Ordering::Acquire) {
++            // Full and closed queues intentionally lose observations.
++            let _ = self.sender.try_send(observation);
++        }
++    }
++}
++#[derive(Debug)]
++struct Admission {
++    thread: String,
++    store: ExtensionData,
++}
++impl ModelToolAdmission for Admission {
++    fn thread_id(&self) -> &str {
++        &self.thread
++    }
++    fn turn_store(&self) -> &ExtensionData {
++        &self.store
++    }
++    fn admits(&self, _: &ResponseItem) -> bool {
++        false
++    }
++}
++
++fn fixture(
++    capacity: usize,
++) -> (
++    Arc<dyn ModelToolAdmission>,
++    Arc<BoundedRoute>,
++    mpsc::Receiver<ModelRequestObservation>,
++) {
++    let (sender, receiver) = mpsc::channel(capacity);
++    let route = Arc::new(BoundedRoute {
++        sender,
++        retired: AtomicBool::new(false),
++    });
++    let admission = Arc::new(Admission {
++        thread: "original-thread".into(),
++        store: ExtensionData::new("original-turn"),
++    });
++    admission
++        .store
++        .get_or_init(|| ModelRequestObservationRoute(route.clone()));
++    (admission, route, receiver)
++}
++fn notify(
++    admission: Option<&Arc<dyn ModelToolAdmission>>,
++) -> Option<Arc<RequestObservationContext>> {
++    dispatching(
++        admission,
++        "resolved-model",
++        None,
++        None,
++        ModelRequestWire::Responses,
++        ModelRequestTransport::HttpSse,
++    )
++}
++
++#[test]
++fn effort_bridge_preserves_wire_scalar_kind_and_exact_integer() {
++    for (input, expected) in [
++        (
++            "18446744073709551615",
++            json!({"kind":"integer", "decimal":"18446744073709551615"}),
++        ),
++        (
++            "9007199254740993",
++            json!({"kind":"integer", "decimal":"9007199254740993"}),
++        ),
++        ("00042", json!({"kind":"integer", "decimal":"42"})),
++        (
++            "18446744073709551616",
++            json!({"kind":"text", "value":"18446744073709551616"}),
++        ),
++        ("1e3", json!({"kind":"text", "value":"1e3"})),
++        ("high", json!({"kind":"text", "value":"high"})),
++    ] {
++        let reasoning = Reasoning {
++            effort: Some(ReasoningEffort::Custom(input.into())),
++            summary: None,
++            context: None,
++        };
++        let (effort, summary) =
++            resolved_reasoning(Some(&reasoning)).expect("known scalar reasoning");
++        assert_eq!(effort.expect("present effort").to_bridge_value(), expected);
++        assert_eq!(summary, None);
++    }
++    assert_eq!(resolved_reasoning(None), Some((None, None)));
++    let reasoning = Reasoning {
++        effort: None,
++        summary: Some(ReasoningSummary::Detailed),
++        context: None,
++    };
++    assert_eq!(
++        resolved_reasoning(Some(&reasoning)),
++        Some((None, Some("detailed".into())))
++    );
++}
++
++#[test]
++fn no_captured_route_produces_no_observation_or_rejection() {
++    assert!(notify(None).is_none());
++    let admission: Arc<dyn ModelToolAdmission> = Arc::new(Admission {
++        thread: "thread".into(),
++        store: ExtensionData::new("turn"),
++    });
++    assert!(notify(Some(&admission)).is_none());
++}
++
++#[test]
++fn invocation_and_terminal_link_share_exact_original_identity() {
++    let (admission, _, mut receiver) = fixture(8);
++    let first = notify(Some(&admission)).expect("captured root route");
++    let second = dispatching(
++        Some(&admission),
++        "resolved-model-2",
++        None,
++        Some("flex"),
++        ModelRequestWire::ResponsesLite,
++        ModelRequestTransport::Websocket,
++    )
++    .expect("captured root route");
++    assert!(std::ptr::eq(
++        first._admission.turn_store(),
++        admission.turn_store()
++    ));
++    let first_event = receiver
++        .try_recv()
++        .expect("first invocation")
++        .to_bridge_value();
++    let second_event = receiver
++        .try_recv()
++        .expect("second invocation")
++        .to_bridge_value();
++    assert_ne!(first_event["request_id"], second_event["request_id"]);
++    assert_eq!(first_event["thread_id"], "original-thread");
++    assert_eq!(first_event["turn_id"], "original-turn");
++    assert_eq!(first_event["model"], "resolved-model");
++    assert_eq!(first_event["service_tier"], serde_json::Value::Null);
++    assert_eq!(first_event["reasoning_effort"], serde_json::Value::Null);
++    assert_eq!(first_event["transport"], "http_sse");
++    assert_eq!(second_event["wire"], "responses_lite");
++    assert_eq!(second_event["transport"], "websocket");
++    assert_eq!(second_event["service_tier"], "flex");
++    first.response_linked("occurrence-A");
++    second.response_linked("occurrence-B");
++    let first_link = receiver
++        .try_recv()
++        .expect("first retained occurrence")
++        .to_bridge_value();
++    let second_link = receiver
++        .try_recv()
++        .expect("second retained occurrence")
++        .to_bridge_value();
++    assert_eq!(first_link["request_id"], first_event["request_id"]);
++    assert_eq!(first_link["response_observation_id"], "occurrence-A");
++    assert_eq!(second_link["request_id"], second_event["request_id"]);
++    assert_eq!(second_link["response_observation_id"], "occurrence-B");
++    assert_eq!(first_link["thread_id"], "original-thread");
++    assert_eq!(first_link["turn_id"], "original-turn");
++    assert_eq!(first_event.as_object().expect("object").len(), 10);
++    assert_eq!(first_link.as_object().expect("object").len(), 5);
++}
++
++#[test]
++fn native_full_closed_and_retired_routes_are_nonblocking_and_do_not_redirect() {
++    let (admission, route, mut receiver) = fixture(1);
++    let first = notify(Some(&admission)).expect("first context");
++    // The queue is already full. A second invocation still receives its context.
++    assert!(notify(Some(&admission)).is_some());
++    receiver.try_recv().expect("only retained notification");
++    assert!(receiver.try_recv().is_err());
++    route.retired.store(true, Ordering::Release);
++    first.response_linked("retained-before-retirement");
++    assert!(receiver.try_recv().is_err());
++    let (later_admission, _, mut later_receiver) = fixture(1);
++    let later = notify(Some(&later_admission)).expect("later owner");
++    assert_ne!(first.request_id, later.request_id);
++    first.response_linked("late-old-occurrence");
++    let later_event = later_receiver
++        .try_recv()
++        .expect("later owner event")
++        .to_bridge_value();
++    assert_eq!(later_event["request_id"], later.request_id);
++    assert!(later_receiver.try_recv().is_err());
++    drop(receiver);
++    route.retired.store(false, Ordering::Release);
++    assert!(notify(Some(&admission)).is_some());
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 1f243952b0e9558243b20e5e5da2a7928141cddd..22f848a788512f008c73326694901f640343ea45 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2637,6 +2637,7 @@ async fn try_run_sampling_request(
+     if cancellation_token.is_cancelled() {
+         return Err(CodexErr::TurnAborted);
+     }
++    let request_observation = stream.request_observation.clone();
+     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
+     let tool_cancellation = cancellation_token.child_token();
+     let mut needs_follow_up = false;
+@@ -3013,7 +3014,12 @@ async fn try_run_sampling_request(
+                     break Err(CodexErr::TurnAborted);
+                 }
+                 match result {
+-                    Ok(id) => response_observation_id = id,
++                    Ok(id) => {
++                        if let (Some(context), Some(id)) = (&request_observation, id.as_deref()) {
++                            context.response_linked(id);
++                        }
++                        response_observation_id = id;
++                    }
+                     Err(error) => {
+                         // Join this sample's tools without cancelling the turn
+                         // that must report the original persistence failure.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 940dc5f1f5d7437fdeaca8e333da3ba91146bd12..e44afa9b206b7b346863fa76eb4164186e3d21f4 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -126,6 +126,13 @@ pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
+ pub use model_request::TurnSamplingStop;
+
++mod model_request_observation;
++pub use model_request_observation::{
++    ModelRequestDispatching, ModelRequestEffort, ModelRequestObservation,
++    ModelRequestObservationRoute, ModelRequestObserver, ModelRequestTransport, ModelRequestWire,
++    ModelResponseLinked,
++};
++
+ /// SDK host context for recording the settings used to prepare a sampling request.
+ pub struct SdkTurnReceiptSeed {
+     pub codex_revision: &'static str,
+diff --git a/codex-rs/ext/extension-api/src/model_request_observation.rs b/codex-rs/ext/extension-api/src/model_request_observation.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..fe2ebeb27bbd9791843db68c9c86135fa494fc2a
+--- /dev/null
++++ b/codex-rs/ext/extension-api/src/model_request_observation.rs
+@@ -0,0 +1,117 @@
++//! Passive, metadata-only observations for an exact SDK-owned root sampling turn.
++use std::sync::Arc;
++
++/// Effort's serialized scalar kind. Bindings must preserve it before JSON parsing.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum ModelRequestEffort {
++    Text(String),
++    Integer(u64),
++}
++impl ModelRequestEffort {
++    /// Private binding encoding; decimal text prevents host JSON-number rounding.
++    pub fn to_bridge_value(&self) -> serde_json::Value {
++        match self {
++            Self::Text(value) => serde_json::json!({"kind": "text", "value": value}),
++            Self::Integer(value) => {
++                serde_json::json!({"kind": "integer", "decimal": value.to_string()})
++            }
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum ModelRequestWire {
++    Responses,
++    ResponsesLite,
++}
++impl ModelRequestWire {
++    fn as_str(self) -> &'static str {
++        match self {
++            Self::Responses => "responses",
++            Self::ResponsesLite => "responses_lite",
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum ModelRequestTransport {
++    HttpSse,
++    Websocket,
++}
++impl ModelRequestTransport {
++    fn as_str(self) -> &'static str {
++        match self {
++            Self::HttpSse => "http_sse",
++            Self::Websocket => "websocket",
++        }
++    }
++}
++
++/// Reaching this notification does not establish serialization or a network send.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct ModelRequestDispatching {
++    pub request_id: String,
++    pub thread_id: String,
++    pub turn_id: String,
++    pub model: String,
++    pub reasoning_effort: Option<ModelRequestEffort>,
++    pub reasoning_summary: Option<String>,
++    pub service_tier: Option<String>,
++    pub wire: ModelRequestWire,
++    pub transport: ModelRequestTransport,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct ModelResponseLinked {
++    pub request_id: String,
++    pub thread_id: String,
++    pub turn_id: String,
++    pub response_observation_id: String,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum ModelRequestObservation {
++    Dispatching(ModelRequestDispatching),
++    ResponseLinked(ModelResponseLinked),
++}
++impl ModelRequestObservation {
++    /// Safe private native-to-host bridge. Contains no body, endpoint or headers.
++    pub fn to_bridge_value(&self) -> serde_json::Value {
++        match self {
++            Self::Dispatching(event) => serde_json::json!({
++                "type": "model_request_dispatching",
++                "request_id": event.request_id,
++                "thread_id": event.thread_id,
++                "turn_id": event.turn_id,
++                "model": event.model,
++                "reasoning_effort": event.reasoning_effort.as_ref().map(ModelRequestEffort::to_bridge_value),
++                "reasoning_summary": event.reasoning_summary,
++                "service_tier": event.service_tier,
++                "wire": event.wire.as_str(),
++                "transport": event.transport.as_str(),
++            }),
++            Self::ResponseLinked(event) => serde_json::json!({
++                "type": "model_response_linked",
++                "request_id": event.request_id,
++                "thread_id": event.thread_id,
++                "turn_id": event.turn_id,
++                "response_observation_id": event.response_observation_id,
++            }),
++        }
++    }
++}
++
++/// Internal SDK route, captured for one immutable public submission/handle.
++///
++/// Implementations must use bounded, nonblocking delivery and return immediately.
++/// Full/closed/retired routes drop the record. Never invoke application callbacks,
++/// look up a current turn, await capacity, or propagate delivery failure to inference.
++/// The captured owner must fence retired submissions without redirecting records.
++pub trait ModelRequestObserver: Send + Sync + std::fmt::Debug {
++    fn observe(&self, observation: ModelRequestObservation);
++}
++
++/// Install only in a managed direct-root turn's exact ExtensionData store.
++/// Missing routes leave execution unchanged. Children must not inherit this value.
++#[derive(Clone, Debug)]
++pub struct ModelRequestObservationRoute(pub Arc<dyn ModelRequestObserver>);

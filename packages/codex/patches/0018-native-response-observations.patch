@@ -1,0 +1,1979 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history.rs b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+index e7128a59cc3cc7f859d41a1326e0b6f9516c307b..b32ef6d20c8d0c9fa26cd121e630641fa871aa24 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+@@ -429,6 +429,7 @@ impl ThreadHistoryBuilder {
+             RolloutItem::InterAgentCommunication(_)
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::TurnContext(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::WorldState(_)
+             | RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history_projection.rs b/codex-rs/app-server-protocol/src/protocol/thread_history_projection.rs
+index b6ad558bb5169cf941cf0d1b23918e35b8de94f9..c3171c9a862ec9593605e6d6e2e56dee9c10aa2f 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history_projection.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history_projection.rs
+@@ -90,6 +90,7 @@ pub fn project_rollout_line(line: &RolloutLine) -> ThreadHistoryChangeSet {
+         | RolloutItem::InterAgentCommunicationMetadata { .. }
+         | RolloutItem::Compacted(_)
+         | RolloutItem::TurnContext(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::WorldState(_)
+         | RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 14a0d6bc11c7421892c572b5be030e1e4a1a9314..6d06a772419412521635d0a9dcbe9690b43fe9e5 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -80,6 +80,7 @@ pub struct ResponseId(pub String);
+
+ #[derive(Debug)]
+ pub enum ResponseEvent {
++    ResponseObserved(codex_protocol::protocol::ResponseObservation),
+     Created {
+         /// Existing server response ID, when supplied by the stream.
+         response_id: Option<String>,
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 794b4d0a99b8767f7a2b7a1f1b766aab72ae0cd2..98219bdf8bd693971bf16f6057d44345ed138199 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -833,6 +833,16 @@ async fn run_websocket_response_stream(
+                         "response event consumer dropped".to_string(),
+                     ));
+                 }
++                if let Some(observation) = event.response_observation()
++                    && tx_event
++                        .send(Ok(ResponseEvent::ResponseObserved(observation)))
++                        .await
++                        .is_err()
++                {
++                    return Err(ApiError::Stream(
++                        "response event consumer dropped".to_string(),
++                    ));
++                }
+                 match process_responses_event(event) {
+                     Ok(Some(event)) => {
+                         if let ResponseEvent::Created { response_id: id } = &event {
+@@ -958,6 +968,76 @@ mod tests {
+     use std::collections::HashMap;
+     use std::sync::Arc;
+
++    #[tokio::test]
++    async fn websocket_observes_incomplete_before_returning_existing_error() {
++        let (tx_command, mut rx_command) = mpsc::channel(1);
++        let (tx_message, rx_message) = mpsc::unbounded_channel();
++        let pump_task =
++            tokio::spawn(async move {
++                let Some(WsCommand::Send { message, tx_result }) = rx_command.recv().await else {
++                    panic!("missing response.create");
++                };
++                assert!(matches!(message, Message::Text(_)));
++                tx_result.send(Ok(())).unwrap();
++                tx_message.send(Ok(Message::Text(json!({
++                "type": "response.incomplete", "response": {
++                    "id": "ws-response", "incomplete_details": {"reason": "content_filter"},
++                    "usage": {"input_tokens": 0}
++                }
++            }).to_string().into()))).unwrap();
++            });
++        let mut stream = WsStream {
++            tx_command,
++            rx_message,
++            pump_task,
++            upgrade_rate_limits: None,
++        };
++        let (tx_event, mut rx_event) = mpsc::channel(8);
++        let (_tx_interrupt, rx_interrupt) = oneshot::channel();
++        let context = ResponsesWebsocketTimingLogContext {
++            model: "test-model".to_string(),
++            session_id: None,
++            thread_id: None,
++            turn_id: None,
++            traceparent: None,
++            previous_response_id: None,
++            request_start_ms: None,
++            warmup: false,
++            connection_reused: false,
++        };
++        let error = run_websocket_response_stream(
++            &mut stream,
++            tx_event,
++            "{}".to_string(),
++            Duration::from_secs(1),
++            None,
++            None,
++            &context,
++            rx_interrupt,
++        )
++        .await
++        .unwrap_err();
++        assert!(matches!(error, ApiError::ContentFilter));
++        let ResponseEvent::ResponseObserved(observation) = rx_event.recv().await.unwrap().unwrap()
++        else {
++            panic!("missing websocket terminal observation");
++        };
++        assert_eq!(observation.response_id.as_deref(), Some("ws-response"));
++        assert_eq!(
++            observation.status,
++            codex_protocol::protocol::ResponseObservationStatus::Incomplete
++        );
++        assert_eq!(
++            observation.incomplete_reason,
++            Some(codex_protocol::protocol::ResponseIncompleteReason::ContentFilter)
++        );
++        let usage = observation.usage.unwrap();
++        assert_eq!(usage.input_tokens, Some(0));
++        assert_eq!(usage.cached_input_tokens, None);
++        assert_eq!(usage.total_tokens, None);
++        assert!(rx_event.recv().await.is_none());
++    }
++
+     #[test]
+     fn direct_serialization_preserves_websocket_request_payload() {
+         let api_request = ResponsesApiRequest {
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index ab5901be538752cc4af26d078b866a5b1da26fe3..d670ff1eccfd5dcf10951f37c3d66bc8e125af49 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -191,6 +191,60 @@ where
+ }
+
+ impl ResponsesStreamEvent {
++    /// Read only safe typed facts; malformed or missing counters stay unknown.
++    pub(crate) fn response_observation(
++        &self,
++    ) -> Option<codex_protocol::protocol::ResponseObservation> {
++        use codex_protocol::protocol::{
++            ReceivedResponseUsage, ResponseIncompleteReason, ResponseObservation,
++            ResponseObservationStatus,
++        };
++        let status = match self.kind() {
++            "response.completed" => ResponseObservationStatus::Completed,
++            "response.incomplete" => ResponseObservationStatus::Incomplete,
++            "response.failed" => ResponseObservationStatus::Failed,
++            _ => return None,
++        };
++        let response = self.response.as_ref();
++        let usage = response
++            .and_then(|r| r.get("usage"))
++            .filter(|u| u.is_object())
++            .map(|u| ReceivedResponseUsage {
++                input_tokens: u.get("input_tokens").and_then(Value::as_i64),
++                cached_input_tokens: u
++                    .pointer("/input_tokens_details/cached_tokens")
++                    .and_then(Value::as_i64),
++                cache_write_input_tokens: u
++                    .pointer("/input_tokens_details/cache_write_tokens")
++                    .and_then(Value::as_i64),
++                output_tokens: u.get("output_tokens").and_then(Value::as_i64),
++                reasoning_output_tokens: u
++                    .pointer("/output_tokens_details/reasoning_tokens")
++                    .and_then(Value::as_i64),
++                total_tokens: u.get("total_tokens").and_then(Value::as_i64),
++            });
++        let incomplete_reason = (status == ResponseObservationStatus::Incomplete).then(|| {
++            match response
++                .and_then(|r| r.pointer("/incomplete_details/reason"))
++                .and_then(Value::as_str)
++            {
++                Some("content_filter") => ResponseIncompleteReason::ContentFilter,
++                Some("max_output_tokens") => ResponseIncompleteReason::MaxOutputTokens,
++                Some("interrupted") => ResponseIncompleteReason::Interrupted,
++                _ => ResponseIncompleteReason::Unknown,
++            }
++        });
++        Some(ResponseObservation {
++            response_id: response
++                .and_then(|r| r.get("id"))
++                .and_then(Value::as_str)
++                .map(str::to_owned),
++            status,
++            incomplete_reason,
++            usage,
++        })
++    }
++
+     pub fn kind(&self) -> &str {
+         &self.kind
+     }
+@@ -660,6 +714,14 @@ async fn process_sse_with_treatment(
+             return;
+         }
+
++        if let Some(observation) = event.response_observation()
++            && tx_event
++                .send(Ok(ResponseEvent::ResponseObserved(observation)))
++                .await
++                .is_err()
++        {
++            return;
++        }
+         match process_responses_event(event) {
+             Ok(Some(event)) => {
+                 let is_completed = matches!(event, ResponseEvent::Completed { .. });
+@@ -712,6 +774,114 @@ mod tests {
+     use tokio_test::io::Builder as IoBuilder;
+     use tokio_util::io::ReaderStream;
+
++    #[tokio::test]
++    async fn received_terminal_facts_precede_existing_settlement() {
++        use codex_protocol::protocol::{ResponseIncompleteReason, ResponseObservationStatus};
++        for (kind, reason, status) in [
++            (
++                "response.completed",
++                None,
++                ResponseObservationStatus::Completed,
++            ),
++            (
++                "response.incomplete",
++                Some("max_output_tokens"),
++                ResponseObservationStatus::Incomplete,
++            ),
++            (
++                "response.incomplete",
++                Some("content_filter"),
++                ResponseObservationStatus::Incomplete,
++            ),
++            (
++                "response.incomplete",
++                Some("interrupted"),
++                ResponseObservationStatus::Incomplete,
++            ),
++            ("response.failed", None, ResponseObservationStatus::Failed),
++        ] {
++            let terminal = json!({"type": kind, "response": {
++                "id": "reused-response", "incomplete_details": {"reason": reason},
++                "usage": {"input_tokens": 9007199254740993_i64, "output_tokens": 0, "total_tokens": 9007199254740993_i64,
++                    "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}
++            }});
++            let body = format!("data: {terminal}\n\n");
++            let events = collect_events(&[body.as_bytes()]).await;
++            assert_eq!(events.len(), 2);
++            let Ok(ResponseEvent::ResponseObserved(observation)) = &events[0] else {
++                panic!("missing observation: {events:?}")
++            };
++            assert_eq!(observation.response_id.as_deref(), Some("reused-response"));
++            assert_eq!(observation.status, status);
++            let usage = observation.usage.as_ref().unwrap();
++            assert_eq!(usage.input_tokens, Some(9007199254740993));
++            assert_eq!(usage.cache_write_input_tokens, Some(0));
++            assert_eq!(usage.cached_input_tokens, Some(0));
++            assert_eq!(usage.reasoning_output_tokens, None);
++            if reason == Some("content_filter") {
++                assert_eq!(
++                    observation.incomplete_reason,
++                    Some(ResponseIncompleteReason::ContentFilter)
++                );
++                assert_matches!(&events[1], Err(ApiError::ContentFilter));
++            } else if kind == "response.completed" || reason == Some("interrupted") {
++                assert_matches!(&events[1], Ok(ResponseEvent::Completed { .. }));
++            } else {
++                assert!(events[1].is_err());
++            }
++        }
++    }
++
++    #[test]
++    fn missing_received_values_are_not_normalized_or_derived() {
++        for usage in [
++            json!(null),
++            json!({}),
++            json!({"output_tokens": 0, "input_tokens_details": null}),
++        ] {
++            let event: ResponsesStreamEvent = serde_json::from_value(json!({
++                "type": "response.incomplete", "response": {"usage": usage}
++            }))
++            .unwrap();
++            let observation = event.response_observation().unwrap();
++            assert_eq!(observation.response_id, None);
++            assert_eq!(
++                observation.incomplete_reason,
++                Some(codex_protocol::protocol::ResponseIncompleteReason::Unknown)
++            );
++            assert_eq!(observation.usage.is_some(), usage.is_object());
++            if let Some(received) = observation.usage {
++                assert_eq!(received.input_tokens, None);
++                assert_eq!(received.total_tokens, None);
++                assert_eq!(
++                    received.output_tokens,
++                    usage.get("output_tokens").and_then(Value::as_i64)
++                );
++            }
++        }
++        let event: ResponsesStreamEvent =
++            serde_json::from_value(json!({"type": "response.created"})).unwrap();
++        assert!(event.response_observation().is_none());
++        let failed: ResponsesStreamEvent =
++            serde_json::from_value(json!({"type": "response.failed"})).unwrap();
++        let observation = failed.response_observation().unwrap();
++        assert_eq!(
++            observation.status,
++            codex_protocol::protocol::ResponseObservationStatus::Failed
++        );
++        assert_eq!(observation.response_id, None);
++        assert_eq!(observation.usage, None);
++        assert_eq!(observation.incomplete_reason, None);
++    }
++
++    async fn collect_legacy_events(chunks: &[&[u8]]) -> Vec<Result<ResponseEvent, ApiError>> {
++        collect_events(chunks)
++            .await
++            .into_iter()
++            .filter(|event| !matches!(event, Ok(ResponseEvent::ResponseObserved(_))))
++            .collect()
++    }
++
+     async fn collect_events(chunks: &[&[u8]]) -> Vec<Result<ResponseEvent, ApiError>> {
+         let mut builder = IoBuilder::new();
+         for chunk in chunks {
+@@ -832,7 +1002,7 @@ mod tests {
+                     .iter()
+                     .map(|event| format!("data: {event}\n\n"))
+                     .collect::<String>();
+-                let results = collect_events(&[body.as_bytes()]).await;
++                let results = collect_legacy_events(&[body.as_bytes()]).await;
+                 assert_eq!(results.len(), 2);
+                 assert_matches!(&results[0], Ok(ResponseEvent::OutputTextDelta(text)) if text == "earlier commentary");
+                 assert_matches!(&results[1], Err(ApiError::InvalidRequest { message })
+@@ -868,7 +1038,10 @@ mod tests {
+
+         let mut out = Vec::new();
+         while let Some(ev) = rx.recv().await {
+-            out.push(ev.expect("channel closed"));
++            let event = ev.expect("channel closed");
++            if !matches!(event, ResponseEvent::ResponseObserved(_)) {
++                out.push(event);
++            }
+         }
+         out
+     }
+@@ -910,7 +1083,8 @@ mod tests {
+         let sse2 = format!("event: response.output_item.done\ndata: {item2}\n\n");
+         let sse3 = format!("event: response.completed\ndata: {completed}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes(), sse2.as_bytes(), sse3.as_bytes()]).await;
++        let events =
++            collect_legacy_events(&[sse1.as_bytes(), sse2.as_bytes(), sse3.as_bytes()]).await;
+
+         assert_eq!(events.len(), 3);
+
+@@ -1014,7 +1188,7 @@ mod tests {
+
+         let sse1 = format!("event: response.output_item.done\ndata: {item1}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 2);
+
+@@ -1119,7 +1293,9 @@ mod tests {
+         let events = tokio::time::timeout(Duration::from_millis(1000), async {
+             let mut events = Vec::new();
+             while let Some(ev) = rx.recv().await {
+-                events.push(ev);
++                if !matches!(ev, Ok(ResponseEvent::ResponseObserved(_))) {
++                    events.push(ev);
++                }
+             }
+             events
+         })
+@@ -1149,7 +1325,7 @@ mod tests {
+
+         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+
+@@ -1186,7 +1362,7 @@ mod tests {
+                 "response": { "error": { "code": code, "message": message } },
+             });
+             let sse = format!("event: response.failed\ndata: {event}\n\n");
+-            let events = collect_events(&[sse.as_bytes()]).await;
++            let events = collect_legacy_events(&[sse.as_bytes()]).await;
+             match (code, events.as_slice()) {
+                 (
+                     "rate_limit_exceeded" | "slow_down",
+@@ -1225,7 +1401,7 @@ mod tests {
+             json!({"type": "response.failed", "response": {"error": {"code": "server_is_overloaded", "plan_type": 42}}}),
+         ] {
+             let sse = format!("event: response.failed\ndata: {event}\n\n");
+-            let events = collect_events(&[sse.as_bytes()]).await;
++            let events = collect_legacy_events(&[sse.as_bytes()]).await;
+             match events.as_slice() {
+                 [Err(ApiError::Stream(message))] => {
+                     assert_eq!(message, "response.failed event received");
+@@ -1241,7 +1417,7 @@ mod tests {
+
+         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+
+@@ -1254,7 +1430,7 @@ mod tests {
+
+         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+
+@@ -1267,7 +1443,7 @@ mod tests {
+
+         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+
+@@ -1280,7 +1456,7 @@ mod tests {
+
+         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+
+@@ -1298,7 +1474,7 @@ mod tests {
+
+         let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-        let events = collect_events(&[sse1.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+
+@@ -1318,7 +1494,7 @@ mod tests {
+         let raw_error = r#"{"type":"response.failed","sequence_number":3,"response":{"id":"resp_fatal_misalignment","object":"response","status":"failed","error":{"type":"invalid_request_error","code":"misalignment_policy_violation","message":"This request violated the misalignment policy."}}}"#;
+
+         let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+-        let events = collect_events(&[sse.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+         match &events[0] {
+@@ -1349,7 +1525,7 @@ mod tests {
+                 },
+             });
+             let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+-            let events = collect_events(&[sse.as_bytes()]).await;
++            let events = collect_legacy_events(&[sse.as_bytes()]).await;
+
+             assert_eq!(events.len(), 1);
+             match &events[0] {
+@@ -1381,7 +1557,7 @@ mod tests {
+             }
+         });
+         let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+-        let events = collect_events(&[sse.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+         match &events[0] {
+@@ -1422,7 +1598,7 @@ mod tests {
+             }
+         });
+         let sse = format!("event: response.failed\ndata: {raw_error}\n\n");
+-        let events = collect_events(&[sse.as_bytes()]).await;
++        let events = collect_legacy_events(&[sse.as_bytes()]).await;
+
+         assert_eq!(events.len(), 1);
+         assert_matches!(
+@@ -1462,7 +1638,7 @@ mod tests {
+             .to_string();
+             let sse1 = format!("event: response.failed\ndata: {raw_error}\n\n");
+
+-            let events = collect_events(&[sse1.as_bytes()]).await;
++            let events = collect_legacy_events(&[sse1.as_bytes()]).await;
+
+             assert_eq!(events.len(), 1);
+             match (code, &events[0]) {
+@@ -1497,7 +1673,7 @@ mod tests {
+                     _ => fallback,
+                 };
+                 let sse = format!("event: response.failed\ndata: {event}\n\n");
+-                let events = collect_events(&[sse.as_bytes()]).await;
++                let events = collect_legacy_events(&[sse.as_bytes()]).await;
+                 match (code, events.as_slice()) {
+                     ("bio_policy", [Err(ApiError::BioPolicy { message })])
+                     | ("invalid_prompt", [Err(ApiError::InvalidPrompt { message })]) => {
+diff --git a/codex-rs/codex-api/tests/sse_end_to_end.rs b/codex-rs/codex-api/tests/sse_end_to_end.rs
+index 5c1dcb8ee5ba5657e93b5adc1f25a58435b61e1b..aba43ce9f19428b4970aaa65b5d0ed99621047c3 100644
+--- a/codex-rs/codex-api/tests/sse_end_to_end.rs
++++ b/codex-rs/codex-api/tests/sse_end_to_end.rs
+@@ -148,7 +148,7 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()>
+         .filter(|ev| !matches!(ev, ResponseEvent::RateLimits(_)))
+         .collect();
+
+-    assert_eq!(events.len(), 3);
++    assert_eq!(events.len(), 4);
+
+     match &events[0] {
+         ResponseEvent::OutputItemDone(ResponseItem::Message { role, .. }) => {
+@@ -165,6 +165,18 @@ async fn responses_stream_parses_items_and_completed_end_to_end() -> Result<()>
+     }
+
+     match &events[2] {
++        ResponseEvent::ResponseObserved(observation) => {
++            assert_eq!(observation.response_id.as_deref(), Some("resp1"));
++            assert_eq!(
++                observation.status,
++                codex_protocol::protocol::ResponseObservationStatus::Completed
++            );
++            assert_eq!(observation.usage.as_ref().unwrap().total_tokens, Some(15));
++        }
++        other => panic!("unexpected terminal observation: {other:?}"),
++    }
++
++    match &events[3] {
+         ResponseEvent::Completed {
+             response_id,
+             token_usage,
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 6957710644bec5e4d4935fca68dd4530273fffe8..da478e35f30a24fbe52140d8f0ac70adac8fa1bd 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -123,6 +123,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+         // from the parent's durable baseline. Truncated forks drop part of that prompt,
+         // so they must rebuild context on their first child turn.
+         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_context_baselines,
++        // Observations preserve their original identity without restoring aggregate usage.
++        RolloutItem::ResponseObservationRecord(_) => true,
+         // Child threads inherit model context, not the parent's cumulative usage state.
+         RolloutItem::TokenUsageRecord(_) => false,
+         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+@@ -1242,7 +1244,8 @@ impl LocalAgentControl {
+                     true
+                 }
+                 RolloutItem::RealtimeItem(_) => false,
+-                RolloutItem::EventMsg(_)
++                RolloutItem::ResponseObservationRecord(_)
++                | RolloutItem::EventMsg(_)
+                 | RolloutItem::SessionMeta(_)
+                 | RolloutItem::TurnContext(_)
+                 | RolloutItem::InterAgentCommunication(_)
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 1acd116f119642a1556a78d84cc70c2a3f857c4c..9c70ba9f1e57bb5371cddb966157bb8483e5dc36 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -2138,6 +2138,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
+         ..TokenUsage::default()
+     };
+     let parent_record = TokenUsageRecord {
++        response_observation_id: None,
+         thread_id: parent_thread_id,
+         turn_id: "parent-turn".to_string(),
+         session_id: parent_thread.session.session_id(),
+@@ -2205,6 +2206,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
+         .record_observed_response_completed(
+             turn_context.as_ref(),
+             "child-response",
++            None,
+             Some(&child_usage),
+             /*usage_metadata*/ None,
+         )
+@@ -2261,6 +2263,7 @@ async fn spawn_agent_fork_sanitizes_inherited_compaction_metadata() {
+     assert_eq!(
+         child_record,
+         Some(&TokenUsageRecord {
++            response_observation_id: None,
+             thread_id: child_thread_id,
+             turn_id: turn_context.sub_id.clone(),
+             session_id: child_thread.session.session_id(),
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..6aa1f046d67094df2ccaabd8f1f3a3a1b35e2b21 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2412,6 +2412,8 @@ where
+     let (tx_last_response, rx_last_response) = oneshot::channel::<LastResponse>();
+     let consumer_dropped = CancellationToken::new();
+     let consumer_dropped_for_stream = consumer_dropped.clone();
++    let observation_processed = Arc::new(tokio::sync::Notify::new());
++    let observation_processed_for_stream = Arc::clone(&observation_processed);
+
+     tokio::spawn(async move {
+         let mut logged_error = false;
+@@ -2490,6 +2492,7 @@ where
+                     }
+                 }
+                 Ok(event) => {
++                    let observation = matches!(&event, ResponseEvent::ResponseObserved(_));
+                     if matches!(&event, ResponseEvent::OutputItemAdded(_)) && ttft_ms.is_none() {
+                         ttft_ms = Some(
+                             i64::try_from(request_start.elapsed().as_millis()).unwrap_or(i64::MAX),
+@@ -2503,6 +2506,22 @@ where
+                         );
+                         return;
+                     }
++                    if observation {
++                        // Do not poll an interceptor's terminal rejection until
++                        // Core finishes retaining the preceding provider fact.
++                        // notify_one retains a permit if the consumer wins this race.
++                        tokio::select! {
++                            _ = consumer_dropped.cancelled() => {
++                                inference_trace_attempt.record_cancelled(
++                                    STREAM_DROPPED_REASON,
++                                    upstream_request_id,
++                                    &items_added,
++                                );
++                                return;
++                            }
++                            _ = observation_processed.notified() => {}
++                        }
++                    }
+                 }
+                 Err(err) => {
+                     let response_debug_context =
+@@ -2537,6 +2556,8 @@ where
+
+     (
+         ResponseStream {
++            observation_processed: observation_processed_for_stream,
++            observation_pending: false,
+             rx_event,
+             interrupt: None,
+             consumer_dropped: consumer_dropped_for_stream,
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 6188306e2ae26a96b758f2359697dc4ad4654b36..41ef1f0d8dbcb3d644c1f6d2ef46ec9f61682fe9 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -15,6 +15,7 @@ use std::pin::Pin;
+ use std::sync::Arc;
+ use std::task::Context;
+ use std::task::Poll;
++use tokio::sync::Notify;
+ use tokio::sync::mpsc;
+ use tokio::sync::oneshot;
+ use tokio_util::sync::CancellationToken;
+@@ -125,6 +126,8 @@ fn normalize_image_detail(detail: &mut Option<ImageDetail>, model_info: &ModelIn
+ }
+
+ pub struct ResponseStream {
++    pub(crate) observation_processed: Arc<Notify>,
++    pub(crate) observation_pending: bool,
+     pub(crate) rx_event: mpsc::Receiver<Result<ResponseEvent>>,
+     pub(crate) interrupt: Option<oneshot::Sender<()>>,
+     /// Signals the mapper task that the consumer stopped polling before the
+@@ -136,7 +139,19 @@ impl Stream for ResponseStream {
+     type Item = Result<ResponseEvent>;
+
+     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+-        self.rx_event.poll_recv(cx)
++        // The consumer persists an observation before requesting another event.
++        // Acknowledge once, including when that next request remains pending.
++        if std::mem::take(&mut self.observation_pending) {
++            self.observation_processed.notify_one();
++        }
++        let event = self.rx_event.poll_recv(cx);
++        if matches!(
++            &event,
++            Poll::Ready(Some(Ok(ResponseEvent::ResponseObserved(_))))
++        ) {
++            self.observation_pending = true;
++        }
++        event
+     }
+ }
+
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 779a40ca2be8f8687ca067f6e922d53be852c51c..05ea1c6119e5ae199d747d664f13b72e9c784c46 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -1547,6 +1547,169 @@ async fn summarize_memories_returns_empty_for_empty_input() {
+     assert_eq!(output.len(), 0);
+ }
+
++fn terminal_observation(response_id: &str) -> ResponseEvent {
++    ResponseEvent::ResponseObserved(codex_protocol::protocol::ResponseObservation {
++        response_id: Some(response_id.to_owned()),
++        status: codex_protocol::protocol::ResponseObservationStatus::Completed,
++        incomplete_reason: None,
++        usage: None,
++    })
++}
++
++#[tokio::test]
++async fn observation_retention_precedes_upstream_rejection() {
++    let polled = Arc::new(AtomicUsize::new(0));
++    let observed_polls = Arc::clone(&polled);
++    let api_stream = futures::stream::iter([
++        Ok(terminal_observation("retained")),
++        Err(ApiError::Stream("integrity rejection".to_owned())),
++    ])
++    .inspect(move |_| {
++        observed_polls.fetch_add(1, Ordering::SeqCst);
++    });
++    let (mut stream, _) = super::map_response_events(
++        None,
++        api_stream,
++        test_session_telemetry(),
++        InferenceTraceAttempt::disabled(),
++        test_model_provider(),
++    );
++    let (entered, retaining) = tokio::sync::oneshot::channel();
++    let (release, retained) = tokio::sync::oneshot::channel();
++    let consumer = tokio::spawn(async move {
++        assert!(matches!(
++            stream.next().await,
++            Some(Ok(ResponseEvent::ResponseObserved(_)))
++        ));
++        // Hold the consumer at the same boundary as an awaited canonical append.
++        entered.send(()).unwrap();
++        retained.await.unwrap();
++        stream.next().await
++    });
++    retaining.await.unwrap();
++    assert_eq!(polled.load(Ordering::SeqCst), 1);
++    release.send(()).unwrap();
++    let error = tokio::time::timeout(Duration::from_secs(5), consumer)
++        .await
++        .unwrap()
++        .unwrap()
++        .unwrap()
++        .unwrap_err();
++    assert!(error.to_string().contains("integrity rejection"));
++    assert_eq!(polled.load(Ordering::SeqCst), 2);
++}
++
++#[tokio::test]
++async fn pending_polls_cannot_acknowledge_a_later_observation() {
++    use futures::FutureExt;
++    use futures::Stream;
++
++    let (provider, mut events) = futures::channel::mpsc::unbounded();
++    provider
++        .unbounded_send(Ok(terminal_observation("first")))
++        .unwrap();
++    let polled = Arc::new(AtomicUsize::new(0));
++    let observed_polls = Arc::clone(&polled);
++    let (waiting, first_ack_consumed) = tokio::sync::oneshot::channel();
++    let mut waiting = Some(waiting);
++    let api_stream = futures::stream::poll_fn(move |cx| {
++        let next = std::pin::Pin::new(&mut events).poll_next(cx);
++        if matches!(&next, std::task::Poll::Ready(Some(_))) {
++            observed_polls.fetch_add(1, Ordering::SeqCst);
++        } else if next.is_pending()
++            && let Some(waiting) = waiting.take()
++        {
++            // Reaching upstream Pending proves the first acknowledgment was consumed.
++            waiting.send(()).unwrap();
++        }
++        next
++    });
++    let (mut stream, _) = super::map_response_events(
++        None,
++        api_stream,
++        test_session_telemetry(),
++        InferenceTraceAttempt::disabled(),
++        test_model_provider(),
++    );
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ResponseEvent::ResponseObserved(_)))
++    ));
++    assert!(stream.next().now_or_never().is_none());
++    first_ack_consumed.await.unwrap();
++    // These polls happen after the first permit was consumed. An erroneous
++    // extra acknowledgment cannot hide by coalescing with the first permit.
++    for _ in 0..3 {
++        assert!(stream.next().now_or_never().is_none());
++    }
++    provider
++        .unbounded_send(Ok(terminal_observation("second")))
++        .unwrap();
++    provider
++        .unbounded_send(Err(ApiError::Stream("integrity rejection".to_owned())))
++        .unwrap();
++    assert!(matches!(
++        stream.next().await,
++        Some(Ok(ResponseEvent::ResponseObserved(_)))
++    ));
++    assert_eq!(polled.load(Ordering::SeqCst), 2);
++    let error = stream.next().await.unwrap().unwrap_err();
++    assert!(error.to_string().contains("integrity rejection"));
++    assert_eq!(polled.load(Ordering::SeqCst), 3);
++}
++
++#[tokio::test]
++async fn dropped_observation_consumer_joins_blocked_producer() {
++    struct ProducerDropped(Option<tokio::sync::oneshot::Sender<()>>);
++    impl Drop for ProducerDropped {
++        fn drop(&mut self) {
++            let _ = self.0.take().unwrap().send(());
++        }
++    }
++
++    for consume in [false, true] {
++        let (done, joined) = tokio::sync::oneshot::channel();
++        let guard = ProducerDropped(Some(done));
++        let mut event = Some(terminal_observation("abandoned"));
++        let polled = Arc::new(AtomicUsize::new(0));
++        let observed_polls = Arc::clone(&polled);
++        let (started, produced) = tokio::sync::oneshot::channel();
++        let mut started = Some(started);
++        let api_stream = futures::stream::poll_fn(move |_| {
++            let _guard = &guard;
++            observed_polls.fetch_add(1, Ordering::SeqCst);
++            if let Some(event) = event.take() {
++                started.take().unwrap().send(()).unwrap();
++                std::task::Poll::Ready(Some(Ok(event)))
++            } else {
++                std::task::Poll::Pending
++            }
++        });
++        let (mut stream, _) = super::map_response_events(
++            None,
++            api_stream,
++            test_session_telemetry(),
++            InferenceTraceAttempt::disabled(),
++            test_model_provider(),
++        );
++        produced.await.unwrap();
++        if consume {
++            assert!(matches!(
++                stream.next().await,
++                Some(Ok(ResponseEvent::ResponseObserved(_)))
++            ));
++        }
++        assert_eq!(polled.load(Ordering::SeqCst), 1);
++        drop(stream);
++        // The upstream guard drops only when the mapper task actually exits.
++        tokio::time::timeout(Duration::from_secs(5), joined)
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(polled.load(Ordering::SeqCst), 1);
++    }
++}
++
+ #[tokio::test]
+ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Result<()> {
+     let temp = TempDir::new()?;
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 59bee0fec40f983672f626b31111a7175917206b..07aacade1a01b6fc41cffc22492545f2bf70f28c 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -219,6 +219,7 @@ async fn run_compact_task_inner(
+         )
+         .await;
+     if let Err(err) = &result
++        && !matches!(err.details(), CodexErrorDetails::Fatal(_))
+         && !matches!(phase, CompactionPhase::PostTurn)
+         && !matches!(
+             err.details(),
+@@ -306,6 +307,8 @@ async fn run_compact_task_inner_impl(
+             {
+                 return Err(err);
+             }
++            // Fatal history-retention failures must not repeat the model request.
++            Err(e) if matches!(e.details(), CodexErrorDetails::Fatal(_)) => return Err(e),
+             Err(e) if matches!(e.details(), CodexErrorDetails::SessionBudgetExceeded) => {
+                 return Err(e);
+             }
+@@ -767,6 +770,7 @@ async fn drain_to_completed(
+         )
+         .await?;
+     let mut output = Vec::new();
++    let mut response_observation_id = None;
+     loop {
+         let maybe_event = stream.next().await;
+         let Some(event) = maybe_event else {
+@@ -804,6 +808,11 @@ async fn drain_to_completed(
+             Ok(ResponseEvent::RateLimits(snapshot)) => {
+                 sess.update_rate_limits(turn_context, snapshot).await;
+             }
++            Ok(ResponseEvent::ResponseObserved(observation)) => {
++                response_observation_id = sess
++                    .record_response_observation(turn_context, observation)
++                    .await?;
++            }
+             Ok(ResponseEvent::Completed {
+                 response_id,
+                 token_usage,
+@@ -813,6 +822,7 @@ async fn drain_to_completed(
+                 sess.record_observed_response_completed(
+                     turn_context,
+                     &response_id,
++                    response_observation_id.take(),
+                     token_usage.as_ref(),
+                     usage_metadata.as_ref(),
+                 )
+diff --git a/codex-rs/core/src/compact_model_fallback.rs b/codex-rs/core/src/compact_model_fallback.rs
+index 9e9a6213d54f6bfb3231e4728d85b910f78d95b1..d7b97d3c48e7a3c5def5e6cf41400cdbb53a821b 100644
+--- a/codex-rs/core/src/compact_model_fallback.rs
++++ b/codex-rs/core/src/compact_model_fallback.rs
+@@ -15,6 +15,7 @@ pub(crate) fn should_retry_with_current_model(
+     if matches!(
+         error.details(),
+         CodexErrorDetails::TurnAborted
++            | CodexErrorDetails::Fatal(_)
+             | CodexErrorDetails::Interrupted
+             | CodexErrorDetails::SessionBudgetExceeded
+     ) || (previous.model_info().slug == current.model_info().slug
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index e20b0a7f5cf5f6d4c5f8bc701facfb785aa900c0..bb266ca2c7fbb92bfbcad80f919f8ba1f7a704a3 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -194,7 +194,8 @@ async fn run_remote_compact_task_inner(
+     match result {
+         Ok(()) => Ok(()),
+         Err(err)
+-            if matches!(err.details(), CodexErrorDetails::TurnAborted)
++            if matches!(err.details(), CodexErrorDetails::Fatal(_))
++                || matches!(err.details(), CodexErrorDetails::TurnAborted)
+                 || matches!(phase, CompactionPhase::PostTurn) =>
+         {
+             Err(err)
+@@ -279,6 +280,11 @@ async fn run_remote_compact_task_inner_impl(
+             );
+             match fallback_result {
+                 Ok(attempt) => (attempt, fallback_turn_context),
++                Err(fallback_error)
++                    if matches!(fallback_error.details(), CodexErrorDetails::Fatal(_)) =>
++                {
++                    return Err(fallback_error);
++                }
+                 Err(_) => return Err(error),
+             }
+         }
+@@ -436,6 +442,7 @@ async fn collect_compaction_output(
+     let mut compaction_output = None;
+     let mut completed_response_id = None;
+     let mut completed_token_usage = None;
++    let mut response_observation_id = None;
+     while let Some(event) = stream.next().await {
+         match event? {
+             ResponseEvent::OutputItemDone(item) => {
+@@ -447,6 +454,11 @@ async fn collect_compaction_output(
+                     }
+                 }
+             }
++            ResponseEvent::ResponseObserved(observation) => {
++                response_observation_id = sess
++                    .record_response_observation(turn_context, observation)
++                    .await?;
++            }
+             ResponseEvent::Completed {
+                 response_id,
+                 token_usage,
+@@ -456,6 +468,7 @@ async fn collect_compaction_output(
+                 sess.record_observed_response_completed(
+                     turn_context,
+                     &response_id,
++                    response_observation_id.take(),
+                     token_usage.as_ref(),
+                     usage_metadata.as_ref(),
+                 )
+@@ -833,6 +846,8 @@ mod tests {
+         }
+         drop(tx_event);
+         ResponseStream {
++            observation_processed: Arc::new(tokio::sync::Notify::new()),
++            observation_pending: false,
+             rx_event,
+             interrupt: None,
+             consumer_dropped: CancellationToken::new(),
+diff --git a/codex-rs/core/src/model_request_tests.rs b/codex-rs/core/src/model_request_tests.rs
+index 3a0354128911d78c0f6db2ea43dbaf16c2dd4859..bd14832c53491306aca18c98b781ab3fdafbd826 100644
+--- a/codex-rs/core/src/model_request_tests.rs
++++ b/codex-rs/core/src/model_request_tests.rs
+@@ -30,6 +30,8 @@ async fn interceptors_forward_before_completion_in_order_and_cancel_upstream() {
+     let mut stream = intercept_stream(
+         Box::pin(
+             ResponseStream {
++                observation_processed: Arc::new(tokio::sync::Notify::new()),
++                observation_pending: false,
+                 rx_event,
+                 interrupt: None,
+                 consumer_dropped,
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 787322e570eeb7be1432300cac44242849211b42..da730dccdf7ee125e1620dbfae1fec95ba97ad74 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -4744,10 +4744,38 @@ impl Session {
+         result
+     }
+
++    pub(crate) async fn record_response_observation(
++        &self,
++        turn_context: &TurnContext,
++        observation: codex_protocol::protocol::ResponseObservation,
++    ) -> CodexResult<Option<String>> {
++        // Ephemeral sessions deliberately have no retained history sink.
++        if self.live_thread().is_none() {
++            return Ok(None);
++        }
++        let id = Uuid::now_v7().to_string();
++        let record = codex_protocol::protocol::ResponseObservationRecord {
++            id: id.clone(),
++            thread_id: self.thread_id,
++            turn_id: turn_context.sub_id.clone(),
++            observation,
++        };
++        if !self
++            .persist_rollout_items(&[RolloutItem::ResponseObservationRecord(record)])
++            .await
++        {
++            return Err(CodexErr::Fatal(
++                "Could not retain response observation".to_string(),
++            ));
++        }
++        Ok(Some(id))
++    }
++
+     pub(crate) async fn record_observed_response_completed(
+         &self,
+         turn_context: &TurnContext,
+         response_id: &str,
++        response_observation_id: Option<String>,
+         usage: Option<&TokenUsage>,
+         usage_metadata: Option<&ResponseUsageMetadata>,
+     ) {
+@@ -4772,6 +4800,7 @@ impl Session {
+                 .root_turn_id()
+                 .unwrap_or_else(|| turn_context.sub_id.clone()),
+             response_id.to_string(),
++            response_observation_id,
+             usage,
+         );
+         self.persist_rollout_items(&[RolloutItem::TokenUsageRecord(record)])
+diff --git a/codex-rs/core/src/session/rollout_reconstruction.rs b/codex-rs/core/src/session/rollout_reconstruction.rs
+index 404412549fc370ad134d9e5cbb6fecc6d7c52118..4249311f6e15ccb8f8e5b891b22953d950f1ce59 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction.rs
+@@ -264,6 +264,7 @@ impl Session {
+                 | RolloutItem::WorldState(_)
+                 | RolloutItem::RetainedContext(_)
+                 | RolloutItem::SecurityRiskScore(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::RealtimeItem(_)
+                 | RolloutItem::Compacted(_)
+@@ -417,6 +418,7 @@ impl Session {
+                 | RolloutItem::RealtimeItem(_)
+                 | RolloutItem::RetainedContext(_)
+                 | RolloutItem::SecurityRiskScore(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
+             }
+@@ -525,6 +527,7 @@ impl Session {
+                 | RolloutItem::RealtimeItem(_)
+                 | RolloutItem::WorldState(_)
+                 | RolloutItem::SecurityRiskScore(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::SessionMeta(_) => {}
+             }
+@@ -565,6 +568,7 @@ impl Session {
+                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                 | RolloutItem::TurnContext(_)
+                 | RolloutItem::RealtimeItem(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::RetainedContext(_)
+                 | RolloutItem::SecurityRiskScore(_)
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index f4663fbfadf7f31e8c2de7407d5e3e640eea70e1..6d8a9a49837f2054019683123a1199504ae16204 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1671,7 +1671,7 @@ impl Session {
+                     | RolloutItem::TurnContext(_)
+                     | RolloutItem::WorldState(_)
+                     | RolloutItem::RealtimeItem(_)
+-                    | RolloutItem::TokenUsageRecord(_)
++                    | RolloutItem::ResponseObservationRecord(_) | RolloutItem::TokenUsageRecord(_)
+                     | RolloutItem::RetainedContext(_)
+                     | RolloutItem::SecurityRiskScore(_) => {}
+                 }
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index f525dfe8b6f2abbfe1ff20f5bf013b79a7e063ae..756c097d715fb612a8ed2fd4884f80a1a1c80e54 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -3383,6 +3383,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
+ fn latest_token_usage_record_stops_at_compaction_checkpoint() {
+     let thread_id = ThreadId::new();
+     let checkpoint_record = TokenUsageRecord {
++        response_observation_id: None,
+         thread_id,
+         turn_id: "turn-1".to_string(),
+         session_id: SessionId::from(thread_id),
+@@ -4002,6 +4003,7 @@ async fn start_new_context_window_persists_checkpoint_state() {
+         attach_thread_persistence(Arc::get_mut(&mut session).expect("unique session")).await;
+     let thread_id = ThreadId::new();
+     let token_usage_record = TokenUsageRecord {
++        response_observation_id: None,
+         thread_id,
+         turn_id: "turn-1".to_string(),
+         session_id: SessionId::from(thread_id),
+@@ -4063,6 +4065,7 @@ async fn start_new_context_window_persists_checkpoint_state() {
+         | RolloutItem::WorldState(_)
+         | RolloutItem::RetainedContext(_)
+         | RolloutItem::SecurityRiskScore(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::RealtimeItem(_)
+         | RolloutItem::EventMsg(_) => None,
+@@ -4158,6 +4161,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
+         | RolloutItem::WorldState(_)
+         | RolloutItem::RetainedContext(_)
+         | RolloutItem::SecurityRiskScore(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::RealtimeItem(_)
+         | RolloutItem::EventMsg(_) => None,
+@@ -11834,6 +11838,9 @@ async fn finished_turn_retains_last_known_step_context(terminal: TerminalEventKi
+ enum FirstAttempt {
+     Succeeds,
+     Retries,
++    Fatal,
++    FallbackFatal,
++    FallbackFails,
+ }
+
+ async fn make_remote_compaction_session(
+@@ -11861,10 +11868,27 @@ async fn make_remote_compaction_session(
+
+ #[test_case(FirstAttempt::Succeeds; "primary succeeds")]
+ #[test_case(FirstAttempt::Retries; "fallback executes")]
++#[test_case(FirstAttempt::Fatal; "fatal primary does not fallback")]
++#[test_case(FirstAttempt::FallbackFatal; "fallback fatal replaces original error")]
++#[test_case(FirstAttempt::FallbackFails; "ordinary fallback error preserves original")]
+ #[tokio::test]
+ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: FirstAttempt) {
+     let server = responses::start_mock_server().await;
+-    let (session, turn, events) = make_remote_compaction_session(&server.uri()).await;
++    let (mut session, turn, events) = make_remote_compaction_session(&server.uri()).await;
++    if matches!(
++        first_attempt,
++        FirstAttempt::Fatal | FirstAttempt::FallbackFatal
++    ) {
++        // Closing the real local recorder leaves an active Session with a sink
++        // whose observation append must fail, including on a replacement model.
++        open_thread_persistence(Arc::get_mut(&mut session).expect("unshared session")).await;
++        session
++            .live_thread()
++            .expect("local persistence")
++            .shutdown()
++            .await
++            .expect("close recorder");
++    }
+     session
+         .record_conversation_items(
+             &turn,
+@@ -11908,6 +11932,33 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+         Some(Arc::as_ptr(&primary)),
+     );
+
++    assert!(fallback.turn.provider.info().is_openai());
++    assert_ne!(
++        primary.turn.model_info().slug,
++        fallback.turn.model_info().slug
++    );
++    assert!(
++        crate::compact_model_fallback::should_retry_with_current_model(
++            &CodexErr::Stream("ordinary stream failure".to_string()),
++            &primary.turn,
++            &fallback.turn,
++        )
++    );
++    assert!(
++        !crate::compact_model_fallback::should_retry_with_current_model(
++            &CodexErr::Fatal("Could not retain response observation".to_string()),
++            &primary.turn,
++            &fallback.turn,
++        )
++    );
++
++    // The closed recorder fails observation retention before terminal acceptance.
++    // Exercise the real authenticated, different-model fallback owner.
++    let fatal = ResponseTemplate::new(/*status*/ 200)
++        .insert_header("content-type", "text/event-stream")
++        .set_body_string(responses::sse(vec![responses::ev_completed(
++            "fatal-compact-response",
++        )]));
+     let success = ResponseTemplate::new(/*status*/ 200)
+         .insert_header("content-type", "text/event-stream")
+         .set_body_string(responses::sse(vec![
+@@ -11924,10 +11975,22 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+                 .set_body_json(json!({ "detail": "previous model unavailable" })),
+             success,
+         ],
++        FirstAttempt::Fatal => vec![fatal],
++        FirstAttempt::FallbackFatal => vec![
++            ResponseTemplate::new(/*status*/ 400)
++                .set_body_json(json!({ "detail": "previous model unavailable" })),
++            fatal,
++        ],
++        FirstAttempt::FallbackFails => vec![
++            ResponseTemplate::new(/*status*/ 400)
++                .set_body_json(json!({ "detail": "previous model unavailable" })),
++            ResponseTemplate::new(/*status*/ 400)
++                .set_body_json(json!({ "detail": "replacement model unavailable" })),
++        ],
+     };
+     let requests = responses::mount_response_sequence(&server, replies).await;
+     let mut client_session = session.services.model_client.new_session();
+-    crate::compact_remote_v2::run_inline_remote_auto_compact_task(
++    let result = crate::compact_remote_v2::run_inline_remote_auto_compact_task(
+         Arc::clone(&session),
+         Arc::clone(&primary),
+         Arc::clone(&fallback),
+@@ -11936,12 +11999,29 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+         CompactionReason::ModelDownshift,
+         CompactionPhase::PreTurn,
+     )
+-    .await
+-    .expect("compaction succeeds");
++    .await;
++    match first_attempt {
++        FirstAttempt::Succeeds | FirstAttempt::Retries => result.expect("compaction succeeds"),
++        FirstAttempt::Fatal | FirstAttempt::FallbackFatal => {
++            let error = result.expect_err("Fatal compaction must fail");
++            assert!(matches!(error.details(), CodexErrorDetails::Fatal(message)
++                if message == "Could not retain response observation"));
++        }
++        FirstAttempt::FallbackFails => {
++            let error = result.expect_err("both model attempts fail");
++            assert!(
++                matches!(error.details(), CodexErrorDetails::InvalidRequest(message)
++                if message.contains("previous model unavailable")
++                    && !message.contains("replacement model unavailable"))
++            );
++        }
++    }
+
+     let (expected, models) = match first_attempt {
+-        FirstAttempt::Succeeds => (&primary, vec![json!("gpt-5.4")]),
+-        FirstAttempt::Retries => (&fallback, vec![json!("gpt-5.4"), json!("gpt-5.2")]),
++        FirstAttempt::Succeeds | FirstAttempt::Fatal => (&primary, vec![json!("gpt-5.4")]),
++        FirstAttempt::Retries | FirstAttempt::FallbackFatal | FirstAttempt::FallbackFails => {
++            (&fallback, vec![json!("gpt-5.4"), json!("gpt-5.2")])
++        }
+     };
+     assert_eq!(
+         state
+@@ -11970,6 +12050,115 @@ async fn remote_compaction_v2_retains_only_the_selected_step(first_attempt: Firs
+     recv_terminal_event(&events, TerminalEventKind::TurnAborted).await;
+ }
+
++#[tokio::test]
++async fn mid_turn_compaction_retention_failure_after_tool_reaches_task_error_owner() {
++    let (release_compaction, compaction_gate) = tokio::sync::oneshot::channel();
++    let (server, _) = start_streaming_sse_server(vec![
++        vec![StreamingSseChunk {
++            gate: None,
++            body: responses::sse(vec![
++                responses::ev_function_call(
++                    "plan-before-compaction",
++                    "update_plan",
++                    r#"{"plan":[{"step":"Record one tool effect","status":"completed"}]}"#,
++                ),
++                responses::ev_completed_with_tokens("sampling-response", 500),
++            ]),
++        }],
++        vec![StreamingSseChunk {
++            gate: Some(compaction_gate),
++            body: responses::sse_completed("compaction-response"),
++        }],
++    ])
++    .await;
++    let mut provider = built_in_model_providers(/*openai_base_url*/ None)["openai"].clone();
++    provider.base_url = Some(format!("{}/v1", server.uri()));
++    provider.supports_websockets = false;
++    let server_uri = server.uri().to_string();
++    let (mut session, turn, events) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        Vec::new(),
++        move |config| {
++            config.model = Some("gpt-5.2".to_string());
++            config.model_provider = provider;
++            config.chatgpt_base_url = server_uri;
++            config.update_plan_enabled = true;
++            config.model_auto_compact_token_limit = Some(200);
++            let _ = config.features.disable(Feature::TokenBudget);
++            let _ = config.features.disable(Feature::EnableRequestCompression);
++        },
++    )
++    .await;
++    open_thread_persistence(Arc::get_mut(&mut session).expect("unshared session")).await;
++    session
++        .record_conversation_items(&turn, turn.model_info(), &[user_message("Update the plan")])
++        .await;
++    session
++        .spawn_task(
++            Arc::clone(&turn),
++            Vec::new(),
++            crate::tasks::RegularTask::new(),
++        )
++        .await;
++    timeout(Duration::from_secs(10), server.wait_for_request_count(2))
++        .await
++        .expect("tool result must reach the mid-turn compaction request");
++    session
++        .live_thread()
++        .expect("local persistence")
++        .shutdown()
++        .await
++        .expect("close recorder before compaction terminal");
++    release_compaction
++        .send(())
++        .expect("release compaction terminal");
++
++    let mut errors = 0;
++    let mut terminals = 0;
++    let mut plan_updates = 0;
++    timeout(Duration::from_secs(10), async {
++        loop {
++            let event = events.recv().await.expect("owning task event");
++            match event.msg {
++                EventMsg::PlanUpdate(_) => plan_updates += 1,
++                EventMsg::Error(error) => {
++                    errors += 1;
++                    assert!(
++                        error
++                            .message
++                            .contains("Could not retain response observation")
++                    );
++                }
++                EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) => {
++                    terminals += 1;
++                    break;
++                }
++                _ => {}
++            }
++        }
++    })
++    .await
++    .expect("retention failure must settle its owning task");
++    while let Ok(event) = events.try_recv() {
++        match event.msg {
++            EventMsg::PlanUpdate(_) => plan_updates += 1,
++            EventMsg::Error(_) => errors += 1,
++            EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) => terminals += 1,
++            _ => {}
++        }
++    }
++    assert_eq!((errors, terminals, plan_updates), (1, 1, 1));
++    let requests = server.requests().await;
++    assert_eq!(
++        requests.len(),
++        2,
++        "retention failure must not repeat inference"
++    );
++    let compaction_request = String::from_utf8_lossy(&requests[1]);
++    assert!(compaction_request.contains("compaction_trigger"));
++    assert!(compaction_request.contains("function_call_output"));
++}
++
+ #[tokio::test]
+ async fn interrupting_compaction_fallback_retains_last_known_step_context() {
+     let (release_primary, primary_gate) = tokio::sync::oneshot::channel();
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..1f243952b0e9558243b20e5e5da2a7928141cddd 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -636,7 +636,10 @@ pub(crate) async fn run_turn(
+                     )
+                     .await
+                     {
+-                        if matches!(err.details(), CodexErrorDetails::TurnAborted) {
++                        if matches!(
++                            err.details(),
++                            CodexErrorDetails::TurnAborted | CodexErrorDetails::Fatal(_)
++                        ) {
+                             return Err(err);
+                         }
+                         let error = err.to_codex_protocol_error();
+@@ -746,10 +749,12 @@ pub(crate) async fn run_turn(
+                         )
+                         .await
+                     {
+-                        if matches!(
+-                            err.details(),
+-                            CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
+-                        ) {
++                        if matches!(err.details(), CodexErrorDetails::Fatal(_))
++                            || matches!(
++                                err.details(),
++                                CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
++                            )
++                        {
+                             return Err(err);
+                         }
+                         let error = err.to_codex_protocol_error();
+@@ -2633,6 +2638,7 @@ async fn try_run_sampling_request(
+         return Err(CodexErr::TurnAborted);
+     }
+     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
++    let tool_cancellation = cancellation_token.child_token();
+     let mut needs_follow_up = false;
+     let mut last_agent_message: Option<String> = None;
+     let mut active_item: Option<TurnItem> = None;
+@@ -2642,6 +2648,7 @@ async fn try_run_sampling_request(
+     )> = None;
+     let mut should_emit_turn_diff = false;
+     let mut should_emit_token_count = false;
++    let mut response_observation_id = None;
+     const MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE: usize = 256;
+     let mut analytics_tool_call_ids = Vec::new();
+     let reasoning_effort = step_context
+@@ -2796,7 +2803,7 @@ async fn try_run_sampling_request(
+                     step_context: Arc::clone(&step_context),
+                     turn_store: Arc::clone(&turn_store),
+                     tool_runtime: tool_runtime.clone(),
+-                    cancellation_token: cancellation_token.child_token(),
++                    cancellation_token: tool_cancellation.child_token(),
+                 };
+
+                 let preempt_for_mailbox_mail = match &item {
+@@ -2998,6 +3005,24 @@ async fn try_run_sampling_request(
+                     .refresh_if_new_etag(etag, turn_context.config.http_client_factory())
+                     .await;
+             }
++            ResponseEvent::ResponseObserved(observation) => {
++                let result = sess
++                    .record_response_observation(&turn_context, observation)
++                    .await;
++                if cancellation_token.is_cancelled() {
++                    break Err(CodexErr::TurnAborted);
++                }
++                match result {
++                    Ok(id) => response_observation_id = id,
++                    Err(error) => {
++                        // Join this sample's tools without cancelling the turn
++                        // that must report the original persistence failure.
++                        tool_cancellation.cancel();
++                        drop(stream);
++                        break Err(error);
++                    }
++                }
++            }
+             ResponseEvent::Completed {
+                 response_id,
+                 token_usage,
+@@ -3024,6 +3049,7 @@ async fn try_run_sampling_request(
+                 sess.record_observed_response_completed(
+                     &turn_context,
+                     &response_id,
++                    response_observation_id.take(),
+                     token_usage.as_ref(),
+                     usage_metadata.as_ref(),
+                 )
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index 6a93e160a4773ee6368cce41b63a418151b7adab..b10c99bfd9334b5aded11e38f02186febc6b8b3a 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -214,6 +214,7 @@ impl SessionState {
+         session_id: SessionId,
+         root_turn_id: String,
+         response_id: String,
++        response_observation_id: Option<String>,
+         usage: &TokenUsage,
+     ) -> TokenUsageRecord {
+         let mut turn_token_usage = self
+@@ -232,6 +233,7 @@ impl SessionState {
+             });
+         thread_token_usage.add_assign(usage);
+         let record = TokenUsageRecord {
++            response_observation_id,
+             thread_id,
+             turn_id: turn_id.to_string(),
+             session_id,
+diff --git a/codex-rs/core/src/state/session_tests.rs b/codex-rs/core/src/state/session_tests.rs
+index 5d3defeefee1a2dcfcc1add69f3e5434342531df..acf97898015ecf59f697855fa71d39b15491883a 100644
+--- a/codex-rs/core/src/state/session_tests.rs
++++ b/codex-rs/core/src/state/session_tests.rs
+@@ -20,6 +20,7 @@ async fn record_token_usage_continues_restored_totals() {
+     };
+     let mut restored = SessionState::new(make_session_configuration_for_tests().await);
+     restored.latest_token_usage_record = Some(TokenUsageRecord {
++        response_observation_id: None,
+         thread_id,
+         turn_id: "turn-b".to_string(),
+         session_id,
+@@ -35,11 +36,13 @@ async fn record_token_usage_continues_restored_totals() {
+         session_id,
+         "root-turn".to_string(),
+         "response-d".to_string(),
++        Some("observation-d".to_string()),
+         &usage(20),
+     );
+     assert_eq!(
+         after_resume,
+         TokenUsageRecord {
++            response_observation_id: Some("observation-d".to_string()),
+             thread_id,
+             turn_id: "turn-b".to_string(),
+             session_id,
+diff --git a/codex-rs/core/src/tasks/compact.rs b/codex-rs/core/src/tasks/compact.rs
+index 62808c9e604c9c996675dad983df4d757bc45af7..5c5b3e2c4bf8ef0141e2fad382abdc5c218d9e21 100644
+--- a/codex-rs/core/src/tasks/compact.rs
++++ b/codex-rs/core/src/tasks/compact.rs
+@@ -91,7 +91,9 @@ impl SessionTask for CompactTask {
+             }
+         };
+         if let Err(err) = result {
+-            if matches!(err.details(), CodexErrorDetails::TurnAborted) {
++            if matches!(err.details(), CodexErrorDetails::Fatal(_))
++                || matches!(err.details(), CodexErrorDetails::TurnAborted)
++            {
+                 return Err(err);
+             }
+             let error = err.to_codex_protocol_error();
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 79fd80dcebaca03ebedaacb9ff537b0833258455..03fff5fca68523294ad16fd4d730486c28cb1c20 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -394,7 +394,8 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
+         | ResponseEvent::ReasoningSummaryDelta { .. }
+         | ResponseEvent::ReasoningSummaryDone { .. }
+         | ResponseEvent::ReasoningContentDelta { .. } => true,
+-        ResponseEvent::Created { .. }
++        ResponseEvent::ResponseObserved(_)
++        | ResponseEvent::Created { .. }
+         | ResponseEvent::ServerModel(_)
+         | ResponseEvent::ModelVerifications(_)
+         | ResponseEvent::TurnModerationMetadata(_)
+diff --git a/codex-rs/external-agent-migration/src/sessions/append.rs b/codex-rs/external-agent-migration/src/sessions/append.rs
+index b77481afd3b2dc8a036da1fb721e6fae01aba258..35a29eccb3e50e735e9ba495490fb6b718649894 100644
+--- a/codex-rs/external-agent-migration/src/sessions/append.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append.rs
+@@ -220,6 +220,7 @@ fn source_model_items(items: &[RolloutItem]) -> Option<Vec<SourceModelItem<'_>>>
+         match item {
+             RolloutItem::SessionMeta(_)
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RealtimeItem(_) => {}
+             RolloutItem::ResponseItem(response_item) => {
+@@ -260,6 +261,7 @@ fn history_model_items(items: &[RolloutItem]) -> Option<Vec<&ResponseItem>> {
+         match item {
+             RolloutItem::SessionMeta(_)
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RealtimeItem(_)
+             | RolloutItem::RetainedContext(_)
+diff --git a/codex-rs/history/src/compaction_resume_metadata.rs b/codex-rs/history/src/compaction_resume_metadata.rs
+index 4886fcd52b8a63fe978b3a0304bac0b4dfcdf75f..effd83cf895edf9d0f535c957f2b18e542e1adfb 100644
+--- a/codex-rs/history/src/compaction_resume_metadata.rs
++++ b/codex-rs/history/src/compaction_resume_metadata.rs
+@@ -43,6 +43,7 @@ pub fn resume_multi_agent_version(item: &RolloutItem) -> Option<MultiAgentVersio
+         | RolloutItem::ResponseItem(_)
+         | RolloutItem::InterAgentCommunication(_)
+         | RolloutItem::InterAgentCommunicationMetadata { .. }
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::WorldState(_)
+         | RolloutItem::RetainedContext(_)
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index 53d396cf3a3faca4ff785c7a130023f9c9eaf1f2..e20801a0d8dab090730882588dbf7f009f4a25b3 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -31,6 +31,7 @@ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::InterAgentCommunication;
+ use codex_protocol::protocol::MultiAgentVersion;
++use codex_protocol::protocol::ResponseObservationRecord;
+ use codex_protocol::protocol::SessionMeta;
+ use codex_protocol::protocol::SessionMetaLine;
+ use codex_protocol::protocol::SessionSource;
+@@ -222,6 +223,7 @@ pub enum RolloutItem {
+     Compacted(CompactedItem),
+     TurnContext(TurnContextItem),
+     TokenUsageRecord(TokenUsageRecord),
++    ResponseObservationRecord(ResponseObservationRecord),
+     WorldState(WorldStateItem),
+     SecurityRiskScore(SecurityRiskScore),
+     RetainedContext(RetainedContextEvent),
+diff --git a/codex-rs/history/src/rollout_payload.rs b/codex-rs/history/src/rollout_payload.rs
+index d740430a190e5a67c7b06333d95d96e89a0bbdb7..360386664b260866a85f2224749db8a72a7a2ffb 100644
+--- a/codex-rs/history/src/rollout_payload.rs
++++ b/codex-rs/history/src/rollout_payload.rs
+@@ -8,6 +8,7 @@ use super::McpResourceOriginCheckpoint;
+ use super::RealtimeItem;
+ use super::ResponseItem;
+ use super::ResponseItemEnvelope;
++use super::ResponseObservationRecord;
+ use super::RolloutItem;
+ use super::SecurityRiskScore;
+ use super::SessionMetaLine;
+@@ -51,6 +52,9 @@ pub(super) enum RolloutItemWire<'a> {
+     TurnContext {
+         payload: Cow<'a, TurnContextItem>,
+     },
++    ResponseObservationRecord {
++        payload: Cow<'a, ResponseObservationRecord>,
++    },
+     TokenUsageRecord {
+         payload: Cow<'a, TokenUsageRecord>,
+     },
+@@ -97,6 +101,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
+             RolloutItem::TurnContext(payload) => Self::TurnContext {
+                 payload: Cow::Borrowed(payload),
+             },
++            RolloutItem::ResponseObservationRecord(payload) => Self::ResponseObservationRecord {
++                payload: Cow::Borrowed(payload),
++            },
+             RolloutItem::TokenUsageRecord(payload) => Self::TokenUsageRecord {
+                 payload: Cow::Borrowed(payload),
+             },
+@@ -214,6 +221,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
+             }
+             RolloutItemWire::Compacted { payload } => Self::Compacted(payload.into_owned()),
+             RolloutItemWire::TurnContext { payload } => Self::TurnContext(payload.into_owned()),
++            RolloutItemWire::ResponseObservationRecord { payload } => {
++                Self::ResponseObservationRecord(payload.into_owned())
++            }
+             RolloutItemWire::TokenUsageRecord { payload } => {
+                 Self::TokenUsageRecord(payload.into_owned())
+             }
+diff --git a/codex-rs/memories/write/src/phase1.rs b/codex-rs/memories/write/src/phase1.rs
+index 1fa128c2f5d2eb96730553092992949079c2e725..ae28974ef1dab7509160c1d355d66feb0b14d96a 100644
+--- a/codex-rs/memories/write/src/phase1.rs
++++ b/codex-rs/memories/write/src/phase1.rs
+@@ -408,6 +408,7 @@ mod job {
+                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                 | RolloutItem::Compacted(_)
+                 | RolloutItem::TurnContext(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::RealtimeItem(_)
+                 | RolloutItem::WorldState(_)
+diff --git a/codex-rs/memories/write/src/rollout_input.rs b/codex-rs/memories/write/src/rollout_input.rs
+index 7a1d1d94c3e0c7efde98993dd128722dde2bf627..67c94762958d64f0216642fb4f0a142fd40cce54 100644
+--- a/codex-rs/memories/write/src/rollout_input.rs
++++ b/codex-rs/memories/write/src/rollout_input.rs
+@@ -52,6 +52,7 @@ pub(crate) fn serialize_tiered_input(
+             | RolloutItem::RealtimeItem(_)
+             | RolloutItem::WorldState(_)
+             | RolloutItem::SecurityRiskScore(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RetainedContext(_)
+             | RolloutItem::EventMsg(_) => None,
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index 1dfc24cce6bc19f7293fac328987cd1a34797445..06e8d2ffb69ca3acb3ef952b08c02045b2c7c3eb 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1366,6 +1366,7 @@ impl SessionTelemetry {
+
+     fn responses_type(event: &ResponseEvent) -> String {
+         match event {
++            ResponseEvent::ResponseObserved(_) => "response_observed".into(),
+             ResponseEvent::Created { .. } => "created".into(),
+             ResponseEvent::OutputItemDone(item) | ResponseEvent::OutputItemAdded(item) => {
+                 SessionTelemetry::responses_item_type(item)
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 181e430fc839d812563fa94a7f7ea898dac910ec..cbf161ccbbc68d330d97d2dcf4d5ad4f62dbbece 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2267,9 +2267,65 @@ pub struct TokenUsage {
+     pub codex_rollout_budget_units: Option<serde_json::Number>,
+ }
+
++/// Counters received on one terminal response. Missing counters remain unknown.
++#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++pub struct ReceivedResponseUsage {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub input_tokens: Option<i64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub cached_input_tokens: Option<i64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub cache_write_input_tokens: Option<i64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_tokens: Option<i64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub reasoning_output_tokens: Option<i64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub total_tokens: Option<i64>,
++}
++
++/// Provider-reported terminal kind, independent of SDK acceptance or turn success.
++#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ResponseObservationStatus {
++    Completed,
++    Incomplete,
++    Failed,
++}
++
++#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++#[serde(rename_all = "snake_case")]
++pub enum ResponseIncompleteReason {
++    ContentFilter,
++    MaxOutputTokens,
++    Interrupted,
++    Unknown,
++}
++
++/// Safe received terminal facts before accounting normalization.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++pub struct ResponseObservation {
++    pub response_id: Option<String>,
++    pub status: ResponseObservationStatus,
++    pub incomplete_reason: Option<ResponseIncompleteReason>,
++    pub usage: Option<ReceivedResponseUsage>,
++}
++
++/// A retained terminal occurrence with its original native identities.
++#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
++pub struct ResponseObservationRecord {
++    pub id: String,
++    pub thread_id: ThreadId,
++    pub turn_id: String,
++    #[serde(flatten)]
++    pub observation: ResponseObservation,
++}
++
+ /// Best-effort Responses API usage observed for one completed response.
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct TokenUsageRecord {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub response_observation_id: Option<String>,
+     pub thread_id: ThreadId,
+     pub turn_id: String,
+     pub session_id: SessionId,
+@@ -6469,3 +6525,54 @@ mod tests {
+         assert_eq!(info.model_context_window, Some(258_400));
+     }
+ }
++
++#[cfg(test)]
++mod response_observation_tests {
++    use super::*;
++
++    #[test]
++    fn received_observation_roundtrip_preserves_origin_and_exact_optional_counters() {
++        let record = ResponseObservationRecord {
++            id: "occurrence".to_string(),
++            thread_id: ThreadId::new(),
++            turn_id: "origin-turn".to_string(),
++            observation: ResponseObservation {
++                response_id: None,
++                status: ResponseObservationStatus::Incomplete,
++                incomplete_reason: Some(ResponseIncompleteReason::Unknown),
++                usage: Some(ReceivedResponseUsage {
++                    input_tokens: Some(9007199254740993),
++                    cache_write_input_tokens: Some(0),
++                    ..ReceivedResponseUsage::default()
++                }),
++            },
++        };
++        let value = serde_json::to_value(&record).unwrap();
++        assert_eq!(value["id"], "occurrence");
++        assert_eq!(value["turn_id"], "origin-turn");
++        assert_eq!(value["usage"]["input_tokens"], 9007199254740993_i64);
++        assert_eq!(value["usage"]["cache_write_input_tokens"], 0);
++        assert!(value["usage"].get("cached_input_tokens").is_none());
++        assert_eq!(
++            serde_json::from_value::<ResponseObservationRecord>(value).unwrap(),
++            record
++        );
++    }
++
++    #[test]
++    fn old_accounting_record_has_no_invented_occurrence_link() {
++        let value = serde_json::json!({
++            "thread_id": ThreadId::new(), "turn_id": "turn", "session_id": SessionId::from(ThreadId::new()),
++            "root_turn_id": "root", "response_id": "response", "usage": TokenUsage::default(),
++            "turn_token_usage": TokenUsage::default(), "thread_token_usage": TokenUsage::default()
++        });
++        let record: TokenUsageRecord = serde_json::from_value(value).unwrap();
++        assert!(record.response_observation_id.is_none());
++        assert!(
++            serde_json::to_value(record)
++                .unwrap()
++                .get("response_observation_id")
++                .is_none()
++        );
++    }
++}
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index bfed9a7097b9c44d9863ffd5584dc656165341d2..ca661ec1bc3ae685569bf08a74f11f5dff57639e 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -1042,7 +1042,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
+             RolloutItem::TurnContext(_) => {
+                 // Not included in `head`; skip.
+             }
+-            RolloutItem::TokenUsageRecord(_) => {
++            RolloutItem::ResponseObservationRecord(_) | RolloutItem::TokenUsageRecord(_) => {
+                 // Not included in `head`; skip.
+             }
+             RolloutItem::RetainedContext(_)
+@@ -1122,6 +1122,7 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
+                 RolloutItem::InterAgentCommunicationMetadata { .. }
+                 | RolloutItem::Compacted(_)
+                 | RolloutItem::TurnContext(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::WorldState(_)
+                 | RolloutItem::RealtimeItem(_)
+@@ -1216,6 +1217,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine>
+             RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::Compacted(_)
+             | RolloutItem::TurnContext(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::WorldState(_)
+             | RolloutItem::RealtimeItem(_)
+diff --git a/codex-rs/rollout/src/metadata.rs b/codex-rs/rollout/src/metadata.rs
+index c2469d0d708efd3284e3086fe13aa38cf2f6e17d..7c64b4a77f1472654c8db8825562158e4a6283f8 100644
+--- a/codex-rs/rollout/src/metadata.rs
++++ b/codex-rs/rollout/src/metadata.rs
+@@ -81,6 +81,7 @@ pub fn builder_from_items(
+         | RolloutItem::TurnContext(_)
+         | RolloutItem::WorldState(_)
+         | RolloutItem::RealtimeItem(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::RetainedContext(_)
+         | RolloutItem::SecurityRiskScore(_)
+@@ -173,6 +174,7 @@ pub async fn extract_metadata_from_rollout(
+             | RolloutItem::TurnContext(_)
+             | RolloutItem::WorldState(_)
+             | RolloutItem::RealtimeItem(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RetainedContext(_)
+             | RolloutItem::SecurityRiskScore(_)
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index bea161d9df049fb31b9d81b55be549933b64a9db..9c71472add7192d533bb1d0144c360e415b505e7 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -261,6 +261,7 @@ fn rollout_item_type(item: &RolloutItem) -> String {
+         }
+         RolloutItem::Compacted(_) => "compacted".to_string(),
+         RolloutItem::TurnContext(_) => "turn_context".to_string(),
++        RolloutItem::ResponseObservationRecord(_) => "response_observation_record".to_string(),
+         RolloutItem::TokenUsageRecord(_) => "token_usage_record".to_string(),
+         RolloutItem::WorldState(_) => "world_state".to_string(),
+         RolloutItem::RetainedContext(_) => "retained_context".to_string(),
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 06a22f50019f5a0d64eeeba7613575682bf2115e..074583491272453e76574467bc48ae5eb903d6df 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -41,6 +41,7 @@ pub fn persisted_rollout_item(
+         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
+         RolloutItem::Compacted(_)
+         | RolloutItem::TurnContext(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::WorldState(_)
+         | RolloutItem::RetainedContext(_)
+diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
+index 7422c7f4e761c72a2c547d6a55e49a58502a939d..ea61f5a709082b1b6ff542cce005435c8813d475 100644
+--- a/codex-rs/rollout/src/recorder.rs
++++ b/codex-rs/rollout/src/recorder.rs
+@@ -2202,6 +2202,7 @@ async fn resume_candidate_matches_cwd(
+             | RolloutItem::Compacted(_)
+             | RolloutItem::WorldState(_)
+             | RolloutItem::RealtimeItem(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RetainedContext(_)
+             | RolloutItem::SecurityRiskScore(_)
+diff --git a/codex-rs/rollout/src/search.rs b/codex-rs/rollout/src/search.rs
+index b0f1a68f87aa999d60d56d43fd84d11a32ad7ae6..4cba77315313625377b2c4dc4fb581efb09133b7 100644
+--- a/codex-rs/rollout/src/search.rs
++++ b/codex-rs/rollout/src/search.rs
+@@ -313,6 +313,7 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
+         | RolloutItem::RealtimeItem(_)
+         | RolloutItem::RetainedContext(_)
+         | RolloutItem::SecurityRiskScore(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::WorldState(_) => None,
+     }
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index a9723801c815596a7f1409dec64ea15b17f3fdcf..6e48082e370d14325e8c8d639c8c55811c65ebeb 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -41,7 +41,7 @@ pub fn apply_rollout_item(
+         RolloutItem::WorldState(_) => {}
+         RolloutItem::RetainedContext(_) | RolloutItem::SecurityRiskScore(_) => {}
+         RolloutItem::RealtimeItem(_) => {}
+-        RolloutItem::TokenUsageRecord(_) => {}
++        RolloutItem::ResponseObservationRecord(_) | RolloutItem::TokenUsageRecord(_) => {}
+     }
+     if metadata.model_provider.is_empty() {
+         metadata.model_provider = default_provider.to_string();
+@@ -74,6 +74,7 @@ pub fn rollout_item_affects_thread_metadata(item: &RolloutItem) -> bool {
+         | RolloutItem::RealtimeItem(_)
+         | RolloutItem::RetainedContext(_)
+         | RolloutItem::SecurityRiskScore(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::WorldState(_) => false,
+     }
+diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
+index e3c2d212cfffe7447af1acae32735f56d742b902..82b4ca2a326bf1acd1e1466e3352ccca966a8739 100644
+--- a/codex-rs/state/src/runtime/threads.rs
++++ b/codex-rs/state/src/runtime/threads.rs
+@@ -1371,6 +1371,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
+         | RolloutItem::RealtimeItem(_)
+         | RolloutItem::RetainedContext(_)
+         | RolloutItem::SecurityRiskScore(_)
++        | RolloutItem::ResponseObservationRecord(_)
+         | RolloutItem::TokenUsageRecord(_)
+         | RolloutItem::EventMsg(_) => None,
+     })
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
+index 1575bcf090af04381d9cebd8f825bfd3d0004986..7877b40ed8b81487f9883bfe07e95ba08f957902 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/canonicalizer.rs
+@@ -290,6 +290,7 @@ impl LegacyRolloutCanonicalizer {
+             }
+             item @ (RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::TurnContext(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RealtimeItem(_)
+             | RolloutItem::RetainedContext(_)
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs b/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs
+index 45081b468934963403340a415d869a7abac10cd0..c20a0080fa153f1cc2b80ee1b81fa18032361b65 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/rollback_plan.rs
+@@ -275,6 +275,9 @@ impl RollbackPlanner {
+                     self.pending_turn_records.push(index);
+                 }
+             }
++            RolloutItem::ResponseObservationRecord(record) => {
++                self.assign_targeted_record(index, Some(record.turn_id.as_str()));
++            }
+             RolloutItem::TokenUsageRecord(record) => {
+                 self.assign_targeted_record(index, Some(record.turn_id.as_str()));
+             }
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/rollback_replay.rs b/codex-rs/thread-store/src/local/rollout_migration/rollback_replay.rs
+index ac23e9c5772b99ab6fa812518891ea92e21e66de..30357e035a9e7a0c7b276cad1b391246d079e8cc 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/rollback_replay.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/rollback_replay.rs
+@@ -76,6 +76,7 @@ impl ModelReplayPlanner {
+             | RolloutItem::EventMsg(_)
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::RealtimeItem(_)
++            | RolloutItem::ResponseObservationRecord(_)
+             | RolloutItem::TokenUsageRecord(_)
+             | RolloutItem::RetainedContext(_)
+             | RolloutItem::SecurityRiskScore(_)
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index cb3559c1373c58fb59e5e95a1bb61aff84af1ce6..3812cec25037aa08f2ddaf8f52bf5122f43955c3 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -345,6 +345,7 @@ impl ThreadMetadataSync {
+                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                 | RolloutItem::Compacted(_)
+                 | RolloutItem::RealtimeItem(_)
++                | RolloutItem::ResponseObservationRecord(_)
+                 | RolloutItem::TokenUsageRecord(_)
+                 | RolloutItem::RetainedContext(_)
+                 | RolloutItem::SecurityRiskScore(_)
