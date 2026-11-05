@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Callable, Coroutine
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from ._compat import cancel_once
@@ -15,6 +17,7 @@ if TYPE_CHECKING:
     from .mcp import _MCP
     from .native_agents import NativeAgents
     from .session import Session, _CallbackState, _Submission
+    from .telemetry import SpanContext
     from .turn import Turn
 
 
@@ -401,6 +404,7 @@ class _NativeInterception:
         from .executor import Environment
         from .mcp import _MCP
         from .session import NativeError
+        from .telemetry import _create_task, _retain_context
 
         native = self.session._native
         try:
@@ -425,6 +429,7 @@ class _NativeInterception:
                     continue
                 nonce = notice["nonce"]
                 dispatched = False
+                tracing = None
                 try:
                     request = notice["request"]
                     name = request["tool_name"]
@@ -432,7 +437,14 @@ class _NativeInterception:
                         **{
                             key: value
                             for key, value in request.items()
-                            if key not in ("tool_name", "instance", "route", "cell_owner_id")
+                            if key
+                            not in (
+                                "tool_name",
+                                "instance",
+                                "route",
+                                "cell_owner_id",
+                                "tracing_context",
+                            )
                         },
                         name=name["name"],
                         namespace=name["namespace"],
@@ -454,6 +466,14 @@ class _NativeInterception:
                             continue
                     if not native._check_native_interception(nonce):
                         continue
+                    if context := request.get("tracing_context"):
+                        try:
+                            tracing = _retain_context(context)
+                        except RuntimeError:
+                            if self.closing or not native._check_native_interception(nonce):
+                                continue
+                            raise
+                        request["tracing_context"] = tracing._handle
                     if (
                         isinstance(descriptor, Environment)
                         and call.thread_id == self.session.id
@@ -463,8 +483,14 @@ class _NativeInterception:
                         # before the original root completes normally.
                         self._start_task(
                             nonce,
-                            asyncio.create_task(
-                                self._run_cell_policy(nonce, request, self.session._active)
+                            _create_task(
+                                self._dispatch(
+                                    nonce,
+                                    tracing,
+                                    partial(
+                                        self._run_cell_policy, nonce, request, self.session._active
+                                    ),
+                                )
                             ),
                         )
                         dispatched = True
@@ -479,15 +505,17 @@ class _NativeInterception:
                     if state is None or state.stopping or state.failure.done():
                         continue
                     if isinstance(descriptor, Environment):
-                        task = asyncio.create_task(
-                            self.session._invoke_executor_policy(state, nonce, request)
+                        invoke = partial(
+                            self.session._invoke_executor_policy, state, nonce, request
                         )
                     else:
-                        task = asyncio.create_task(self._invoke(state, nonce, call, descriptor))
+                        invoke = partial(self._invoke, state, nonce, call, descriptor)
+                    task = _create_task(self._dispatch(nonce, tracing, invoke))
                     self._start_task(nonce, task)
                     state.add_callback(task)
                     dispatched = True
                 finally:
+                    tracing = None
                     if not dispatched:
                         native._resolve_native_interception(nonce, '{"action":"deny"}')
                         native._release_native_interception(nonce)
@@ -501,6 +529,19 @@ class _NativeInterception:
                 state.failure.set_result(NativeError("Native tool interception failed"))
         finally:
             native._finish_native_interception_reader()
+
+    async def _dispatch(
+        self,
+        nonce: int,
+        tracing: SpanContext | None,
+        invoke: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
+        from .telemetry import _activate, _clear_current
+
+        if self.closing or not self.session._native._check_native_interception(nonce):
+            return
+        with _clear_current(), _activate(tracing._handle if tracing is not None else None):
+            await invoke()
 
     async def _invoke(
         self,

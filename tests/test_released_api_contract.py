@@ -180,9 +180,9 @@ def test_empty_submodule_exports_are_not_inferred_from_remaining_classes(candida
 def test_method_body_does_not_change_contract(candidate: Path) -> None:
     source = candidate / "src/agents/session.py"
     text = source.read_text()
-    before = '        self._check_callback_operation("start work in its own Session")\n'
+    before = 'self._check_callback_operation("start work in its own Session")'
     assert before in text
-    source.write_text(text.replace(before, before + "        implementation_local = 1\n", 1))
+    source.write_text(text.replace(before, f"implementation_local = {before}", 1))
     result = check(candidate)
     assert result.returncode == 0, result.stderr
 

@@ -696,6 +696,12 @@ jobs:
       - name: Run native SDK tests
         if: steps.changes.outputs.run == 'true'
         run: make tests
+      - name: Qualify native tracing and decoded OTLP transports
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        env:
+          AGENTS_REQUIRE_TRACING_QUALIFICATION: '1'
+        run: |
+          uv run --with grpcio==1.85.0 --with opentelemetry-proto==1.45.1 python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_tracing_native.py tests/test_telemetry_transports.py
       - name: Verify the qualified wheel archive
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         env:

@@ -71,6 +71,13 @@ def test_native_export_reaches_real_collector(tmp_path, scenario, outcome):
         and attributes(span).get("example.run_id") == artifact["run_id"]
         for span in spans
     )
+    workflow = next(span for span in spans if span["name"] == "synthetic walkthrough")
+    step = next(span for span in spans if span["name"] == "exercise scenario")
+    assert step["traceId"] == workflow["traceId"]
+    assert step["parentSpanId"] == workflow["spanId"]
+    assert any(
+        span["name"] == "run_turn" and span["traceId"] == workflow["traceId"] for span in spans
+    )
     logs = [attributes(row) for row in rows(artifact, "logs")]
     requests = [log for log in logs if log.get("event.name") == "codex.api_request"]
     assert requests
