@@ -1,0 +1,243 @@
+name: Build installable SDK package
+
+on:
+  workflow_call:
+    inputs:
+      native_provenance:
+        type: string
+        required: true
+      runner:
+        type: string
+        required: true
+      artifact_id:
+        type: string
+        required: true
+      artifact_digest:
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    name: Native package (${{ inputs.runner }})
+    runs-on: >-
+      ${{ fromJSON(
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'ubuntu-24.04' && '{"group":"codex-runners","labels":"codex-linux-x64"}' ||
+        github.repository == 'openai/openai-agents-python' && inputs.runner == 'windows-latest' && '{"group":"codex-runners","labels":"codex-windows-x64"}' ||
+        toJSON(inputs.runner)
+      ) }}
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Configure Linux dependency registries
+        if: runner.os == 'Linux'
+        run: |
+          {
+            for variable in NPM_CONFIG_REGISTRY npm_config_registry PNPM_CONFIG_REGISTRY pnpm_config_registry COREPACK_NPM_REGISTRY YARN_NPM_REGISTRY_SERVER BUN_CONFIG_REGISTRY; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/npm/'
+            done
+            for variable in UV_DEFAULT_INDEX UV_INDEX_URL PIP_INDEX_URL; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
+            done
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          enable-cache: false
+      - name: Begin SDK qualification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NATIVE_ARTIFACTS: ${{ format('{{"{0}-{1}":{{"id":{2},"digest":"sha256:{3}","provenance":{4}}}}}', runner.os, runner.arch, inputs.artifact_id, inputs.artifact_digest, inputs.native_provenance) }}
+          NATIVE_SOURCE_RUN: ${{ github.run_id }}
+          SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
+        run: python .github/scripts/download-native-snapshot.py
+      - name: Prepare the source distribution
+        # Use one stable source path for Cargo, the wheel and the test executor.
+        run: |
+          uv build --sdist
+          python - <<'PYTHON'
+          import os
+          import tarfile
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-source"
+          source.mkdir()
+          archive_path, = Path("dist").glob("openai_agents-*.tar.gz")
+          with tarfile.open(archive_path) as archive:
+              archive.extractall(source, filter="data")
+          extracted, = source.iterdir()
+          project = source / "project"
+          extracted.rename(project)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
+          PYTHON
+      - name: Select the verified native overlay
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-qualified"
+          wheel, = source.glob("openai_agents-*.whl")
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          Path("dist").mkdir(exist_ok=True)
+          shutil.copy2(source / name, Path("dist") / name)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_NATIVE_WHEEL={wheel.resolve()}\n")
+              output.write(f"OPENAI_AGENTS_NATIVE_RECEIPT_DIR={Path('dist').resolve()}\n")
+          PYTHON
+      - name: Repack the current Python SDK with the verified native snapshot
+        run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
+      - name: Install Linux sandbox runtime for fresh-wheel checks
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap dnsmasq-base
+      - name: Test fresh installations without a checkout on the import path
+        if: runner.os == 'Linux'
+        run: |
+          cp packages/codex/scripts/verify_installed.py "$RUNNER_TEMP/verify_installed.py"
+          uv export --frozen --no-default-groups --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$RUNNER_TEMP/sdk-install-constraints.txt"
+          for version in 3.10 3.11 3.12; do
+            uv venv --seed --python "$version" "$RUNNER_TEMP/sdk-$version"
+            "$RUNNER_TEMP/sdk-$version/bin/python" -m pip install \
+              --constraint "$RUNNER_TEMP/sdk-install-constraints.txt" dist/*.whl
+            helper="$("$RUNNER_TEMP/sdk-$version/bin/python" -I - <<'PYTHON'
+          import os
+          import sysconfig
+          from pathlib import Path
+          import agents
+          helper = (Path(agents.__file__).resolve().parent / "bin" / "codex-linux-sandbox").resolve()
+          libraries = {Path(sysconfig.get_path(kind)).resolve() for kind in ("purelib", "platlib")}
+          assert any(helper.is_relative_to(base) for base in libraries), "helper is outside the fresh environment"
+          assert helper.is_file() and os.access(helper, os.X_OK), "installed Linux helper is not executable"
+          runtime = helper.with_name("codex-sdk-runtime")
+          assert runtime.is_file() and os.access(runtime, os.X_OK), "installed runtime is not executable"
+          print(helper)
+          PYTHON
+            )"
+            userns_restriction=unavailable
+            profile_loaded=false
+            if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+              case "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" in
+                0) userns_restriction=0 ;;
+                1) userns_restriction=1 ;;
+                *) userns_restriction=other ;;
+              esac
+              profile="agents-sdk-installed-linux-${version//./}"
+              sudo tee "/etc/apparmor.d/$profile" > /dev/null <<EOF
+          abi <abi/4.0>,
+          include <tunables/global>
+          profile $profile "$helper" flags=(unconfined) {
+            userns,
+          }
+          profile $profile-runtime "${helper%/*}/codex-sdk-runtime" flags=(unconfined) {
+            userns,
+          }
+          EOF
+              sudo apparmor_parser -r "/etc/apparmor.d/$profile"
+              profile_loaded=true
+            fi
+            printf 'Installed Linux sandbox host setup: userns_restriction=%s helper_profile_loaded=%s\n' "$userns_restriction" "$profile_loaded"
+            (
+              cd "$RUNNER_TEMP"
+              env -u OPENAI_API_KEY -u OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX \
+                "$RUNNER_TEMP/sdk-$version/bin/python" -I verify_installed.py \
+                --output "$RUNNER_TEMP/installed-$version.json"
+            )
+          done
+          cp "$RUNNER_TEMP"/installed-*.json dist/
+      - name: Qualify offline Unix sockets with the installed Linux wheel
+        if: runner.os == 'Linux'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/offline-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{offline_ipc.py,unix_socket_command.py,unix_peer_approval.py,offline_executor.sh} "$stage/tests/qualification"
+          python="$RUNNER_TEMP/sdk-3.12/bin/python"
+          uv export --frozen --only-group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/test-constraints.txt"
+          "$python" -m pip install --constraint "$stage/test-constraints.txt" aiohttp pytest pytest-asyncio
+          (
+            cd "$stage"
+            env -i HOME="$stage/home" PATH=/usr/bin:/bin timeout 90 \
+              "$python" -I -B -m pytest -q -o "pythonpath=$stage" tests/qualification/unix_peer_approval.py
+          )
+          chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          sudo unshare --mount --net --propagation private -- /bin/bash tests/qualification/run_offline_ipc.sh \
+            "$(readlink /proc/self/ns/net)" "$(readlink /proc/self/ns/mnt)" "$(id -u)" "$(id -g)" \
+            "$stage" "$python" "$GITHUB_WORKSPACE/dist/exec-server-fixture"
+      - name: Test native macOS Unix socket policy with the installed wheel
+        if: runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
+          uv venv --seed --python "$(command -v python)" "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          python="$stage/venv/bin/python"
+          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          fixture="$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          chmod +x "$fixture"
+          cd "$stage"
+          env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
+            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
+      - name: Test Windows named pipes and Unix peer approval with the installed wheel
+        if: runner.os == 'Windows'
+        run: |
+          stage=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/windows-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/tests/qualification"
+          uv venv --seed --python 3.12 "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          "$stage/venv/Scripts/python.exe" -m pip install --constraint "$stage/constraints.txt" \
+            dist/*-win_amd64.whl aiohttp pytest pytest-asyncio
+          python -I - "$stage" <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          stage = Path(sys.argv[1]).resolve(strict=True)
+          fixture = Path("dist/exec-server-fixture.exe").resolve(strict=True)
+          keep = set("""
+              ALLUSERSPROFILE APPDATA COMMONPROGRAMFILES COMMONPROGRAMFILES(X86) COMMONPROGRAMW6432
+              COMPUTERNAME COMSPEC HOMEDRIVE HOMEPATH LOCALAPPDATA NUMBER_OF_PROCESSORS OS PATH PATHEXT
+              PROCESSOR_ARCHITECTURE PROGRAMDATA PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PUBLIC
+              SYSTEMDRIVE SYSTEMROOT TEMP TMP USERDOMAIN USERNAME USERPROFILE WINDIR
+          """.split())
+          env = {key: value for key, value in os.environ.items() if key.upper() in keep}
+          subprocess.run(
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
+               "import os, sys, pytest; sys.path.insert(0, os.getcwd()); "
+               "sys.exit(pytest.main(['-q', 'tests/qualification/unix_peer_approval.py']))"],
+              cwd=stage, env=env, check=True, timeout=90,
+          )
+          subprocess.run(
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
+               "import os, runpy, sys; sys.path.insert(0, os.getcwd()); "
+               "runpy.run_module('tests.qualification.windows_ipc', run_name='__main__')", fixture],
+              cwd=stage, env=env, check=True,
+          )
+          PYTHON
+      - name: Share the package and test executor
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: native-${{ runner.os }}-${{ runner.arch }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
