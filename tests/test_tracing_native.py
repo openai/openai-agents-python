@@ -1072,10 +1072,16 @@ async def second():
     result=await telemetry.force_flush(timeout_ms=2000)
     assert result.status=='partial', result
     assert result.dropped_records==0, result
-    assert result.failed_deliveries==2, result
+    first_events=[lifecycle for _,name,lifecycle in seen if name=='first']
+    assert first_events in (['start'], ['start','end']), first_events
+    # The pump may select start before end is queued. Only the selected
+    # records are lost at loop shutdown; a queued end can reach the next loop.
+    assert result.failed_deliveries==2-int('end' in first_events), result
     again=await telemetry.force_flush(timeout_ms=2000)
-    assert again.status=='partial' and again.failed_deliveries==2, again
-    assert [name for _,name,lifecycle in seen if name=='first']==['first']
+    assert again.status=='partial', again
+    assert again.dropped_records==0, again
+    assert again.failed_deliveries==result.failed_deliveries, again
+    assert [lifecycle for _,name,lifecycle in seen if name=='first']==first_events
     if sys.argv[1]=='True':
         second_events=[(name,lifecycle) for _,name,lifecycle in seen if name=='second']
         assert second_events==[('second','start'),('second','end')]

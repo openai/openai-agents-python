@@ -1945,7 +1945,8 @@ impl PythonTools {
                 "namespace": entry.name.namespace, "tool": entry.name.name,
                 "arguments": arguments, "_sdk_python_tool": key.reply,
                 "_sdk_invocation": invocation, "_sdk_manual": entry.manual,
-                "_sdk_code_origin": code_origin, "_sdk_model": model
+                "_sdk_code_origin": code_origin, "_sdk_model": model,
+                "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
         if let Some(context) = &tracing {
@@ -1960,7 +1961,13 @@ impl PythonTools {
                 PendingCall {
                     _tracing: tracing,
                     invocation,
-                    manual_request: entry.manual.then(|| request.clone()),
+                    manual_request: entry.manual.then(|| {
+                        let mut manual = request.clone();
+                        // Trace metadata belongs to automatic ToolContext callbacks,
+                        // not the bounded manual action envelope.
+                        manual["msg"].as_object_mut().unwrap().remove("_sdk_trace");
+                        manual
+                    }),
                     sender,
                     phase: Phase::Admitted,
                     reentry,
@@ -4109,7 +4116,7 @@ pub(crate) mod managed_tests {
             let recovery_state = resumed.clone();
             let manual = restored.manual.clone();
             let recovering = tokio::spawn(async move {
-                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None).await.unwrap()
+                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None, None).await.unwrap()
             });
             hold.entered.acquire().await.unwrap().forget();
             assert_eq!(provider.requests.lock().unwrap().len(), 2,
@@ -4844,7 +4851,14 @@ pub(crate) mod managed_tests {
             key: key.clone(),
             invocation,
         };
-        let (_, grant, _) = tools.manual_snapshot("owner").unwrap().pop().unwrap();
+        let (_, grant, raw) = tools.manual_snapshot("owner").unwrap().pop().unwrap();
+        let manual: Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            !manual["msg"]
+                .as_object()
+                .unwrap()
+                .contains_key("_sdk_trace")
+        );
         let foreign = catalog(
             ToolPolicy::default(),
             DynamicToolSpec::Function(function("lookup")),

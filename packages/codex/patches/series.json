@@ -207,7 +207,11 @@
     {
       "path": "0050-sdk-native-tracing.patch",
       "sha256": "0e45e726652f4df20626a7f21be11a7eb1cdc81f65f9d3c4030470962e7cb6b1"
+    },
+    {
+      "path": "0051-w3c-defined-trace-flags.patch",
+      "sha256": "b138e7672a1f3d2e20255598bab467d8b7d08f4b8f2415091f41474b8778d21c"
     }
   ],
-  "result_tree": "9ecf1f7f4ce05d49a8996d0fc7d13af56ba2c745"
+  "result_tree": "88f56076d10d0b266a3ce93f6915e3629d0a07ac"
 }

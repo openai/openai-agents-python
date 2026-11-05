@@ -549,6 +549,7 @@ pub(crate) fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Res
 pub(crate) async fn continue_if_ready(
     thread: &crate::engine::ThreadState,
     owner: &Owner,
+    trace: Option<codex_protocol::protocol::W3cTraceContext>,
     observation_submission_id: Option<String>,
 ) -> Result<Value> {
     let _operation = thread.engine.operation(false)?;
@@ -580,6 +581,7 @@ pub(crate) async fn continue_if_ready(
         Some(schema) => serde_json::json!({"output_schema":schema}),
         None => serde_json::json!({}),
     };
+    recovery_options["trace"] = serde_json::json!(trace);
     recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     let result = crate::ops::recover_prepared(
         thread,
