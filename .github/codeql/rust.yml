@@ -1,0 +1,3 @@
+# Analyze SDK-owned Rust. Prepared dependencies remain available for type resolution.
+paths-ignore:
+  - packages/codex/.upstream
