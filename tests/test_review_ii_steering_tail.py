@@ -102,6 +102,14 @@ async def test_frozen_tail_preserves_exact_turn_and_follows_only_its_automatic_s
     responses.respond(assistant_output("first native result"))
     responses.respond(assistant_output("automatic native result"))
     responses.respond(assistant_output("explicit later result"))
+    continuation_started, release_continuation = asyncio.Event(), asyncio.Event()
+
+    async def hold_continuation(event: dict[str, Any]) -> None:
+        if event["type"] == "response.created" and event["response"]["id"] == "resp_3":
+            continuation_started.set()
+            await release_continuation.wait()
+
+    responses.before_event = hold_continuation
     async with (
         timeout(30),
         Agent(
@@ -120,7 +128,11 @@ async def test_frozen_tail_preserves_exact_turn_and_follows_only_its_automatic_s
             assert proxy.terminal is not None and proxy.terminal[0] == first.turn_id
             assert len(responses.requests) == 2
             proxy.release.set()
+            await continuation_started.wait()
+            assert not first._root_result_ready()
+            release_continuation.set()
             automatic = await first.get_result()
+            assert first._root_result_ready()
             assert automatic is await following
             assert automatic.final_output == "automatic native result"
             assert automatic.turn is first
@@ -139,6 +151,7 @@ async def test_frozen_tail_preserves_exact_turn_and_follows_only_its_automatic_s
             assert effects == ["record-a"] and len(responses.requests) == 4
         finally:
             proxy.release.set()
+            release_continuation.set()
             await asyncio.gather(following, return_exceptions=True)
     assert await first.get_result() is automatic
     finished = [event async for event in stream if isinstance(event, TurnFinished)]

@@ -263,8 +263,6 @@ async def _wait_with_quota(
 ) -> QuotaOutcome[OutputT]:
     waiter = asyncio.create_task(_wait_for_attention(turn, trace, surface_questions=True))
     try:
-        # Let an already available native result publish before checking a cached block.
-        await asyncio.sleep(0)
         while True:
             if observer is not None and observer.done():
                 observer.result()
@@ -280,6 +278,9 @@ async def _wait_with_quota(
                 if (block := quota._block()) is not None:
                     if observer is not None and observer.done():
                         observer.result()
+                    # The root can be settled before its lazy result reader returns.
+                    if turn._root_result_ready():
+                        return await _wait_for_attention(turn, trace, surface_questions=True)
                     return block
                 waiter = asyncio.create_task(
                     _wait_for_attention(turn, trace, surface_questions=True)

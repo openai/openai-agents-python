@@ -226,9 +226,22 @@ async def test_tool_progress_and_sparse_api_headers_do_not_wake_worker(
         result = await task
         assert isinstance(result, Completed) and result.final_output == "done"
         assert report.first_tool_result_ms is not None
-        feed.read(watch, binding, NO_CREDITS)
-        ready = await worker.wait_for_result_with_quota(turn, trace(), watch)
-        assert ready is result
+
+
+async def test_settled_native_result_wins_without_an_earlier_result_wait(
+    responses: ResponsesFixture, feed: Feed
+) -> None:
+    responses.respond(assistant_output("done"))
+    watch = quota.QuotaWatch()
+    feed.read(watch, watch.attach("account-a"), NO_CREDITS)
+    connection = provider(responses)
+    agent = Agent(instructions="Reply.", provider=connection)
+    async with timeout(15), connection, agent.session() as session:
+        turn = await session.submit("Reply.")
+        async for _ in turn.events():
+            pass
+        result = await worker.wait_for_result_with_quota(turn, trace(), watch)
+        assert isinstance(result, Completed) and result.final_output == "done"
 
 
 async def test_current_read_and_sparse_credit_update_can_wake_an_active_turn(
@@ -446,26 +459,27 @@ async def test_opt_in_owner_cancellation_joins_the_native_turn(
             assert isinstance(result, TurnNeedsAttention) and result.reason == "interrupted"
 
 
+@pytest.mark.parametrize("credits", [USABLE_CREDITS, NO_CREDITS], ids=["usable", "exhausted"])
 async def test_native_provider_quota_wins_with_optimistic_or_adverse_account_evidence(
-    provider_peer: ProviderErrorPeer, tmp_path: Path, feed: Feed
+    provider_peer: ProviderErrorPeer, tmp_path: Path, feed: Feed, credits: quota.Credits
 ) -> None:
     provider_peer.failure = (429, "insufficient_quota", "insufficient_quota")
     watch = quota.QuotaWatch()
     binding = watch.attach("account-a")
-    feed.read(watch, binding, USABLE_CREDITS)
+    feed.read(watch, binding, credits)
     connection = provider(provider_peer)
     agent = Agent(instructions="Reply.", provider=connection)
     active_worker = worker.Worker(tmp_path, False)
     async with timeout(15), connection, agent.session() as session:
         turn = await session.submit("Reply.")
+        if credits == NO_CREDITS:
+            async for _ in turn.events():
+                pass
         result = await worker.supervise(active_worker, turn, trace(), timeout=12, quota=watch)
         assert isinstance(result, TurnNeedsAttention) and result.reason == "quota_blocked"
         assert isinstance(result.error, NativeError)
         assert result.error.category == "usage_limit_exceeded"
 
-        feed.read(watch, binding, NO_CREDITS)
-        ready = await worker.supervise(active_worker, turn, trace(), timeout=12, quota=watch)
-        assert isinstance(ready, TurnNeedsAttention) and ready.error is result.error
     assert provider_peer.failed_requests == 1
 
 
