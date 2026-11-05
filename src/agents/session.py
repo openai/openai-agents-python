@@ -6617,9 +6617,9 @@ class Session(Generic[ContextT, OutputT]):
         with _owned_span(
             "executor callback", "callback", request.get("tracing_context")
         ) as tracing:
-            await self._invoke_executor_policy_body(state, nonce, request, cell_owner=cell_owner)
-            if tracing is not None and state is not None and state.failure.done():
-                tracing.set_outcome(status="error", category="callback_error")
+            await self._invoke_executor_policy_body(
+                state, nonce, request, cell_owner=cell_owner, tracing=tracing
+            )
 
     async def _invoke_executor_policy_body(
         self,
@@ -6628,6 +6628,7 @@ class Session(Generic[ContextT, OutputT]):
         request: dict[str, Any],
         *,
         cell_owner: _CellPolicyOwner | None = None,
+        tracing: TraceScope | None = None,
     ) -> None:
         scope = _Invocation(self)
         token = _invocation.set(scope)
@@ -6657,6 +6658,12 @@ class Session(Generic[ContextT, OutputT]):
             )
 
         def fail_original(error: BaseException) -> None:
+            if tracing is not None:
+                cancelled = isinstance(error, asyncio.CancelledError)
+                tracing.set_outcome(
+                    status="cancelled" if cancelled else "error",
+                    category="cancelled" if cancelled else "callback_error",
+                )
             target = state
             if cell_owner is not None:
                 target = self._active
@@ -6845,6 +6852,8 @@ class Session(Generic[ContextT, OutputT]):
             elif not isinstance(error, asyncio.CancelledError):
                 # Native revocation can precede Python's stopping flag.
                 # Keep rejected input/results out of both history and errors.
+                if tracing is not None:
+                    tracing.set_outcome(status="error", category="callback_error")
                 if state is not None:
                     state.retain_cleanup_error(NativeError("Executor policy cleanup failed"))
                 elif cell_owner is not None:

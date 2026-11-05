@@ -2576,3 +2576,132 @@ async def test_foreign_pump_waits_for_native_route_publication(
         await asyncio.to_thread(coordinator.join, 2)
         assert not writer.is_alive() and not coordinator.is_alive()
         await _stop_processor_pump()
+
+
+@pytest.mark.parametrize(
+    ("outcome", "successor"),
+    [("error", False), ("timeout", False), ("error", True), ("cancelled", False), ("ok", True)],
+)
+async def test_retained_cell_executor_span_records_its_own_outcome(
+    native: NativeTracing, outcome: str, successor: bool
+) -> None:
+    from types import MethodType
+
+    from agents.native_interception import _CellPolicyOwner
+    from agents.session import NativeError, Session
+
+    loop = asyncio.get_running_loop()
+    original_turn, successor_turn = object(), object()
+    original = SimpleNamespace(
+        handle=original_turn,
+        stopping=False,
+        terminal=loop.create_future(),
+        failure=loop.create_future(),
+        policy_stop=None,
+    )
+    replacement = SimpleNamespace(
+        handle=successor_turn,
+        stopping=False,
+        terminal=loop.create_future(),
+        failure=loop.create_future(),
+        policy_stop=None,
+    )
+    accepted = []
+    live = True
+
+    def resolve(nonce: int, encoded: str) -> bool:
+        nonlocal live
+        assert nonce == 41
+        if not live:
+            return False
+        live = False
+        accepted.append(json.loads(encoded))
+        return True
+
+    async def transform(context: Any, value: Any) -> str:
+        assert context.submission is original_turn
+        if successor:
+            original.terminal.set_result(None)
+            issuer._active = replacement
+        if outcome == "ok":
+            replacement.failure.set_result(NativeError("other owner's failure"))
+            return "accepted result"
+        if outcome == "timeout":
+            await asyncio.Future()
+        if outcome == "cancelled":
+            raise asyncio.CancelledError()
+        raise ValueError("PRIVATE_CALLBACK_EXCEPTION")
+
+    executor = SimpleNamespace(
+        transform_arguments=None, transform_result=transform, policy_timeout=0.01, approval=None
+    )
+    owner = _CellPolicyOwner(
+        1,
+        "thread",
+        "original-turn",
+        "outer",
+        "cell",
+        original_turn,
+        executor,
+        None,
+        object(),
+    )
+    issuer = SimpleNamespace(
+        _active=original,
+        _closing=False,
+        _broken=False,
+        _interception=SimpleNamespace(owns_cell=lambda item: item is owner),
+        _native=SimpleNamespace(
+            _check_native_interception=lambda nonce: live,
+            _handoff_native_interception=lambda nonce: True,
+            _resolve_native_interception=resolve,
+            _expire_native_interception_result=lambda nonce: None,
+        ),
+    )
+    issuer._invoke_executor_policy_body = MethodType(Session._invoke_executor_policy_body, issuer)
+    with telemetry.trace("retained executor owner") as parent:
+        request = {
+            "tracing_context": parent.context._handle,
+            "thread_id": "thread",
+            "turn_id": "original-turn",
+            "outer_call_id": "outer",
+            "cell_id": "cell",
+            "runtime_tool_call_id": "runtime",
+            "call_id": None,
+            "phase": "after",
+            "route": "code_mode",
+            "tool_kind": "function_json",
+            "tool_name": {"name": "exec_command"},
+            "result": "PRIVATE_NATIVE_RESULT",
+        }
+        pending = asyncio.create_task(
+            Session._invoke_executor_policy(issuer, None, 41, request, cell_owner=owner)
+        )
+        await asyncio.wait_for(pending, 1)
+    callback_id = next(
+        i + 1 for i, span in enumerate(native.starts) if span["name"] == "executor callback"
+    )
+    [recorded] = [data for handle, data in native.ends if handle == f"span-{callback_id}"]
+    expected = "error" if outcome == "timeout" else outcome
+    assert recorded["status"] == expected
+    assert recorded["category"] == (
+        "callback_error"
+        if expected == "error"
+        else "cancelled"
+        if expected == "cancelled"
+        else None
+    )
+    assert "PRIVATE" not in json.dumps(native.ends)
+    if successor:
+        assert not original.failure.done()
+        assert replacement.failure.done() == (outcome == "ok")
+    else:
+        assert original.failure.done()
+        assert isinstance(
+            original.failure.result(),
+            asyncio.CancelledError if outcome == "cancelled" else NativeError,
+        )
+    if outcome == "ok":
+        assert accepted == [{"action": "replace", "value": "accepted result"}]
+    else:
+        assert accepted == [{"action": "deny"}]
