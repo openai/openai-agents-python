@@ -57,6 +57,12 @@ pub(crate) struct LocalStorageHome<'a> {
     pub persistent_rollouts: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct LocalPrivatePaths<'a> {
+    pub storage_home: Option<LocalStorageHome<'a>>,
+    pub saved_login_file: Option<&'a Path>,
+}
+
 pub async fn for_unattached_threads(
     config: &Config,
     sdk_local: bool,
@@ -262,7 +268,7 @@ impl EnvironmentOptions {
     pub(crate) async fn connect(
         &self,
         config: &Config,
-        storage_home: Option<LocalStorageHome<'_>>,
+        private_paths: LocalPrivatePaths<'_>,
     ) -> Result<EnvironmentManager> {
         self.check_config(config)?;
         if self.local {
@@ -283,7 +289,7 @@ impl EnvironmentOptions {
             })?;
             let info = executor_info(&environment).await?;
             let (profile, ..) = self
-                .profile(&environment, &info, config, storage_home)
+                .profile(&environment, &info, config, private_paths)
                 .await?;
             self.check_network_target(&info, &profile)?;
             probe_local_sandbox(&environment, &self.cwd, profile).await?;
@@ -316,7 +322,7 @@ impl EnvironmentOptions {
         if self.strict_writes() || self.network.is_some() {
             let info = executor_info(&environment).await?;
             let (profile, ..) = self
-                .profile(&environment, &info, config, storage_home)
+                .profile(&environment, &info, config, private_paths)
                 .await?;
             self.check_network_target(&info, &profile)?;
         }
@@ -448,7 +454,7 @@ impl EnvironmentOptions {
         environment: &Environment,
         info: &EnvironmentInfo,
         config: &Config,
-        storage_home: Option<LocalStorageHome<'_>>,
+        private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
         if self.strict_writes() {
             strict_write_profile(
@@ -458,7 +464,7 @@ impl EnvironmentOptions {
                 self.writable_roots.as_deref().unwrap_or_default(),
                 self.local,
                 config.codex_home.as_path(),
-                storage_home,
+                private_paths,
             )
             .await
         } else {
@@ -474,7 +480,7 @@ impl EnvironmentOptions {
         &self,
         config: &Config,
         manager: &EnvironmentManager,
-        storage_home: Option<LocalStorageHome<'_>>,
+        private_paths: LocalPrivatePaths<'_>,
     ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
         self.check_config(config)?;
         let environment = manager
@@ -486,7 +492,7 @@ impl EnvironmentOptions {
         let (profile, workspace_root, writes, windows_executor) = if needs_info {
             let info = executor_info(&environment).await?;
             let (profile, workspace_root, writes) = self
-                .profile(&environment, &info, config, storage_home)
+                .profile(&environment, &info, config, private_paths)
                 .await?;
             self.check_network_target(&info, &profile)?;
             (
@@ -703,7 +709,7 @@ async fn strict_write_profile(
     additional: &[PathUri],
     local: bool,
     codex_home: &Path,
-    storage_home: Option<LocalStorageHome<'_>>,
+    private_paths: LocalPrivatePaths<'_>,
 ) -> Result<(PermissionProfile, PathUri, StrictExecutorWrites)> {
     ensure!(
         matches!(
@@ -754,7 +760,7 @@ async fn strict_write_profile(
             .collect::<std::io::Result<Vec<_>>>()?;
         let roots = LocalWriteRoots::new(&roots).context("could not verify local write roots")?;
         check_local_helper_write_roots(environment, &roots)?;
-        check_local_private_write_roots(&roots, codex_home, storage_home)?;
+        check_local_private_write_roots(&roots, codex_home, private_paths)?;
         for entry in &mut filesystem_policy.entries {
             if entry.access == FileSystemAccessMode::Read
                 && matches!(
@@ -791,8 +797,12 @@ async fn strict_write_profile(
 fn check_local_private_write_roots(
     roots: &LocalWriteRoots<'_>,
     codex_home: &Path,
-    storage_home: Option<LocalStorageHome<'_>>,
+    private_paths: LocalPrivatePaths<'_>,
 ) -> Result<()> {
+    let LocalPrivatePaths {
+        storage_home,
+        saved_login_file,
+    } = private_paths;
     let persistent_rollouts = storage_home.is_some_and(|home| home.persistent_rollouts);
     let storage_home = storage_home
         .map(|home| check_local_write_root_overlap(home.path, roots, STORAGE_OVERLAP))
@@ -803,6 +813,15 @@ fn check_local_private_write_roots(
         "local executor writable roots must stay outside the native SDK runtime home",
     )?;
     let mut protected_files = Vec::new();
+    if let Some(file) = saved_login_file {
+        let target = check_local_write_root_overlap(
+            file,
+            roots,
+            "local executor writable roots must stay outside the saved Codex login",
+        )?;
+        collect_existing_private_file(target, &mut protected_files)
+            .context("could not inspect the saved Codex login file")?;
+    }
     if let Some(home) = storage_home.as_deref() {
         protected_files.extend(relocated_database_files(home, roots)?);
         if persistent_rollouts {
@@ -1191,7 +1210,7 @@ pub(crate) async fn replace_writable_roots(
     manager: &EnvironmentManager,
     current: &StrictExecutorWrites,
     writable_roots: Vec<PathUri>,
-    storage_home: Option<LocalStorageHome<'_>>,
+    private_paths: LocalPrivatePaths<'_>,
 ) -> Result<(TurnEnvironmentSelection, StrictExecutorWrites)> {
     // The SDK installs its local proxy after rejecting an ambient controller at selection.
     let local = selection.environment_id == LOCAL_ENVIRONMENT_ID;
@@ -1212,7 +1231,7 @@ pub(crate) async fn replace_writable_roots(
         &writable_roots,
         local,
         config.codex_home.as_path(),
-        storage_home,
+        private_paths,
     )
     .await?;
     ensure!(
@@ -1507,7 +1526,7 @@ pub async fn connect_environment(
         let config = state.thread.config().await;
         let (selection, _) = request
             .environment
-            .selection(&config, &manager, None)
+            .selection(&config, &manager, state.engine.local_private_paths())
             .await?;
 
         // Connection is slow; serialize only the final update with turn admission and interrupts.

@@ -133,16 +133,54 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
 
 
 @dataclass(frozen=True, kw_only=True)
+class CodexLogin:
+    """Reuse an existing file-backed Codex login for a local native Session.
+
+    Codex locates its usual login directory unless you supply ``codex_home``.
+    Set ``account_id`` to require a specific ChatGPT account or workspace.
+    The SDK checks the saved login when it opens a Session.
+
+    This experimental mode may change or be absent from the public beta or
+    general availability of the Agents SDK.
+    """
+
+    codex_home: str | Path | None = field(default=None, repr=False)
+    account_id: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.codex_home is not None and (
+            not isinstance(self.codex_home, (str, Path)) or not str(self.codex_home).strip()
+        ):
+            raise ValueError("codex_home must be a non-empty path")
+        if self.account_id is not None and (
+            not isinstance(self.account_id, str) or not self.account_id.strip()
+        ):
+            raise ValueError("account_id must be a non-empty string")
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexAccount:
+    """The saved plan type and optional workspace ID at Session opening."""
+
+    account_id: str | None
+    plan_type: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class NativeProvider:
     """A native Responses connection. Construction performs no I/O.
 
-    An omitted key uses ``OPENAI_API_KEY`` when the session opens. Credentials
-    and connection URLs are excluded from the descriptor's representation.
+    For API-key authentication, an omitted key uses ``OPENAI_API_KEY`` when
+    the Session opens. Credentials and connection URLs are excluded from the
+    descriptor's representation.
     With ``supports_websockets=None``, the SDK permits WebSockets only when
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries.
+
+    Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
+    Omit ``api_key`` and ``base_url`` in this experimental mode.
 
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
@@ -151,6 +189,7 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
+    auth: CodexLogin | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("base_url", "api_key"):
@@ -159,10 +198,15 @@ class NativeProvider:
                 raise ValueError(f"{name} must be a non-empty string when provided")
         if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
             raise ValueError("supports_websockets must be a bool or None")
+        if self.auth is not None:
+            if not isinstance(self.auth, CodexLogin):
+                raise TypeError("auth must be CodexLogin or None")
+            if self.api_key is not None or self.base_url is not None or self.supports_websockets:
+                raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
 
     @property
     def _websockets_enabled(self) -> bool:
-        return (
+        return self.auth is None and (
             self.supports_websockets
             if self.supports_websockets is not None
             else self.base_url is None
