@@ -1830,27 +1830,55 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_manual(&grant.key.reply.thread, grant)))
     }
 
-    fn _respond_manual_tool(
+    fn _respond_manual_tool<'py>(
         &self,
+        py: Python<'py>,
         grant: &python_tools::ManualToolGrant,
         response_json: &str,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
-        let _operation = inner.engine.operation(false).map_err(py_error)?;
-        let Some(tools) = inner
-            .thread
-            .thread_extension_data()
-            .get::<python_tools::PythonTools>()
-            .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
-        else {
-            return Ok(false);
-        };
-        // Reject foreign/expired grants before parsing a supplied result.
-        if !tools.check_manual(&grant.key.reply.thread, grant) {
-            return Ok(false);
-        }
-        let response = serde_json::from_str(response_json).map_err(py_error)?;
-        Ok(tools.respond_manual(&grant.key.reply.thread, grant, response))
+        let grant = grant.clone();
+        let response_json = response_json.to_owned();
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = Arc::clone(&inner.mutations).lock_owned().await;
+            let Some(tools) = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+                .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
+            else {
+                return Ok(false);
+            };
+            // Reject foreign, expired and duplicate grants before writing a receipt.
+            if !tools.check_manual(&grant.key.reply.thread, &grant) {
+                return Ok(false);
+            }
+            let response: codex_protocol::dynamic_tools::DynamicToolResponse =
+                serde_json::from_str(&response_json).map_err(py_error)?;
+            if inner.engine.local_checklist_store.is_some() {
+                let id = codex_protocol::ThreadId::from_string(&grant.key.reply.thread)
+                    .map_err(py_error)?;
+                let reentry = tools.is_reentry(&grant.key);
+                let item = python_tools::PythonOutput(response.clone()).receipt(&grant.key);
+                return async_bridge::retain_writer_operation(async move {
+                    let _operation = _context_operation;
+                    let _mutation = _mutation;
+                    let store = inner
+                        .engine
+                        .local_checklist_store
+                        .as_ref()
+                        .expect("selected local SDK writer");
+                    store
+                        .commit_sdk_receipt(id, &grant.key, item, reentry)
+                        .await
+                        .map_err(py_error)?;
+                    Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+                })
+                .await;
+            }
+            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+        })
     }
 
     fn _respond_python_tool<'py>(

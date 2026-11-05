@@ -3422,7 +3422,7 @@ class Session(Generic[ContextT, OutputT]):
             or self._broken
             or (self._environment_lease is not None and self._environment_lease.interrupted)
             or self._sealed_checkpoint is not None
-            or not self._native._respond_manual_tool(request._grant, output)
+            or not await self._native._respond_manual_tool(request._grant, output)
         ):
             raise InteractionExpiredError("Manual tool reply is expired or already delivered")
         self._observations.notify()

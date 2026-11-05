@@ -63,6 +63,7 @@ impl Generation {
 
 // No Python constructor or serialization. The weak owner avoids retaining a
 // session through application-held requests after its native waiter is gone.
+#[derive(Clone)]
 #[pyclass(frozen, module = "agents._native")]
 pub(crate) struct ManualToolGrant {
     pub(crate) owner: ManualOwner,
@@ -70,6 +71,7 @@ pub(crate) struct ManualToolGrant {
     pub(crate) invocation: u64,
 }
 
+#[derive(Clone)]
 pub(crate) enum ManualOwner {
     Core(Weak<PythonTools>),
 }
