@@ -2198,3 +2198,124 @@ async def test_child_question_context_failure_discards_only_expired_grant(
     else:
         await sessions.Session._read_child_event(issuer, event)
     assert not state.failure.done() and not state.terminal.done()
+
+
+@pytest.mark.parametrize("replace", [False, True])
+async def test_processor_factory_rejection_preserves_effective_routes(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, replace: bool
+) -> None:
+    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    monkeypatch.setattr(telemetry, "_processor_serial", 7)
+    native.set_trace_routes(json.dumps({"processor_ids": ["existing"], "replace": False}))
+    before = list(native.routes)
+    loop = asyncio.get_running_loop()
+    original = loop.get_task_factory()
+
+    def reject(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("pump factory rejected")
+
+    loop.set_task_factory(reject)
+    try:
+        with pytest.raises(RuntimeError, match="pump factory rejected"):
+            processor = SimpleNamespace(on_trace_event=lambda event: None)
+            if replace:
+                telemetry.set_trace_processors([processor])
+            else:
+                telemetry.add_trace_processor(processor)
+    finally:
+        loop.set_task_factory(original)
+    assert native.routes == before  # Replacement never removed the native exporter.
+    assert telemetry._processors == {"existing": old}
+    assert telemetry._active_processor_ids == {"existing"}
+    assert telemetry._retired_routes == {} and telemetry._processor_serial == 7
+    assert telemetry._processor_task is None
+
+
+@pytest.mark.parametrize("eager", [False, True])
+async def test_processor_native_rejection_retires_only_provisional_pump(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, eager: bool
+) -> None:
+    if eager and not hasattr(asyncio, "eager_task_factory"):
+        pytest.skip("Eager task factories require Python 3.12")
+    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    created = []
+    drained = []
+    loop = asyncio.get_running_loop()
+    original = loop.get_task_factory()
+
+    def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
+        task = (
+            asyncio.eager_task_factory(loop, work, **kwargs)
+            if eager
+            else asyncio.Task(work, loop=loop, **kwargs)
+        )
+        created.append(task)
+        return task
+
+    async def drain(count: int) -> str:
+        drained.append(count)
+        raise AssertionError("Rejected registration started a native drain")
+
+    def reject(encoded: str) -> int:
+        assert created and not created[0].done()
+        assert telemetry._processors == {"existing": old}
+        raise RuntimeError("native registration rejected")
+
+    monkeypatch.setattr(native, "set_trace_routes", reject)
+    monkeypatch.setattr(native, "drain_trace_events", drain)
+    loop.set_task_factory(factory)
+    try:
+        with pytest.raises(RuntimeError, match="native registration rejected"):
+            telemetry.set_trace_processors([SimpleNamespace(on_trace_event=lambda event: None)])
+    finally:
+        loop.set_task_factory(original)
+    await asyncio.gather(*created, return_exceptions=True)
+    assert created[0].cancelled() and drained == []
+    assert telemetry._processor_task is None
+    assert telemetry._processors == {"existing": old}
+    assert telemetry._active_processor_ids == {"existing"}
+    assert telemetry._retired_routes == {} and telemetry._processor_serial == 0
+
+
+async def test_eager_processor_pump_waits_for_committed_routes(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    if not hasattr(asyncio, "eager_task_factory"):
+        pytest.skip("Eager task factories require Python 3.12")
+    seen = []
+    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    native.sequence = 1
+    native.batches.put_nowait(
+        {"events": [{"sequence": 1, "processor_ids": ["python-0"]}], "through_sequence": 1}
+    )
+    original_set = native.set_trace_routes
+
+    def publish(encoded: str) -> int:
+        assert seen == [] and native.acks == []
+        assert telemetry._processors == {"existing": old}
+        return original_set(encoded)
+
+    monkeypatch.setattr(native, "set_trace_routes", publish)
+    loop = asyncio.get_running_loop()
+    original = loop.get_task_factory()
+    loop.set_task_factory(asyncio.eager_task_factory)
+    try:
+        telemetry.set_trace_processors(
+            [SimpleNamespace(on_trace_event=lambda event: seen.append(event["sequence"]))]
+        )
+        assert seen == [] and native.acks == []
+    finally:
+        loop.set_task_factory(original)
+    try:
+        await _wait_for_ack(native, 1)
+        assert seen == [1] and native.acks == [(1, 0)]
+        assert telemetry._active_processor_ids == {"python-0"}
+        assert set(telemetry._processors) == {"python-0"}
+    finally:
+        await _stop_processor_pump()

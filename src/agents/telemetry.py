@@ -766,19 +766,48 @@ def _set_processors(processors: Sequence[TraceProcessor], *, replace: bool) -> N
             "Trace processor route capacity exhausted; flush completed records before adding routes"
         )
     ids = [f"python-{_processor_serial + i}" for i in range(len(values))]
+    routes = {
+        identifier: _ProcessorRoute(value) for identifier, value in zip(ids, values, strict=True)
+    }
     native = _native_tracing()
-    cutoff = native.set_trace_routes(json.dumps({"processor_ids": ids, "replace": replace}))
+    reserved: asyncio.Task[None] | None = None
+    ready: asyncio.Future[None] | None = None
+    try:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if (
+            loop is not None
+            and not _in_processor.get()
+            and (_processors or routes)
+            and (
+                _processor_task is None
+                or _processor_task.done()
+                or _processor_task.get_loop().is_closed()
+            )
+        ):
+            ready = loop.create_future()
+            reserved = _create_task(_pump_processors(ready))
+        cutoff = native.set_trace_routes(json.dumps({"processor_ids": ids, "replace": replace}))
+    except BaseException:
+        if ready is not None:
+            ready.cancel()
+        if reserved is not None:
+            reserved.cancel()
+        raise
     if replace:
         _retired_routes.update((identifier, cutoff) for identifier in _active_processor_ids)
         _active_processor_ids = set(ids)
     else:
         _active_processor_ids.update(ids)
     _processor_serial += len(values)
-    _processors.update(
-        (identifier, _ProcessorRoute(value)) for identifier, value in zip(ids, values, strict=True)
-    )
+    _processors.update(routes)
     _retire_routes(_processor_acknowledged)
-    _ensure_processor_pump()
+    if reserved is not None:
+        _processor_task = reserved
+        assert ready is not None
+        ready.set_result(None)
 
 
 def _retire_routes(through_sequence: int) -> None:
@@ -990,7 +1019,12 @@ class _ProcessorDrain(asyncio.Task[None]):
         return False
 
 
-async def _pump_processors() -> None:
+async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
+    if ready is not None:
+        # Eager task factories must not drain before route publication commits.
+        await ready
+        if not _processors:
+            return
     from .session import _join
 
     global _processor_acknowledged
