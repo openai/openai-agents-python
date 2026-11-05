@@ -78,6 +78,18 @@ uv run --no-sync pytest tests/test_native_session_input.py
 
 Edits under `src/agents` take effect on the next Python invocation. After changing Rust or native build inputs, leave `OPENAI_AGENTS_NATIVE_WHEEL` unset and run `uv sync --group dev --reinstall-package openai-agents` to rebuild the editable package. Run `make build` when you need a release wheel.
 
+### Native products in Tests CI
+
+Tests still checks each pull request's merge commit. A separate push workflow runs the same native pipeline on other canonical-repository branches, without the broad SDK tests, lint or docs jobs. Default-branch and `feat/codex-harness` pushes keep the full Tests workflow and do not start a duplicate native-only run.
+
+Every selected platform publishes a `native-snapshot-<OS>-<ARCH>` artifact before any SDK or installed-package qualification starts in that run. Qualification repacks the current Python SDK around the verified native payload, then publishes the existing `native-<OS>-<ARCH>` output. Installed-package, IPC, executable-symbol and receipt checks remain required.
+
+CI accepts donors only from push runs. It checks the complete caller and native workflows at the push commit, compares committed native and build inputs against the current checkout, and requires successful later platform qualification. It selects original publications by artifact ID and SHA-256 digest before the earliest SDK execution across all attempts. A branch producer records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
+
+PR Tests prefers an existing compatible donor. If none exists, it can wait up to 75 minutes for one compatible push producer of its current head. The producer never waits for the PR consumer. Missing, failed, cancelled or incompatible producers use the fresh-build path. Incomplete source-history reads and corrupted downloads fail visibly. The search checks the latest 20 runs for each eligible source. A copied snapshot remains eligible only when the same source, publication and qualification checks pass.
+
+Native producers do not restore or save Actions caches, including Cargo targets, source trees, V8 bundles and Python build tools. Verified native snapshots provide reuse across runs; fresh job-local Cargo and uv directories provide reuse within one build. SDK-phase caches remain separate. Native-input or recipe changes require fresh production; local Python tests do not replace full platform qualification.
+
 ## Keep the pin and source verifiable
 
 Use the existing source preparation and build tools. Keep `CODEX_REVISION` and the upstream repository fixed.
