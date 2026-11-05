@@ -80,7 +80,7 @@ Edits under `src/agents` take effect on the next Python invocation. After changi
 
 ### Native products in Tests CI
 
-The **Tests** workflow checks each pull request's merge commit. A separate push workflow runs the same native pipeline on other canonical-repository branches, without the broad SDK tests, lint or docs jobs. Default-branch and `feat/codex-harness` pushes keep the full Tests workflow and do not start a duplicate native-only run.
+The **Tests** workflow checks each pull request's merge commit and runs on pushes to the default branch and `feat/codex-harness`. To run just native production and qualification, push a branch under `ci/native-bundle/**` in the canonical repository.
 
 #### Identify the artifact
 
@@ -90,7 +90,7 @@ Every selected platform publishes a `native-snapshot-<OS>-<ARCH>` artifact befor
 
 A donor is a push run that supplies a reusable native artifact. CI checks the complete caller and native workflows at the push commit, compares committed native and build inputs against the current checkout, and requires successful later platform qualification. CI selects original publications by artifact ID and SHA-256 digest before the earliest SDK execution across all attempts. A branch producer records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
 
-PR Tests prefers an existing compatible donor. If none exists, it can wait up to 75 minutes for one compatible push producer of its current head. The producer never waits for the PR consumer. Missing, failed, cancelled or incompatible producers use the fresh-build path. Incomplete source-history reads and corrupted downloads fail visibly. The search checks the latest 20 runs for each eligible source. A copied snapshot remains eligible only when the same source, publication and qualification checks pass.
+PR Tests checks the latest 20 successful push runs for each eligible source. It reuses a compatible, qualified snapshot if one exists. Otherwise it starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 
 #### Keep native and SDK caches separate
 

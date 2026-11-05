@@ -2,7 +2,8 @@ name: Native products for SDK pull requests
 
 on:
   push:
-    branches-ignore: [main, feat/codex-harness]
+    # Ordinary branches build on a cache miss in their PR workflow.
+    branches: ['ci/native-bundle/**']
 
 permissions:
   contents: read
