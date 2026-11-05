@@ -227,7 +227,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
  struct AuthRequestTelemetryContext {
      auth_mode: Option<&'static str>,
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 779a40ca2be8f8687ca067f6e922d53be852c51c..f4dbf04c9453d1b846e8bc7d9bb3d809a56a9cc0 100644
+index 779a40ca2be8f8687ca067f6e922d53be852c51c..54c62e5da35da7f2889363e134a06dc6e57d20ee 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -1674,6 +1674,8 @@ struct TestRecoveryProvider {
@@ -273,7 +273,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..f4dbf04c9453d1b846e8bc7d9bb3d809
          });
          assert!(provider.auth_manager().is_none());
  
-@@ -2208,3 +2223,395 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+@@ -2208,3 +2223,374 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
          );
      }
  }
@@ -446,7 +446,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..f4dbf04c9453d1b846e8bc7d9bb3d809
 +    rotate_keys: bool,
 +) -> (ModelClient, Arc<AtomicUsize>) {
 +    let mut info = ModelProviderInfo::create_openai_provider(Some(base_url));
-+    info.requires_openai_auth = false;
++    info.requires_openai_auth = rotate_keys;
 +    info.supports_websockets = websockets;
 +    info.request_max_retries = Some(0);
 +    let attempts = Arc::new(AtomicUsize::new(0));
@@ -592,7 +592,8 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..f4dbf04c9453d1b846e8bc7d9bb3d809
 +        .expect(1).mount(&server).await;
 +    let (client, attempts) =
 +        auth_recovery_model_client(format!("{}/v1", server.uri()), false, true);
-+    let mut stream = auth_recovery_stream(&mut client.new_session()).await?;
++    let mut session = client.new_session();
++    let mut stream = auth_recovery_stream(&mut session).await?;
 +    let mut completed = false;
 +    while let Some(event) = stream.next().await {
 +        completed |= matches!(event?, ResponseEvent::Completed { .. });
@@ -603,70 +604,48 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..f4dbf04c9453d1b846e8bc7d9bb3d809
 +    Ok(())
 +}
 +
-+/// A successful rotated WebSocket handshake still dispatches exactly one prompt.
++/// Rotated WebSocket credentials remain usable for one HTTP fallback prompt.
 +#[tokio::test]
 +async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Result<()> {
-+    use futures::SinkExt;
-+    use tokio_tungstenite::tungstenite::Message;
-+    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
-+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-+    let address = listener.local_addr()?;
-+    let peer = tokio::spawn(async move {
-+        for attempt in 0..2 {
-+            let (socket, _) = listener.accept().await.unwrap();
-+            let upgraded = tokio_tungstenite::accept_hdr_async(
-+                socket,
-+                move |request: &Request, response: Response| {
-+                    assert_eq!(
-+                        request
-+                            .headers()
-+                            .get("authorization")
-+                            .unwrap()
-+                            .to_str()
-+                            .unwrap(),
-+                        format!("Bearer synthetic-rotation-{attempt}")
-+                    );
-+                    if attempt == 0 {
-+                        Err(http::Response::builder()
-+                            .status(401)
-+                            .body(Some("rejected".to_owned()))
-+                            .unwrap())
-+                    } else {
-+                        Ok(response)
-+                    }
-+                },
-+            )
-+            .await;
-+            if attempt == 0 {
-+                assert!(upgraded.is_err());
-+                continue;
-+            }
-+            let mut websocket = upgraded.unwrap();
-+            let request = websocket.next().await.unwrap().unwrap();
-+            let request: serde_json::Value =
-+                serde_json::from_str(request.to_text().unwrap()).unwrap();
-+            assert_eq!(request["type"], "response.create");
-+            for event in [
-+                json!({"type":"response.created","response":{"id":"recovered"}}),
-+                json!({"type":"response.completed","response":{"id":"recovered"}}),
-+            ] {
-+                websocket
-+                    .send(Message::Text(event.to_string().into()))
-+                    .await
-+                    .unwrap();
-+            }
-+        }
-+    });
-+    let (client, attempts) = auth_recovery_model_client(format!("http://{address}/v1"), true, true);
-+    let mut stream = auth_recovery_stream(&mut client.new_session()).await?;
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .and(wiremock::matchers::header(
++            "authorization",
++            "Bearer synthetic-rotation-0",
++        ))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("GET"))
++        .and(wiremock::matchers::header(
++            "authorization",
++            "Bearer synthetic-rotation-1",
++        ))
++        .respond_with(ResponseTemplate::new(426))
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .and(wiremock::matchers::header("authorization", "Bearer synthetic-rotation-1"))
++        .respond_with(ResponseTemplate::new(200)
++            .insert_header("content-type", "text/event-stream")
++            .set_body_string(concat!(
++                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"recovered\"}}\n\n",
++                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"recovered\"}}\n\n",
++            )))
++        .expect(1).mount(&server).await;
++    let (client, attempts) = auth_recovery_model_client(format!("{}/v1", server.uri()), true, true);
++    let mut session = client.new_session();
++    let mut stream = auth_recovery_stream(&mut session).await?;
 +    let mut completed = false;
 +    while let Some(event) = stream.next().await {
 +        completed |= matches!(event?, ResponseEvent::Completed { .. });
 +    }
 +    assert!(completed);
 +    assert_eq!(attempts.load(Ordering::Relaxed), 1);
-+    assert!(client.responses_websocket_enabled());
-+    peer.await?;
++    assert!(!client.responses_websocket_enabled());
++    assert_eq!(server.received_requests().await.unwrap().len(), 3);
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/responses_retry_tests.rs b/codex-rs/core/src/responses_retry_tests.rs

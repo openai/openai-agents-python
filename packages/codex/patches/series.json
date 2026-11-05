@@ -178,8 +178,8 @@
     },
     {
       "path": "0045-terminal-authentication-retry.patch",
-      "sha256": "f7a82aeffc1dc1abc4a3ff15da43978a1c8c243b3e4074c3db09bc53efedab30"
+      "sha256": "4f12eb2d9794fec908b2e78425641bf4d22e66de089f4523321c57c60f44f2bb"
     }
   ],
-  "result_tree": "43da001e02caf7eec1296290af58d1734c180344"
+  "result_tree": "f7c3f6cd1df7dd5d51965f26ed6c87147e54f2d1"
 }
