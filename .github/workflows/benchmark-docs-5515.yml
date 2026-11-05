@@ -1,0 +1,15 @@
+name: Replay Python docs-only 5515
+
+on:
+  push:
+    branches: [ci/benchmark-python-docs-5515-20261105]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  tests:
+    if: github.repository == 'openai/openai-agents-python' && !github.event.created && !github.event.deleted
+    uses: ./.github/workflows/tests.yml
