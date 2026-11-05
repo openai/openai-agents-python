@@ -281,7 +281,11 @@ class NativeA2AExecutor(AgentExecutor):
         queue: EventQueue,
         **changes: Any,
     ) -> NativeA2ATask:
-        snapshot = await projection.apply(events)
+        current = await projection.manager.get_task()
+        if current is None:
+            raise RuntimeError("A2A task projection is unavailable")
+        candidate = _Projection(projection.context)
+        snapshot = await candidate.apply([current, *events])
         if len(snapshot) > self.limits.checkpoint_bytes:
             raise ValueError("A2A snapshot exceeds configured byte limit")
         next_record = (
@@ -305,6 +309,7 @@ class NativeA2AExecutor(AgentExecutor):
         await lease.commit(
             next_record, expected_generation=record.generation if record is not None else None
         )
+        projection.store, projection.manager = candidate.store, candidate.manager
         for event in events:
             await queue.enqueue_event(event)
         return next_record

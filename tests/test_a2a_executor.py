@@ -490,3 +490,36 @@ async def test_cancel_interrupts_preseal_callback_and_joins_cleanup(
             return_exceptions=True,
         )
         await queue.close(immediate=True)
+
+
+async def test_oversized_final_snapshot_settles_and_recovers_failure(tmp_path, responses):
+    responses.respond(assistant_output("x" * 1024))
+    executor = make_executor(
+        tmp_path, responses, limits=A2ALimits(message_bytes=4096, checkpoint_bytes=512)
+    )
+    context = request_context()
+    stored, events = await invoke(executor, context)
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+
+    assert stored.task.status.state == p.TASK_STATE_FAILED
+    assert saved.status == "failed"
+    assert stored.task.id == binding.task_id and stored.task.context_id == binding.context_id
+    assert saved.acknowledges(stored.task)
+    assert len(saved.snapshot) <= 512
+    assert saved.checkpoint is None and saved.challenge is None
+    assert not stored.task.artifacts
+    assert not any(isinstance(event, p.TaskArtifactUpdateEvent) for event in events)
+    assert len(responses.requests) == 1
+    assert binding not in executor._live
+
+    def forbidden_factory(*args):
+        raise AssertionError("Recovery must not execute the failed native task")
+
+    fresh = NativeA2AExecutor(agent_factory=forbidden_factory, store=executor.store)
+    assert await fresh.recover(binding, call_context()) == saved
+    recovered = await executor.store.get(binding.task_id, call_context())
+    assert recovered.task == stored.task
+    assert saved.acknowledges(recovered.task)
+    assert executor.store.read(binding) == saved
+    assert len(responses.requests) == 1
