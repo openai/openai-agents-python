@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import pickle
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -13,7 +14,14 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, InteractionRequired, NativeError, NativeProvider, function_tool
+from agents import (
+    Agent,
+    InteractionRequired,
+    NativeError,
+    NativeProvider,
+    TurnStoppedError,
+    function_tool,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.test_native_provider_websockets import peer as websocket_peer
@@ -24,13 +32,21 @@ class ProviderErrorPeer(ResponsesFixture):
     # The shared fixture supplies SSE; provider failures must occur before SSE starts.
     failure: tuple[int, object, str] | None = None
     failed_requests: int = 0
+    failed_inputs: list[dict[str, Any]] = field(default_factory=list)
+    failure_started: asyncio.Event | None = None
+    failure_release: asyncio.Event | None = None
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
-        if self.failure is None:
+        failure = self.failure
+        if failure is None:
             return await super().handle(request)
         self.failed_requests += 1
-        await request.read()
-        status, code, kind = self.failure
+        self.failed_inputs.append(await request.json())
+        status, code, kind = failure
+        if self.failure_started is not None:
+            self.failure_started.set()
+        if self.failure_release is not None:
+            await self.failure_release.wait()
         return web.json_response(
             {
                 "error": {
@@ -264,3 +280,133 @@ async def test_provider_metadata_does_not_reach_later_turns_or_local_errors(
             assert last.value.category is None
     finally:
         await provider.aclose()
+
+
+async def test_terminal_http_auth_failure_stops_after_one_refresh(
+    provider_peer: ProviderErrorPeer,
+) -> None:
+    provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+    async with NativeProvider(
+        base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+    ) as provider:
+        with pytest.raises(NativeError) as caught:
+            await Agent(instructions="Answer.", model="gpt-5.2", provider=provider).run(
+                "Reject the captured key."
+            )
+    assert provider_peer.failed_requests == 2
+    assert caught.value.status_code == 401
+    assert caught.value.code == "invalid_api_key"
+    assert caught.value.request_id == "synthetic-provider-request"
+    assert caught.value.category == "authentication_error"
+
+
+async def test_terminal_http_auth_failure_preserves_one_prior_tool_effect(
+    provider_peer: ProviderErrorPeer,
+) -> None:
+    effects = []
+
+    @function_tool
+    def write_once() -> str:
+        effects.append("committed")
+        provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+        return "receipt-1"
+
+    provider_peer.respond(function_call("write_once", {}, "write-once-call"))
+    async with NativeProvider(
+        base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+    ) as provider:
+        with pytest.raises(NativeError) as caught:
+            await Agent(
+                instructions="Use write_once then answer.",
+                model="gpt-5.2",
+                provider=provider,
+                tools=[write_once],
+            ).run("Record one effect.")
+    assert effects == ["committed"]
+    assert len(provider_peer.requests) == 1
+    assert provider_peer.failed_requests == 2
+    assert caught.value.status_code == 401
+    assert caught.value.code == "invalid_api_key"
+    assert caught.value.request_id == "synthetic-provider-request"
+    assert caught.value.category == "authentication_error"
+    for request in provider_peer.failed_inputs:
+        original = next(item for item in request["input"] if item.get("type") == "function_call")
+        outputs = [item for item in request["input"] if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == original["call_id"]
+        assert outputs[0]["output"] == "receipt-1"
+
+
+@pytest.mark.parametrize("status,expected_http", [(401, 2), (403, 6)])
+async def test_websocket_auth_fallback_keeps_final_http_failure(
+    status: int, expected_http: int
+) -> None:
+    async with (
+        timeout(30),
+        websocket_peer(
+            upgrade_status=401, http_failure=(status, "final_http_rejection", "final-http-request")
+        ) as peer,
+    ):
+        agent = Agent(
+            instructions="Answer.",
+            model="gpt-5.2",
+            provider=peer.provider(key="synthetic-rejected-key"),
+        )
+        async with agent.session() as session:
+            with pytest.raises(NativeError) as caught:
+                await (await session.submit("Reject the upgrade then reject HTTP.")).get_result()
+        assert caught.value.status_code == status
+        assert caught.value.code == "final_http_rejection"
+        assert caught.value.request_id == "final-http-request"
+        assert caught.value.category == "authentication_error"
+        assert len(peer.upgrades) == 2
+        assert len(peer.http_requests) == expected_http
+        assert all(
+            header.get("authorization") == "Bearer synthetic-rejected-key"
+            for header in [*peer.upgrades, *peer.request_headers]
+        )
+
+
+async def test_cancel_after_tool_effect_prevents_late_auth_retry(
+    provider_peer: ProviderErrorPeer,
+) -> None:
+    effects = []
+    provider_peer.failure_started = asyncio.Event()
+    provider_peer.failure_release = asyncio.Event()
+
+    @function_tool
+    def write_once() -> str:
+        effects.append("committed")
+        provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+        return "receipt-1"
+
+    provider_peer.respond(function_call("write_once", {}, "write-once-call"))
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+        ) as provider,
+    ):
+        agent = Agent(
+            instructions="Use write_once then answer.",
+            model="gpt-5.2",
+            provider=provider,
+            tools=[write_once],
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Record one effect then hold the auth rejection.")
+            try:
+                await provider_peer.failure_started.wait()
+                assert effects == ["committed"]
+                await turn.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await turn.get_result()
+            finally:
+                provider_peer.failure_release.set()
+            provider_peer.failure = None
+            provider_peer.respond(assistant_output("fresh turn"))
+            assert (
+                await (await session.submit("Answer after cancellation.")).get_result()
+            ).final_output == "fresh turn"
+    assert effects == ["committed"]
+    assert provider_peer.failed_requests == 1
+    assert len(provider_peer.requests) == 2

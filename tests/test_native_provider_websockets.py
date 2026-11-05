@@ -51,6 +51,7 @@ class WebSocketPeer(ResponsesFixture):
     """Reconstruct continuation input only on the synthetic provider side."""
 
     upgrade_status: int | None = None
+    http_failure: tuple[int, str, str] | None = None
     tls_context: ssl.SSLContext | None = None
     upgrades: list[dict[str, str]] = field(default_factory=list)
     frames: list[dict[str, Any]] = field(default_factory=list)
@@ -76,6 +77,23 @@ class WebSocketPeer(ResponsesFixture):
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
         self.http_requests.append(await request.json())
+        if self.http_failure is not None:
+            self.request_headers.append(
+                {key.lower(): value for key, value in request.headers.items()}
+            )
+            status, code, request_id = self.http_failure
+            return web.json_response(
+                {
+                    "error": {
+                        "message": "Final HTTP rejection",
+                        "type": "invalid_request_error",
+                        "code": code,
+                        "param": None,
+                    }
+                },
+                status=status,
+                headers={"x-request-id": request_id},
+            )
         if self.upgrade_status == 401:
             self.request_headers.append(
                 {key.lower(): value for key, value in request.headers.items()}
@@ -197,9 +215,14 @@ class WebSocketPeer(ResponsesFixture):
 
 @asynccontextmanager
 async def peer(
-    *, upgrade_status: int | None = None, tls_context: ssl.SSLContext | None = None
+    *,
+    upgrade_status: int | None = None,
+    tls_context: ssl.SSLContext | None = None,
+    http_failure: tuple[int, str, str] | None = None,
 ) -> AsyncIterator[WebSocketPeer]:
-    fixture = WebSocketPeer(upgrade_status=upgrade_status, tls_context=tls_context)
+    fixture = WebSocketPeer(
+        upgrade_status=upgrade_status, tls_context=tls_context, http_failure=http_failure
+    )
     app = web.Application()
     app.router.add_get("/v1/responses", fixture.websocket)
     app.router.add_post("/v1/responses", fixture.handle)

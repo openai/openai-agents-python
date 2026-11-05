@@ -163,7 +163,11 @@
     {
       "path": "0044-scan-deep-helper-hard-links.patch",
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
+    },
+    {
+      "path": "0045-terminal-authentication-retry.patch",
+      "sha256": "dfb685f3098c8016a2e897c9cb19f0bb9330998d65bf425e4223c4325127dfb1"
     }
   ],
-  "result_tree": "0429c4208ab3424b70262ee45e748b95092f9285"
+  "result_tree": "fc15c63693e29c11f144795082e38ad61a5806d3"
 }
