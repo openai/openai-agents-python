@@ -1,4 +1,8 @@
-# Compare live model trials
+# Compare model configurations
+
+Run repeated catalog tasks, save a baseline, and compare a candidate configuration. Check the runner with scripted responses before spending model requests on a live comparison.
+
+## Set up the runner
 
 Install the [SDK preview wheel](../../docs/sdk/installation.md), activate your Python environment, and use the example files from the same release. Run the commands below from the root of that release's source archive. This runner needs no extra packages.
 
@@ -10,11 +14,15 @@ First run the scripted cases without credentials:
 python -m examples.evaluation.run --mode scripted --repeats 2 --output harness.json
 ```
 
+A successful scripted run creates `harness.json` and reports `evidence` set to `harness_only`, four trials, and four passes.
+
 The two cases ask for a known catalog code and a missing code. `ScriptedResponses` chooses the calls and final text, but the real native loop executes `lookup` and sends its result back to the peer. The runner checks that receipt. A passing scripted run checks the runner and tool execution. It does not evaluate model selection, prompt quality, or answer quality.
 
 ## Run a live comparison
 
 Live mode sends synthetic prompts and catalog values to the provider and can incur charges. It requires `OPENAI_API_KEY` and never falls back to scripted mode. The model and reasoning setting in `config.json` must be available to your account.
+
+### Record a baseline
 
 Supply your key through your usual secret mechanism, then record a baseline:
 
@@ -22,11 +30,15 @@ Supply your key through your usual secret mechanism, then record a baseline:
 python -m examples.evaluation.run --mode live --config examples/evaluation/config.json --repeats 3 --output baseline.json
 ```
 
-Copy `config.json` to `candidate.json` and change only the instructions or model setting you want to compare. Keep the cases and repeats fixed:
+### Run a candidate
+
+Copy `examples/evaluation/config.json` to `candidate.json` and change only the instructions or model setting you want to compare. Keep the cases and repeats fixed:
 
 ```sh
 python -m examples.evaluation.run --mode live --config candidate.json --repeats 3 --baseline baseline.json --output candidate-results.json
 ```
+
+Each live command records six trials. Inspect the output file even if the command exits with a failure.
 
 ## Read the results
 

@@ -1,8 +1,36 @@
-# Public results for external jobs
+# Run and resume an external thumbnail job
+
+Start a thumbnail request, render it in a separate worker, and resume the original tool call. The application keeps the image and provider receipt private and returns only the byte count to the model.
+
+## Set up the job
+
+Install the [matching SDK preview wheel](../../docs/sdk/installation.md), activate its Python environment, and open the repository root containing `agents.experimental.deferred` and these example files. Use a local POSIX filesystem with a Unix SQLite VFS that creates private files using the selected state directory's permissions.
+
+Set `THUMBNAIL_STATE_DIR` to an absolute private state path outside every model-visible mount. Its parent directory must already exist and be trusted by the host. Keep the database, SQLite sidecars, locks, and private receipts outside those mounts for the job's entire lifetime. The example trusts processes with the same operating-system user ID.
+
+The `run` command needs a local Responses endpoint. The commands below assume that endpoint listens on port `8080`; replace the port if needed. The example sends a fixed `local-only` credential to that endpoint and does not use `OPENAI_API_KEY`. The worker needs no model connection.
+
+The endpoint must request `render_thumbnail` and continue after receiving its result. For a complete synthetic model setup, see [the native test setup](../../tests/README.md) and [the external-job tests](../../tests/test_deferred_jobs_example.py).
+
+## Render and resume an order
+
+Run these commands in order from the repository root:
+
+```sh
+PYTHONPATH=. python -m examples.external_job run sample-01 --model-port 8080 --directory "$THUMBNAIL_STATE_DIR"
+PYTHONPATH=. python -m examples.external_job worker sample-01 --directory "$THUMBNAIL_STATE_DIR"
+PYTHONPATH=. python -m examples.external_job run sample-01 --model-port 8080 --directory "$THUMBNAIL_STATE_DIR"
+```
+
+The first command prints `pending`. The worker stores a 32 by 32 image in the private application database and prints `Rendered.`. The final command restores the pending call, gives the model the image's byte count, and prints `completed`.
+
+Reuse the order ID when retrying the same work. Choose a new ID to request another image. The SQLite journal authorizes each order and stores its checkpoint. The provider creates or finds the thumbnail under the same order ID.
+
+## Register the public result
 
 Declare a `FunctionTool` for the call the app will answer. Pass that same object to `jobs.register` and to the agent's `tools` list. Registration returns `None`.
 
-The example uses its SQLite journal to authorize each order and store its checkpoint. The provider creates or finds the thumbnail under the same order ID. The projector converts the private result into a public result that exposes only the byte count to the model.
+The projector converts the private result into a public result that exposes only the byte count to the model. The following registration excerpt uses the example's journal and provider:
 
 ```python
 from agents import FunctionTool
@@ -62,7 +90,7 @@ Keep the supplied order for ranked results. Choose public names and compute deri
 
 If the app needs to control result serialization itself, use `render.match(event)` and call `await request.respond(value)` on the matched request. In an `Agent.run()` interaction handler, return `request.reply(value)` instead.
 
-## Stable inputs
+## Declare stable inputs
 
 Declare inputs with these constraints:
 

@@ -1,12 +1,17 @@
 # Check a custom Responses endpoint
 
-A custom endpoint must implement the required Responses behavior. A Chat Completions-compatible route alone is insufficient.
+Use `NativeProvider` to connect the SDK to a custom Responses endpoint. Before using that endpoint in your application, check the endpoint and model against each feature the application needs. A Chat Completions-compatible route alone is insufficient.
 
-Test each feature your application uses against the actual endpoint and model. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support. `session.capabilities` describes SDK configuration support. It does not test a remote service.
+Start with HTTP text responses, then test tools and strict output separately. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support. `session.capabilities` reports whether the SDK configuration supports a feature; it does not test the remote service.
 
 ## Run text, Python tools and strict output separately
 
-Save this complete script as `check_endpoint.py`. Set `OPENAI_BASE_URL`, `OPENAI_API_KEY` and `MODEL` for the endpoint under test. Run `python check_endpoint.py text`, then `python check_endpoint.py tools`, then `python check_endpoint.py strict`. Each run makes live requests and can incur charges.
+Each check makes live requests and can incur charges. Keep inputs synthetic and keep credentials out of logs.
+
+1. [Install the preview wheel](installation.md) in the Python environment you will use for the checks.
+2. Save the script below as `check_endpoint.py`.
+3. Set `OPENAI_BASE_URL`, `OPENAI_API_KEY` and `MODEL` for the endpoint and model under test. The script passes the URL explicitly because the SDK does not read `OPENAI_BASE_URL` itself.
+4. Run `python check_endpoint.py text`, then `python check_endpoint.py tools`, then `python check_endpoint.py strict`. Each successful check prints its mode, `passed:`, and the final output.
 
 ```python
 import asyncio
@@ -69,12 +74,13 @@ The checks cover only their selected cases:
 
 | Check | What a pass establishes | Limit |
 | --- | --- | --- |
+| Text | The endpoint returned a response containing `atlas`. | It does not establish support for tools, structured output or other input types. |
 | Tools | The model requested the Python function and the loop completed. | It does not cover every tool shape. |
 | Strict output | The SDK requested native schema output and validated this object. | It does not prove server enforcement for every generation or support for every schema. |
 
-A model's wrong choice can also fail a check. Inspect the service request and error before blaming protocol support. Keep data synthetic and do not log headers or credentials.
+If a check fails, inspect the assertion or service error and the corresponding request. A model can fail to follow the prompt even when the endpoint supports the protocol. Check whether the failure comes from the model response or the endpoint before deciding which feature is unsupported.
 
-The provider context closes after the one-shot Session. Shared providers follow the same rule: close all their Sessions first.
+The script closes each one-shot Session before leaving the provider context. Follow the same order with shared providers: close every Session that uses the provider before closing the provider.
 
 ## Check WebSockets independently
 
