@@ -75,6 +75,8 @@ class A2AEndpoint:
                 raise ValueError(
                     "A2A routes require HTTP(S) URLs without credentials, queries or fragments"
                 )
+            if parts.scheme == "http" and parts.hostname not in {"localhost", "127.0.0.1", "::1"}:
+                raise ValueError("A2A routes require HTTPS outside loopback development")
         if origins[0] != origins[1]:
             raise ValueError("A2A discovery and RPC must share a configured origin")
 

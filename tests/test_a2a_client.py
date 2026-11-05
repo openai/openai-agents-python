@@ -36,6 +36,30 @@ def endpoint(base_url, name="specialist"):
     )
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://peer.example",
+        "http://127.0.0.1.example",
+        "http://192.0.2.1",
+        "http://[2001:db8::1]",
+    ],
+    ids=["remote-name", "loopback-lookalike", "remote-ipv4", "remote-ipv6"],
+)
+def test_remote_a2a_routes_require_https(url):
+    with pytest.raises(ValueError, match="HTTPS"):
+        endpoint(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://peer.example", "http://localhost:8000", "http://127.0.0.1:8000", "http://[::1]:8000"],
+    ids=["remote-tls", "local-name", "local-ipv4", "local-ipv6"],
+)
+def test_a2a_routes_accept_remote_tls_and_loopback_http(url):
+    assert endpoint(url).rpc_url == url + "/rpc"
+
+
 async def completed(client, task_id):
     for _ in range(200):
         task = await client.get_task(p.GetTaskRequest(id=task_id))

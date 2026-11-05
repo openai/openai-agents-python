@@ -4,7 +4,7 @@ The optional `agents.a2a` package connects native Agents SDK applications to ind
 
 ## Call a specialist
 
-`client.py` discovers one host-configured Agent Card, admits only its exact configured JSON-RPC interface, and then acquires a bearer token. Run it against an authorized service:
+`client.py` discovers one host-configured Agent Card, admits only its exact configured JSON-RPC interface, and then acquires a bearer token. Use HTTPS for remote services. For local development, HTTP works on `localhost`, `127.0.0.1`, and `[::1]`.
 
     export A2A_BEARER_TOKEN='your host-issued token'
     python examples/a2a/client.py \
