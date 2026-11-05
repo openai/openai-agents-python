@@ -11,10 +11,10 @@ index 295d1f826b19efa6e781761ca0c3d8bba6dd0d8a..61d3e12d4c59edaed9778a9bcc2cc4c6
   "tokio",
  ]
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..c4819869a7bcc269c2915a04149e299bf61b531e 100644
+index cb98f828bbed447c96a5b0dd9ecab20aa3698c7f..ad2416fa7f2f40b59091a45245addfaa44a44c1f 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -1784,6 +1784,9 @@ impl ModelClientSession {
+@@ -1785,6 +1785,9 @@ impl ModelClientSession {
              )
              .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
              crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
@@ -22,13 +22,13 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..c4819869a7bcc269c2915a04149e299b
 +                admission.admit_request().map_err(CodexErr::Fatal)?;
 +            }
              crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
-             let stream_result = client.stream_request(request, options).await;
- 
+             let request_observation = if observation_is_reviewer {
+                 None
 diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
-index 6188306e2ae26a96b758f2359697dc4ad4654b36..c6ffa49e94cb01075613b5a9e4bae3a9ec93a984 100644
+index b36753d97772d16c92b43d3c4c5877f828ce6fe4..1ab8e118d409094511c0648459cdecd12b3991dd 100644
 --- a/codex-rs/core/src/client_common.rs
 +++ b/codex-rs/core/src/client_common.rs
-@@ -33,6 +33,9 @@ pub struct Prompt {
+@@ -34,6 +34,9 @@ pub struct Prompt {
  
      /// Stops new provider requests for this turn, including prompts without tools.
      pub(crate) sampling_stop: Option<Arc<TurnSamplingStop>>,
@@ -38,7 +38,7 @@ index 6188306e2ae26a96b758f2359697dc4ad4654b36..c6ffa49e94cb01075613b5a9e4bae3a9
  
      /// Whether parallel tool calls are permitted for this prompt.
      pub(crate) parallel_tool_calls: bool,
-@@ -55,6 +58,7 @@ impl Default for Prompt {
+@@ -56,6 +59,7 @@ impl Default for Prompt {
              tools: Arc::default(),
              tool_admission: None,
              sampling_stop: None,
@@ -59,7 +59,7 @@ index c302aac22a6b055739501c55033aec814eb7a248..6843656823fe6a779c6d12ad19172851
          base_instructions,
          output_schema: None,
 diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
-index 5a5ae1d2c56ba260486336404a586652845a300e..5b8f87d3d66a2fa98dbaebb540d90d11691cffa0 100644
+index 669e33df55c11457a4b676e333de82a2e8cb49cc..9e75242032c01f76e101602f539f221721fc8344 100644
 --- a/codex-rs/core/src/lib.rs
 +++ b/codex-rs/core/src/lib.rs
 @@ -11,6 +11,7 @@ mod apps;
@@ -366,7 +366,7 @@ index 0000000000000000000000000000000000000000..a70e5faf6d3b77f8fa6d90f9c92276ae
 +    }
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22affa7f4fd0c 100644
+index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720d29e9ed5 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -1,3 +1,4 @@
@@ -374,7 +374,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
  use std::collections::HashMap;
  use std::collections::HashSet;
  use std::sync::Arc;
-@@ -1463,6 +1464,26 @@ async fn run_auto_compact(
+@@ -1468,6 +1469,26 @@ async fn run_auto_compact(
      phase: CompactionPhase,
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
@@ -401,7 +401,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
      if matches!(phase, CompactionPhase::PreTurn)
          && crate::guardian::is_basic_session_source(&turn_context.session_source)
          && !crate::guardian::should_compact_guardian_input(sess)?
-@@ -1606,6 +1627,7 @@ pub(crate) fn build_prompt(
+@@ -1611,6 +1632,7 @@ pub(crate) fn build_prompt(
          parallel_tool_calls: true,
          tool_admission: None,
          sampling_stop: None,
@@ -409,7 +409,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
          base_instructions,
          output_schema: turn_context.final_output_json_schema.clone(),
          output_schema_strict: !crate::guardian::is_basic_session_source(
-@@ -1657,6 +1679,7 @@ async fn run_sampling_request(
+@@ -1662,6 +1684,7 @@ async fn run_sampling_request(
      );
      let max_retries = turn_context.provider.info().stream_max_retries();
      let mut retry_state = ResponsesStreamRetryState::default();
@@ -417,7 +417,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
      let mut initial_input = Some(input);
      let mut original_input = None;
      let mut executed_tool_calls_by_output = HashMap::new();
-@@ -1689,6 +1712,27 @@ async fn run_sampling_request(
+@@ -1694,6 +1717,27 @@ async fn run_sampling_request(
          let responses_metadata = sess
              .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
              .await;
@@ -445,7 +445,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
          if crate::guardian::is_basic_session_source(&turn_context.session_source) {
              crate::guardian::prepare_guardian_prompt(
                  &sess,
-@@ -1698,6 +1742,34 @@ async fn run_sampling_request(
+@@ -1703,6 +1747,34 @@ async fn run_sampling_request(
              )
              .await?;
          }
@@ -480,7 +480,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
          let err = match try_run_sampling_request(
              tool_runtime.clone(),
              Arc::clone(&sess),
-@@ -1706,7 +1778,7 @@ async fn run_sampling_request(
+@@ -1711,7 +1783,7 @@ async fn run_sampling_request(
              client_session,
              &responses_metadata,
              Arc::clone(&turn_diff_tracker),
@@ -489,7 +489,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..32c8344d6236cd31db3aa230b7d22aff
              cancellation_token.child_token(),
          )
          .await
-@@ -1762,6 +1834,7 @@ async fn run_sampling_request(
+@@ -1767,6 +1839,7 @@ async fn run_sampling_request(
              ));
          }
          retry??;
@@ -510,22 +510,21 @@ index 4b487226eb7deb0a44ad5d9ae16e53f90fd7ec8e..3e19d0358c23532df40aca4dff37125b
  
  [dev-dependencies]
 diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
-index 940dc5f1f5d7437fdeaca8e333da3ba91146bd12..ae6ee3954b03f3637870b6c534c0ec8fe8f0170e 100644
+index e44afa9b206b7b346863fa76eb4164186e3d21f4..75f35746fa98bd047a54cf1b76f3cb243bbdeb77 100644
 --- a/codex-rs/ext/extension-api/src/lib.rs
 +++ b/codex-rs/ext/extension-api/src/lib.rs
-@@ -126,6 +126,12 @@ pub use model_request::ModelToolAdmission;
- pub use model_request::ResponseEvent;
- pub use model_request::TurnSamplingStop;
- 
+@@ -132,6 +132,11 @@ pub use model_request_observation::{
+     ModelRequestObservationRoute, ModelRequestObserver, ModelRequestTransport, ModelRequestWire,
+     ModelResponseLinked,
+ };
 +pub use model_request::PreparedRequestAdmission;
 +pub use model_request::PreparedRequestData;
 +pub use model_request::PreparedRequestInput;
 +pub use model_request::PreparedRequestOutput;
 +pub use model_request::PreparedToolPresentation;
-+
+ 
  /// SDK host context for recording the settings used to prepare a sampling request.
  pub struct SdkTurnReceiptSeed {
-     pub codex_revision: &'static str,
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
 index 45fa289c1d3a458daa5305abc634e79a47c7b1e5..26a4e467282a70ff3cc5407a5f8e3b249b450612 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs

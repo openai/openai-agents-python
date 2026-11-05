@@ -2334,6 +2334,7 @@ impl TurnLifecycleContributor for PythonContributor {
         input: codex_extension_api::TurnStopInput<'a>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            crate::request_metadata::retire(input.turn_store);
             if let Some(tools) = input.thread_store.get::<PythonTools>()
                 && let Some(receipt) = input.turn_store.get::<Arc<TurnAdmission>>()
             {
@@ -2359,6 +2360,7 @@ impl TurnLifecycleContributor for PythonContributor {
         input: codex_extension_api::TurnAbortInput<'a>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            crate::request_metadata::retire(input.turn_store);
             if let Some(tools) = input.thread_store.get::<PythonTools>()
                 && let Some(receipt) = input.turn_store.get::<Arc<TurnAdmission>>()
             {
@@ -4011,7 +4013,7 @@ pub(crate) mod managed_tests {
             let recovery_state = resumed.clone();
             let manual = restored.manual.clone();
             let recovering = tokio::spawn(async move {
-                manual_checkpoint::continue_if_ready(&recovery_state, &manual).await.unwrap()
+                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None).await.unwrap()
             });
             hold.entered.acquire().await.unwrap().forget();
             assert_eq!(provider.requests.lock().unwrap().len(), 2,

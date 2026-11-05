@@ -1727,13 +1727,19 @@ impl NativeThread {
         manual_checkpoint::prepare(&inner, &self.manual).map_err(py_error)
     }
 
-    fn _continue_manual<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (observation_submission_id=None))]
+    fn _continue_manual<'py>(
+        &self,
+        py: Python<'py>,
+        observation_submission_id: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         let manual = self.manual.clone();
         async_bridge::future_into_py(py, async move {
-            let receipt = manual_checkpoint::continue_if_ready(&inner, &manual)
-                .await
-                .map_err(py_error)?;
+            let receipt =
+                manual_checkpoint::continue_if_ready(&inner, &manual, observation_submission_id)
+                    .await
+                    .map_err(py_error)?;
             serde_json::to_string(&receipt).map_err(py_error)
         })
     }
@@ -2813,3 +2819,5 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("OPERATIONS", operations)?;
     Ok(())
 }
+
+mod request_metadata;
