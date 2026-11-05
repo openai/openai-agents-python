@@ -18,6 +18,8 @@ from agents import (
 )
 from agents._native_async import _NativeCompletionError
 from agents.observation import (
+    ModelRequestDispatching,
+    ModelResponseLinked,
     OutputTextDelta,
     SessionEnded,
     ToolFinished,
@@ -101,7 +103,10 @@ async def test_replaced_tools_rich_input_and_observation_survive_native_restore(
             assert len(replaced_calls) == 1
             assert replaced_calls[0].context is source_context
             assert replaced_calls[0].submission is first
-            assert [type(event) for event in source_events] == [
+            metadata_types = (ModelRequestDispatching, ModelResponseLinked)
+            assert [
+                type(event) for event in source_events if not isinstance(event, metadata_types)
+            ] == [
                 TurnStarted,
                 ToolStarted,
                 ToolFinished,
@@ -111,6 +116,14 @@ async def test_replaced_tools_rich_input_and_observation_survive_native_restore(
                 UsageUpdated,
                 TurnFinished,
             ]
+            dispatches = [
+                event for event in source_events if isinstance(event, ModelRequestDispatching)
+            ]
+            links = [event for event in source_events if isinstance(event, ModelResponseLinked)]
+            assert len(dispatches) == len(links) == 2
+            assert {event.request_id for event in dispatches} == {
+                event.request_id for event in links
+            }
             assert source_events[-1].status == "completed"
             encoded = state.to_json()
             for secret in (source_context.private, "synthetic-observation-key"):

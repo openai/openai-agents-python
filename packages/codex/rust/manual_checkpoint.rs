@@ -550,6 +550,7 @@ pub(crate) async fn continue_if_ready(
     thread: &crate::engine::ThreadState,
     owner: &Owner,
     trace: Option<codex_protocol::protocol::W3cTraceContext>,
+    observation_submission_id: Option<String>,
 ) -> Result<Value> {
     let _operation = thread.engine.operation(false)?;
     let _mutation = thread.mutations.lock().await;
@@ -576,14 +577,17 @@ pub(crate) async fn continue_if_ready(
         .map(|call| frame.accepted[call].clone())
         .collect();
     thread.thread.inject_response_items(outputs).await?;
+    let mut recovery_options = match frame.state["native_continuation"].get("output_schema") {
+        Some(schema) => serde_json::json!({"output_schema":schema}),
+        None => serde_json::json!({}),
+    };
+    recovery_options["trace"] = serde_json::json!(trace);
+    recovery_options["observation_submission_id"] = serde_json::json!(observation_submission_id);
     let result = crate::ops::recover_prepared(
-        &thread.thread,
+        thread,
         frame.turn,
         frame.seen.into_iter().collect(),
-        match frame.state["native_continuation"].get("output_schema") {
-            Some(schema) => serde_json::json!({"output_schema":schema,"trace":trace}),
-            None => serde_json::json!({"trace":trace}),
-        },
+        recovery_options,
     )
     .await?;
     ensure!(

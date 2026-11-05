@@ -262,6 +262,18 @@ impl Engine {
         })
     }
     #[getter]
+    fn _codex_account(&self) -> PyResult<Option<(Option<String>, String, String)>> {
+        let inner = self.current()?;
+        Ok(inner.codex_account.as_ref().map(|account| {
+            (
+                account.account_id.clone(),
+                account.plan_type.clone(),
+                account.binding.clone(),
+            )
+        }))
+    }
+
+    #[getter]
     fn startup_warnings(&self) -> Vec<String> {
         self.startup_warnings.clone()
     }
@@ -1685,10 +1697,11 @@ impl NativeThread {
         manual_checkpoint::prepare(&inner, &self.manual).map_err(py_error)
     }
 
-    #[pyo3(signature = (trace_json=None))]
+    #[pyo3(signature = (observation_submission_id=None, trace_json=None))]
     fn _continue_manual<'py>(
         &self,
         py: Python<'py>,
+        observation_submission_id: Option<String>,
         trace_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let trace = trace_json
@@ -1699,9 +1712,14 @@ impl NativeThread {
         let inner = self.current()?;
         let manual = self.manual.clone();
         async_bridge::future_into_py(py, async move {
-            let receipt = manual_checkpoint::continue_if_ready(&inner, &manual, trace)
-                .await
-                .map_err(py_error)?;
+            let receipt = manual_checkpoint::continue_if_ready(
+                &inner,
+                &manual,
+                trace,
+                observation_submission_id,
+            )
+            .await
+            .map_err(py_error)?;
             serde_json::to_string(&receipt).map_err(py_error)
         })
     }
@@ -2781,3 +2799,5 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("OPERATIONS", operations)?;
     Ok(())
 }
+
+mod request_metadata;
