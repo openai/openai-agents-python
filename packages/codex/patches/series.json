@@ -177,9 +177,13 @@
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
     },
     {
-      "path": "0045-terminal-authentication-retry.patch",
+      "path": "0045-saved-codex-login.patch",
+      "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
+    },
+    {
+      "path": "0046-terminal-authentication-retry.patch",
       "sha256": "4f12eb2d9794fec908b2e78425641bf4d22e66de089f4523321c57c60f44f2bb"
     }
   ],
-  "result_tree": "f7c3f6cd1df7dd5d51965f26ed6c87147e54f2d1"
+  "result_tree": "c041abbbd358bade3fb34c9ebef59dc319889449"
 }
