@@ -10,13 +10,15 @@ For a live model example, supply `OPENAI_API_KEY` through your usual credential 
 
 ## Run a Python tool
 
-Run the greeting example:
+With `OPENAI_API_KEY` configured, run the greeting example:
 
 ```sh
 python -m examples.basic
 ```
 
 The example asks the agent to greet Ada with the Python `greeting` tool and prints the final answer. Live wording can vary. The [source](basic.py) shows the tool declaration and `Agent.run()` call.
+
+To start without model credentials, choose a [scripted recipe](../docs/sdk/recipes.md#test-application-logic-without-a-model).
 
 ## Choose an agent task
 
@@ -43,6 +45,7 @@ These programs use the current SDK and model credentials:
 | Serve an agent or call an A2A peer | [A2A adapter](a2a/README.md) | Install the A2A extra. The host supplies caller identity and task storage for cancellation and recovery. |
 | Supervise local coding workers | [Supervised workers](supervised_worker/README.md) | Separate workspaces, native histories, artifact checks, and publication records. Requires matching native helpers and model credentials. |
 | Debug tool and provider failures | [Trace walkthrough](observability/README.md) | A local collector, viewer, and history reader. Uses synthetic data without provider credentials. |
+| Continue a trace across workers | [Explicit trace context](observability/README.md#continue-a-parent-trace-into-another-worker) | A synthetic parent trace and a second Agent. Requires the development APIs identified in the guide. |
 | Compare model configurations | [Evaluation runner](evaluation/README.md) | Repeated cases, baseline comparisons, and failure artifacts. Scripted mode checks the runner; live mode needs model credentials. |
 
 ## Connect an executor

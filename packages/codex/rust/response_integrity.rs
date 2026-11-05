@@ -8,6 +8,7 @@ use codex_extension_api::{
     ModelRequestContributor, ModelRequestInput, ModelRequestKind, ModelResponseError,
     ModelResponseInterceptor, ModelResponseStream, ResponseEvent,
 };
+use codex_protocol::error::ResponseIntegrityReason;
 use codex_protocol::models::{ContentItem, ResponseItem};
 use futures_util::Stream;
 
@@ -87,11 +88,12 @@ impl Stream for Generation {
                     // provider. Unpaired external context and server search
                     // outputs belong to Core and still pass through.
                     this.rejected = true;
+                    let reason = ResponseIntegrityReason::ProviderOwnedToolReceipt;
                     if let Some(receipt) = &this.owner.admission {
-                        receipt.reject_model(&this.owner.thread);
+                        receipt.reject_model(&this.owner.thread, reason);
                     }
-                    return Poll::Ready(Some(Err(ModelResponseError::InvalidRequest {
-                        message: UNSUPPORTED_OUTPUT.into(),
+                    return Poll::Ready(Some(Err(ModelResponseError::ResponseIntegrity {
+                        reason,
                     })));
                 }
                 ResponseEvent::OutputItemAdded(ResponseItem::Message { role, .. })
@@ -150,11 +152,16 @@ impl Stream for Generation {
                     // output. Never claim the response was empty success. Do
                     // not include model text, IDs, or provider details in errors.
                     this.rejected = true;
+                    let reason = if this.pending_assistant {
+                        ResponseIntegrityReason::UnfinishedAssistantItem
+                    } else {
+                        ResponseIntegrityReason::MissingSupportedTerminalOutput
+                    };
                     if let Some(receipt) = &this.owner.admission {
-                        receipt.reject_model(&this.owner.thread);
+                        receipt.reject_model(&this.owner.thread, reason);
                     }
-                    return Poll::Ready(Some(Err(ModelResponseError::InvalidRequest {
-                        message: UNSUPPORTED_OUTPUT.into(),
+                    return Poll::Ready(Some(Err(ModelResponseError::ResponseIntegrity {
+                        reason,
                     })));
                 }
                 _ => {}

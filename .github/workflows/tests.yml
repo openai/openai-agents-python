@@ -40,6 +40,8 @@ jobs:
       windows: ${{ steps.release-windows.outputs.run }}
       native_source_run: ${{ steps.native-source.outputs.run_id }}
       native_artifacts: ${{ steps.native-source.outputs.artifacts }}
+      native_dependency_run: ${{ steps.native-source.outputs.dependency_run }}
+      native_dependencies: ${{ steps.native-source.outputs.dependencies }}
       native_provenance: ${{ steps.producer-identity.outputs.provenance }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -215,7 +217,7 @@ jobs:
                   raise SystemExit('Incomplete native publication timestamp')
               return parsed
 
-          def compatible(run):
+          def compatible(run, dependencies=False):
               if (repo != 'openai/openai-agents-python' or run['event'] != 'push'
                       or run['repository']['full_name'] != repo
                       or str(run['repository']['id']) != os.environ['GITHUB_REPOSITORY_ID']
@@ -289,10 +291,12 @@ jobs:
                   rb'|\.github/workflows/alpha-install\.yml\Z'
                   rb'|docs/assets/images/.+\.(?:png|jpg|jpeg|gif|svg|webp)\Z'
               )
-              return not any(not allowed.fullmatch(path) for path in changed)
+              return all(allowed.fullmatch(path) or (dependencies and re.fullmatch(
+                  rb'packages/codex/rust/.+\.rs', path
+              )) for path in changed)
 
-          def qualified(run):
-              if run['status'] != 'completed' or run['conclusion'] != 'success' or not compatible(run):
+          def qualified(run, dependencies=False):
+              if run['status'] != 'completed' or run['conclusion'] != 'success' or not compatible(run, dependencies):
                   return None
               run_api = api + '/runs/' + str(run['id'])
               jobs = records(run_api + '/jobs?filter=all', 'jobs')
@@ -372,13 +376,15 @@ jobs:
                       copied = (steps.get('Build the SDK and native runtime together', {}).get('conclusion') == 'skipped'
                                 and steps.get('Build the shared test executor', {}).get('conclusion') == 'skipped'
                                 and steps.get('Download the qualified native build', {}).get('conclusion') == 'success')
-                      if not (fresh or copied):
+                      if not (fresh or (copied and not dependencies)):
                           continue
-                      publication = steps.get('Publish the native snapshot', {})
+                      publication = steps.get('Publish Rust dependencies' if dependencies else 'Publish the native snapshot', {})
+                      if dependencies and steps.get('Prepare Rust dependency cache', {}).get('conclusion') != 'success':
+                          continue
                       if publication.get('conclusion') != 'success':
                           continue
                       for artifact in artifacts:
-                          if (artifact['name'] == 'native-snapshot-' + identity and not artifact['expired']
+                          if (artifact['name'] == ('native-dependencies-' if dependencies else 'native-snapshot-') + identity and not artifact['expired']
                                   and timestamp(publication['started_at']) <= timestamp(artifact['created_at'])
                                   <= timestamp(publication['completed_at']) < earliest_sdk):
                               if not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact['digest']):
@@ -397,16 +403,21 @@ jobs:
               query = urllib.parse.urlencode({'branch': os.environ['SOURCE_BRANCH'], 'event': 'push', 'status': 'success', 'per_page': 20})
               yield from get(api + '/workflows/tests.yml/runs?' + query)['workflow_runs']
 
-          for run in candidates():
-              selected = qualified(run)
-              if selected:
-                  with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-                      output.write(f"run_id={run['id']}\n")
-                      output.write('artifacts=' + json.dumps(selected, sort_keys=True) + '\n')
-                  print(f"Reusing native build from {repo} push run {run['id']} at {run['head_sha']}")
-                  break
-          else:
-              print('No qualified native build is available. Building from source now.')
+          # Prefer a ready wheel. Only restore compiler dependencies when a fresh build is needed.
+          def select():
+              runs = list(candidates())
+              for dependencies in (False, True):
+                  for run in runs:
+                      selected = qualified(run, dependencies)
+                      if selected:
+                          run_key, artifact_key = ('dependency_run', 'dependencies') if dependencies else ('run_id', 'artifacts')
+                          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                              output.write(f"{run_key}={run['id']}\n")
+                              output.write(artifact_key + '=' + json.dumps(selected, sort_keys=True) + '\n')
+                          print(f"Reusing {'Rust dependencies' if dependencies else 'native build'} from {repo} push run {run['id']} at {run['head_sha']}")
+                          return
+              print('No qualified native build or dependencies are available. Building from source now.')
+          select()
           PYTHON
 
   produce-linux:
@@ -417,6 +428,8 @@ jobs:
       runner: ubuntu-24.04
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
+      native_dependency_run: ${{ needs.changes.outputs.native_dependency_run }}
+      native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   produce-windows:
@@ -427,6 +440,8 @@ jobs:
       runner: windows-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
+      native_dependency_run: ${{ needs.changes.outputs.native_dependency_run }}
+      native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   produce-macos:
@@ -437,6 +452,8 @@ jobs:
       runner: macos-latest
       native_source_run: ${{ needs.changes.outputs.native_source_run }}
       native_artifacts: ${{ needs.changes.outputs.native_artifacts }}
+      native_dependency_run: ${{ needs.changes.outputs.native_dependency_run }}
+      native_dependencies: ${{ needs.changes.outputs.native_dependencies }}
       native_provenance: ${{ needs.changes.outputs.native_provenance }}
 
   native-linux:
@@ -828,7 +845,7 @@ jobs:
       - name: Run parallel tests
         id: parallel-tests
         if: steps.changes.outputs.run == 'true'
-        run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 2 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
+        run: uv run python packages/codex/scripts/test_native.py --sdk -m pytest -n 8 --dist worksteal -m "not serial" -vv --tb=short -o faulthandler_timeout=180 -o faulthandler_exit_on_timeout=true
       - name: Run serial tests after all workers exit
         if: ${{ !cancelled() && (steps.parallel-tests.outcome == 'success' || steps.parallel-tests.outcome == 'failure') }}
         run: uv run python .github/scripts/run_serial_tests.py

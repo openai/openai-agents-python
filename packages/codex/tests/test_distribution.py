@@ -17,7 +17,7 @@ from zipfile import ZipFile
 import pytest
 from packaging.requirements import Requirement
 from packaging.tags import sys_tags
-from packaging.utils import parse_wheel_filename
+from packaging.utils import canonicalize_name, parse_wheel_filename
 from packaging.version import Version
 
 if sys.version_info >= (3, 11):
@@ -82,7 +82,7 @@ def test_sdk_archive_has_current_native_api_and_licenses(sdk_wheel):
             assert (info.external_attr >> 16) & 0o111
 
 
-def test_sdk_metadata_declares_base_and_optional_runtime_dependencies(
+def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
     sdk_wheel,
 ):
     path, archive = sdk_wheel
@@ -103,35 +103,44 @@ def test_sdk_metadata_declares_base_and_optional_runtime_dependencies(
         metadata.get_payload().strip()
         == (SOURCE.parents[1] / "packages/codex/README.md").read_text().strip()
     )
-    assert metadata.get_all("Provides-Extra") == ["a2a"]
+    extra_dependencies = project["optional-dependencies"]
+    assert "classic" in extra_dependencies
+    assert extra_dependencies["a2a"] == ["a2a-sdk==1.3.0"]
+    assert sorted(metadata.get_all("Provides-Extra", [])) == sorted(extra_dependencies)
     observed = {Requirement(value) for value in metadata.get_all("Requires-Dist", [])}
     expected = {
         Requirement("jsonschema>=4.25.1,<5"),
         Requirement("referencing>=0.36.2,<1"),
         Requirement("pydantic>=2.12.2,<3"),
         Requirement("typing-extensions>=4.15,<5"),
-        Requirement('a2a-sdk==1.3.0; extra == "a2a"'),
     }
-    assert {(item.name, item.specifier, frozenset(item.extras), item.url) for item in observed} == {
-        (item.name, item.specifier, frozenset(item.extras), item.url) for item in expected
-    }
+    classic = {Requirement(value) for value in extra_dependencies["classic"]}
     # Maturin normalizes the Python-version marker when writing METADATA.
     for full_version in ("3.10.0", "3.10.22", "3.11.0", "3.12.13", "3.14.0"):
-        for extra in ("", "a2a"):
+        for extra in ("", *extra_dependencies):
             environment = {
                 "python_version": ".".join(full_version.split(".")[:2]),
                 "python_full_version": full_version,
                 "extra": extra,
             }
+            selected_expected = expected | (classic if extra == "classic" else set())
+            # Hatch expands each integration's local classic dependency into its requirements.
+            for value in extra_dependencies.get(extra, []):
+                requirement = Requirement(value)
+                if requirement.name == "openai-agents":
+                    assert requirement == Requirement("openai-agents[classic]")
+                    selected_expected |= classic
+                else:
+                    selected_expected.add(requirement)
             assert {
-                item.name
+                (canonicalize_name(item.name), item.specifier, frozenset(item.extras), item.url)
                 for item in observed
                 if item.marker is None or item.marker.evaluate(environment)
             } == {
-                item.name
-                for item in expected
+                (canonicalize_name(item.name), item.specifier, frozenset(item.extras), item.url)
+                for item in selected_expected
                 if item.marker is None or item.marker.evaluate(environment)
-            }
+            }, (full_version, extra)
     wheel_path = metadata_path.removesuffix("METADATA") + "WHEEL"
     wheel = BytesParser().parsebytes(archive.read(wheel_path))
     assert wheel["Root-Is-Purelib"] == "false"

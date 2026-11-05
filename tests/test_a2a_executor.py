@@ -291,6 +291,108 @@ async def test_invalid_continuation_preserves_pending_answer(tmp_path, responses
     assert len(responses.requests) == 2
 
 
+@pytest.mark.parametrize("reason_size", [20, 300])
+async def test_generated_approval_limit_includes_message_envelope(tmp_path, responses, reason_size):
+    tool = FunctionTool(
+        name="approve", description="Application approval", input_type=Approval, output_type=str
+    )
+    responses.respond(function_call("approve", {"reason": "x" * reason_size}, "call-a"))
+    executor = make_executor(tmp_path, responses, [tool], limits=A2ALimits(message_bytes=512))
+
+    stored, events = await invoke(executor, request_context())
+
+    expected = p.TASK_STATE_INPUT_REQUIRED if reason_size == 20 else p.TASK_STATE_FAILED
+    assert stored.task.status.state == expected
+    for event in events:
+        if isinstance(event, p.TaskStatusUpdateEvent) and event.status.HasField("message"):
+            encoded = json.dumps(
+                MessageToDict(event.status.message), ensure_ascii=False, separators=(",", ":")
+            ).encode()
+            assert len(encoded) <= 512
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    assert saved.acknowledges(stored.task)
+    assert (saved.checkpoint is not None) is (reason_size == 20)
+    assert (saved.challenge is not None) is (reason_size == 20)
+    assert await executor.recover(binding, call_context()) == saved
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("message_limit", [160, 512])
+async def test_failure_omits_only_diagnostic_that_exceeds_message_limit(
+    tmp_path, responses, message_limit
+):
+    responses.respond(assistant_output("x" * 2048))
+    executor = make_executor(tmp_path, responses, limits=A2ALimits(message_bytes=message_limit))
+
+    stored, events = await invoke(executor, request_context())
+
+    assert stored.task.status.state == p.TASK_STATE_FAILED
+    assert stored.task.status.HasField("message") is (message_limit == 512)
+    assert not stored.task.artifacts
+    for event in events:
+        if isinstance(event, p.TaskStatusUpdateEvent) and event.status.HasField("message"):
+            encoded = json.dumps(
+                MessageToDict(event.status.message), ensure_ascii=False, separators=(",", ":")
+            ).encode()
+            assert len(encoded) <= message_limit
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    assert saved.status == "failed" and saved.acknowledges(stored.task)
+    assert saved.checkpoint is None and saved.challenge is None
+    assert await executor.recover(binding, call_context()) == saved
+    assert binding not in executor._live
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("message_limit", [160, 512])
+async def test_cancellation_omits_only_diagnostic_that_exceeds_message_limit(
+    tmp_path, responses, message_limit
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        entered.set()
+        await release.wait()
+        return "released"
+
+    responses.respond(function_call("hold", {}, "call-cancel"))
+    executor = make_executor(
+        tmp_path, responses, [hold], limits=A2ALimits(message_bytes=message_limit)
+    )
+    context = request_context()
+    running = asyncio.create_task(invoke(executor, context))
+    queue = EventQueueSource()
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(executor.cancel(context, queue), 5)
+        stored, events = await running
+        assert stored.task.status.state == p.TASK_STATE_CANCELED
+        assert stored.task.status.HasField("message") is (message_limit == 512)
+        for event in events:
+            if isinstance(event, p.TaskStatusUpdateEvent) and event.status.HasField("message"):
+                encoded = json.dumps(
+                    MessageToDict(event.status.message), ensure_ascii=False, separators=(",", ":")
+                ).encode()
+                assert len(encoded) <= message_limit
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        saved = executor.store.read(binding)
+        assert saved.status == "canceled" and saved.acknowledges(stored.task)
+        assert saved.checkpoint is None and saved.challenge is None
+        assert await executor.recover(binding, call_context()) == saved
+        assert binding not in executor._live
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await queue.close(immediate=True)
+
+
 async def test_same_context_still_owns_independent_native_sessions(tmp_path, responses):
     responses.respond(assistant_output("one"))
     responses.respond(assistant_output("two"))

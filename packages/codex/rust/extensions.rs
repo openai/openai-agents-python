@@ -251,6 +251,7 @@ pub fn build(
         skills_registry.build(),
         crate::native_interception::DirectOutput::Json,
     );
+    builder.model_request_contributor(Arc::new(crate::python_tools::PreparedRequestContributor));
     builder.model_request_contributor(recovery);
     builder.model_request_contributor(interception.clone());
     builder.model_request_contributor(Arc::new(crate::response_integrity::Contributor(

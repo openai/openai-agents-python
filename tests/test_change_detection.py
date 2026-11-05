@@ -1052,6 +1052,28 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "release_split_donors",
         "unknown_two_platforms",
         "unknown_complete",
+        "dependencies_reuse",
+        "dependencies_prefer_wheel",
+        "dependencies_missing_cleanup",
+        "dependencies_build_payload_changed_modified",
+        "dependencies_native_changed",
+        "dependencies_build_metadata_changed",
+        "dependencies_dependency_lock_changed",
+        "dependencies_native_workflow_changed",
+        "dependencies_selector_changed",
+        "dependencies_untrusted",
+        "dependencies_failed_run",
+        "dependencies_in_progress",
+        "dependencies_missing_artifact",
+        "dependencies_expired",
+        "dependencies_cross_platform_interleaving",
+        "dependencies_replacement_artifact",
+        "dependencies_earlier_attempt_sdk",
+        "dependencies_qualification_failed",
+        "dependencies_invalid_snapshot_digest",
+        "dependencies_branch_same",
+        "dependencies_branch_other_pr",
+        "dependencies_branch_copied",
     ],
 )
 def test_native_build_selection(
@@ -1063,6 +1085,12 @@ def test_native_build_selection(
     import urllib.parse
     import urllib.request
 
+    dependency_cache = scenario.startswith("dependencies_")
+    prefer_wheel = scenario == "dependencies_prefer_wheel"
+    missing_cleanup = scenario == "dependencies_missing_cleanup"
+    scenario = scenario.removeprefix("dependencies_")
+    if prefer_wheel or missing_cleanup:
+        scenario = "reuse"
     pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
     scenario = scenario.removeprefix("pending_python_")
     repo, initial = change_repo
@@ -1379,6 +1407,8 @@ def test_native_build_selection(
             _commit(repo, "packages/codex/Cargo.toml")
         else:
             _commit(repo, "src/agents/parent.py")
+    if dependency_cache and not prefer_wheel:
+        additional_paths += ("packages/codex/rust/lib.rs",)
     head = _commit(
         repo,
         "packages/codex/Cargo.toml"
@@ -1637,6 +1667,18 @@ def test_native_build_selection(
             ("macos", "macos-latest"),
         )
     ]
+    if dependency_cache:
+        for job in jobs:
+            if prefer_wheel:
+                job["steps"].append(dict(job["steps"][-1]))
+            job["steps"][-1]["name"] = "Publish Rust dependencies"
+            job["steps"].insert(
+                -1,
+                {
+                    "name": "Prepare Rust dependency cache",
+                    "conclusion": "skipped" if missing_cleanup else "success",
+                },
+            )
     if scenario == "producer_failed":
         jobs[0]["conclusion"] = "failure"
     if scenario == "producer_in_progress":
@@ -1659,6 +1701,13 @@ def test_native_build_selection(
             )
         )
     ]
+    if prefer_wheel:
+        artifacts.extend(dict(artifact, id=artifact["id"] + 1000) for artifact in list(artifacts))
+    if dependency_cache:
+        for artifact in artifacts:
+            if prefer_wheel and artifact["id"] < 2000:
+                continue
+            artifact["name"] = artifact["name"].replace("native-snapshot-", "native-dependencies-")
     if scenario == "missing_artifact":
         artifacts.pop()
     if scenario in {
@@ -1977,7 +2026,11 @@ def test_native_build_selection(
     else:
         exec(compile(script, workflow_path, "exec"), {})
     assert (output.read_text() if output.exists() else "") == (
-        "run_id=123\nartifacts="
+        (
+            "dependency_run=123\ndependencies="
+            if dependency_cache and not prefer_wheel
+            else "run_id=123\nartifacts="
+        )
         + json.dumps(
             {
                 identity: {
@@ -1991,7 +2044,9 @@ def test_native_build_selection(
             sort_keys=True,
         )
         + "\n"
-        if scenario
+        if not missing_cleanup
+        and not (dependency_cache and scenario == "branch_copied")
+        and scenario
         in {
             "reuse",
             "trusted_push_to_pr",

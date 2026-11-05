@@ -211,7 +211,7 @@ for repair in result.repair_attempts:
     print(repair["id"], repair["parent_turn_id"], repair["usage"])
 ```
 
-`Completed.usage` is cumulative for the original thread and excludes correction threads. Missing usage is `None`, not zero. Follow the [usage accounting limits](troubleshooting.md#read-usage-without-double-counting) when comparing successive snapshots.
+`Completed.usage` is cumulative for the original thread and excludes correction threads. Missing usage is `None`, not zero. Follow the [usage accounting limits](observability.md#read-usage-without-double-counting) when comparing successive snapshots.
 
 Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
@@ -221,33 +221,11 @@ Automatic one-shot checkpoints support native strict output but exclude `Prompte
 
 ## Telemetry
 
-Configure native telemetry through `agents.telemetry` before opening the first Session in the process. Call `await configure(...)` once. After all Sessions close, call `await shutdown()` to flush and shut down native telemetry. Your application still owns Session cleanup and any Python OpenTelemetry exporters it creates.
+Configure exporters, startup, shutdown, and content controls in the [observability guide](observability.md#configure-telemetry).
 
-If native initialization fails after claiming the tracing subscriber, start a fresh process. Retrying configuration in that process is unsupported.
+### Continue a trace across workers
 
-Place this fragment before any Session opens. Replace the endpoint with your collector's trace endpoint and configure `agent` as above:
-
-```python
-from agents import telemetry
-
-await telemetry.configure(
-    traces=telemetry.OtlpHttp(endpoint="http://127.0.0.1:4318/v1/traces"),
-    environment="dev",
-)
-try:
-    result = await agent.run("Say hello.")
-finally:
-    await telemetry.shutdown()
-```
-
-Exporter settings are:
-
-- `traces`, `logs` and `metrics` accept `OtlpHttp(...)`, `OtlpGrpc(...)` or `None`. Each defaults to `None`, disabling that signal, including native metrics.
-- `OtlpHttp` defaults to `protocol="binary"` and also accepts `"json"`. Supply a collector endpoint and optional string-to-string `headers` mapping.
-- Both exporters accept `tls=OtelTlsConfig(...)` with `ca_certificate`, `client_certificate` and `client_private_key` paths. Relative paths resolve against the application's current directory.
-- `span_attributes` adds application-selected string attributes.
-
-Content defaults are `log_user_prompt=False`, `log_agent_responses=False` and `tool_result_max_bytes=0`. The switches control only the named native records. They do not sanitize all telemetry. The byte limit bounds only result text. Select exporters and controls for the data your collector may receive.
+Use [trace context and worker propagation](observability.md#continue-a-trace-across-workers) to connect Session and tool work across workers.
 
 ## Programmatic tool calling
 
@@ -263,3 +241,16 @@ These limits apply:
 - `exec` and `wait` are reserved function names.
 
 Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor argument and result transforms](execution.md#executor-policies) also support direct calls without this option.
+
+## Plan the application lifecycle
+
+The SDK runs inside your application, which manages its workers, storage and credentials. Saving a checkpoint does not provide a hosted recovery service.
+
+| Application decision | Supported path |
+| --- | --- |
+| When to initialize diagnostics | Configure [telemetry](observability.md#configure-telemetry) before the first Session opens. |
+| Which work belongs to a conversation | Own each [Session](sessions.md) explicitly and choose queueing or steering when submissions overlap. |
+| Where history survives a restart | Choose [portable checkpoints or a local profile](state.md#choose-how-to-store-a-conversation). Retain the required state or conversation ID in application storage. |
+| What tools may do | Supply current [tools and execution permissions](tools.md). Restored history does not supply current credentials or grant new authority. |
+| Whether work can be retried | Inspect [effect metadata and history](sessions.md#failures-and-recovery), together with your application's records of external effects. |
+| How to shut down | Close owned Sessions, then close any [explicit providers](#provider-lifetime) after their Sessions are closed. Shut down [telemetry](observability.md#configure-telemetry) after all Sessions close. |

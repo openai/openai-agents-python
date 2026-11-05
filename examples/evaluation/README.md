@@ -8,7 +8,7 @@ Install the [SDK preview wheel](../../docs/sdk/installation.md), activate your P
 
 ## Check the test setup
 
-First run the scripted cases without credentials:
+First run the scripted cases without credentials. The runner writes results to the path passed as `--output`; choose a path you can write:
 
 ```sh
 python -m examples.evaluation.run --mode scripted --repeats 2 --output harness.json
@@ -42,7 +42,7 @@ Each live command records six trials. Inspect the output file even if the comman
 
 ## Read the results
 
-Result files contain the configuration, cases, catalog, hashes, SDK and Python versions, and timestamp. Each trial records its duration, answer, executed lookup codes, safe exception type, and scores.
+Result files contain the configuration, cases, catalog, hashes, SDK and Python versions, and timestamp. Each trial records its duration, answer, executed lookup codes, exception type without its message, and scores.
 
 Use synthetic data because these files include prompts, answers, and tool values. Keep credentials out of configuration files. The runner omits exception messages and traceback locals.
 

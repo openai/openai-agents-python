@@ -71,7 +71,11 @@ The starter separates display recovery from work cancellation:
 
 See the starter's README for work limits, cancellation deadlines, MCP credentials, and external-worker commands.
 
-## Check feature limits
+## Adapt a recipe to your application
+
+Before replacing synthetic dependencies with application services, check the relevant API limits, approval rules, and data lifetimes.
+
+### Check feature limits
 
 Use these guides for the rules behind each recipe:
 
@@ -81,23 +85,23 @@ Use these guides for the rules behind each recipe:
 | Stream to a browser or stop work | [Stream observations](sessions.md#stream-observations) and [cancel joined work](sessions.md#interrupt-work) |
 | Validate tool inputs and results | [Python tools](tools.md#python-functions), [argument inspection](tools.md#inspect-python-policy-arguments), and [structured output](configuration.md#structured-output) |
 | Call tools from generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) |
-| Run an MCP server locally | [Native MCP](tools.md#native-mcp) |
+| Run an MCP server locally | [Start a stdio server](mcp.md#start-a-stdio-server) |
 | Manage conversation context and application memory | [History and compaction](state.md#compact-conversation-context) |
 | Delegate to another agent | [Native children](delegation.md#native-children) |
 
 For PDFs or document search, extract text in application code and retrieve authorized excerpts. The SDK cannot accept PDFs or arbitrary files directly or provide authoritative native citation spans. Images require inline image data.
 
-## Human in the loop: approve the exact request
+### Human in the loop: approve the exact request
 
 Use [manual tool results](approvals.md#manual-tool-results) when your application or a person supplies a tool answer. Use [application approval](approvals.md#ask-for-application-approval) to decide whether an executor call may run.
 
 Before accepting a reply, verify that the authenticated caller can answer that exact pending request. A timeout or cancellation does not undo completed effects.
 
-## Rate limits and token budget
+### Rate limits and token budget
 
-Read the [API-key rate-limit snapshot](configuration.md#read-api-key-rate-limits) and set your own limits on accepted and queued work. Use [usage and deadlines](troubleshooting.md) to report consumption and stop work. Enforce strict token or cost limits in your application.
+Read the [API-key rate-limit snapshot](configuration.md#read-api-key-rate-limits) and set your own limits on accepted and queued work. Use [token usage](observability.md#read-usage-without-double-counting) to report consumption and [deadlines](troubleshooting.md#bound-a-wait-and-stop-owned-work) to stop work. Enforce strict token or cost limits in your application.
 
-## Keep each data store's lifetime explicit
+### Keep each data store's lifetime explicit
 
 Choose retention, access, and deletion rules for each store:
 

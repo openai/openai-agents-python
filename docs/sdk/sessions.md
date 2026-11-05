@@ -32,6 +32,22 @@ Run `.venv/bin/python conversation.py` on Linux/macOS or `.\.venv\Scripts\python
 
 Later examples with `await` or `async with` are fragments for an async function unless marked as complete scripts. Use the same installed SDK and credentials, and follow the version notices when opening other pages.
 
+## Typed input
+
+Pass a string or one `UserMessage` dictionary. Its `role` is `"user"`; its `content` is a string or a nonempty ordered sequence of `InputText` and `InputImage` dictionaries. These types use the Responses field names:
+
+```python
+from agents import InputText, UserMessage
+
+text: InputText = {"type": "input_text", "text": "Explain the label atlas."}
+message: UserMessage = {"role": "user", "content": [text]}
+result = await agent.run(message)
+```
+
+An `InputImage` uses `type="input_image"` and an `image_url` containing a base64 image data URL. Omit `detail` or set it to `"auto"`; other detail values, remote URLs, file IDs and local paths are unsupported. Codex decodes and prepares the image.
+
+Do not pass manual results to `Session.submit()`. Reply to the exact live `ActionRequested` with `await request.respond(value)`, using the declared output type. If validation fails, the request remains available, so you can retry while it remains live. Request identity keeps root and child replies separate even if native call IDs match.
+
 ## Submit and wait for work
 
 `submit()` returns a handle to the root `Turn`. Use `await turn.get_result()` in the event loop where you opened the Session. The call waits for that root's work and its native continuations.
@@ -77,7 +93,9 @@ async with aclosing(turn.events()) as events:
             break
 ```
 
-A `SteeringReceipt` confirms that the exact native turn accepted the input. The model may finish before it reads that input. Strict steering never starts a continuation, and cancelling the wait can leave acceptance unknown. Keep one steering mode per native root turn. To submit new work after a stale target, make a separate application decision.
+A `SteeringReceipt` confirms that the exact native turn accepted the input. The model may finish before it reads that input. Strict steering never starts a continuation.
+
+Keep one steering mode per native root turn. Cancelling the wait can leave acceptance unknown. To submit new work after a stale target, make a separate application decision.
 
 For child work, see [native child turns](#native-child-turns).
 
@@ -220,22 +238,6 @@ Execution items carry a call ID and a status when the runtime records them. Comm
 
 These types are public imports from `agents`. `InteractionRequired` can carry a supported manual checkpoint; see [manual continuation](approvals.md#continue-a-one-shot-manual-request).
 
-## Typed input
-
-Pass a string or one `UserMessage` dictionary. Its `role` is `"user"`; its `content` is a string or a nonempty ordered sequence of `InputText` and `InputImage` dictionaries. These types use the Responses field names:
-
-```python
-from agents import InputText, UserMessage
-
-text: InputText = {"type": "input_text", "text": "Explain the label atlas."}
-message: UserMessage = {"role": "user", "content": [text]}
-result = await agent.run(message)
-```
-
-An `InputImage` uses `type="input_image"` and an `image_url` containing a base64 image data URL. Omit `detail` or set it to `"auto"`; other detail values, remote URLs, file IDs and local paths are unsupported. Codex decodes and prepares the image.
-
-Do not pass manual results to `Session.submit()`. Reply to the exact live `ActionRequested` with `await request.respond(value)`, using the declared output type. If validation fails, the request remains available, so you can retry while it remains live. Request identity keeps root and child replies separate even if native call IDs match.
-
 ## Update tools, instructions and model settings
 
 Declare the available tools when you open the Session. By default, the Session uses the Agent's tools. `agent.session(tools=[...])` replaces that opening tool list for this Session. Include `NativeAgents()` in the list if this Session needs subagents.
@@ -281,9 +283,18 @@ For instruction matching and trust during restore, see [store and trust checkpoi
 
 Pass `instruction_files=[Path("method.md")]` to `agent.session()` to load trusted UTF-8 files as part of the application instructions. The SDK reads these paths on the application host. Choose them in trusted code. When restoring a portable checkpoint, supply matching instructions and file content.
 
-Read `recorded_turn.get("receipt")` from `session.turns()` to inspect the settings the runtime selected for the turn's latest recorded model sampling attempt. The receipt can identify the model, reasoning effort, Codex revision and source tree, whether user configuration applied, and the selected executor and approval policy. The executor entry shows the selected environment ID, transport, working directory, explicit write roots and network settings. The receipt lists loaded instruction file paths, source categories and SHA-256 hashes, along with the hash of the developer instructions.
+Read `recorded_turn.get("receipt")` from `session.turns()` to inspect the settings selected for the turn's latest recorded model sampling attempt. The receipt can include:
 
-Live Sessions and trusted `LocalStorage` report these details for each executor the step selected. When the latest recorded receipt lists a local executor or a WSS Environment with explicit write roots, the SDK compares its full native policy on `LocalStorage` reopen. An implicit WSS Environment follows the [relocation and model-only reopen rules](state.md#restore-executor-policy). In `receipt["executors"]`, `[]` means the observed step selected no executor. After portable restore, `None` means the checkpoint withheld executor policy details. The other recorded settings remain available.
+- The model, reasoning effort, Codex revision and source tree, and whether user configuration applied.
+- The executor and approval policy, including the environment ID, transport, working directory, explicit write roots, and network settings.
+- Loaded instruction file paths, source categories, and SHA-256 hashes, plus the hash of the developer instructions.
+
+Live Sessions and trusted `LocalStorage` report these details for each executor the step selected. On `LocalStorage` reopen, the SDK compares the full native policy for a local executor or a WSS Environment with explicit write roots. An implicit WSS Environment follows the [relocation and model-only reopen rules](state.md#restore-executor-policy).
+
+Interpret `receipt["executors"]` as follows:
+
+- `[]` means the observed step selected no executor.
+- After portable restore, `None` means the checkpoint withheld executor policy details. Other recorded settings remain available.
 
 Use the file hash to check the version of a method file the runtime loaded. The receipt describes the runtime's settings. The provider can still reject or route the request. To verify later tool reads or external effects, use their records separately. Treat missing receipts or fields as unknown.
 

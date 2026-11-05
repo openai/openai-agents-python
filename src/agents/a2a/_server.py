@@ -293,6 +293,14 @@ class NativeA2AExecutor(AgentExecutor):
         queue: EventQueue,
         **changes: Any,
     ) -> NativeA2ATask:
+        for event in events:
+            if isinstance(event, p.TaskStatusUpdateEvent) and event.status.HasField("message"):
+                try:
+                    _json(MessageToDict(event.status.message), self.limits.message_bytes)
+                except ValueError:
+                    if event.status.state not in {p.TASK_STATE_FAILED, p.TASK_STATE_CANCELED}:
+                        raise
+                    event.status.ClearField("message")
         candidate, snapshot = await projection.preview(events)
         if (
             len(snapshot) > self.limits.checkpoint_bytes
@@ -589,7 +597,6 @@ class NativeA2AExecutor(AgentExecutor):
                 "tool": tool,
                 "arguments": arguments,
             }
-            _json(proposal, self.limits.message_bytes)
             return await self._commit(
                 lease,
                 record,

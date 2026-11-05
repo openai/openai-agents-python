@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .prepared_request import _PrepareRequest
     from .recovery import ReconciledCall
     from .schema import OutputSpec
     from .session import (
@@ -732,6 +733,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -751,6 +753,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -771,6 +774,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -792,6 +796,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -801,6 +806,16 @@ class Agent(Generic[ContextT, OutputT]):
         provider, model, and model_settings follow the same precedence and
         restore restrictions as session(). An implicit provider is retired when
         the run closes, including failure and cancellation.
+
+        prepare_request(turn, request, *, preparation_index, recovery_attempt)
+        edits a detached next-request sampling copy. Return its complete value
+        or None. Use an explicitly HTTP provider and eager ordinary function/MCP
+        tools without children, Environment or code mode. The callback must
+        tolerate repeated preparation and avoid business effects. HTTP retries
+        reuse its captured edit; native stream recovery calls it again. Separate
+        output correction attempts are unsupported; set max_retries=0 or use
+        NativeOutput. Callback operations cannot suspend or export active state. Cancellation joins
+        callback settlement before a later operation can start.
 
         on_interaction receives a live request and returns request.reply(value),
         directly or through an awaitable. The SDK validates and delivers it.
@@ -820,11 +835,31 @@ class Agent(Generic[ContextT, OutputT]):
         """
         options: dict[str, Any] = {}
         try:
-            from .schema import PromptedOutput
+            from .prepared_request import _check_output, _check_profile, _check_tools
+            from .schema import PromptedOutput, _prepare_spec
             from .session import InteractionRequired, NativeError, _split_tools
             from .state import SessionState
             from .tools import WebSearch
 
+            if prepare_request is not None:
+                if not callable(prepare_request):
+                    raise TypeError("prepare_request must be callable")
+                if getattr(self.session, "__func__", None) is Agent.session:
+                    _check_output(_prepare_spec(self.output_type))
+                    effective_provider = self.provider if provider is None else provider
+                    if effective_provider is not None and not isinstance(
+                        effective_provider, NativeProvider
+                    ):
+                        raise TypeError("provider must be a NativeProvider or None")
+                    _check_profile(
+                        self,
+                        websockets=True
+                        if effective_provider is None
+                        else effective_provider._websockets_enabled,
+                        environment=environment,
+                    )
+                    if tools is None and before_step is None and state is None:
+                        _check_tools(self.tools)
             if on_interaction is not None and not callable(on_interaction):
                 raise TypeError("on_interaction must be callable")
             if not isinstance(return_state, bool):
@@ -842,9 +877,10 @@ class Agent(Generic[ContextT, OutputT]):
                     )
                     error.state = state
                     raise error
-                if tools is not None or before_step is not None:
+                if tools is not None or before_step is not None or prepare_request is not None:
                     raise ValueError(
-                        "Cannot change tools or before_step on an already admitted turn"
+                        "Cannot change tools, before_step or prepare_request "
+                        "on an already admitted turn"
                     )
             elif input is None:
                 raise TypeError("input is required unless resuming a pending manual checkpoint")
@@ -857,6 +893,7 @@ class Agent(Generic[ContextT, OutputT]):
                 for tool in declared
                 if on_interaction is None
                 and before_step is None
+                and prepare_request is None
                 and tool._bind is None
                 and (tools is None or tool in tools or tool.ref in tools)
             )
@@ -906,7 +943,7 @@ class Agent(Generic[ContextT, OutputT]):
                 context=cast(SessionContextT, context),
                 **options,
             ) as session:
-                if pause_manual:
+                if pause_manual or (prepare_request is not None and on_interaction is None):
                     # A delegating factory may change the opening roster or its
                     # default operation. Check the same effective selection that
                     # submit will capture, before it admits work or starts MCP.
@@ -921,6 +958,15 @@ class Agent(Generic[ContextT, OutputT]):
                         environment=session._executor,
                         native_agents=None if effective is None else session._native_agents,
                     )
+                    if (
+                        prepare_request is not None
+                        and before_step is None
+                        and any(tool._bind is None for tool in selected)
+                    ):
+                        raise InteractionRequired(
+                            "Running manual tools with prepare_request requires on_interaction. "
+                            "Use Agent.session() to reply to requests directly."
+                        )
                     if any(tool is eligible for tool in selected for eligible in pause_manual) and (
                         opening.programmatic_tool_calling
                         or session._default_output.mode == "prompted"
@@ -945,7 +991,12 @@ class Agent(Generic[ContextT, OutputT]):
                     submission = cast("Turn[OutputT]", restored)
                 else:
                     assert input is not None
-                    submission = await session.submit(input, tools=tools, before_step=before_step)
+                    submit_options: dict[str, Any] = {}
+                    if prepare_request is not None:
+                        submit_options["prepare_request"] = prepare_request
+                    submission = await session.submit(
+                        input, tools=tools, before_step=before_step, **submit_options
+                    )
                 if on_interaction is not None or pause_manual:
                     return await session._run_with_interactions(
                         submission,
@@ -978,6 +1029,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -997,6 +1049,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1017,6 +1070,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -1038,6 +1092,7 @@ class Agent(Generic[ContextT, OutputT]):
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1073,6 +1128,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["model_settings"] = model_settings
                 if environment is not None:
                     options["environment"] = environment
+                if prepare_request is not None:
+                    options["prepare_request"] = prepare_request
                 return _SyncRun().run(
                     self.run(
                         input,

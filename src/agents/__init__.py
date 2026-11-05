@@ -64,6 +64,10 @@ if TYPE_CHECKING:
         ReplaceArguments as ReplaceArguments,
         StopTurn as StopTurn,
     )
+    from .prepared_request import (
+        PreparedRequest as PreparedRequest,
+        PreparedToolPresentation as PreparedToolPresentation,
+    )
     from .rate_limits import (
         ApiRateLimits as ApiRateLimits,
         ApiRateLimitWindow as ApiRateLimitWindow,
@@ -88,6 +92,7 @@ if TYPE_CHECKING:
         InteractionExpiredError as InteractionExpiredError,
         InteractionRequired as InteractionRequired,
         NativeError as NativeError,
+        ResponseIntegrityReason as ResponseIntegrityReason,
         Session as Session,
         SessionBusyError as SessionBusyError,
         StaleTurnError as StaleTurnError,
@@ -126,6 +131,8 @@ if TYPE_CHECKING:
     )
 
 _MODULES = {
+    "PreparedRequest": ".prepared_request",
+    "PreparedToolPresentation": ".prepared_request",
     "TraceContext": "._trace_context",
     "Allow": ".native_interception",
     "Deny": ".native_interception",
@@ -201,6 +208,7 @@ _MODULES = {
     "TurnStoppedError": ".session",
     "InteractionRequired": ".session",
     "NativeError": ".session",
+    "ResponseIntegrityReason": ".session",
     "Session": ".session",
     "SessionBusyError": ".session",
     "Turn": ".turn",
