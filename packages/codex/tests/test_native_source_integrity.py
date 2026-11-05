@@ -639,3 +639,66 @@ def test_codex_reuse_still_prepares_the_missing_fixed_companion(monkeypatch, sou
     (root / ".upstream/rust-sdk-source.json").unlink()
     prepare(monkeypatch, source)
     assert verify_rmcp_source(root)["source"]["version"] == "=3.3.0"
+
+
+@pytest.mark.parametrize("dependency", ["codex", "rmcp"])
+@pytest.mark.parametrize("timeout", [False, True])
+def test_network_preparation_is_bounded_without_hiding_progress(
+    monkeypatch, source, capsys, dependency, timeout
+):
+    import prepare_codex
+    import prepare_rmcp
+
+    root, _ = source
+    calls = []
+    extracted = []
+    real_run = subprocess.run
+
+    def run(command, **kwargs):
+        if "fetch" not in command:
+            return real_run(command, **kwargs)
+        calls.append(command)
+        assert command[:5] == [
+            "git",
+            "-c",
+            "http.lowSpeedLimit=1024",
+            "-c",
+            "http.lowSpeedTime=120",
+        ]
+        assert "--progress" in command and "--depth=1" in command
+        assert kwargs["timeout"] == 300 and kwargs["check"] is True
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert not {"capture_output", "stdout", "stderr"} & kwargs.keys()
+        if timeout:
+            raise subprocess.TimeoutExpired(command, 300)
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    module = prepare_codex if dependency == "codex" else prepare_rmcp
+    monkeypatch.setattr(module, "_extract_archive", lambda *args: extracted.append(args))
+    if dependency == "codex":
+        monkeypatch.setattr(module, "__file__", str(root / "scripts/prepare_codex.py"))
+        monkeypatch.setattr(sys, "argv", ["prepare_codex.py"])
+        monkeypatch.setattr(module, "record_pristine_source", lambda *args: None)
+        monkeypatch.setattr(module, "prepare_rmcp", lambda *args: None)
+        invoke = module.main
+        revision = (root / "CODEX_REVISION").read_text().strip()
+        remote = "https://github.com/openai/codex.git"
+    else:
+        monkeypatch.setattr(module, "record_rmcp_source", lambda *args: None)
+
+        def invoke():
+            return module.prepare_rmcp(root)
+
+        identity = module.rmcp_source_identity(root)
+        revision, remote = identity["rev"], identity["git"]
+    if timeout:
+        with pytest.raises(subprocess.TimeoutExpired):
+            invoke()
+        assert not extracted
+    else:
+        invoke()
+        assert len(extracted) == 1
+    assert len(calls) == 1 and calls[0][-2:] == [remote, revision]
+    label = "RMCP" if dependency == "rmcp" else "Codex"
+    assert f"Fetching pinned {label} source {revision}" in capsys.readouterr().out
