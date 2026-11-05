@@ -6,7 +6,7 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 [0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) is available as a GitHub prerelease with prebuilt wheels. The release includes checksums in `SHA256SUMS`.
 
-The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides.
+The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides. Use [the guides for your installed release](versions.md): these development-branch guides include APIs added after alpha.6.
 
 ## Requirements
 
@@ -72,7 +72,7 @@ Check the installed version and native module:
 python -c "from importlib.metadata import version; import agents._native; print(version('openai-agents'))"
 ```
 
-Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`. Continue with the [quickstart](index.md) to set your API key and run your first agent.
+Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`. Continue with [the quickstart for that release](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.6/docs/sdk/index.md) to set your API key and run your first agent.
 
 ## Examples and upgrades
 
@@ -86,7 +86,7 @@ The wheel does not include example files. To run an example included in `0.24.0-
 
 You do not need to build the SDK to run examples from that release.
 
-The local execution and supervised worker examples on the development branch use APIs that alpha.6 does not include, such as `Environment.local()` and `Turn.wait_for_attention()`. To try these examples, [build from this branch](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) or install a newer release whose notes include these APIs. Use the example files that match that build. The alpha.6 install commands on this page do not enable these APIs.
+Development-branch examples can require APIs absent from alpha.6, including `Environment.local()` for local execution and `Turn.wait_for_attention()` for supervised workers. To run those examples, use a newer release whose notes include the APIs, or follow the [contributor setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) to build this branch. Keep the example files and installed build on the same version.
 
 To upgrade, download a newer compatible preview wheel and install it in the same environment with `python -m pip install --upgrade` followed by the wheel's path. Read that release's notes for changes before upgrading.
 

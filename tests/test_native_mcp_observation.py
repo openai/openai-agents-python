@@ -216,9 +216,14 @@ async def test_policy_barrier_private_data_and_independent_readers(
             await entered.wait()
             while not isinstance(await anext(reader), ToolStarted):
                 pass
-            blocked_read = asyncio.create_task(anext(reader))
-            await asyncio.sleep(0)
-            blocked_read.cancel()
+            # Drain buffered observations before cancelling a pending read.
+            while True:
+                blocked_read = asyncio.create_task(anext(reader))
+                await asyncio.sleep(0)
+                if not blocked_read.done():
+                    break
+                blocked_read.result()
+            assert blocked_read.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await blocked_read
             assert not fast.done()

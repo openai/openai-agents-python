@@ -2,7 +2,13 @@
 
 Use `NativeAgents` when the model needs to delegate independent tasks within one conversation. Native children share the parent's executor workspace and selected tools, so give each child a task that can safely run alongside the others.
 
-Before opening the Session, [configure an Environment](execution.md) with `exec_command`, `write_stdin`, and `apply_patch`, choose a compatible explicit model, and [configure the provider](configuration.md#provider-connection). The first example assumes that `environment` is already configured. It runs inside an async application.
+Before running the examples:
+
+1. [Configure an Environment](execution.md) with `exec_command`, `write_stdin`, and `apply_patch`.
+2. Choose an explicit model that supports those tools. See [model and role limits](#configure-roles-and-delegation-limits).
+3. [Configure the provider](configuration.md#provider-connection).
+
+The examples run inside an async application. The first example uses the `environment` you configured.
 
 ## Native children
 
@@ -72,7 +78,7 @@ async for child in session.subagents():
         print(child.id, result.final_output)
 ```
 
-An `active` child can be idle or unloaded. `is_live` reports whether the snapshot captured a loaded active instance. Close or reload can make a snapshot stale; `start()` checks that the captured instance remains current.
+An `active` status means the child remains open for work; it can be idle or unloaded. Check `is_live` to see whether the snapshot captured a loaded active instance. Closing or reloading a child can make its snapshot stale. `start()` checks that the captured instance remains current.
 
 `Turn.get_result()` returns the child's `Completed[str]`, retaining its text and latest reported thread usage after later turns. Missing usage is `None`; root results exclude child usage. Native failures and interruptions raise `NativeError`. Python tool failures can raise the function's exception after cleanup.
 
@@ -104,7 +110,9 @@ Root completion does not imply child completion. Closing the Session shuts down 
 
 Model settings, instructions, and `NativeAgents` remain fixed for the Session. Use [idle tool replacement](tools.md#replace-tools-between-turns) only after all children close.
 
-Once work and callbacks finish, idle checkpoints can retain child conversations, task history, and older goals and checklists. Restore requires current `NativeAgents` and matching Python and manual definitions, uses the current Agent's MCP declarations, and creates fresh runtime resources. Saved goals and checklists grant no tools. Live child Turns do not transfer, and interrupted child work does not resume automatically. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
+Once work and callbacks finish, idle checkpoints can retain child conversations, task history, and older goals and checklists. To restore them, supply current `NativeAgents` and matching Python and manual tool definitions. Restore uses the current Agent's MCP declarations and creates fresh runtime resources.
+
+Live child Turns do not transfer, and interrupted child work does not resume automatically. Saved goals and checklists grant no tools. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
 ## Native tool decisions
 
