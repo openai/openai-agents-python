@@ -1738,8 +1738,8 @@ impl NativeThread {
                 let receipt = manual_checkpoint::continue_if_ready(
                     &inner,
                     &manual,
-                    observation_submission_id,
                     trace,
+                    observation_submission_id,
                 )
                 .await
                 .map_err(py_error)?;
