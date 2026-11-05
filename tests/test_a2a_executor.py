@@ -407,3 +407,86 @@ async def test_cancel_joins_native_session_transition(tmp_path, responses, monke
             return_exceptions=True,
         )
         await queue.close(immediate=True)
+
+
+async def test_cancel_interrupts_preseal_callback_and_joins_cleanup(
+    tmp_path, responses, monkeypatch
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    from agents import Session, function_tool
+
+    entered, draining, cleanup, joined = (asyncio.Event() for _ in range(4))
+    release, release_cleanup = asyncio.Event(), asyncio.Event()
+    canceled = asyncio.Event()
+    effects = []
+
+    @function_tool
+    async def held() -> str:
+        """Wait until the host releases this synthetic effect."""
+        entered.set()
+        try:
+            await release.wait()
+            effects.append("finished")
+            return "finished"
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+        finally:
+            cleanup.set()
+            await release_cleanup.wait()
+            joined.set()
+
+    original = Session._wait_manual_boundary
+
+    async def observe_draining(session, *args, **kwargs):
+        await entered.wait()
+        draining.set()
+        return await original(session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "_wait_manual_boundary", observe_draining)
+    manual = FunctionTool(
+        name="approve", description="Host approval", input_type=Approval, output_type=str
+    )
+    responses.respond(
+        function_call("approve", {"reason": "synthetic"}, "call-a"),
+        function_call("held", {}, "call-b"),
+    )
+    executor = make_executor(tmp_path, responses, [manual, held])
+    context = request_context()
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    queue = EventQueueSource()
+    running = asyncio.create_task(invoke(executor, context))
+    canceling = None
+    try:
+        await asyncio.wait_for(draining.wait(), 5)
+        canceling = asyncio.create_task(executor.cancel(context, queue))
+        await asyncio.wait_for(cleanup.wait(), 5)
+        assert canceled.is_set()
+        assert not joined.is_set() and not canceling.done()
+        release_cleanup.set()
+        settled, cancellation = await asyncio.wait_for(
+            asyncio.gather(running, canceling, return_exceptions=True), 5
+        )
+        assert not isinstance(settled, BaseException), repr(settled)
+        assert cancellation is None, repr(cancellation)
+        stored, _ = settled
+        saved = executor.store.read(binding)
+        assert joined.is_set() and effects == []
+        assert saved.status == "canceled"
+        assert stored.task.status.state == p.TASK_STATE_CANCELED
+        assert saved.acknowledges(stored.task)
+        assert saved.checkpoint is None and saved.challenge is None
+        assert not stored.task.artifacts
+        assert binding not in executor._live
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        release_cleanup.set()
+        await asyncio.gather(
+            *(pending for pending in (running, canceling) if pending is not None),
+            return_exceptions=True,
+        )
+        await queue.close(immediate=True)

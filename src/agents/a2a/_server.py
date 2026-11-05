@@ -27,6 +27,7 @@ from .._trace_context import TraceContext, _trace_context
 from ..manual import _CapturedManual, _PreparedManualResult
 from ..observation import ToolFinished, ToolStarted
 from ..schema import NativeOutput, PromptedOutput
+from ..session import _ManualBoundaryLost
 from ..state import SessionState
 from ._client import _DEFAULT_LIMITS, A2ALimits, _limits
 from ._provider import _json
@@ -507,9 +508,13 @@ class NativeA2AExecutor(AgentExecutor):
                                     )
                                     _json(arguments, self.limits.message_bytes)
                                     if not live.canceled:
-                                        # Later cancellation joins sealing and cleanup.
-                                        live.session = None
-                                        checkpoint = (await session.suspend()).to_json()
+
+                                        def before_seal() -> None:
+                                            live.session = None
+
+                                        checkpoint = (
+                                            await session._suspend(before_seal=before_seal)
+                                        ).to_json()
                                         if len(checkpoint.encode()) > self.limits.checkpoint_bytes:
                                             raise ValueError(
                                                 "Native checkpoint exceeds configured byte limit"
@@ -522,7 +527,7 @@ class NativeA2AExecutor(AgentExecutor):
                                         )
                                 else:
                                     result = await turn.get_result()
-                            except TurnStoppedError:
+                            except (TurnStoppedError, _ManualBoundaryLost):
                                 if not live.canceled:
                                     raise
                             finally:
@@ -638,8 +643,10 @@ class NativeA2AExecutor(AgentExecutor):
         if live is not None:
             live.canceled = True
             try:
-                if live.session is not None:
-                    await live.session.cancel_all()
+                session = live.session
+                # Checkpoint ownership joins sealing; its preceding drain remains interruptible.
+                if session is not None and session._checkpoint_task is None:
+                    await session.cancel_all()
             finally:
                 await live.done.wait()
         async with self.store.own(binding) as lease:
