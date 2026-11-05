@@ -41,7 +41,7 @@ Pass `NativeProvider(auth=CodexLogin())` to reuse an existing Codex-managed Chat
 
 Complete `codex login` separately before opening an SDK Session. This mode reads the ChatGPT login saved in `auth.json`. If Codex uses the operating system credential store, configure file storage and sign in again. See [Codex credential storage](https://learn.chatgpt.com/docs/auth#credential-storage) to configure file storage. Protect the login file and keep its tokens out of logs and source control.
 
-`CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the workspace differs.
+`CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the saved login has a different workspace ID or has no workspace ID.
 
 #### Run a coding turn without an API key
 
@@ -86,7 +86,7 @@ The example asks for code and tests in the answer. To execute commands or edit w
 
 #### Account identity, refresh, and usage
 
-`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. Check `account_id` to identify the saved ChatGPT workspace before submitting work. Pass the expected ID to `CodexLogin(account_id=...)` to check it when opening the Session. The saved `plan_type` may be `"unknown"`. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. Check `account_id` to identify the saved ChatGPT workspace before submitting work. Some personal logins have no workspace ID and report `account_id=None`. Pass the expected ID to `CodexLogin(account_id=...)` to check it when opening the Session. The saved `plan_type` may be `"unknown"`. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
 
 The native runtime refreshes the saved login for the same user and workspace. Portable restore and local conversation resume must use that same identity. If you switch users or workspaces, start a new conversation. See [save and restore](sessions.md#compact-save-and-restore).
 
