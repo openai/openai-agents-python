@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from contextlib import AsyncExitStack
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Any
@@ -138,6 +139,9 @@ async def test_parent_trace_and_instruction_files_keep_admission_order(tmp_path:
             pytest.fail("Missing instruction file opened a Session")
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 @pytest.mark.parametrize("resume", [None, "synthetic-existing-session"])
 async def test_custom_storage_trace_admission_precedes_ownership(
     tmp_path: Path, resume: str | None
@@ -353,6 +357,9 @@ def test_fresh_process_manual_resume_uses_current_worker_parent(
     )
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 def test_custom_storage_reopen_uses_current_trace_parent(tmp_path: Path) -> None:
     from examples.observability.trace_walkthrough import Collector
 
@@ -363,6 +370,25 @@ def test_custom_storage_reopen_uses_current_trace_parent(tmp_path: Path) -> None
     _assert_parent(_dispatch(spans, receipt["rebound"]), WORKER)
     fresh = _dispatch(spans, receipt["fresh"])
     assert fresh["traceId"] not in (PARENT[3:35], WORKER[3:35])
+
+
+def test_same_parent_keeps_concurrent_workflow_policies_separate(tmp_path: Path) -> None:
+    from examples.observability.trace_walkthrough import Collector
+
+    with Collector().serve() as collector:
+        receipt = _run_case("policy-isolation", collector.url, tmp_path / "policy.json")
+    spans = _spans(collector)
+    _assert_parent(_dispatch(spans, receipt["permissive"]), PARENT)
+    _assert_parent(_dispatch(spans, receipt["fresh"]), PARENT)
+    assert not any(
+        _attributes(span).get("submission.id") == receipt["restrictive"]
+        and span["name"].startswith("op.dispatch.")
+        for span in spans
+    )
+    assert receipt["callbacks"]["restrictive"] == {"disabled": True, "sensitive": False}
+    assert receipt["callbacks"]["permissive"] == {"disabled": False, "sensitive": True}
+    assert receipt["callbacks"]["fresh"]["disabled"] in (None, False)
+    assert receipt["callbacks"]["fresh"]["sensitive"] in (None, False)
 
 
 def test_disabled_tracing_preserves_sync_run_and_callback(tmp_path: Path) -> None:
@@ -401,6 +427,8 @@ async def _native_case(case: str, collector: str, output: str) -> None:
                 return await _compact_case(workflow=workflow)
             elif case.startswith("flags-"):
                 return await _flags_case(case.removeprefix("flags-"))
+            elif case == "policy-isolation":
+                return await _policy_isolation_case()
             elif case == "store-reopen":
                 return await _store_reopen_case(Path(output))
             elif case == "manual-limit":
@@ -419,6 +447,79 @@ async def _native_case(case: str, collector: str, output: str) -> None:
     finally:
         await telemetry.shutdown()
     Path(output).write_text(json.dumps(receipt))
+
+
+async def _policy_isolation_case() -> dict[str, Any]:
+    labels = ("restrictive", "permissive")
+    entered = {label: asyncio.Event() for label in labels}
+    closed = {label: asyncio.Event() for label in labels}
+    release = asyncio.Event()
+    callbacks: dict[str, Any] = {}
+
+    @function_tool
+    async def observe(ctx: ToolContext, key: str) -> str:
+        """Observe the current native policy after its caller scope has closed."""
+        if key in entered:
+            entered[key].set()
+            await release.wait()
+        current = telemetry.current_context()
+        callbacks[key] = {
+            "disabled": current.disabled if current is not None else None,
+            "sensitive": current.include_sensitive_data if current is not None else None,
+        }
+        return "accepted"
+
+    async def run_owned(label: str, disabled: bool, sensitive: bool) -> str:
+        async with (
+            ScriptedResponses(
+                [tool_call("observe", {"key": label}, call_id=label)], [text("done")]
+            ) as peer,
+            AsyncExitStack() as stack,
+        ):
+            agent = Agent(
+                instructions="Observe synthetic policy", tools=[observe], provider=peer.provider
+            )
+            with telemetry.trace(
+                label,
+                options=telemetry.TraceOptions(
+                    disabled=disabled,
+                    include_sensitive_data=sensitive,
+                ),
+            ):
+                session = await stack.enter_async_context(
+                    agent.session(parent_trace={"traceparent": PARENT})
+                )
+                turn = await session.submit(label)
+            closed[label].set()
+            assert (await turn.get_result()).final_output == "done"
+            return turn.turn_id
+
+    restrictive = asyncio.create_task(run_owned("restrictive", True, False))
+    permissive = asyncio.create_task(run_owned("permissive", False, True))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in [*entered.values(), *closed.values()])), 15
+        )
+    except BaseException:
+        release.set()
+        restrictive.cancel()
+        permissive.cancel()
+        await asyncio.gather(restrictive, permissive, return_exceptions=True)
+        raise
+    else:
+        release.set()
+    results = await asyncio.gather(restrictive, permissive)
+    async with ScriptedResponses(
+        [tool_call("observe", {"key": "fresh"}, call_id="fresh")], [text("done")]
+    ) as peer:
+        result = await Agent(
+            instructions="Observe synthetic policy", tools=[observe], provider=peer.provider
+        ).run("fresh", parent_trace={"traceparent": PARENT})
+    return {
+        **dict(zip(labels, results, strict=True)),
+        "fresh": result.turn.turn_id,
+        "callbacks": callbacks,
+    }
 
 
 async def _store_reopen_case(output: Path) -> dict[str, Any]:
