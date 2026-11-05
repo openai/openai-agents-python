@@ -6333,8 +6333,10 @@ class Session(Generic[ContextT, OutputT]):
             )
             replied = True
         except BaseException as error:
-            if not state.failure.done():
+            if not state.stopping and not state.failure.done():
                 state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
         finally:
             guard.active = False
             _invocation.reset(token)

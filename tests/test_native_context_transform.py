@@ -14,7 +14,14 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 import agents
-from agents import Agent, ModelRequestContext, PromptedOutput, TurnStoppedError, function_tool
+from agents import (
+    Agent,
+    ModelRequestContext,
+    NativeError,
+    PromptedOutput,
+    TurnStoppedError,
+    function_tool,
+)
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
@@ -220,6 +227,43 @@ async def test_cancel_waits_for_async_cleanup_and_discards_suppressed_cancellati
         await stopped
         with pytest.raises(TurnStoppedError):
             await turn.get_result()
+    assert not responses.requests
+
+
+async def test_cancel_preserves_async_transform_cleanup_failure(responses):
+    entered = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    cleanup_error = OSError("context cleanup failed")
+
+    async def transform(request):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            raise cleanup_error
+
+    agent = Agent(instructions="Answer.", provider=provider(responses), transform_context=transform)
+    with pytest.raises(NativeError):
+        async with timeout(20), agent.session() as session:
+            turn = await session.submit("cancel this")
+            await entered.wait()
+            stopping = asyncio.create_task(turn.cancel())
+            try:
+                await cleaning.wait()
+                assert not stopping.done() and not responses.requests
+            finally:
+                release.set()
+            with pytest.raises(NativeError) as cancelled:
+                await stopping
+
+    assert cancelled.value.__cause__ is cleanup_error
+    with pytest.raises(NativeError) as stopped:
+        await turn.get_result()
+    assert stopped.value.effects == "unknown"
+    assert stopped.value.__cause__.__context__ is cleanup_error
     assert not responses.requests
 
 

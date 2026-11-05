@@ -125,9 +125,28 @@ pub struct PythonTools {
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
     // share the lock so a late step cannot wait on an already closed reader.
-    step_replies: Mutex<Option<HashMap<u64, oneshot::Sender<Option<Value>>>>>,
+    preparation_replies: Mutex<Option<HashMap<u64, PreparationReply>>>,
     #[cfg(test)]
     pub(crate) before_result: Mutex<Option<Arc<manual_checkpoint_tests::BeforeResult>>>,
+}
+
+pub(crate) enum ModelContextUpdate {
+    Keep,
+    Replace(Vec<ResponseItem>),
+}
+
+enum PreparationReply {
+    Step(oneshot::Sender<Option<Vec<ToolName>>>),
+    Context(oneshot::Sender<Option<ModelContextUpdate>>),
+}
+
+impl PreparationReply {
+    fn is_closed(&self) -> bool {
+        match self {
+            Self::Step(reply) => reply.is_closed(),
+            Self::Context(reply) => reply.is_closed(),
+        }
+    }
 }
 
 struct PendingPreparation {
@@ -139,9 +158,9 @@ impl Drop for PendingPreparation {
     fn drop(&mut self) {
         if let Some(pending) = self
             .tools
-            .step_replies
+            .preparation_replies
             .lock()
-            .expect("Python step replies poisoned")
+            .expect("Python preparation replies poisoned")
             .as_mut()
         {
             pending.remove(&self.id);
@@ -1121,7 +1140,7 @@ impl PythonTools {
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: transform_context,
             step_defaults: RwLock::new(None),
-            step_replies: Mutex::new(Some(HashMap::new())),
+            preparation_replies: Mutex::new(Some(HashMap::new())),
             #[cfg(test)]
             before_result: Mutex::new(None),
         };
@@ -1177,7 +1196,7 @@ impl PythonTools {
                     .expect("Step defaults poisoned")
                     .clone(),
             ),
-            step_replies: Mutex::new(Some(HashMap::new())),
+            preparation_replies: Mutex::new(Some(HashMap::new())),
             #[cfg(test)]
             before_result: Mutex::new(None),
         }
@@ -1251,12 +1270,12 @@ impl PythonTools {
         let owner = self.admission_ready(input.turn_id)?;
         let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
         let (reply, receive) = oneshot::channel();
-        self.step_replies
+        self.preparation_replies
             .lock()
-            .expect("Python step replies poisoned")
+            .expect("Python preparation replies poisoned")
             .as_mut()
             .context("Expired model context owner")?
-            .insert(id, reply);
+            .insert(id, PreparationReply::Context(reply));
         let _pending = PendingPreparation {
             tools: self.clone(),
             id,
@@ -1279,14 +1298,13 @@ impl PythonTools {
             .requests
             .send(QueuedRequest::Step(request))
             .map_err(|_| anyhow::anyhow!("Model context reader closed"))?;
-        let value = receive
+        let update = receive
             .await
             .context("Model context transformation cancelled")?
             .context("Model context transformation failed")?;
         ensure!(owner.is_current(), "Expired model context owner");
-        if !value.is_null() {
-            *input.items = serde_json::from_value(value)
-                .map_err(|_| anyhow::anyhow!("Invalid model context items"))?;
+        if let ModelContextUpdate::Replace(items) = update {
+            *input.items = items;
         }
         Ok(())
     }
@@ -1294,29 +1312,30 @@ impl PythonTools {
     pub(crate) fn retire_steps(&self) {
         // Dropping the owned senders wakes blocked selectors with no authority.
         let pending = self
-            .step_replies
+            .preparation_replies
             .lock()
-            .expect("Python step replies poisoned")
+            .expect("Python preparation replies poisoned")
             .take();
         drop(pending);
     }
 
     pub(crate) fn reply_step(&self, id: u64, names: Option<Vec<ToolName>>) -> Result<()> {
-        self.reply_preparation(id, names.map(|names| json!(names)))
+        let PreparationReply::Step(reply) = self.take_preparation(id)? else {
+            anyhow::bail!("Invalid step selection reply");
+        };
+        reply
+            .send(names)
+            .map_err(|_| anyhow::anyhow!("Expired step selection"))
     }
 
-    fn reply_preparation(&self, id: u64, value: Option<Value>) -> Result<()> {
-        let reply = self
-            .step_replies
+    fn take_preparation(&self, id: u64) -> Result<PreparationReply> {
+        self.preparation_replies
             .lock()
-            .expect("Python step replies poisoned")
+            .expect("Python preparation replies poisoned")
             .as_mut()
-            .context("Expired step selection")?
+            .context("Expired preparation")?
             .remove(&id)
-            .context("Expired step selection")?;
-        reply
-            .send(value)
-            .map_err(|_| anyhow::anyhow!("Expired step selection"))
+            .context("Expired preparation")
     }
 
     fn step_owner(
@@ -1350,9 +1369,9 @@ impl PythonTools {
     ) -> Result<()> {
         let owner = self.step_owner(thread, instance)?;
         let replies = owner
-            .step_replies
+            .preparation_replies
             .lock()
-            .expect("Python step replies poisoned");
+            .expect("Python preparation replies poisoned");
         ensure!(
             replies
                 .as_ref()
@@ -1376,12 +1395,18 @@ impl PythonTools {
     pub(crate) fn reply_context(
         self: &Arc<Self>,
         id: u64,
-        items: Option<Value>,
+        update: Option<ModelContextUpdate>,
         thread: Option<&str>,
         instance: Option<&str>,
     ) -> Result<()> {
-        self.step_owner(thread, instance)?
-            .reply_preparation(id, items)
+        let PreparationReply::Context(reply) =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid model context reply");
+        };
+        reply
+            .send(update)
+            .map_err(|_| anyhow::anyhow!("Expired model context transformation"))
     }
 
     pub(crate) fn retain_context_revision(&self, source: &Self) -> Result<()> {
@@ -2902,11 +2927,11 @@ impl ToolContributor for PythonContributor {
             let (reply, receive) = oneshot::channel();
             {
                 let mut replies = tools
-                    .step_replies
+                    .preparation_replies
                     .lock()
-                    .expect("Python step replies poisoned");
+                    .expect("Python preparation replies poisoned");
                 let pending = replies.as_mut().ok_or("Expired step owner")?;
-                pending.insert(id, reply);
+                pending.insert(id, PreparationReply::Step(reply));
             }
             // Dropping the native step retires this exact nonce even if Python
             // returns later, after another step or incarnation has started.
@@ -2944,9 +2969,7 @@ impl ToolContributor for PythonContributor {
                 .await
                 .map_err(|_| "Step selection cancelled")?
                 .ok_or("Step selection failed")?;
-            serde_json::from_value(names)
-                .map(Some)
-                .map_err(|_| "Invalid step selection".to_owned())
+            Ok(Some(names))
         })
     }
 }
@@ -4728,7 +4751,7 @@ pub(crate) mod managed_tests {
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: false,
             step_defaults: RwLock::new(None),
-            step_replies: Mutex::new(Some(HashMap::new())),
+            preparation_replies: Mutex::new(Some(HashMap::new())),
             before_result: Mutex::new(None),
         });
         *tools.current.write().unwrap() = Arc::new(tools.prepare(1, vec![spec]).unwrap());

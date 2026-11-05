@@ -1653,15 +1653,20 @@ impl NativeThread {
             .thread_extension_data()
             .get::<python_tools::PythonTools>()
             .ok_or_else(|| py_error("Model context transformation requires Python tools"))?;
-        let items = items_json
+        let update = items_json
             .map(|text| {
                 serde_json::from_str::<Option<Vec<codex_protocol::models::ResponseItem>>>(text)
-                    .map(|items| serde_json::json!(items))
+                    .map(|items| {
+                        items.map_or(
+                            python_tools::ModelContextUpdate::Keep,
+                            python_tools::ModelContextUpdate::Replace,
+                        )
+                    })
                     .map_err(|_| py_error("Invalid model context items"))
             })
             .transpose()?;
         tools
-            .reply_context(id, items, thread, instance)
+            .reply_context(id, update, thread, instance)
             .map_err(py_error)
     }
 
