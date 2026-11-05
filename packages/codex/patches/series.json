@@ -177,6 +177,10 @@
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
     },
     {
+      "path": "0045-saved-codex-login.patch",
+      "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
+    },
+    {
       "path": "0018-native-response-observations.patch",
       "sha256": "2ba277adb749a1b874debb21d8ad6a0e77b372d1d2a177f29d0e381bb1bb9b8b"
     },
@@ -185,5 +189,5 @@
       "sha256": "e4b910cb9e9c649d04d63fedc46c21cd75ae7da921511c19a943d82fd13f6f02"
     }
   ],
-  "result_tree": "1bbcbbf796553c1d034df91e95f97161f9168d07"
+  "result_tree": "afe268ca74c93800ad584b28259eb38cab00650b"
 }
