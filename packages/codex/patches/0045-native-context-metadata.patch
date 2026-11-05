@@ -100,10 +100,10 @@ index 8bdb9ba22e7d6157b992417b63541009a707e5f8..94faba5acb993d98497ba85b0204c88e
 +}
 diff --git a/codex-rs/core/src/session/context_metadata_tests.rs b/codex-rs/core/src/session/context_metadata_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..127ec6ec1a8051a9b7f1bf46f46f503c9478a667
+index 0000000000000000000000000000000000000000..ac21da85b10c7184d57b24acce8e0107a0957f5d
 --- /dev/null
 +++ b/codex-rs/core/src/session/context_metadata_tests.rs
-@@ -0,0 +1,217 @@
+@@ -0,0 +1,237 @@
 +use super::*;
 +
 +#[tokio::test]
@@ -321,6 +321,26 @@ index 0000000000000000000000000000000000000000..127ec6ec1a8051a9b7f1bf46f46f503c
 +    assert_eq!(info.model_context_window, None);
 +    assert_eq!(info.total_token_usage.total_tokens, 47);
 +}
++
++#[tokio::test]
++async fn synthetic_overflow_fills_the_window_of_the_captured_sampling_model() {
++    let (session, turn) = make_session_and_context().await;
++    let mut replacement = turn.initial_settings.selected().clone();
++    replacement.collaboration_mode.settings.model = "gpt-daybreak-red-latest".to_string();
++    let model = replacement
++        .resolve_model_info(
++            session.services.models_manager.as_ref(),
++            &Default::default(),
++        )
++        .await;
++    let settings = ResolvedStepSettings::new(Arc::new(replacement), Arc::new(model), false, None);
++    let limit = settings.model_info.usable_context_window().unwrap();
++    assert_ne!(turn.model_context_window(), Some(limit));
++    session.set_total_tokens_full(&turn, &settings).await;
++    let usage = session.token_usage_info().await.unwrap();
++    assert_eq!(usage.model_context_window, Some(limit));
++    assert_eq!(usage.total_token_usage.total_tokens, limit);
++}
 diff --git a/codex-rs/core/src/session/guardian_checkpoint_tests.rs b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
 index 6ff5ab358960273d3de2c237b2dd50c4724d146f..a728999e9baee03b9b22fe881dd2a77b379cde84 100644
 --- a/codex-rs/core/src/session/guardian_checkpoint_tests.rs
@@ -360,7 +380,7 @@ index 6ff5ab358960273d3de2c237b2dd50c4724d146f..a728999e9baee03b9b22fe881dd2a77b
 +    }
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 060f9fcf3d45c21923a62abe586ed6530c815631..0bab6f753c4f6f245cf2b390ad0c47e6ceffc90c 100644
+index 787322e570eeb7be1432300cac44242849211b42..8c72198d5ac1169b6d42c10e4c00e2c87f9cdd3c 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -2278,7 +2278,7 @@ impl Session {
@@ -372,7 +392,7 @@ index 060f9fcf3d45c21923a62abe586ed6530c815631..0bab6f753c4f6f245cf2b390ad0c47e6
              collaboration_mode_kind: turn_context.mode(),
          };
          self.send_event(turn_context, EventMsg::TurnStarted(event))
-@@ -3783,6 +3783,7 @@ impl Session {
+@@ -3789,6 +3789,7 @@ impl Session {
                      Arc::new(selected),
                      Arc::clone(&settings.model_info),
                      self.features.enabled(Feature::FastMode),
@@ -380,7 +400,7 @@ index 060f9fcf3d45c21923a62abe586ed6530c815631..0bab6f753c4f6f245cf2b390ad0c47e6
                  );
                  inherited_settings.mcp_approvals_reviewer_override =
                      settings.mcp_approvals_reviewer_override;
-@@ -4624,7 +4625,7 @@ impl Session {
+@@ -4630,7 +4631,7 @@ impl Session {
              },
          )
          .await;
@@ -388,8 +408,8 @@ index 060f9fcf3d45c21923a62abe586ed6530c815631..0bab6f753c4f6f245cf2b390ad0c47e6
 +        self.recompute_token_usage(step_context).await;
          window_number
      }
- 
-@@ -4810,8 +4811,8 @@ impl Session {
+
+@@ -4787,8 +4788,8 @@ impl Session {
          if let Some(token_usage) = token_usage {
              let token_info = {
                  let mut state = self.state.lock().await;
@@ -400,38 +420,39 @@ index 060f9fcf3d45c21923a62abe586ed6530c815631..0bab6f753c4f6f245cf2b390ad0c47e6
                  if matches!(
                      turn_context.config.model_auto_compact_token_limit_scope,
                      AutoCompactTokenLimitScope::BodyAfterPrefix
-@@ -4849,7 +4850,8 @@ impl Session {
+@@ -4826,7 +4827,8 @@ impl Session {
          Ok(())
      }
- 
+
 -    pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
 +    pub(crate) async fn recompute_token_usage(&self, step_context: &StepContext) {
 +        let turn_context = step_context.turn.as_ref();
          let history = self.clone_history().await;
          let base_instructions = self.get_base_instructions().await;
          let Some(estimated_total_tokens) =
-@@ -4875,9 +4877,7 @@ impl Session {
+@@ -4852,9 +4854,7 @@ impl Session {
                  codex_rollout_budget_units: None,
              };
- 
+
 -            if let Some(model_context_window) = turn_context.model_context_window() {
 -                info.model_context_window = Some(model_context_window);
 -            }
 +            info.model_context_window = step_context.settings.reported_context_window();
- 
+
              state.set_token_info(Some(info));
          }
-@@ -4954,10 +4954,15 @@ impl Session {
+@@ -4931,10 +4931,15 @@ impl Session {
              .await;
      }
- 
+
 -    pub(crate) async fn set_total_tokens_full(&self, turn_context: &TurnContext) {
+-        if let Some(context_window) = turn_context.model_context_window() {
 +    pub(crate) async fn set_total_tokens_full(
 +        &self,
 +        turn_context: &TurnContext,
 +        settings: &ResolvedStepSettings,
 +    ) {
-         if let Some(context_window) = turn_context.model_context_window() {
++        if let Some(context_window) = settings.model_info.usable_context_window() {
              let mut state = self.state.lock().await;
              state.set_token_usage_full(context_window);
 +            state.replace_reported_context_window(settings.reported_context_window());
