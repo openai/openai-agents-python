@@ -9,7 +9,7 @@ assignees: ''
 
 ### Please read this first
 
-- **Have you read the docs?** [Public v1 source-build setup and guides](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/README.md)
+- **Have you read the docs?** [SDK installation and guides](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/README.md)
 - **Have you searched for related issues?** Others may have faced similar issues.
 
 ### Describe the bug

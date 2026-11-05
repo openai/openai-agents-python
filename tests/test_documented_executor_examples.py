@@ -45,7 +45,7 @@ def _configure_executor(
 
 
 def _documented_code(heading: str) -> str:
-    guide = Path(__file__).resolve().parents[1] / "docs/sdk/tools.md"
+    guide = Path(__file__).resolve().parents[1] / "docs/sdk/execution.md"
     section = guide.read_text().split(heading + "\n", 1)[1]
     return section.split("```python\n", 1)[1].split("```", 1)[0]
 
@@ -67,7 +67,7 @@ async def test_documented_local_environment_lists_its_workspace(
     )
     responses.respond(function_call("exec_command", {"cmd": "pwd; ls"}, "list-workspace"))
     responses.respond(assistant_output("workspace listed"))
-    compiled = compile(code, "docs/sdk/tools.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+    compiled = compile(code, "docs/sdk/execution.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
     async with timeout(30):
         await eval(compiled, {"fixture_provider": provider(responses)})
     output = tool_output(responses.requests[1], "list-workspace")
@@ -106,7 +106,9 @@ async def test_documented_write_root_replacement_writes_report_after_settled_tur
     ):
         await (await session.submit("Inspect the workspace.")).get_result()
         assert str(workspace) in tool_output(responses.requests[1], "inspect-workspace")
-        compiled = compile(code, "docs/sdk/tools.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        compiled = compile(
+            code, "docs/sdk/execution.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+        )
         await eval(compiled, {"session": session, "Path": Path})
     output = tool_output(responses.requests[3], "write-report")
     assert "Process exited with code 0" in output, output
@@ -121,7 +123,7 @@ async def test_documented_environment_executes_in_assigned_workspace(
     async with timeout(30), ExecutorPeer(tmp_path / "remote").serve() as peer:
         _configure_executor(peer, responses, tmp_path, monkeypatch)
         code = _documented_code(
-            "#### Unix sockets in an offline job" if offline else "## Remote execution"
+            "### Unix sockets in an offline job" if offline else "## Remote execution"
         )
         assert code.count('cwd="/workspace"') == 1
         code = code.replace('cwd="/workspace"', f"cwd={str(peer.root)!r}")
@@ -137,7 +139,9 @@ async def test_documented_environment_executes_in_assigned_workspace(
             function_call("exec_command", {"cmd": _COMMAND, "max_output_tokens": 200}, "inspect")
         )
         responses.respond(assistant_output("inspection complete"))
-        compiled = compile(code, "docs/sdk/tools.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT)
+        compiled = compile(
+            code, "docs/sdk/execution.md", "exec", flags=ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
+        )
         if offline:
             exec(compiled, namespace)
             async with Agent(instructions="Inspect.", provider=provider(responses)).session(
