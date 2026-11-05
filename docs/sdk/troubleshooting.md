@@ -21,6 +21,7 @@ Find the symptom below, then inspect the failed operation and any completed tool
 | Streamed text is incomplete or an `EventGap` appears | The observation stream can drop records. Use `turn.get_result()` and its final output; see [streaming](sessions.md#stream-observations). |
 | A result fails validation | Catch [`OutputValidationError`](configuration.md#structured-output). A new submission can repeat completed tool effects; validation does not undo them. |
 | A provider or native operation fails | Inspect available `NativeError` metadata and [effect status](sessions.md#failures-and-recovery). Missing metadata remains unknown. |
+| Usage totals appear inflated or usage is missing | Check [usage accounting](observability.md#read-usage-without-double-counting). Replace cumulative snapshots when updating a display, and keep missing usage as unknown. |
 | A scripted test uses an unexpected request or leaves responses unused | Each script entry is one model response. Check [request snapshots and exact exhaustion](testing.md). |
 
 ## Restore and clean up
@@ -66,42 +67,11 @@ See [interruption](sessions.md#interrupt-work) and [Python tool cancellation](to
 
 ## Read usage without double counting
 
-After a successful run, inspect the optional `Completed.usage` snapshot:
-
-```python
-# result is the Completed value returned by agent.run() or turn.get_result().
-usage = result.usage
-if usage is None:
-    print("No usage was reported.")
-else:
-    print("Thread total:", usage.total_token_usage.total_tokens)
-    print("Latest reported response:", usage.last_token_usage.total_tokens)
-    print("Model context window:", usage.model_context_window)
-```
-
-Read usage with these accounting rules:
-
-- `total_token_usage` is cumulative for the native thread, including restored history. Do not add successive snapshots as separate costs.
-- `last_token_usage` may cover only one response from a Turn that needed several. A snapshot may repeat when no new usage arrives.
-- Cached and reasoning tokens are already included in totals. Do not add them again.
-- Root usage excludes child threads. [Prompted-output repairs](configuration.md#structured-output) have separate records.
-
-Both `total_token_usage` and `last_token_usage` expose the fields listed in [usage types](reference.md#tokenusageinfo-and-tokenusage). `model_context_window` can be `None`. These counts are not billing records.
-
-For a live display, replace the snapshot with `UsageUpdated.usage` from `agents.observation`, which can be `None`. Do not add event counts. Because observations can drop, read the final result after completion.
+Read [usage snapshots and accounting limits](observability.md#read-usage-without-double-counting) before combining counts or displaying live usage.
 
 ## Plan the application lifecycle
 
-The SDK runs inside your application, which manages its workers, storage and credentials. Saving a checkpoint does not provide a hosted recovery service.
-
-| Application decision | Supported path |
-| --- | --- |
-| When to initialize diagnostics | Configure [telemetry](configuration.md#telemetry) before the first Session opens. |
-| Which work belongs to a conversation | Own each [Session](sessions.md) explicitly and choose queueing or steering when submissions overlap. |
-| Where history survives a restart | Choose [portable checkpoints or a local profile](state.md#choose-how-to-store-a-conversation). Retain the required state or conversation ID in application storage. |
-| What tools may do | Supply current [tools and execution permissions](tools.md). Restored history does not supply current credentials or grant new authority. |
-| Whether work can be retried | Inspect [effect metadata and history](sessions.md#failures-and-recovery), together with your application's records of external effects. |
-| How to shut down | Close owned Sessions, then close any [explicit providers](configuration.md) after their Sessions are closed. Shut down [telemetry](configuration.md#telemetry) after all Sessions close. |
+Follow the [application lifecycle decisions](configuration.md#plan-the-application-lifecycle) for Session ownership, persistence, permissions, and shutdown.
 
 ## Prepare a useful failure report
 
@@ -113,29 +83,16 @@ Include these details in a failure report:
 
 Messages, request snapshots, prompts, tool results and checkpoints can contain private data. Inspect and redact reports before sending them to [GitHub issues](https://github.com/openai/openai-agents-python/issues). Never include credentials. Report vulnerabilities through [private security reporting](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/SECURITY.md).
 
-For ongoing diagnostics, follow [telemetry configuration](configuration.md#telemetry) for startup, shutdown and permitted collector data.
+For ongoing diagnostics, follow [telemetry configuration](observability.md#configure-telemetry) for startup, shutdown, and permitted collector data.
 
 ## Diagnose a trace with history and application receipts
 
+Compare [history, collector exports, and application outcomes](observability.md#diagnose-a-trace-with-history-and-application-receipts) before deciding whether to retry failed work.
+
 ### Run the local walkthrough
 
-The synthetic [trace walkthrough](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/trace_walkthrough.py) starts a local OTLP JSON receiver and prints a receipt summary and viewer URL. It needs no collector account or model key. Keep receiver output synthetic.
-
-First follow the [example-project setup](installation.md#examples-and-upgrades) to obtain the source files matching your installed wheel. From the directory containing `examples/`, run `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`.
+Use the [synthetic local walkthrough](observability.md#run-the-local-walkthrough) to inspect a trace without a model key or collector account.
 
 ### Compare evidence
 
-Connect application receipts, spans and history using `example.run_id`, span `traceId`, Session identity and `conversation.id` where those identifiers are present. Compare application outcomes with telemetry and the [history reader](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/history_reader.py), which joins tool calls and results by turn and call identity. Missing timestamps and usage stay missing.
-
-| Evidence | What it can show | What it does not prove |
-| --- | --- | --- |
-| Application receipt around `get_result()` | Settled output, raised error and application effect records | Native logs need not contain a separate record for a Python callback exception or output-validation failure. |
-| `session.turns()` | Recorded turn status, failure, and available usage and timestamps | Missing usage or timestamps are not zero. Recorded turn usage differs from cumulative live thread snapshots. |
-| `session.items()` messages and reasoning | Supported user and assistant text, user inline images, and retained reasoning summaries | Developer and system messages, unsupported content and unidentified records may be absent. This is not a full UI transcript or hidden reasoning. |
-| Recorded function calls and results | Normalized function and custom calls and supported native tool records, joined by turn and call ID | `error=None` can accompany a returned tool error. Inspect the output and application outcome. Cancellation can leave incomplete pairs. |
-| Recorded web search | Recorded query, action and text fields | These fields cannot reconstruct authoritative source records or citation spans. |
-| Collector export | Received native spans and logs and configured telemetry fields | Export does not prove coverage of all Python failures, undo effects or define collector retention. |
-
-Inspect the tool result and the application's outcome together. A tool may return an error value and let the turn complete, or raise an exception that fails the turn. Final-output validation can also fail after a tool effect. Each case needs a different recovery decision because turn completion alone does not describe the tool's outcome.
-
-Closing the Session does not delete data already exported to the collector.
+Use the [evidence comparison](observability.md#compare-evidence) to interpret missing records, tool errors, and completed effects.

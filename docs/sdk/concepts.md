@@ -1,6 +1,6 @@
 # Agent, Session and Turn
 
-An `Agent` defines instructions and tools. A `Session` holds a live conversation. Submit input to get a `Turn`, then await `turn.get_result()` to get a `Completed` result.
+An `Agent` defines instructions and tools that you can reuse across conversations. Open a `Session` for one live conversation, then submit input to get a `Turn`. Await `turn.get_result()` to receive a `Completed` result with the final output. A Turn can include several model requests and tool calls.
 
 | Object | What it owns or represents | When to use it |
 | --- | --- | --- |
@@ -10,7 +10,7 @@ An `Agent` defines instructions and tools. A `Session` holds a live conversation
 | `Completed` | The completed output and available usage information. | Read `final_output`, which is text by default or your configured output type. |
 | Observation | A passive event, such as an output text delta. | Update a display. Events can be dropped. Use the completed result for the final answer. |
 
-A Turn can include several model requests and tool calls. Await `turn.get_result()` to know when the work is complete. A native `TurnFinished` event alone does not prove completion, and the root Turn can finish while independent native children still run. See [Turn lifetime and child controls](sessions.md) for those advanced cases.
+Use `turn.get_result()` to determine completion. A native `TurnFinished` observation marks a native step ending. SDK callbacks, result validation, or accepted steering input can continue the logical Turn after that step. If you enable delegation, independent native children can still run after the root Turn finishes. See [Turn lifetime and child controls](sessions.md) for those cases.
 
 ## Choose the smallest interface you need
 
@@ -28,7 +28,7 @@ In a notebook or async web handler, use `await`; do not call `asyncio.run()` or 
 
 ## Keep application state and conversation state separate
 
-The model receives instructions, submitted input, tool arguments, and tool results. Application `context` supplies Python objects to callbacks, such as an account or database client. The SDK excludes the `ToolContext` parameter from the tool schema. A tool can still send context data to the model by returning that data, so choose the tool result carefully. See the [complete context example](tools.md#application-context).
+Conversation content includes instructions, submitted input, tool arguments, and tool results. Application `context` supplies Python objects to callbacks, such as an account or database client. The SDK excludes the `ToolContext` parameter from the tool schema. Returning context data from a tool sends that data to the model, so select the public result carefully. See the [complete context example](tools.md#application-context).
 
 A checkpoint records conversation state. It does not transfer live Python objects, credentials, or open handles. When restoring a checkpoint, your application supplies the current callbacks, context, and permissions. Follow the [save and restore rules](state.md#save-and-restore-a-portable-checkpoint).
 
@@ -49,4 +49,12 @@ flowchart LR
     App --> State["Trusted application checkpoint storage"]
 ```
 
-Codex runs the model loop. Your Python code declares agents and tools and handles callbacks. Optional [programmatic tool calling](configuration.md#programmatic-tool-calling) lets the model generate JavaScript to coordinate tool calls. The SDK runs that JavaScript in its bundled V8-based Codex Code Mode host. Your application and function tools still run in Python. For remote file and process operations, supply an [Environment](execution.md#remote-execution). Choose the [deployment model](choosing.md) separately from these Python interfaces.
+Codex runs the model loop inside your application. Your Python code declares agents and tools and handles callbacks. The application owns its workers, credentials, storage, and any execution workspace.
+
+Add these features only when the application needs them:
+
+- [Programmatic tool calling](configuration.md#programmatic-tool-calling) lets the model generate JavaScript to coordinate tool calls. The SDK executes the JavaScript in its bundled V8-based Codex Code Mode host. Your application and function tools still run in Python.
+- An [Environment](execution.md) connects file and process operations to an application-selected executor.
+- [Delegation](delegation.md) lets the model start native child agents.
+
+See [Choose how to run your agent](choosing.md) to compare this application-owned runtime with the hosted Agents API.

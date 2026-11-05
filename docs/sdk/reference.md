@@ -19,13 +19,16 @@ agent.validate() -> None
 agent.with_output_type(output_type) -> Agent
 await agent.run(input, *, context=None, on_interaction=None,
                 provider=None, model=None, model_settings=None, environment=None,
-                tools=None, before_step=None, state=None, return_state=False) -> Completed
+                tools=None, before_step=None, state=None, return_state=False,
+                parent_trace=None, trace_options=None) -> Completed
 agent.run_sync(input, *, context=None, on_interaction=None,
                provider=None, model=None, model_settings=None, environment=None,
-               tools=None, before_step=None, state=None, return_state=False) -> Completed
+               tools=None, before_step=None, state=None, return_state=False,
+               parent_trace=None, trace_options=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
-              instruction_files=(), reconciled_calls=())
+              instruction_files=(), reconciled_calls=(),
+              parent_trace=None, trace_options=None)
               -> async context manager[Session]
 ```
 
@@ -52,7 +55,7 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
+| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
@@ -132,7 +135,7 @@ Import these immutable data classes from `agents.usage`. `Completed.usage` is a 
 
 `TokenUsage` contains integer fields `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` and `total_tokens`. Cached and reasoning counts are already included in the totals.
 
-These values describe native thread snapshots. They do not report per-submission costs or billing records. See [usage readback and accounting limits](troubleshooting.md#read-usage-without-double-counting).
+These values describe native thread snapshots. They do not report per-submission costs or billing records. See [usage readback and accounting limits](observability.md#read-usage-without-double-counting).
 
 ## Errors
 
@@ -273,7 +276,7 @@ StdioMCP(*, name: str, tools: Sequence[str], command: str,
          before=None, approval=None, defer_loading=False)
 ```
 
-`location="environment"` runs stdio on the Session's Environment. Neither MCP descriptor accepts `interceptor`. See [native MCP](tools.md#native-mcp) and [result policies](tools.md#mcp-result-policies).
+`location="environment"` runs stdio on the Session's Environment. Neither MCP descriptor accepts `interceptor`. See [native MCP](mcp.md#connect-an-http-server) and [result policies](mcp.md#mcp-result-policies).
 
 For both descriptors, `transform_result_timeout=None` uses a 30-second deadline; it does not disable the deadline. An explicit value must be in `(0, 3600]` seconds and requires `transform_result`. This deadline is separate from tool execution and approval. Where supported, `defer_loading=True` controls when the model sees selected schemas. It does not delay connection startup.
 
@@ -361,6 +364,14 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 ### ModelSettings
 
 Supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted settings keep native defaults. `service_tier=None` clears that override.
+
+## Tracing
+
+### TraceContext and trace options
+
+`TraceContext(*, traceparent, tracestate=None)` holds validated W3C trace headers. `to_headers()` returns a new header mapping. Import `TraceContext` from `agents`. Pass it or a mapping containing `traceparent` and optional `tracestate` as `parent_trace` when opening a Session, running an Agent, or submitting a new root Turn. See [trace correlation](observability.md#continue-a-trace-across-workers) for inheritance and restore rules.
+
+Import `TraceOptions` from `agents.telemetry` for the `trace_options` argument. These options control native tracing linkage and policy. A local `TraceOptions.parent` uses an SDK `SpanContext`; a `TraceContext` carries only W3C headers between workers. Neither type grants tool or workspace access.
 
 ## Native tools and delegation
 

@@ -1,6 +1,13 @@
 # Releases and documentation
 
-These guides follow the `feat/codex-harness` development branch and include APIs that are not in the published preview. If you installed [0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6), use [the guides from that release](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.6/docs/sdk/index.md). See [installation](installation.md) for platform requirements, wheel commands, and features that need a newer build.
+Match the guides and example files to your installed SDK version. These guides follow the `feat/codex-harness` development branch, which includes APIs absent from the published preview.
+
+| Installed SDK | Documentation and examples |
+| --- | --- |
+| [0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) wheel | Use [the guides from that release](https://github.com/openai/openai-agents-python/blob/v0.24.0-alpha.6/docs/sdk/index.md) and its source archive for examples. |
+| A development build from `feat/codex-harness` | Use guides and example files from the same source commit as the build. |
+
+See [installation](installation.md) for platform requirements, wheel commands, and examples that need a newer build.
 
 The release page contains the versioned downloads, checksums, installation commands, and release notes. This preview is distributed through GitHub Releases; it has not been published to PyPI.
 

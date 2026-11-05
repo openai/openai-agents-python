@@ -1,6 +1,6 @@
 # Debug a run with local telemetry
 
-Run a synthetic task, inspect its native traces and logs, and compare the application receipt with its recorded history.
+Run a synthetic task, inspect its native traces and logs, and compare the application receipt with its recorded history. For exporter configuration and the role of each source of evidence, see the [observability guide](../../docs/sdk/observability.md).
 
 ## Set up the walkthrough
 
@@ -43,6 +43,8 @@ python -m examples.observability.trace_walkthrough --scenario provider --output 
 | `validation` | `PromptedOutput(Report)` rejects the final JSON value; the receipt records `output_validation_failure`. | The model request returned 200. Native telemetry does not establish Python output validity. |
 | `provider` | A local synthetic provider returns HTTP 401; the receipt records `provider_failure`, `status_code=401`, `category=authentication_error` and `code=invalid_api_key`. | API-request log records contain HTTP 401. This exercises the provider failure path without contacting a real provider. |
 
+### Interpret records from the checked build
+
 In the checked source build, traces included `run_turn`, `traceId`, `spanId`, parent links, start/end times and the custom run attribute. API-request logs included the conversation ID, HTTP status, attempt and duration fields.
 
 The raised callback and output-validation runs did not emit dedicated Python failure log records. Their native span status did not reliably identify Python failures. Use settled results, exception types and application receipts for those distinctions. These fields describe observations from this build. They do not define a stable telemetry schema or establish native retry defaults.
@@ -50,6 +52,18 @@ The raised callback and output-validation runs did not emit dedicated Python fai
 ## Check delivery
 
 If the command reports no receipt, check the exporter endpoint and loopback proxy bypass. A successful SDK run alone does not prove telemetry arrived. The process keeps the receiver alive until `telemetry.shutdown()` flushes. Closing the receiver first can lose batches.
+
+## Continue a parent trace into another worker
+
+The [`trace_context.py`](trace_context.py) example requires APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](../../docs/sdk/installation.md#examples-and-upgrades), then run:
+
+```sh
+python -m examples.observability.trace_context
+```
+
+The example supplies an explicit `TraceContext` to the first run. Its Python tool passes `ToolContext.trace_context.to_headers()` to a second Agent through `parent_trace`. Both runs use synthetic model responses and a local collector, so no API key is needed. The command prints `Done` and the number of received native spans; the count can vary.
+
+The application passes trace headers explicitly across the worker boundary. Configure telemetry once before opening Sessions, and call `telemetry.shutdown()` after the Sessions close so the collector can receive the final spans.
 
 ## Read supported tool history
 

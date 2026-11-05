@@ -88,13 +88,20 @@ Every selected platform publishes a `native-snapshot-<OS>-<ARCH>` artifact befor
 
 #### Check donor eligibility
 
-A donor is a push run that supplies a reusable native artifact. CI checks the complete caller and native workflows at the push commit, compares committed native and build inputs against the current checkout, and requires successful later platform qualification. CI selects original publications by artifact ID and SHA-256 digest before the earliest SDK execution across all attempts. A branch producer records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
+A donor is a push run that supplies a reusable native artifact. For each donor, CI:
+
+- Checks the complete caller and native workflows at the push commit.
+- Compares committed native and build inputs against the current checkout.
+- Requires successful later platform qualification.
+- Selects original publications by artifact ID and SHA-256 digest, from before the earliest SDK execution across all attempts.
+
+A branch producer also records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
 
 PR Tests checks the latest 20 successful push runs for each eligible source. It reuses a compatible, qualified snapshot if one exists. Otherwise it starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 
 #### Keep native and SDK caches separate
 
-Native producers do not restore or save Actions caches, including Cargo targets, source trees, V8 bundles and Python build tools. Verified native snapshots provide reuse across runs; fresh job-local Cargo and uv directories provide reuse within one build. SDK-phase caches remain separate. Native-input or recipe changes require fresh production; local Python tests do not replace full platform qualification.
+Native producers do not restore or save Actions caches. They prefer verified native snapshots. If only local Rust source and permitted SDK files changed, they can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. They use the same donor, digest, publication and qualification checks as snapshots. They preserve dependency sources and timestamps, remove compiled `codex-agents-python` outputs, and require matching build environments. Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
 
 ## Keep the pin and source verifiable
 
@@ -102,7 +109,9 @@ Use the existing source preparation and build tools. Keep `CODEX_REVISION` and t
 
 ### Maintain the patch manifest
 
-Store reviewed SDK-local changes as ordinary Git diffs under `patches/`. Never edit `.upstream/codex` directly or add executable patch hooks. Preparation authenticates the complete canonical base archive and applies the ordered patches in private Git storage. The result must match the tree recorded in the committed manifest. Fresh builds and source audits verify every resulting file, directory, symlink and Git mode. An empty series must reproduce the pristine pinned tree.
+Store reviewed SDK-local changes as ordinary Git diffs under `patches/`. Never edit `.upstream/codex` directly or add executable patch hooks.
+
+Preparation authenticates the complete canonical base archive and applies the ordered patches in private Git storage. The result must match the tree recorded in the committed manifest. Fresh builds and source audits verify every resulting file, directory, symlink and Git mode. An empty series must reproduce the pristine pinned tree.
 
 `patches/series.json` has exactly two fields:
 

@@ -101,7 +101,7 @@ Use synthetic names and add cases for actual application failures. Check require
 Record these trial details:
 
 - Case, trial, SDK revision, instructions, and model and provider settings.
-- Final output, failure, elapsed time and available [usage](troubleshooting.md#read-usage-without-double-counting), with its accounting limits.
+- Final output, failure, elapsed time and available [usage](observability.md#read-usage-without-double-counting), with its accounting limits.
 - Arguments and returned values captured inside each Python tool. For `greeting`, capture `name` and the greeting before returning it. Keep those records synthetic.
 
 ### Interpret the results
@@ -110,4 +110,4 @@ Three trials per case can catch obvious failures, but cannot give a reliable suc
 
 Keep live evaluations separate from deterministic pytest tests so service failures and model variation do not obscure application regressions. Passing one does not replace passing the other.
 
-The [evaluation runner](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/evaluation/run.py) repeats cases, records configurations, compares a baseline and saves failure details. Its synthetic mode checks the test setup. Live results need outcome review. Neither scripted responses nor model confidence shows that confidence matches the actual success rate.
+Follow the [evaluation runner guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/evaluation/README.md) to repeat cases, record configurations, compare a baseline and save failure details. The runner's scripted mode checks the test setup. Live results need outcome review. Neither scripted responses nor model confidence shows that confidence matches the actual success rate.

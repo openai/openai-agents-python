@@ -5,6 +5,7 @@ Use a manual `FunctionTool` when your application must obtain or supply a tool r
 | Your application needs to | Use |
 | --- | --- |
 | Supply a typed function result | [A manual tool](#manual-tool-results) |
+| Wait for requests during an explicit Session | [Wait for a request or result](#wait-for-a-request-or-result) |
 | Answer requests during `run()` | [A one-shot handler](#answer-interactions-during-a-one-shot-run) |
 | Answer a native approval, form, or URL request | [Native interaction requests](#handle-native-approvals-and-forms) |
 | Expire a live request | [Force cancellation](#expire-pending-requests) |
@@ -48,6 +49,25 @@ async def answer(event):
 
 result = await agent.run("Find the label for record-a.", on_interaction=answer)
 ```
+
+### Continue a one-shot manual request
+
+For a run using Python or manual tools with plain-text or native strict Agent output, `agent.run()` and `agent.run_sync()` can start without `on_interaction`. If the model never calls a manual tool, the run completes normally. If it calls one, the SDK waits for a supported settled manual boundary, then raises `InteractionRequired` with a portable checkpoint. Completed tool effects are not replayed on restore.
+
+```python
+from agents import InteractionRequired
+
+try:
+    completed = await agent.run("Find the label for record-a.")
+except InteractionRequired as exc:
+    if exc.state is None:
+        raise
+    completed = await agent.run(None, state=exc.state, on_interaction=answer)
+```
+
+Run this fragment with the `agent` and `answer` definitions from [Manual tool results](#manual-tool-results). Always check `exc.state`.
+
+For automatic-checkpoint eligibility and the rules for resuming pending work, see [manual-request checkpoints](state.md#automatic-checkpoint-limits).
 
 ### Reply to live manual requests
 
@@ -137,7 +157,7 @@ To expire pending root requests, use `await turn.cancel(mode="force")`. To inclu
 
 ### Answer interactions during a one-shot run
 
-Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the preceding `answer` example. The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
+Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the [`answer` handler](#manual-tool-results). The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
 
 #### Handle native approvals and forms
 
@@ -187,31 +207,12 @@ Choose the policy that owns the operation:
 | Operation | Application control |
 | --- | --- |
 | Executor call | [`Environment.approval`](execution.md#executor-policies) |
-| MCP call | [`before`, `approval`, and `transform_result`](tools.md#mcp-result-policies), alongside native `approval_mode` |
+| MCP call | [`before`, `approval`, and `transform_result`](mcp.md#mcp-result-policies), alongside native `approval_mode` |
 | Native collaboration call | [`NativeAgents.approval`](delegation.md#native-tool-decisions) |
 
 MCP declarations do not accept a per-call `interceptor`.
 
 For questions your application asks, declare a `FunctionTool` with typed question arguments and a typed answer. Its `on_interaction` handler can wait for the user and return a reply created by that exact request. This also works in native children and programmatic tool calling while the run remains active.
-
-### Continue a one-shot manual request
-
-For a Python/manual run with plain-text or native strict Agent output, `agent.run()` and `agent.run_sync()` can start without `on_interaction`. If the model never calls a manual tool, the run completes normally. If it calls one, the SDK waits for a supported settled manual boundary, then raises `InteractionRequired` with a portable checkpoint. Completed tool effects are not replayed on restore.
-
-```python
-from agents import InteractionRequired
-
-try:
-    completed = await agent.run("Find the label for record-a.")
-except InteractionRequired as exc:
-    if exc.state is None:
-        raise
-    completed = await agent.run(None, state=exc.state, on_interaction=answer)
-```
-
-Run this fragment with the `agent` and `answer` definitions from [Manual tool results](#manual-tool-results). Always check `exc.state`.
-
-For automatic-checkpoint eligibility and the rules for resuming pending work, see [manual-request checkpoints](state.md#automatic-checkpoint-limits).
 
 ## Experimental job recovery
 
@@ -305,7 +306,9 @@ Automatic delivery rejects public results that contain the current model API key
 
 ### Optional MCP Tasks adapter
 
-`MCPTasksProvider` is an optional experimental adapter for one host-selected remote MCP tool. It does not change [native MCP](tools.md#native-mcp) execution. Install exactly `mcp==2.0.0` and `mcp-types==2.0.0` in the host environment, then import `MCPTasksProvider` and `MCPInputReply` from `agents.experimental.mcp_tasks`. Normal SDK imports do not require these packages.
+Use this adapter when your application owns an external job and its durable journal. To let Codex call an MCP server during a live conversation, use the [native MCP guide](mcp.md).
+
+`MCPTasksProvider` is an optional experimental adapter for one host-selected remote MCP tool. Install exactly `mcp==2.0.0` and `mcp-types==2.0.0` in the host environment, then import `MCPTasksProvider` and `MCPInputReply` from `agents.experimental.mcp_tasks`. Normal SDK imports do not require these packages.
 
 #### Configure the remote tool
 
