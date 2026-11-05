@@ -18,7 +18,7 @@ from concurrent.futures import Future
 from contextlib import AbstractAsyncContextManager, contextmanager, suppress
 from contextvars import ContextVar, copy_context
 from copy import deepcopy
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from os import PathLike
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -97,6 +97,7 @@ from .observation import (
     _ObservationBuffer,
 )
 from .rate_limits import ApiRateLimits, _api_rate_limits
+from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
@@ -1341,6 +1342,7 @@ class Session(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         tool_selection: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
         _captured_api_key: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
@@ -1355,6 +1357,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise ValueError("resume requires the original LocalStorage profile")
             if not isinstance(resume, str) or not resume:
                 raise TypeError("resume must be a nonempty native Session ID")
+        reconciliation = tuple(reconciled_calls)
+        if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
+            raise TypeError("reconciled_calls must contain ReconciledCall records")
+        if reconciliation and resume is None:
+            raise ValueError("reconciled_calls requires a LocalStorage resume")
         if state is not None and (model is not None or model_settings is not None):
             raise ValueError(
                 "Opening model and model_settings overrides cannot be used with state; "
@@ -2091,21 +2098,29 @@ class Session(Generic[ContextT, OutputT]):
                         await session._publish_startup(thread.call("list_subagents"))
                     )
                     recorded: dict[str, list[RecordedTurn]] = {}
+                    recorded_items: list[SessionItem] = []
+                    unknown: list[UncertainCall] = []
                     for subagent_id in [None, *(child["id"] for child in descendants)]:
                         history = json.loads(
                             await session._publish_startup(thread.read_thread_history(subagent_id))
                         )
-                        turns, items = project_history(history, session.id, subagent_id)
-                        recorded[subagent_id if subagent_id is not None else session.id] = turns
-                        if any(
-                            item["type"] == "function_call"
-                            and item["status"] in ("in_progress", "incomplete")
-                            for item in items
-                        ):
-                            raise RuntimeError(
-                                "Native local history has an unknown tool outcome; "
-                                "reconcile its external effect before reopening"
-                            )
+                        turns, items = project_history(
+                            history, session.id, subagent_id, uncertain_calls=unknown
+                        )
+                        thread_id = subagent_id if subagent_id is not None else session.id
+                        recorded[thread_id] = turns
+                        recorded_items.extend(items)
+                    if any(call.thread_id != session.id for call in unknown):
+                        raise RuntimeError(
+                            "Native local history has an unknown tool outcome in a descendant; "
+                            "local recovery cannot reconcile descendant calls"
+                        )
+                    if unknown and not reconciliation:
+                        raise LocalRecoveryRequired(
+                            tuple(unknown),
+                            tuple(turn for turns in recorded.values() for turn in turns),
+                            tuple(recorded_items),
+                        )
                     for child in descendants:
                         if child["status"] == "closed":
                             continue
@@ -2122,7 +2137,25 @@ class Session(Generic[ContextT, OutputT]):
                                 "Native local history has an active descendant; "
                                 "its runtime cannot be restored"
                             )
-                    await session._publish_startup(thread._validate_local_executor_policy())
+                    missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
+                    supplied = {
+                        (call.thread_id, call.turn_id, call.call_id) for call in reconciliation
+                    }
+                    prior = {
+                        (session.id, item["turn_id"], item["call_id"])
+                        for item in recorded_items
+                        if item["type"] == "function_call_output" and "reconciliation" in item
+                    }
+                    if (
+                        len(supplied) != len(reconciliation)
+                        or not missing <= supplied <= missing | prior
+                    ):
+                        raise ValueError("Reconciliation must cover every unresolved call once")
+                    await session._publish_startup(
+                        thread._reconcile_local_calls(
+                            json.dumps([asdict(call) for call in reconciliation])
+                        )
+                    )
                 if (
                     web_search is not None
                     and web_search.route == "hosted"

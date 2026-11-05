@@ -1397,13 +1397,21 @@ impl NativeThread {
         })
     }
 
-    fn _validate_local_executor_policy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn _reconcile_local_calls<'py>(
+        &self,
+        py: Python<'py>,
+        receipts_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            local_reconciliation::validate_executor_policy(&inner)
-                .await
-                .map_err(py_error)
+            async_bridge::retain_writer_operation(async move {
+                let _context_operation = _context_operation;
+                local_reconciliation::reconcile(&inner, &receipts_json)
+                    .await
+                    .map_err(py_error)
+            })
+            .await
         })
     }
 
