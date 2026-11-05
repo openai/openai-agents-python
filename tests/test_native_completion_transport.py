@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agents import _native_async
+from agents._runtime import _native_async
 
 
 @pytest.mark.parametrize("outcome", ["native_error", "lost_acknowledgement", "missing_result"])

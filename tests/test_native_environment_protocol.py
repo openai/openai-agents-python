@@ -151,7 +151,7 @@ async def test_repeated_native_home_failure_recovers_managed_opening(
     tmp_path, responses, monkeypatch, cancel_opening, implicit
 ):
     from agents import _native
-    from agents.session import _EnvironmentLease, _release_environment
+    from agents._runtime.session import _EnvironmentLease, _release_environment
 
     saved = {}
     entered = []
@@ -274,7 +274,7 @@ async def test_repeated_native_home_failure_recovers_managed_opening(
 
 @pytest.fixture
 def delayed_native_join(monkeypatch, request):
-    from agents.session import _OpeningOwner
+    from agents._runtime.session import _OpeningOwner
 
     fail = _OpeningOwner.fail
     attempts = []

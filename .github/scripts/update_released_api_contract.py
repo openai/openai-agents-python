@@ -116,6 +116,19 @@ def _module_contract(
 ) -> dict[str, Any]:
     assert module.__file__ is not None
     tree = ast.parse(Path(module.__file__).read_text())
+    source = module
+    # Public modules explicitly re-export their implementation. Read declarations
+    # from that one owner while checking bindings on the public module itself.
+    for node in tree.body:
+        if isinstance(node, ast.ImportFrom):
+            owner = importlib.util.resolve_name(
+                "." * node.level + (node.module or ""), module.__package__
+            )
+            if owner.startswith("agents._runtime.") and _public_owner(owner) == module.__name__:
+                source = importlib.import_module(owner)
+                assert source.__file__ is not None
+                tree = ast.parse(Path(source.__file__).read_text())
+                break
     definitions = [(node, _names(node)) for node in tree.body if _names(node)]
     if exports is None:
         exports = (
@@ -155,12 +168,21 @@ def _module_contract(
         selected = expanded
     imports = []
     references = {}
+    relative_groups: dict[int, list[int]] = {}
     import_statements = [
-        statement
+        (statement, group)
         for node in tree.body
-        for statement in ([node, *node.body, *node.orelse] if isinstance(node, ast.If) else [node])
+        for statement, group in (
+            [
+                (node, 0),
+                *((item, id(node.body)) for item in node.body),
+                *((item, id(node.orelse)) for item in node.orelse),
+            ]
+            if isinstance(node, ast.If)
+            else [(node, 0)]
+        )
     ]
-    for node in import_statements:
+    for node, group in import_statements:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
             aliases = [
                 alias
@@ -170,22 +192,44 @@ def _module_contract(
             if aliases:
                 node = copy.deepcopy(node)
                 node.names = aliases
-                imports.append(ast.unparse(node))
                 if isinstance(node, ast.ImportFrom):
                     owner = importlib.util.resolve_name(
-                        "." * node.level + (node.module or ""), module.__package__
+                        "." * node.level + (node.module or ""), source.__package__
                     )
+                    owner = _public_owner(owner)
+                    if source is not module and node.level:
+                        # The runtime is one package level deeper. Preserve the
+                        # reviewed logical import, including shared root leaves.
+                        package = module.__package__ or ""
+                        if owner.startswith(package + "."):
+                            node.level = 1
+                            node.module = owner[len(package) + 1 :]
                     if owner == "agents" or owner.startswith("agents."):
                         references.update(
                             (alias.asname or alias.name, f"{owner}.{alias.name}")
                             for alias in aliases
                         )
+                imports.append(ast.unparse(node))
+                if isinstance(node, ast.ImportFrom) and node.level:
+                    relative_groups.setdefault(group, []).append(len(imports) - 1)
+    if source is not module:
+        # Moving shared leaves one level up changes isort's relative-import
+        # grouping. Compare their logical public order after resolving owners.
+        for positions in relative_groups.values():
+            for index, statement in zip(
+                positions, sorted(imports[index] for index in positions), strict=True
+            ):
+                imports[index] = statement
     return {
         "exports": bindings,
         "imports": imports,
         "references": references,
         "declarations": [ast.unparse(node) for node in declarations],
     }
+
+
+def _public_owner(name: str) -> str:
+    return name.replace("agents._runtime.", "agents.", 1)
 
 
 def public_api() -> dict[str, Any]:
@@ -246,6 +290,27 @@ def public_api() -> dict[str, Any]:
     }
 
 
+def _comparison_api(api: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Ignore explicit self-re-exports when comparing reviewed import syntax."""
+    if api is None:
+        return None
+    result = copy.deepcopy(api)
+    import_lists = [
+        result["root_imports"],
+        *(contract.get("imports", []) for contract in result["modules"].values()),
+        *(contract.get("imports", []) for contract in result["root_definitions"].values()),
+    ]
+    for imports in import_lists:
+        for index, statement in enumerate(imports):
+            node = ast.parse(statement).body[0]
+            assert isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names:
+                if alias.asname == alias.name:
+                    alias.asname = None
+            imports[index] = ast.unparse(node)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--version", required=True)
@@ -266,7 +331,7 @@ def main() -> int:
     if args.check:
         # Release versions and commit IDs change independently of the supported API.
         # Check the committed baseline before CI is allowed to regenerate that metadata.
-        if old.get("public_api") != api:
+        if _comparison_api(old.get("public_api")) != _comparison_api(api):
             print("Native public API differs from the reviewed snapshot.", file=sys.stderr)
             return 1
         return 0

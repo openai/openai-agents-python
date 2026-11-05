@@ -381,6 +381,8 @@ async def test_function_validated_input_output_and_local_denial(
 
 
 async def test_scoped_callback_rejection_drops_sdk_owned_hook_aliases(responses: ResponsesFixture):
+    from agents._runtime import session as runtime_session
+
     secret = "SYNTHETIC_scoped_alias_private_8470"
 
     def before(ctx: ToolContext[None]):
@@ -402,10 +404,13 @@ async def test_scoped_callback_rejection_drops_sdk_owned_hook_aliases(responses:
         with pytest.raises(ValueError, match="Tool result failed validation") as caught:
             await turn.get_result()
         tb = caught.value.__traceback__
+        session_frames = 0
         while tb:
-            if tb.tb_frame.f_code.co_filename.endswith("/agents/session.py"):
+            if tb.tb_frame.f_code.co_filename == runtime_session.__file__:
+                session_frames += 1
                 assert secret not in repr(tb.tb_frame.f_locals), tb.tb_frame.f_code.co_name
             tb = tb.tb_next
+        assert session_frames > 0
         assert secret not in repr([item async for item in session.items()])
         assert len(responses.requests) == 1
 

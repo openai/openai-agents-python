@@ -25,7 +25,7 @@ from agents import (
     function_tool,
     telemetry,
 )
-from agents._trace_context import _native_trace_context, _trace_context
+from agents._runtime._trace_context import _native_trace_context, _trace_context
 from agents.testing import ScriptedResponses, text, tool_call
 
 ROOT = Path(__file__).parents[1]

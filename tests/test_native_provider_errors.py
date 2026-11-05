@@ -507,7 +507,7 @@ async def test_cancel_after_tool_effect_prevents_late_auth_retry(
 def test_captured_integrity_reason_is_readonly_and_does_not_change_error_metadata(
     reason: str,
 ) -> None:
-    from agents.session import _model_failure_error, _native_error
+    from agents._runtime.session import _model_failure_error, _native_error
 
     error = _model_failure_error(
         {"message": "fixed safe message", "response_integrity_reason": reason}
@@ -536,7 +536,7 @@ def test_captured_integrity_reason_is_readonly_and_does_not_change_error_metadat
 
 
 def test_absent_captured_integrity_reason_remains_unknown() -> None:
-    from agents.session import _model_failure_error
+    from agents._runtime.session import _model_failure_error
 
     assert _model_failure_error({"message": "safe"}).response_integrity_reason is None
     assert (
@@ -548,7 +548,7 @@ def test_absent_captured_integrity_reason_remains_unknown() -> None:
 
 
 def test_passive_reason_conversion_preserves_its_originating_category_and_provider_fields() -> None:
-    from agents.session import _native_error
+    from agents._runtime.session import _native_error
 
     error = _native_error(
         {

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import runpy
 import shutil
 import subprocess
 import sys
@@ -63,6 +64,10 @@ def check(candidate: Path, version: str = VERSION) -> subprocess.CompletedProces
     )
 
 
+def implementation(candidate: Path, name: str) -> Path:
+    return candidate / "src/agents/_runtime" / name
+
+
 @pytest.mark.parametrize(
     ("path", "before", "after"),
     [
@@ -96,7 +101,6 @@ def check(candidate: Path, version: str = VERSION) -> subprocess.CompletedProces
             "class ModelSettings(TypedDict, total=False, closed=True):",
             "class ModelSettings(TypedDict, total=True, closed=True):",
         ),
-        ("observation.py", '    "OutputTextDelta",\n', ""),
         ("_function_tools.py", " | HttpMCP[object]", " | int"),
         ("_function_tools.py", " | StdioMCP[object]", " | str"),
         ("tools.py", "    field_names: tuple[str, ...]", "    field_names: tuple[int, ...]"),
@@ -143,7 +147,7 @@ def test_api_changes_fail_without_rewriting_baseline(
     before: str,
     after: str,
 ) -> None:
-    source = candidate / "src/agents" / path
+    source = implementation(candidate, path)
     text = source.read_text()
     assert before in text
     source.write_text(text.replace(before, after, 1))
@@ -171,14 +175,61 @@ def test_root_binding_change_fails(candidate: Path, replacement: str) -> None:
     assert check(candidate).returncode == 1
 
 
+def test_public_facade_rebinding_fails_even_when_runtime_declaration_is_unchanged(
+    candidate: Path,
+) -> None:
+    source = candidate / "src/agents/session.py"
+    source.write_text(source.read_text() + "\nfrom .input import InputText as Session\n")
+    assert check(candidate).returncode == 1
+
+
 def test_empty_submodule_exports_are_not_inferred_from_remaining_classes(candidate: Path) -> None:
     source = candidate / "src/agents/observation.py"
     source.write_text(source.read_text() + "\n__all__ = []\n")
     assert check(candidate).returncode == 1
 
 
+def test_public_facade_export_removal_fails(candidate: Path) -> None:
+    source = candidate / "src/agents/observation.py"
+    text = source.read_text()
+    before = '    "OutputTextDelta",\n'
+    assert before in text
+    source.write_text(text.replace(before, "", 1))
+    assert check(candidate).returncode == 1
+
+
+def test_contract_comparison_ignores_only_redundant_import_aliases() -> None:
+    comparison = runpy.run_path(str(SCRIPT))["_comparison_api"]
+    api = {
+        "root_imports": ["from typing import Any as Any"],
+        "modules": {
+            "agents.telemetry": {
+                "imports": ["from ._trace_context import TraceContext as TraceContext"],
+                "declarations": ["Alias = 'from typing import Any as Any'"],
+            }
+        },
+        "root_definitions": {"agents._function_tools": {"imports": ["import typing as typing"]}},
+    }
+    expected = json.loads(json.dumps(api))
+    expected["root_imports"] = ["from typing import Any"]
+    expected["modules"]["agents.telemetry"]["imports"] = [
+        "from ._trace_context import TraceContext"
+    ]
+    expected["root_definitions"]["agents._function_tools"]["imports"] = ["import typing"]
+    assert comparison(api) == expected
+    assert api["root_imports"] == ["from typing import Any as Any"]
+    for actual, renamed in [
+        ("from typing import Any", "from typing import Any as Object"),
+        ("import typing", "import typing as types"),
+        ("import os.path", "import os.path as path"),
+    ]:
+        original = {"root_imports": [actual], "modules": {}, "root_definitions": {}}
+        changed = {**original, "root_imports": [renamed]}
+        assert comparison(original) != comparison(changed)
+
+
 def test_method_body_does_not_change_contract(candidate: Path) -> None:
-    source = candidate / "src/agents/session.py"
+    source = implementation(candidate, "session.py")
     text = source.read_text()
     before = 'self._check_callback_operation("start work in its own Session")'
     assert before in text
@@ -188,7 +239,7 @@ def test_method_body_does_not_change_contract(candidate: Path) -> None:
 
 
 def test_unreferenced_private_signature_does_not_change_contract(candidate: Path) -> None:
-    source = candidate / "src/agents/tools.py"
+    source = implementation(candidate, "tools.py")
     text = source.read_text()
     before = "def _function_parameters(\n    callback: Callable[..., Any],"
     assert before in text
