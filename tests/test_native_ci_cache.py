@@ -185,13 +185,16 @@ def test_native_macos_rejects_deferred_executable_symbols(
 
 
 @pytest.mark.parametrize("donor", ["", "123"])
-def test_native_reuse_never_forces_cache_warming(donor: str) -> None:
-    values = {"inputs.native_source_run": donor}
+@pytest.mark.parametrize("event", ["push", "pull_request"])
+def test_native_reuse_never_forces_cache_warming(donor: str, event: str) -> None:
+    values = {"inputs.native_source_run": donor, "github.event_name": event}
     expected = {
         "Install native build tools": not donor,
         "Download the qualified native build": bool(donor),
         "Build the SDK and native runtime together": not donor,
         "Build the shared test executor": not donor,
+        "Prepare Rust dependency cache": not donor and event == "push",
+        "Publish Rust dependencies": not donor and event == "push",
     }
     for step in _steps():
         if step.get("name") in expected:

@@ -4,9 +4,9 @@ Build an agent that calls a Python function and returns a greeting. You define i
 
 ## Before you begin
 
-Follow the [installation guide](installation.md) to install a preview wheel and activate your Python environment.
-
-These branch guides include APIs added after the published preview. If you installed a published wheel, use the [guides for that release](versions.md).
+1. Follow the [installation guide](installation.md) to install a preview wheel and activate your Python environment.
+2. Choose the [guides for your installed release](versions.md). These branch guides also include APIs added after the published preview.
+3. [Create an OpenAI API key](https://developers.openai.com/api/docs/quickstart#create-and-export-an-api-key) for the live example below.
 
 The example below needs an OpenAI API key and makes live model requests that can incur charges. To test with scripted responses and no API key, use the [testing guide](testing.md).
 
@@ -50,7 +50,7 @@ On Windows PowerShell, use `$env:OPENAI_API_KEY = "your-key"`, then `python agen
 
 The script prints a greeting for Ada, such as `Hello, Ada!`. When the model requests the `greeting` tool, the SDK calls your Python function and returns its result to the model. The model chooses the final wording, so it can vary.
 
-`agent.run()` opens a Session, waits for the result, and closes the Session. Use `agent.session()` when you need to continue the conversation or stream events. In synchronous code, use `agent.run_sync()` outside an existing event loop. The [core concepts guide](concepts.md) explains these interfaces and how the runtime fits into your application.
+`agent.run()` opens a Session, waits for the result, and closes the Session. With the default in-memory storage, calling `agent.run()` again without a saved checkpoint starts an independent conversation. Use `agent.session()` to keep history between submissions or stream events. In synchronous code, use `agent.run_sync()` outside an existing event loop. See [core concepts](concepts.md) for the relationship between Agent, Session and Turn.
 
 ## Choose your next task
 
@@ -58,6 +58,7 @@ The script prints a greeting for Ada, such as `Hello, Ada!`. When the model requ
 | --- | --- |
 | Understand Agent, Session and Turn | [Core concepts](concepts.md) |
 | Call Python code with application data | [Function tools](tools.md#python-functions) and [context](tools.md#application-context) |
+| Connect a tool server | [MCP servers](mcp.md) |
 | Continue a conversation or stream its answer | [Sessions](sessions.md) and [streaming](sessions.md#stream-observations) |
 | Save a conversation and resume later | [Save and restore state](state.md) |
 | Return a validated Python value | [Structured output](configuration.md#structured-output) |
@@ -66,6 +67,6 @@ The script prints a greeting for Ada, such as `Hello, Ada!`. When the model requ
 | Delegate work to child agents | [Delegation](delegation.md) |
 | Test without a model service | [Testing](testing.md) |
 | Diagnose failures or set a timeout | [Troubleshooting](troubleshooting.md) |
-| Inspect usage and export telemetry | [Usage](troubleshooting.md#read-usage-without-double-counting) and [telemetry](configuration.md#telemetry) |
+| Inspect usage and export telemetry | [Usage and tracing](observability.md) |
 
 Find worked examples for [images, retrieval, application memory, and specialist agents](recipes.md). Before combining features, check the [limits on storage, approvals, and delegation](choosing.md#choose-feature-combinations). Use the [API reference](reference.md) to look up signatures and defaults.

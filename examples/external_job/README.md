@@ -10,7 +10,7 @@ Set `THUMBNAIL_STATE_DIR` to an absolute private state path outside every model-
 
 The `run` command needs a local Responses endpoint. The commands below assume that endpoint listens on port `8080`; replace the port if needed. The example sends a fixed `local-only` credential to that endpoint and does not use `OPENAI_API_KEY`. The worker needs no model connection.
 
-The endpoint must request `render_thumbnail` and continue after receiving its result. For a complete synthetic model setup, see [the native test setup](../../tests/README.md) and [the external-job tests](../../tests/test_deferred_jobs_example.py).
+Start the endpoint before running the job commands. The endpoint must request `render_thumbnail` and continue after receiving its result. For a complete synthetic model setup, see [the native test setup](../../tests/README.md) and [the external-job tests](../../tests/test_deferred_jobs_example.py).
 
 ## Render and resume an order
 

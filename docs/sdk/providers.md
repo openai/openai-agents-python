@@ -2,7 +2,9 @@
 
 Use `NativeProvider` to connect the SDK to a custom Responses endpoint. Before using that endpoint in your application, check the endpoint and model against each feature the application needs. A Chat Completions-compatible route alone is insufficient.
 
-Start with HTTP text responses, then test tools and strict output separately. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support. `session.capabilities` reports whether the SDK configuration supports a feature; it does not test the remote service.
+First test HTTP text responses, then Python tools and strict output. Use the same endpoint and model configuration that the application will use. A successful text response does not establish tool, strict-output, image, MCP or WebSocket support.
+
+`session.capabilities` reports support in the SDK configuration. It does not send a request to test the remote service. The checks below exercise the endpoint through real model requests.
 
 ## Run text, Python tools and strict output separately
 
@@ -78,7 +80,7 @@ The checks cover only their selected cases:
 | Tools | The model requested the Python function and the loop completed. | It does not cover every tool shape. |
 | Strict output | The SDK requested native schema output and validated this object. | It does not prove server enforcement for every generation or support for every schema. |
 
-If a check fails, inspect the assertion or service error and the corresponding request. A model can fail to follow the prompt even when the endpoint supports the protocol. Check whether the failure comes from the model response or the endpoint before deciding which feature is unsupported.
+If a check fails, inspect the assertion or service error and the corresponding request. Separate a protocol failure from a model that did not follow the prompt. For example, a tool check fails if the model returns text without calling `lookup_label`, even when the endpoint supports tool calls.
 
 The script closes each one-shot Session before leaving the provider context. Follow the same order with shared providers: close every Session that uses the provider before closing the provider.
 
@@ -90,6 +92,6 @@ The script forces HTTP. To check WebSockets:
 2. Set `supports_websockets=True` and repeat selected cases against an endpoint that declares support.
 3. Verify the actual upgrade and response in trusted server logs or approved transport monitoring tools. The runtime selects the final transport. A successful run or `websockets_allowed=True` does not prove negotiation.
 
-Record the SDK source revision, wheel version, endpoint and model settings, transport evidence and case outcomes without secrets. Repeat affected cases after changing the endpoint, model, SDK or native revision, or features. Images and additional tool combinations also need representative checks.
+Record the SDK source revision, wheel version, endpoint and model settings, transport evidence and case outcomes without secrets. Repeat the relevant checks when the endpoint, model, SDK build or feature configuration changes. Add representative cases for images and any additional tool combinations your application uses.
 
 See [provider configuration](configuration.md), [structured output limits](configuration.md#structured-output) and [feature combinations](choosing.md#choose-feature-combinations).
