@@ -1029,3 +1029,24 @@ async def test_manual_editor_run_requires_a_handler_for_selected_manual_tools(
     assert result.final_output == "done"
     assert edits == [1, 1]
     assert len(responses.requests) == 2
+
+
+async def test_run_editor_uses_falsy_provider_override(responses):
+    class FalsyProvider(NativeProvider):
+        def __bool__(self):
+            return False
+
+    responses.respond(assistant_output("overridden"))
+    override = FalsyProvider(base_url=responses.url, api_key="synthetic", supports_websockets=False)
+    agent = Agent(
+        instructions="Use the selected provider.",
+        model="gpt-5.5",
+        provider=NativeProvider(
+            base_url="http://127.0.0.1:1/v1", api_key="synthetic", supports_websockets=True
+        ),
+    )
+    result = await agent.run(
+        "answer", provider=override, prepare_request=lambda _turn, _request, **_indices: None
+    )
+    assert result.final_output == "overridden"
+    assert len(responses.requests) == 1

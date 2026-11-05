@@ -743,7 +743,7 @@ class Agent(Generic[ContextT, OutputT]):
             if not callable(prepare_request):
                 raise TypeError("prepare_request must be callable")
             _check_output(_prepare_spec(self.output_type))
-            effective_provider = provider or self.provider
+            effective_provider = self.provider if provider is None else provider
             if effective_provider is not None and not isinstance(
                 effective_provider, NativeProvider
             ):
