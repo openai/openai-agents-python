@@ -79,7 +79,15 @@
     {
       "path": "0020-sdk-turn-receipts.patch",
       "sha256": "2e7b19c453c96c609fd5dafba2836eafe802776f02274ea45f6320a04d60a67c"
+    },
+    {
+      "path": "0021-native-history-durability.patch",
+      "sha256": "6d86e76d4b6340d2c1b6a84827a97db430ccef2d153abd71ffbda80f4abf53d4"
+    },
+    {
+      "path": "0022-native-history-write-reconciliation.patch",
+      "sha256": "02abd4b0ab45907d179d315ea65063a196df6a96af7dcd7a6eb5211826543f71"
     }
   ],
-  "result_tree": "6ff5f1b941c506337570089657c8c20e34c5a51c"
+  "result_tree": "3528521796e56b5166ef2ae08af906e52a9a017f"
 }

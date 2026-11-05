@@ -1,0 +1,409 @@
+diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
+index 7422c7f4e761c72a2c547d6a55e49a58502a939d..d030901fd09c60955d3cbd72016b2177e14a049a 100644
+--- a/codex-rs/rollout/src/recorder.rs
++++ b/codex-rs/rollout/src/recorder.rs
+@@ -976,6 +976,7 @@ impl RolloutRecorder {
+                     rollout_path: path,
+                     ordinal_state,
+                     last_logged_error: None,
++                    unacknowledged: None,
+                 }
+             }
+             RolloutRecorderParams::Resume { path } => {
+@@ -990,6 +991,7 @@ impl RolloutRecorder {
+                     rollout_path: path,
+                     ordinal_state,
+                     last_logged_error: None,
++                    unacknowledged: None,
+                 }
+             }
+         };
+@@ -1744,7 +1746,7 @@ fn precompute_new_rollout_path(
+     Ok((path, timestamp))
+ }
+ 
+-fn open_log_file(path: &Path) -> std::io::Result<File> {
++fn open_log_file(path: &Path, repair_newline: bool) -> std::io::Result<File> {
+     let refresh_modified_time = !compression::plain_rollout_path(path).try_exists()?;
+     let path = compression::materialize_rollout_for_append_blocking(path)?;
+     let Some(parent) = path.parent() else {
+@@ -1762,7 +1764,9 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
+     if refresh_modified_time {
+         file.set_times(std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()))?;
+     }
+-    ensure_rollout_is_newline_terminated(&mut file)?;
++    if repair_newline {
++        ensure_rollout_is_newline_terminated(&mut file)?;
++    }
+     Ok(file)
+ }
+ 
+@@ -1781,6 +1785,8 @@ struct RolloutWriterState {
+     rollout_path: PathBuf,
+     ordinal_state: RolloutOrdinalState,
+     last_logged_error: Option<String>,
++    // The writer retains the original bytes and offset until it acknowledges the line.
++    unacknowledged: Option<PendingLine>,
+ }
+ 
+ impl RolloutWriterState {
+@@ -1866,7 +1872,7 @@ impl RolloutWriterState {
+             return Ok(());
+         }
+ 
+-        let file = open_log_file(self.rollout_path.as_path())?;
++        let file = open_log_file(self.rollout_path.as_path(), self.unacknowledged.is_none())?;
+         self.writer = Some(JsonlWriter {
+             file: tokio::fs::File::from_std(file),
+         });
+@@ -1880,6 +1886,7 @@ impl RolloutWriterState {
+         };
+         write_session_meta(
+             self.writer.as_mut(),
++            &mut self.unacknowledged,
+             &mut self.ordinal_state,
+             session_meta,
+             &self.cwd,
+@@ -1910,7 +1917,10 @@ impl RolloutWriterState {
+         let mut write_result = Ok(());
+         for item in &self.pending_items {
+             match self.ordinal_state.current() {
+-                Ok(ordinal) => match writer.write_rollout_item(item, ordinal).await {
++                Ok(ordinal) => match writer
++                    .write_rollout_item(item, ordinal, &mut self.unacknowledged)
++                    .await
++                {
+                     Ok(()) => self.ordinal_state.advance(),
+                     Err(err) => {
+                         write_result = Err(err);
+@@ -1971,6 +1981,7 @@ async fn rollout_writer(
+ 
+ async fn write_session_meta(
+     mut writer: Option<&mut JsonlWriter>,
++    unacknowledged: &mut Option<PendingLine>,
+     ordinal_state: &mut RolloutOrdinalState,
+     session_meta: SessionMeta,
+     cwd: &Path,
+@@ -1992,7 +2003,9 @@ async fn write_session_meta(
+     let rollout_item = RolloutItem::SessionMeta(session_meta_line);
+     if let Some(writer) = writer.as_mut() {
+         let ordinal = ordinal_state.current()?;
+-        writer.write_rollout_item(&rollout_item, ordinal).await?;
++        writer
++            .write_rollout_item(&rollout_item, ordinal, unacknowledged)
++            .await?;
+         ordinal_state.advance();
+     }
+     Ok(())
+@@ -2011,7 +2024,7 @@ pub async fn append_rollout_item_to_path(
+         open_rollout_for_append(rollout_path, /*writer_lock*/ None).await?;
+     let ordinal = ordinal_state.current()?;
+     let mut writer = JsonlWriter { file };
+-    writer.write_rollout_item(item, ordinal).await
++    writer.write_rollout_item(item, ordinal, &mut None).await
+ }
+ 
+ async fn open_rollout_for_append(
+@@ -2049,12 +2062,36 @@ fn ensure_rollout_is_newline_terminated(file: &mut File) -> std::io::Result<()>
+     let mut final_byte = [0];
+     file.read_exact(&mut final_byte)?;
+     if final_byte[0] != b'\n' {
++        // Older writers could omit the final newline. Admit a complete record
++        // but do not turn a torn write into a line that history readers skip.
++        let end = file.metadata()?.len();
++        let mut start = end;
++        let mut chunk = [0; 4096];
++        while start > 0 {
++            let count = start.min(chunk.len() as u64) as usize;
++            start -= count as u64;
++            file.seek(SeekFrom::Start(start))?;
++            file.read_exact(&mut chunk[..count])?;
++            if let Some(newline) = chunk[..count].iter().rposition(|&byte| byte == b'\n') {
++                start += newline as u64 + 1;
++                break;
++            }
++        }
++        file.seek(SeekFrom::Start(start))?;
++        serde_json::from_reader::<_, serde::de::IgnoredAny>(&mut *file).map_err(|_| {
++            IoError::new(std::io::ErrorKind::InvalidData, "incomplete rollout tail")
++        })?;
+         file.write_all(b"\n")?;
+         file.flush()?;
+     }
+     Ok(())
+ }
+ 
++struct PendingLine {
++    offset: u64,
++    bytes: Vec<u8>,
++}
++
+ struct JsonlWriter {
+     file: tokio::fs::File,
+ }
+@@ -2073,7 +2110,13 @@ impl JsonlWriter {
+         &mut self,
+         rollout_item: &RolloutItem,
+         ordinal: Option<u64>,
++        unacknowledged: &mut Option<PendingLine>,
+     ) -> std::io::Result<()> {
++        if let Some(line) = unacknowledged.as_ref() {
++            self.finish_interrupted_line(line).await?;
++            *unacknowledged = None;
++            return Ok(());
++        }
+         let timestamp_format: &[FormatItem] = format_description!(
+             "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z"
+         );
+@@ -2086,14 +2129,42 @@ impl JsonlWriter {
+             ordinal,
+             item: rollout_item,
+         };
+-        self.write_line(&line).await
+-    }
+-    async fn write_line(&mut self, item: &impl serde::Serialize) -> std::io::Result<()> {
+-        let mut json = serde_json::to_string(item)?;
+-        json.push('\n');
+-        self.file.write_all(json.as_bytes()).await?;
+-        self.file.flush().await?;
+-        Ok(())
++        let mut bytes = serde_json::to_vec(&line)?;
++        bytes.push(b'\n');
++        let offset = self.file.metadata().await?.len();
++        let written = async {
++            self.file.write_all(&bytes).await?;
++            self.file.flush().await
++        }
++        .await;
++        if written.is_err() {
++            *unacknowledged = Some(PendingLine { offset, bytes });
++        }
++        written
++    }
++
++    /// Only the fenced writer may extend the file. A failed flush may have
++    /// already written the entire line or any prefix, including zero bytes.
++    async fn finish_interrupted_line(&mut self, line: &PendingLine) -> std::io::Result<()> {
++        use tokio::io::AsyncReadExt;
++        use tokio::io::AsyncSeekExt;
++
++        let length = self.file.metadata().await?.len();
++        let present = length
++            .checked_sub(line.offset)
++            .and_then(|n| usize::try_from(n).ok())
++            .filter(|&n| n <= line.bytes.len())
++            .ok_or_else(|| IoError::other("rollout changed during write recovery"))?;
++        self.file.seek(SeekFrom::Start(line.offset)).await?;
++        let mut prefix = vec![0; present];
++        self.file.read_exact(&mut prefix).await?;
++        if prefix != line.bytes[..present] {
++            return Err(IoError::other(
++                "rollout contents changed during write recovery",
++            ));
++        }
++        self.file.write_all(&line.bytes[present..]).await?;
++        self.file.flush().await
+     }
+ }
+ 
+diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
+index c97800ba4b156d663b508fc88cb22a613c899a95..00b27dc1f8233e08cd0abdfe1be9c7a45290a1c9 100644
+--- a/codex-rs/rollout/src/recorder_tests.rs
++++ b/codex-rs/rollout/src/recorder_tests.rs
+@@ -148,8 +148,8 @@ fn append_repair_terminates_nonempty_rollout_tail() -> std::io::Result<()> {
+     let home = TempDir::new().expect("temp dir");
+     let rollout_path = home.path().join("rollout.jsonl");
+     fs::write(&rollout_path, b"{\"type\":\"event_msg\"}")?;
+-    drop(open_log_file(&rollout_path)?);
+-    drop(open_log_file(&rollout_path)?);
++    drop(open_log_file(&rollout_path, true)?);
++    drop(open_log_file(&rollout_path, true)?);
+ 
+     assert_eq!(fs::read(&rollout_path)?, b"{\"type\":\"event_msg\"}\n");
+     Ok(())
+@@ -166,7 +166,7 @@ async fn opening_existing_rollout_preserves_modified_time() -> std::io::Result<(
+         .open(&rollout_path)?
+         .set_times(std::fs::FileTimes::new().set_modified(modified))?;
+ 
+-    drop(open_log_file(&rollout_path)?);
++    drop(open_log_file(&rollout_path, true)?);
+     assert_eq!(fs::metadata(&rollout_path)?.modified()?, modified);
+ 
+     drop(open_rollout_for_append(&rollout_path, /*writer_lock*/ None).await?);
+@@ -1005,6 +1005,7 @@ async fn writer_state_retries_write_error_before_reporting_flush_success() -> st
+         rollout_path: rollout_path.clone(),
+         ordinal_state: RolloutOrdinalState::Legacy,
+         last_logged_error: None,
++        unacknowledged: None,
+     };
+     state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
+         AgentMessageEvent {
+@@ -1110,54 +1111,29 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
+ }
+ 
+ #[tokio::test]
+-async fn resumed_paginated_rollout_repairs_unsafe_tail() -> std::io::Result<()> {
+-    let valid_unterminated = serde_json::to_string(&RolloutLine {
++async fn resumed_paginated_rollout_preserves_complete_unterminated_tail() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let config = test_config(home.path());
++    let path = home.path().join("rollout.jsonl");
++    write_paginated_rollout(&path, ThreadId::new(), &[4])?;
++    let tail = serde_json::to_string(&RolloutLine {
+         timestamp: "2026-07-09T00:00:05Z".to_string(),
+         ordinal: Some(5),
+         item: agent_message_item("valid unterminated"),
+     })?;
+-    for (name, tail, expected_ordinals) in [
+-        (
+-            "valid unterminated",
+-            valid_unterminated,
+-            vec![Some(0), Some(4), Some(5), Some(6)],
+-        ),
+-        (
+-            "invalid unterminated",
+-            "{\"timestamp\":\"unterminated\"".to_string(),
+-            vec![Some(0), Some(4), Some(5)],
+-        ),
+-    ] {
+-        let home = TempDir::new().expect("temp dir");
+-        let config = test_config(home.path());
+-        let rollout_path = home.path().join("rollout.jsonl");
+-        write_paginated_rollout(&rollout_path, ThreadId::new(), &[4])?;
+-        let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+-        write!(file, "{tail}")?;
+-        drop(file);
+-
+-        let recorder =
+-            RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path.clone()))
+-                .await?;
+-        recorder
+-            .record_canonical_items(&[agent_message_item("after-tail-repair")])
+-            .await?;
+-        recorder.flush().await?;
+-
+-        let contents = fs::read_to_string(&rollout_path)?;
+-        assert!(contents.ends_with('\n'), "{name} tail should be terminated");
+-        let ordinals = contents
+-            .lines()
+-            .filter_map(|line| crate::parse_rollout_line(line).ok())
+-            .map(|line| line.ordinal)
+-            .collect::<Vec<_>>();
+-        assert_eq!(
+-            ordinals, expected_ordinals,
+-            "unexpected ordinals after repairing {name} tail"
+-        );
+-        recorder.shutdown().await?;
+-    }
+-    Ok(())
++    write!(fs::OpenOptions::new().append(true).open(&path)?, "{tail}")?;
++    let recorder =
++        RolloutRecorder::new(&config, RolloutRecorderParams::resume(path.clone())).await?;
++    recorder
++        .record_canonical_items(&[agent_message_item("after-tail-repair")])
++        .await?;
++    recorder.flush().await?;
++    let ordinals = read_rollout_lines(&path)?
++        .into_iter()
++        .map(|line| line.ordinal)
++        .collect::<Vec<_>>();
++    assert_eq!(ordinals, vec![Some(0), Some(4), Some(5), Some(6)]);
++    recorder.shutdown().await
+ }
+ 
+ #[tokio::test]
+@@ -1930,3 +1906,94 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
+     );
+     Ok(())
+ }
++
++#[tokio::test]
++async fn ambiguous_rollout_write_commits_exactly_one_original_line() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let path = home.path().join("rollout.jsonl");
++    let old = b"existing line\n";
++    let next = b"original serialized item\n";
++    for count in [0, 5, next.len()] {
++        fs::write(&path, [old.as_slice(), &next[..count]].concat())?;
++        let mut writer = JsonlWriter {
++            file: tokio::fs::File::from_std(open_log_file(&path, false)?),
++        };
++        let mut pending = Some(PendingLine {
++            offset: old.len() as u64,
++            bytes: next.to_vec(),
++        });
++        writer
++            .write_rollout_item(&agent_message_item("retry"), Some(1), &mut pending)
++            .await?;
++        assert!(pending.is_none());
++        assert_eq!(fs::read(&path)?, [old.as_slice(), next.as_slice()].concat());
++    }
++    fs::write(&path, [old.as_slice(), b"unexpected"].concat())?;
++    let mut writer = JsonlWriter {
++        file: tokio::fs::File::from_std(open_log_file(&path, false)?),
++    };
++    let mut pending = Some(PendingLine {
++        offset: old.len() as u64,
++        bytes: next.to_vec(),
++    });
++    assert!(
++        writer
++            .write_rollout_item(&agent_message_item("retry"), Some(1), &mut pending)
++            .await
++            .is_err()
++    );
++    assert!(pending.is_some());
++    assert_eq!(fs::read(&path)?, [old.as_slice(), b"unexpected"].concat());
++    Ok(())
++}
++
++#[test]
++fn reopening_a_torn_rollout_rejects_it_without_modifying_history() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let path = home.path().join("rollout.jsonl");
++    let interrupted = b"{\"type\":\"event_msg\"}\n{\"payload\":";
++    fs::write(&path, interrupted)?;
++    assert_eq!(
++        open_log_file(&path, true).unwrap_err().kind(),
++        std::io::ErrorKind::InvalidData
++    );
++    assert_eq!(fs::read(path)?, interrupted);
++    Ok(())
++}
++
++#[tokio::test]
++async fn writer_advances_once_after_an_acknowledgment_is_lost() -> std::io::Result<()> {
++    let home = TempDir::new().expect("temp dir");
++    let path = home.path().join("rollout.jsonl");
++    let first = agent_message_item("first");
++    let bytes = format!(
++        "{}\n",
++        serde_json::to_string(&RolloutLineRef {
++            timestamp: "2026-11-04T00:00:00.000Z".into(),
++            ordinal: Some(0),
++            item: &first,
++        })?
++    )
++    .into_bytes();
++    fs::write(&path, &bytes)?;
++    let mut state = RolloutWriterState {
++        writer: None,
++        deferred_creation: false,
++        pending_items: vec![first, agent_message_item("second")],
++        meta: None,
++        cwd: home.path().to_path_buf(),
++        rollout_path: path.clone(),
++        ordinal_state: RolloutOrdinalState::Paginated { next: Some(0) },
++        last_logged_error: None,
++        unacknowledged: Some(PendingLine { offset: 0, bytes }),
++    };
++    state.flush().await?;
++    state.flush().await?;
++    let lines = read_rollout_lines(&path)?;
++    assert_eq!(
++        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
++        vec![Some(0), Some(1)]
++    );
++    assert!(state.pending_items.is_empty());
++    Ok(())
++}

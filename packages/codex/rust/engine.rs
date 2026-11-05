@@ -129,6 +129,25 @@ impl EngineState {
         api_key: Option<String>,
         initial_model: Option<String>,
     ) -> anyhow::Result<Self> {
+        Self::new_with_store(
+            config_json,
+            runtime_json,
+            checkpoint,
+            api_key,
+            initial_model,
+            None,
+        )
+        .await
+    }
+
+    pub async fn new_with_store(
+        config_json: String,
+        runtime_json: String,
+        checkpoint: bool,
+        api_key: Option<String>,
+        initial_model: Option<String>,
+        canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
+    ) -> anyhow::Result<Self> {
         telemetry::engine_starting().await?;
         let runtime_json = config::prepare_runtime(&runtime_json)?;
         let (mut config, cloud_config) = config::load(&config_json, &runtime_json, None).await?;
@@ -203,9 +222,18 @@ impl EngineState {
                 agent_graph.clone(),
             ))
         });
-        let store: Arc<dyn ThreadStore> = match &local_checklist_store {
-            Some(store) => store.clone(),
-            None => Arc::new(crate::storage::MemoryThreadStore::default()),
+        ensure!(
+            canonical_store.is_none()
+                || (local_checklist_store.is_none() && !goals_enabled && !checkpoint),
+            "Custom canonical storage cannot combine with local storage, goals or checkpoints"
+        );
+        let store: Arc<dyn ThreadStore> = if let Some(backend) = canonical_store {
+            Arc::new(crate::canonical_storage::CanonicalStore::new(backend))
+        } else {
+            match &local_checklist_store {
+                Some(store) => store.clone(),
+                None => Arc::new(crate::storage::MemoryThreadStore::default()),
+            }
         };
         let auth = crate::auth::manager(&config, api_key).await?;
         let provider = codex_model_provider::create_model_provider(
@@ -242,8 +270,11 @@ impl EngineState {
                         config.model.clone()
                     } else if let Some(id) = config::sdk_resume_thread_id(&runtime_json)? {
                         ensure!(
-                            local_checklist_store.is_some(),
-                            "SDK resume requires current native local storage"
+                            local_checklist_store.is_some()
+                                || store
+                                    .as_any()
+                                    .is::<crate::canonical_storage::CanonicalStore>(),
+                            "SDK resume requires current native canonical storage"
                         );
                         let model = store
                             .read_thread(ReadThreadParams {
@@ -253,10 +284,9 @@ impl EngineState {
                             })
                             .await?
                             .model;
-                        local_checklist_store
-                            .as_ref()
-                            .expect("local store checked above")
-                            .expect_resume_model(id, model.clone())?;
+                        if let Some(local) = &local_checklist_store {
+                            local.expect_resume_model(id, model.clone())?;
+                        }
                         model
                     } else {
                         None
@@ -327,6 +357,15 @@ impl EngineState {
                 environment.clone(),
                 extension_events.clone(),
                 interception.clone(),
+                local_checklist_store
+                    .as_ref()
+                    .map(|store| store.managed_calls.clone())
+                    .or_else(|| {
+                        store
+                            .as_any()
+                            .downcast_ref::<crate::canonical_storage::CanonicalStore>()
+                            .map(|store| store.managed_calls.clone())
+                    }),
             );
             let manager = ThreadManager::new(
                 &config,
@@ -419,7 +458,11 @@ impl EngineState {
         let (mut startup, instructions) = self.build_startup(options, initial_config).await?;
         if let Some(id) = resume {
             ensure!(
-                self.store.as_any().is::<LocalThreadStore>()
+                (self.store.as_any().is::<LocalThreadStore>()
+                    || self
+                        .store
+                        .as_any()
+                        .is::<crate::canonical_storage::CanonicalStore>())
                     && python_specs.is_some()
                     && history.is_none()
                     && matches!(startup.initial_history, InitialHistory::New)
@@ -999,6 +1042,9 @@ impl EngineState {
 
     async fn close_locked(&self) -> anyhow::Result<()> {
         if self.closed.load(Ordering::Acquire) {
+            if let Some(store) = &self.local_checklist_store {
+                store.check_durability()?;
+            }
             return Ok(());
         }
         let report = self
@@ -1019,7 +1065,17 @@ impl EngineState {
         {
             state_db.close().await;
         }
+        if let Some(store) = self
+            .store
+            .as_any()
+            .downcast_ref::<crate::canonical_storage::CanonicalStore>()
+        {
+            store.close_all().await?;
+        }
         self.closed.store(true, Ordering::Release);
+        if let Some(store) = &self.local_checklist_store {
+            store.check_durability()?;
+        }
         Ok(())
     }
 
@@ -1879,6 +1935,9 @@ impl ThreadState {
         }
         let _mutation = self.mutations.lock().await;
         if self.closed.load(Ordering::Acquire) {
+            if let Some(store) = &self.engine.local_checklist_store {
+                store.check_durability()?;
+            }
             return Ok(());
         }
         self.closing.send_replace(true);
@@ -1938,6 +1997,9 @@ impl ThreadState {
             .retain(|_, owner| *owner != self.id);
         self.child_questions.lock().await.clear();
         self.closed.store(true, Ordering::Release);
+        if let Some(store) = &self.engine.local_checklist_store {
+            store.check_durability()?;
+        }
         Ok(())
     }
 

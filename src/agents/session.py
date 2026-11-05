@@ -40,6 +40,7 @@ from .agent import (
     _copy_model_settings,
     _SyncRun,
 )
+from .canonical_storage import CanonicalStorage
 from .executor import Environment, EnvironmentSource, ExecutorContext
 from .history import RecordedTurn
 from .input import UserInput, _native_input
@@ -1328,7 +1329,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         context: ContextT | None = None,
         state: SessionState | None = None,
-        storage: LocalStorage | None = None,
+        storage: LocalStorage | CanonicalStorage | None = None,
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         provider: NativeProvider | None = None,
@@ -1338,8 +1339,8 @@ class Session(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         _captured_api_key: str | None = None,
     ) -> Session[ContextT, OutputT]:
-        if storage is not None and not isinstance(storage, LocalStorage):
-            raise TypeError("storage must be a LocalStorage")
+        if storage is not None and not isinstance(storage, (LocalStorage, CanonicalStorage)):
+            raise TypeError("storage must be LocalStorage or CanonicalStorage")
         if state is not None and (storage is not None or resume is not None):
             raise ValueError(
                 "Portable state cannot be combined with native local storage or resume"
@@ -1426,10 +1427,29 @@ class Session(Generic[ContextT, OutputT]):
             continuation = saved.native_continuation
             if manual_restore:
                 restored_model_settings = _manual_restore_model_settings(saved)
+        if isinstance(storage, LocalStorage) and programmatic_tool_calling:
+            raise ValueError(
+                "LocalStorage does not support code mode: nested tool identities "
+                "do not yet have durable intent and result receipts"
+            )
         tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
+        if isinstance(storage, CanonicalStorage) and (
+            native_agents is not None
+            or goals
+            or programmatic_tool_calling
+            or checklist
+            or mcp_tools
+            or environment is not None
+            or any(isinstance(tool, WebSearch) for tool in available)
+            or any(tool._bind is None for tool in tools)
+        ):
+            raise ValueError(
+                "CanonicalStorage preview does not support children, goals, checklist, "
+                "code mode, manual tools, native tools or environments"
+            )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
         web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
@@ -1618,7 +1638,11 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
-            if storage is not None:
+            if isinstance(storage, CanonicalStorage):
+                runtime["ephemeral"] = False
+                if resume is not None:
+                    runtime["_sdk_resume_thread_id"] = resume
+            elif storage is not None:
                 runtime.update(native_thread_store=str(storage.path), ephemeral=False)
                 if resume is not None:
                     runtime["_sdk_resume_thread_id"] = resume
@@ -1937,6 +1961,11 @@ class Session(Generic[ContextT, OutputT]):
                         api_key=opening.api_key or "",
                         provider_lease=provider_lease,
                         **(
+                            {"canonical_store": storage.backend}
+                            if isinstance(storage, CanonicalStorage)
+                            else {}
+                        ),
+                        **(
                             {
                                 "initial_checkpoint": checkpoint,
                                 "initial_specs_json": native_specs,
@@ -2215,7 +2244,7 @@ class Session(Generic[ContextT, OutputT]):
         _start_readers: bool = True,
     ) -> None:
         self._provider_lease: Any = None
-        self._storage: LocalStorage | None = None
+        self._storage: LocalStorage | CanonicalStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._owned_provider: NativeProvider | None = None
         self._agent: Agent[ContextT, OutputT] | None = None
@@ -4072,6 +4101,8 @@ class Session(Generic[ContextT, OutputT]):
         allowed_mcp: tuple[_MCP[Any], ...],
         specs: str,
     ) -> None:
+        if isinstance(self._storage, CanonicalStorage) and candidate.manual_slots():
+            raise ValueError("CanonicalStorage preview does not support manual tools")
         assert self._opening_agent is not None
         if self._native_agents is not None:
             children = json.loads(await self._native.call("list_subagents"))

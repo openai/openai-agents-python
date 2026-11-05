@@ -156,6 +156,8 @@ Import from `agents.state`. Serialize with `to_json()` and load with `SessionSta
 
 ### LocalStorage
 
+`LocalStorage` rejects `programmatic_tool_calling=True` before acquisition or model/tool work: individual nested tool identities do not yet have durable intent and result receipts. Use nonpersistent code mode for that combination.
+
 Import `LocalStorage` from `agents` and construct it with a `pathlib.Path`, for example `LocalStorage(Path("conversations"))`. Pass the profile as `agent.session(storage=profile)`. Keep `session.id` in application storage.
 
 After closing the Session, reopen the conversation with `agent.session(storage=profile, resume=saved_id)` using the original profile directory and current tools, context and provider. Only one native writer can own the conversation at a time.

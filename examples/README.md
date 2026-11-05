@@ -7,6 +7,7 @@ These examples use the SDK preview. Follow the [installation guide](../docs/sdk/
 | [basic.py](basic.py) | One answer through Agent and function_tool. |
 | [typed_context.py](typed_context.py) | Application context and a Pydantic output model. |
 | [conversation.py](conversation.py) | Two turns, streamed observations and a saved conversation. |
+| [Application-owned storage](canonical_storage/README.md) | A canonical native backend and persistent SQLite reopen example. |
 | [validated_artifact.py](validated_artifact.py) | Application memory and an XML result policy that validates an artifact before writing it. |
 
 ## More examples

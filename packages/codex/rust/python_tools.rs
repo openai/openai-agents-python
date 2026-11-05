@@ -2124,6 +2124,7 @@ fn provider_error_code(body: &str) -> Option<String> {
 
 #[derive(Default)]
 pub struct PythonContributor {
+    pub(crate) managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     pub(crate) manager: Weak<ThreadManager>,
     pub(crate) models_config: codex_models_manager::ModelsManagerConfig,
     pub(crate) code_mode_enabled: bool,
@@ -2597,6 +2598,7 @@ impl PythonContributor {
             .copied()
             .map(|slot| {
                 Arc::new(PythonExecutor {
+                    managed_calls: self.managed_calls.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -2749,6 +2751,7 @@ impl ToolContributor for PythonContributor {
 }
 
 struct PythonExecutor {
+    managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
     generation: Arc<Generation>,
@@ -2799,6 +2802,9 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
         Box::pin(async move {
             let arguments: Value = serde_json::from_str(call.function_arguments()?)
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            if let Some(calls) = &self.managed_calls {
+                calls.register(&self.thread, &call.turn_id, &call.call_id);
+            }
             let (key, invocation, receiver) = self
                 .tools
                 .enqueue(
@@ -4361,6 +4367,7 @@ pub(crate) mod managed_tests {
 
     fn executor(tools: Arc<PythonTools>) -> PythonExecutor {
         PythonExecutor {
+            managed_calls: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,

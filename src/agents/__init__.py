@@ -15,6 +15,11 @@ if TYPE_CHECKING:
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
     )
+    from .canonical_storage import (
+        CanonicalStorage as CanonicalStorage,
+        CanonicalThreadStore as CanonicalThreadStore,
+        SQLiteThreadStore as SQLiteThreadStore,
+    )
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -148,6 +153,9 @@ _MODULES = {
     "OutputValidationError": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "CanonicalStorage": ".canonical_storage",
+    "CanonicalThreadStore": ".canonical_storage",
+    "SQLiteThreadStore": ".canonical_storage",
     "ApiRateLimits": ".rate_limits",
     "ApiRateLimitWindow": ".rate_limits",
     "InputImage": ".input",

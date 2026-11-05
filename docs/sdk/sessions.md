@@ -118,11 +118,12 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 | Continue talking while the Session stays open | `async with agent.session()` | The live Session, which owns the conversation until it closes. |
 | Save a portable snapshot and restore it in a new Session | `SessionState` from `await session.save_state()` | The checkpoint in trusted storage, serialized with `state.to_json()` when needed. |
 | Reopen a native conversation from a local profile directory | [`LocalStorage`](reference.md#localstorage) | The profile directory and `session.id`; reopen with the same profile and `resume=saved_id`. |
+| Supply an application-owned canonical native backend | `CanonicalStorage(backend)` | See the [persistent adapter example and contract](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage) for the preview scope, lifecycle and recovery procedure. |
 
 The storage choices have these limits:
 
 - Portable checkpoints do not copy workspace files or live processes.
-- A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`.
+- A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`. Persistent code mode (`programmatic_tool_calling=True`) is rejected before opening because individual nested tool identities lack durable intent and result receipts. Nonpersistent code mode remains available.
 - Do not combine `storage` or `resume` with portable `state`.
 - Both restore methods require current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
@@ -167,7 +168,9 @@ This script demonstrates closing and reopening within one application process. T
 
 Local storage retains history, but it cannot recover every interrupted conversation. Reopening fails with `RuntimeError` if the saved history contains a function call with an unknown outcome. For example, the process may have crashed after an external effect but before recording its result. Reopening also fails if a saved active child's runtime cannot be restored. No new model request starts in either case.
 
-Before starting another conversation, preserve the profile and check your application's records to find which external effects occurred. Repeating `resume` does not resolve an unknown outcome. The SDK provides no public operation to repair that saved history, and checking external effects does not repair it.
+A successful `LocalThreadStore` append records canonical items and flushes the native writer to the OS-readable file; internal enqueue alone only accepts queued work. Successful persistence and flush acknowledge the same process-death boundary. The runtime requires that boundary before tool dispatch or dependent work. These boundaries cover process death; they do not promise survival of host or power loss. Search indexes and telemetry are rebuildable and do not replace canonical history. The first canonical storage failure remains visible through turn completion and close, even if a later operation succeeds.
+
+Before starting another conversation, preserve the profile and check your application's records to find which external effects occurred. Repeating `resume` does not resolve an unknown outcome. `LocalStorage` provides no public operation to repair that saved history, and checking external effects does not repair it. The separate `CanonicalStorage.reconcile()` preview applies only to application-supplied canonical backends.
 
 ## Compact, save and restore
 

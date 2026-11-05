@@ -19,6 +19,7 @@ from typing_extensions import TypedDict, TypeVar
 
 if TYPE_CHECKING:
     from ._function_tools import Tool
+    from .canonical_storage import CanonicalStorage
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
     from .native_agents import NativeAgents
@@ -477,7 +478,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         state: SessionState | None = None,
-        storage: LocalStorage | None = None,
+        storage: LocalStorage | CanonicalStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -493,7 +494,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         state: SessionState | None = None,
-        storage: LocalStorage | None = None,
+        storage: LocalStorage | CanonicalStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -509,7 +510,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         state: SessionState | None = None,
-        storage: LocalStorage | None = None,
+        storage: LocalStorage | CanonicalStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -525,7 +526,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | None = None,
-        storage: LocalStorage | None = None,
+        storage: LocalStorage | CanonicalStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -574,11 +575,19 @@ class Agent(Generic[ContextT, OutputT]):
         Load checkpoints only from trusted application storage: their history
         includes instructions. Unverifiable histories are rejected.
 
+        With ``storage=CanonicalStorage(backend)``, use an application-owned
+        canonical native backend. See CanonicalThreadStore for its exclusive
+        ownership and commit contract. This preview supports root Sessions;
+        child agents, goals, checklist, code mode, manual and native tools,
+        and environments are rejected.
+
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
         provider. Missing tool receipts are rejected as unknown effects, not
-        replayed. Local storage and portable ``state`` cannot be combined.
+        replayed. Local storage rejects code mode because nested tool identities
+        lack durable intent and result receipts. Local storage and portable
+        ``state`` cannot be combined.
 
         Pass instruction_files to load trusted UTF-8 files as application
         instructions. Use files and parent directories that untrusted actors

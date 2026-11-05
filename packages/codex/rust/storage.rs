@@ -25,6 +25,41 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::manual_checkpoint::UnsupportedManualState;
 
+/// Calls admitted to application Python code. Core cancellation text is not a
+/// receipt for the external effect these callbacks may already have produced.
+/// The engine and its extensions own this tracker for one Session lifetime;
+/// entries grow with that Session's canonical calls and drop with the engine.
+#[derive(Default)]
+pub(crate) struct ManagedCalls(std::sync::Mutex<HashSet<(String, String, String)>>);
+
+impl ManagedCalls {
+    pub(crate) fn register(&self, thread: &str, turn: &str, call: &str) {
+        self.0.lock().expect("managed calls poisoned").insert((
+            thread.into(),
+            turn.into(),
+            call.into(),
+        ));
+    }
+
+    pub(crate) fn owns_output(&self, thread: ThreadId, item: &RolloutItem) -> bool {
+        if let RolloutItem::ResponseItem(envelope) = item
+            && let ResponseItem::FunctionCallOutput {
+                call_id: Some(call),
+                internal_chat_message_metadata_passthrough: Some(metadata),
+                ..
+            } = &envelope.item
+            && let Some(turn) = &metadata.turn_id
+        {
+            return self.0.lock().expect("managed calls poisoned").contains(&(
+                thread.to_string(),
+                turn.clone(),
+                call.clone(),
+            ));
+        }
+        false
+    }
+}
+
 /// Last accepted whole-list update. Never a source of runtime configuration.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -844,6 +879,7 @@ pub(crate) struct CompletionHold {
 /// Local checklist records have the lifetime of a native thread, including across
 /// new engines. Only a successful native live append can replace a record.
 pub struct LocalChecklistStore {
+    pub(crate) managed_calls: Arc<ManagedCalls>,
     inner: LocalThreadStore,
     graph: Arc<MemoryAgentGraph>,
     directory: PathBuf,
@@ -851,6 +887,7 @@ pub struct LocalChecklistStore {
     // exclusion; this gate only closes the append/shutdown race in this wrapper.
     writers: Mutex<HashMap<ThreadId, ChecklistWriter>>,
     resume_model: OnceLock<(ThreadId, Option<String>)>,
+    durability_failure: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -1233,6 +1270,24 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) fn check_durability(&self) -> ThreadStoreResult<()> {
+        if self
+            .durability_failure
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ThreadStoreError::Internal { message: "Canonical thread persistence failed; close and reconcile saved history before reopening".into() });
+        }
+        Ok(())
+    }
+
+    fn retain_durability_failure<T>(&self, result: ThreadStoreResult<T>) -> ThreadStoreResult<T> {
+        if result.is_err() {
+            self.durability_failure
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
     pub fn new(
         config: LocalThreadStoreConfig,
         inner: LocalThreadStore,
@@ -1269,7 +1324,9 @@ impl LocalChecklistStore {
             graph,
             directory,
             writers: Mutex::new(HashMap::new()),
+            managed_calls: Arc::new(ManagedCalls::default()),
             resume_model: OnceLock::new(),
+            durability_failure: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1355,6 +1412,8 @@ impl LocalChecklistStore {
             // Core ignores some append failures; this writer must refuse later
             // capture/close instead of accepting a synthetic cancelled result.
             writer.failure.get_or_insert_with(|| error.to_string());
+            self.durability_failure
+                .store(true, std::sync::atomic::Ordering::Release);
             return Err(error);
         }
         // Consume once at Core drain, or at the idle Core history injection
@@ -1969,6 +2028,9 @@ impl LocalChecklistStore {
         let mut receipt = None;
         if let Some(writer) = writers.get_mut(&id) {
             params.items.retain(|item| {
+                // Actual results enter through commit_sdk_receipt. Never let a
+                // synthesized cancellation claim the external effect settled.
+                let managed = self.managed_calls.owns_output(id, item);
                 if let RolloutItem::ResponseItem(envelope) = item
                     && let ResponseItem::FunctionCallOutput {
                         call_id: Some(call_id),
@@ -1979,9 +2041,9 @@ impl LocalChecklistStore {
                     } = &envelope.item
                     && let Some(turn) = &meta.turn_id
                 {
-                    return !writer.early.remove(&(turn.clone(), call_id.clone()));
+                    return !writer.early.remove(&(turn.clone(), call_id.clone())) && !managed;
                 }
-                true
+                !managed
             });
         }
         for item in &params.items {
@@ -2071,7 +2133,8 @@ impl ThreadStore for LocalChecklistStore {
                     self.inner
                         .persist_thread(id, PersistContext::Standard)
                         .await?;
-                    self.inner.flush_thread(id).await?;
+                    self.retain_durability_failure(self.inner.flush_thread(id).await)?;
+                    self.check_durability()?;
                     self.graph.admit(parent, id).await.map_err(checklist_error)
                 }
                 .await;
@@ -2207,14 +2270,17 @@ impl ThreadStore for LocalChecklistStore {
                 loss.suffix.push(params.items);
                 return Ok(());
             }
-            self.append_committed(params, &mut writers).await
+            self.check_durability()?;
+            let result = self.append_committed(params, &mut writers).await;
+            self.retain_durability_failure(result)
         })
     }
 
     fn persist_thread(&self, id: ThreadId, context: PersistContext) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let writers = self.writers.lock().await;
-            self.inner.persist_thread(id, context).await?;
+            self.retain_durability_failure(self.inner.persist_thread(id, context).await)?;
+            self.check_durability()?;
             if let Some(writer) = writers.get(&id) {
                 writer.check()?;
             }
@@ -2225,7 +2291,8 @@ impl ThreadStore for LocalChecklistStore {
     fn flush_thread(&self, id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let writers = self.writers.lock().await;
-            self.inner.flush_thread(id).await?;
+            self.retain_durability_failure(self.inner.flush_thread(id).await)?;
+            self.check_durability()?;
             if let Some(writer) = writers.get(&id) {
                 writer.check()?;
             }
@@ -2240,14 +2307,15 @@ impl ThreadStore for LocalChecklistStore {
                 && (writer.rebuilding.is_some() || writer.loss.is_some())
             {
                 writer.check()?;
-                return self.inner.flush_thread(id).await;
+                self.retain_durability_failure(self.inner.flush_thread(id).await)?;
+                return self.check_durability();
             }
             // Release the native OS writer even if an earlier append failed.
-            self.inner.shutdown_thread(id).await?;
+            self.retain_durability_failure(self.inner.shutdown_thread(id).await)?;
             if let Some(writer) = writers.remove(&id) {
                 writer.check()?;
             }
-            Ok(())
+            self.check_durability()
         })
     }
 

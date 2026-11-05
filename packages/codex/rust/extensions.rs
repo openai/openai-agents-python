@@ -105,6 +105,7 @@ pub fn build(
     environment: Arc<EnvironmentManager>,
     events: Arc<Events>,
     interception: Arc<crate::native_interception::Boundary>,
+    managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
 ) -> Arc<ExtensionRegistry<Config>> {
     let mut builder = ExtensionRegistryBuilder::<Config>::with_event_sink(events);
     let settlement = Arc::new(crate::turn_settlement::Contributor);
@@ -123,6 +124,7 @@ pub fn build(
     builder.turn_lifecycle_contributor(interception.clone());
     builder.tool_lifecycle_contributor(interception.clone());
     let python_tools = Arc::new(crate::python_tools::PythonContributor {
+        managed_calls,
         manager: manager.clone(),
         models_config: config.to_models_manager_config(),
         code_mode_enabled: config.features.enabled(Feature::CodeMode),

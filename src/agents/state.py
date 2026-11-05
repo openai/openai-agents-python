@@ -25,7 +25,9 @@ class LocalStorage:
     conversation at a time. Current application tools, context and provider
     are required; no saved credential or Python task is restored.
 
-    Native local conversations cannot export portable SessionState. Missing
+    Code mode is rejected before opening because nested tool identities do not
+    yet have durable intent and result receipts. Nonpersistent code mode remains
+    available. Native local conversations cannot export portable SessionState. Missing
     receipts are unknown effects: reconcile them with your external system,
     never retry the tool automatically. This is not a checkpoint store.
     """
