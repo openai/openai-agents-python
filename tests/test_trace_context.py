@@ -482,16 +482,25 @@ async def _policy_isolation_case() -> dict[str, Any]:
         }
         return "accepted"
 
-    async def run_owned(label: str, disabled: bool, sensitive: bool) -> str:
-        async with (
-            ScriptedResponses(
-                [tool_call("observe", {"key": label}, call_id=label)], [text("done")]
-            ) as peer,
-            AsyncExitStack() as stack,
-        ):
+    phases = dict.fromkeys(labels, "opening")
+    async with AsyncExitStack() as stack:
+        sessions: dict[str, Any] = {}
+        for label in labels:
+            peer = await stack.enter_async_context(
+                ScriptedResponses(
+                    [tool_call("observe", {"key": label}, call_id=label)], [text("done")]
+                )
+            )
             agent = Agent(
                 instructions="Observe synthetic policy", tools=[observe], provider=peer.provider
             )
+            # Initialize resources separately from the concurrent admission policies.
+            sessions[label] = await stack.enter_async_context(
+                agent.session(parent_trace={"traceparent": PARENT})
+            )
+            phases[label] = "ready"
+
+        async def run_owned(label: str, disabled: bool, sensitive: bool) -> str:
             with telemetry.trace(
                 label,
                 options=telemetry.TraceOptions(
@@ -499,49 +508,53 @@ async def _policy_isolation_case() -> dict[str, Any]:
                     include_sensitive_data=sensitive,
                 ),
             ):
-                session = await stack.enter_async_context(
-                    agent.session(parent_trace={"traceparent": PARENT})
-                )
-                turn = await session.submit(label)
+                phases[label] = "submitting"
+                turn = await sessions[label].submit(label)
             closed[label].set()
+            phases[label] = "admitted"
             assert (await turn.get_result()).final_output == "done"
+            phases[label] = "completed"
             return turn.turn_id
 
-    restrictive = asyncio.create_task(run_owned("restrictive", True, False))
-    permissive = asyncio.create_task(run_owned("permissive", False, True))
+        restrictive = asyncio.create_task(run_owned("restrictive", True, False))
+        permissive = asyncio.create_task(run_owned("permissive", False, True))
 
-    async def callers_closed() -> None:
-        await asyncio.gather(*(event.wait() for event in closed.values()))
+        async def callers_closed() -> None:
+            await asyncio.gather(*(event.wait() for event in closed.values()))
 
-    barrier = asyncio.create_task(callers_closed())
-    owners = (restrictive, permissive)
-    try:
-        # Both policies must be retained after admission and caller-scope close.
-        # Callback scheduling need not let both tools enter before either returns.
-        ready, _ = await asyncio.wait(
-            (barrier, *owners), timeout=30, return_when=asyncio.FIRST_COMPLETED
-        )
-        for owner in owners:
-            if owner in ready:
-                # Surface setup/tool failures instead of hiding them in timeout cleanup.
-                owner.result()
-                raise AssertionError("Policy owner finished before the callbacks were released")
-        if barrier not in ready:
-            raise TimeoutError(
-                {
-                    label: {"entered": entered[label].is_set(), "closed": closed[label].is_set()}
-                    for label in labels
-                }
+        barrier = asyncio.create_task(callers_closed())
+        owners = (restrictive, permissive)
+        try:
+            # Both policies must be retained after admission and caller-scope close.
+            # Callback scheduling need not let both tools enter before either returns.
+            ready, _ = await asyncio.wait(
+                (barrier, *owners), timeout=30, return_when=asyncio.FIRST_COMPLETED
             )
-        await barrier
-        release.set()
-        results = await asyncio.gather(*owners)
-    finally:
-        release.set()
-        for waiter in (barrier, *owners):
-            if not waiter.done():
-                waiter.cancel()
-        await asyncio.gather(barrier, *owners, return_exceptions=True)
+            for owner in owners:
+                if owner in ready:
+                    # Surface setup/tool failures instead of hiding them in timeout cleanup.
+                    owner.result()
+                    raise AssertionError("Policy owner finished before the callbacks were released")
+            if barrier not in ready:
+                raise TimeoutError(
+                    {
+                        label: {
+                            "phase": phases[label],
+                            "entered": entered[label].is_set(),
+                            "closed": closed[label].is_set(),
+                        }
+                        for label in labels
+                    }
+                )
+            await barrier
+            release.set()
+            results = await asyncio.gather(*owners)
+        finally:
+            release.set()
+            for waiter in (barrier, *owners):
+                if not waiter.done():
+                    waiter.cancel()
+            await asyncio.gather(barrier, *owners, return_exceptions=True)
     async with ScriptedResponses(
         [tool_call("observe", {"key": "fresh"}, call_id="fresh")], [text("done")]
     ) as peer:
