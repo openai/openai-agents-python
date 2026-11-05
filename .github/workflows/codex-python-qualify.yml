@@ -158,6 +158,37 @@ jobs:
             )
           done
           cp "$RUNNER_TEMP"/installed-*.json dist/
+      - name: Qualify canonical storage with the installed POSIX wheel
+        if: runner.os == 'Linux' || runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/canonical-storage.XXXXXX")
+          mkdir -p "$stage/examples/canonical_storage"
+          cp -R tests "$stage/tests"
+          cp examples/canonical_storage/main.py "$stage/examples/canonical_storage"
+          uv venv --seed --python 3.10 "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          python="$stage/venv/bin/python"
+          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          cd "$stage"
+          "$python" -I -B - <<'PYTHON'
+          import sys
+          from pathlib import Path
+          import agents
+          import agents._native
+
+          prefix = Path(sys.prefix).resolve()
+          assert Path(agents.__file__).resolve().is_relative_to(prefix)
+          assert Path(agents._native.__file__).resolve().is_relative_to(prefix)
+          print("Installed native revision:", agents._native.CODEX_REVISION)
+          PYTHON
+          chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          CODEX_EXEC_SERVER_TEST_BINARY="$GITHUB_WORKSPACE/dist/exec-server-fixture" \
+            "$python" -I -B -m pytest -q -o "pythonpath=$stage" -o asyncio_mode=auto \
+            tests/test_canonical_storage.py tests/test_canonical_storage_example.py \
+            tests/test_custom_storage_durability.py \
+            tests/test_native_local_descendant_receipts.py::test_local_descendant_admission_checks_receipts_without_resuming_work \
+            tests/test_native_local_descendant_receipts.py::test_local_reopen_refuses_cold_active_child_without_tool_receipt
       - name: Qualify offline Unix sockets with the installed Linux wheel
         if: runner.os == 'Linux'
         run: |

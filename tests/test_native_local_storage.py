@@ -28,9 +28,46 @@ from tests.native_fixtures import assistant_output, function_call, responses as 
 from tests.test_native_manual_tools import LookupArgs, next_request, provider
 
 
+async def _manual_receipt_failure_worker(url: str, directory: Path) -> None:
+    import resource
+    import signal
+
+    lookup = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    agent = Agent(
+        instructions="Read the record.",
+        tools=[lookup],
+        provider=NativeProvider(base_url=url, api_key="synthetic-manual-write-failure"),
+    )
+    try:
+        async with agent.session(storage=LocalStorage(directory / "profile")) as session:
+            await session.submit("Begin")
+            request = await next_request(session.interactions(), lookup)
+            limits = resource.getrlimit(resource.RLIMIT_FSIZE)
+            previous_signal = signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            try:
+                # Fail real native append/flush operations without changing host state.
+                resource.setrlimit(resource.RLIMIT_FSIZE, (0, limits[1]))
+                try:
+                    await request.respond("must not reach dependent model work")
+                except Exception:
+                    print(json.dumps({"reply_failed": True}), flush=True)
+                else:
+                    print(json.dumps({"reply_failed": False}), flush=True)
+            finally:
+                resource.setrlimit(resource.RLIMIT_FSIZE, limits)
+                signal.signal(signal.SIGXFSZ, previous_signal)
+    except Exception:
+        print(json.dumps({"close_failed": True}), flush=True)
+
+
 async def _worker() -> None:
     mode, url, root, thread_id = sys.argv[1:]
     directory = Path(root)
+    if mode == "manual-receipt-failure":
+        await _manual_receipt_failure_worker(url, directory)
+        return
 
     @function_tool
     async def record(context: ToolContext[str], key: str) -> str:
@@ -441,6 +478,75 @@ async def test_local_manual_export_rejects_before_sealing_or_spending_grants(res
         await request.respond("known receipt")
         assert (await turn.get_result()).final_output == "still-live"
         assert "known receipt" in json.dumps(responses.requests[-1]["input"])
+
+
+async def test_local_manual_reply_survives_reopen_without_repeating_the_effect(responses, tmp_path):
+    lookup = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "native-key"}, "durable-manual"))
+    responses.respond(assistant_output("original complete"))
+    responses.respond(assistant_output("resumed complete"))
+    agent = Agent(instructions="Read the record.", tools=[lookup], provider=provider(responses))
+    storage = LocalStorage(tmp_path / "profile")
+    effects: list[str] = []
+    async with timeout(20):
+        async with agent.session(storage=storage) as original:
+            identity = original.id
+            turn = await original.submit("Begin")
+            request = await next_request(original.interactions(), lookup)
+            effects.append(request.arguments.key)
+            await request.respond("durable manual receipt")
+            assert (await turn.get_result()).final_output == "original complete"
+        assert len(responses.requests) == 2
+        async with agent.session(storage=storage, resume=identity) as reopened:
+            assert reopened.id == identity
+            assert (
+                await (await reopened.submit("Continue without another lookup")).get_result()
+            ).final_output == "resumed complete"
+            assert not await reopened.pending_interactions()
+        assert len(responses.requests) == 3
+        results = [
+            item
+            for item in responses.requests[-1]["input"]
+            if item.get("type") == "function_call_output"
+        ]
+        assert len(results) == 1 and results[0]["call_id"] == "durable-manual"
+        assert "durable manual receipt" in json.dumps(results)
+        assert effects == ["native-key"]
+
+
+async def test_local_manual_missing_reply_blocks_reopen_before_model(responses, tmp_path):
+    lookup = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "native-key"}, "missing-manual"))
+    responses.respond(assistant_output("must never start"))
+    agent = Agent(instructions="Read the record.", tools=[lookup], provider=provider(responses))
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(20):
+        async with agent.session(storage=storage) as original:
+            identity = original.id
+            await original.submit("Begin")
+            request = await next_request(original.interactions(), lookup)
+            assert request.arguments.key == "native-key"
+            # The application may have performed its effect without replying.
+        request_count = len(responses.requests)
+        with pytest.raises(LocalRecoveryRequired):
+            async with agent.session(storage=storage, resume=identity):
+                pytest.fail("A missing manual receipt reopened without recovery")
+        assert len(responses.requests) == request_count
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Uses POSIX per-process file limits")
+async def test_local_manual_receipt_write_failure_stops_dependent_model(responses, tmp_path):
+    responses.respond(function_call("lookup", {"key": "native-key"}, "manual-write-failure"))
+    responses.respond(assistant_output("must never start"))
+    process = await _start(responses, tmp_path, "manual-receipt-failure")
+    code, rows, err = await _collect(process)
+    assert code == 0, (rows, err)
+    assert rows == [{"reply_failed": True}, {"close_failed": True}]
+    assert len(responses.requests) == 1
 
 
 async def test_portable_state_cannot_select_a_native_directory(responses, tmp_path):
