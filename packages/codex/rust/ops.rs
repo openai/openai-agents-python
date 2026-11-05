@@ -547,7 +547,7 @@ async fn prepare_write_selection(
         &state.engine.manager.environment_manager(),
         &writes,
         roots,
-        state.engine.native_storage_home(),
+        state.engine.local_private_paths(),
     )
     .await?;
     if selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID

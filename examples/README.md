@@ -1,37 +1,54 @@
-# Examples
+# Run an SDK example
 
-These examples use the SDK preview. Follow the [installation guide](../docs/sdk/installation.md) and use example files from the same release as your installed wheel.
+Use these examples with the SDK preview wheel and source files from the same release. Start with one Python tool, or choose a workflow below for scripted tests, browser applications, and background jobs.
 
-| File | What it shows |
-| --- | --- |
-| [basic.py](basic.py) | One answer through Agent and function_tool. |
-| [typed_context.py](typed_context.py) | Application context and a Pydantic output model. |
-| [conversation.py](conversation.py) | Two turns, streamed observations and a saved conversation. |
-| [validated_artifact.py](validated_artifact.py) | Application memory and a tool callback that validates XML before writing an artifact. |
+## Set up your environment
 
-## More examples
+Follow the [installation guide](../docs/sdk/installation.md), activate your Python environment, and open the root of the matching release's source archive. Install any extra dependencies listed in the example's README.
 
-If an example imports `agents`, install the matching preview wheel and any extra dependencies listed in its README. The [SDK guide](../docs/sdk/index.md) explains the APIs. The Docker provisioning helper uses only the Python standard library and Docker.
+For a live model example, supply `OPENAI_API_KEY` through your usual credential setup. These examples make model requests and can incur charges. The scripted recipes identify when no API key is needed.
 
-| Entry point | What it shows | Prerequisites |
+## Run a Python tool
+
+Run the greeting example:
+
+```sh
+python -m examples.basic
+```
+
+The example asks the agent to greet Ada with the Python `greeting` tool and prints the final answer. Live wording can vary. The [source](basic.py) shows the tool declaration and `Agent.run()` call.
+
+## Choose an agent task
+
+These programs use the current SDK and model credentials:
+
+| Task | Example | What to inspect |
 | --- | --- | --- |
-| [conversation.py](conversation.py) | Multiple turns, observations and saved state using `Turn.get_result()`. | Current SDK and model credentials. |
-| [validated_artifact.py](validated_artifact.py) | A tool callback that returns validation errors through `ToolOutput` so the model can retry. | Current SDK and model credentials. |
-| [callback_quota.py](callback_quota.py) | Scoped function policies with a fresh application quota for each run. | Current SDK and model credentials; grants no native tool permissions. |
-| [vercel_stream.py](vercel_stream.py) | Passive Turn observations as Vercel UI text and tool-progress frames. | Current SDK; the application supplies its HTTP response and owns the Session. |
-| [AG-UI](ag_ui/README.md) | Passive Turn observations using the pinned AG-UI event/SSE contract. | Current SDK and the pinned dependency listed in its README. |
-| [remote_executor.py](remote_executor.py) | Commands and checklists on a pre-provisioned executor. | Current SDK, an authenticated WSS exec-server, assigned workspace and model credentials. |
-| [offline_unix_sockets.py](offline_unix_sockets.py) | Unix-socket access inside an independently offline job. | Current SDK, an isolated Linux or macOS executor, gateway credentials and a local synthetic Responses peer. |
-| [offline_docker.py](offline_docker.py) | Application helpers that create and inspect an offline Docker job. | Docker and a prepared image; the application supplies the gateway and executor configuration. |
-| [External jobs](external_job/README.md) | A journal, a separate thumbnail worker, and a deferred tool result. | Current SDK, the source checkout, private POSIX storage and a local Responses peer. |
+| Call a Python function | [basic.py](basic.py) | One answer through `Agent` and `function_tool`. |
+| Supply application context | [typed_context.py](typed_context.py) | Context supplied to a tool and a validated Pydantic output model. |
+| Continue and restore a conversation | [conversation.py](conversation.py) | Multiple turns, streamed observations, and saved state using `Turn.get_result()`. |
+| Validate an artifact before writing it | [validated_artifact.py](validated_artifact.py) | A tool callback returns validation errors through `ToolOutput` so the model can retry. |
+| Limit Python callbacks | [callback_quota.py](callback_quota.py) | A fresh application quota for each run. The quota grants no native tool permissions. |
 
-## Workflow recipes
+## Choose a workflow
 
-These recipes use the same preview wheel and may need extra dependencies.
+| Task | Guide | Prerequisites and limits |
+| --- | --- | --- |
+| Test application behavior | [Task recipe chooser](../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
+| Build a browser application | [Service and browser starter](web_starter/README.md) | Request ownership, approvals, bounded admission, typed results, and authorized artifact downloads. Install its pinned browser dependencies. |
+| Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | The application supplies its HTTP response and owns the Session. |
+| Stream AG-UI events | [AG-UI guide](ag_ui/README.md) | Install the pinned dependency in its README. |
+| Resume an external job | [External jobs](external_job/README.md) | A journal, a separate thumbnail worker, and a deferred tool result. Requires private POSIX storage and a local Responses endpoint. |
+| Supervise local coding workers | [Supervised workers](supervised_worker/README.md) | Separate workspaces, native histories, artifact checks, and publication records. Requires matching native helpers and model credentials. |
+| Debug tool and provider failures | [Trace walkthrough](observability/README.md) | A local collector, viewer, and history reader. Uses synthetic data without provider credentials. |
+| Compare model configurations | [Evaluation runner](evaluation/README.md) | Repeated cases, baseline comparisons, and failure artifacts. Scripted mode checks the runner; live mode needs model credentials. |
 
-- [Task recipe chooser](../docs/sdk/recipes.md): typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval and application memory. Each entry identifies synthetic or live execution and its limits.
-- [Complete service and browser](web_starter/README.md): request ownership, approvals, bounded admission, typed final results and authorized artifact downloads with a pinned browser client.
-- [Trace walkthrough](observability/README.md): a local collector/viewer and worked history reader for tool, validation and provider failures.
-- [Evaluation runner](evaluation/README.md): repeatable cases, recorded configurations, baseline comparisons, and failure artifacts. Synthetic checks do not measure live model quality.
+## Connect an executor
 
-The [tool guide](../docs/sdk/tools.md) covers Python functions and native MCP tools.
+| Task | Example | Prerequisites |
+| --- | --- | --- |
+| Run commands on an existing executor | [remote_executor.py](remote_executor.py) | Current SDK, an authenticated WSS exec-server, an assigned workspace, and model credentials. |
+| Use Unix sockets inside an offline job | [offline_unix_sockets.py](offline_unix_sockets.py) | Current SDK, an isolated Linux or macOS executor, gateway credentials, and a local synthetic Responses peer. |
+| Provision an offline Docker job | [offline_docker.py](offline_docker.py) | Docker and a prepared image. This standard-library helper expects the application to supply the gateway and executor configuration. |
+
+Use the [SDK guide](../docs/sdk/index.md) for API behavior and the [tool guide](../docs/sdk/tools.md) for Python functions and native MCP tools.

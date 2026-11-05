@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
 import sys
 from argparse import Namespace
@@ -130,6 +131,11 @@ async def test_readme_shell_runs_both_workers_and_publishes(tmp_path: Path) -> N
     repository = Path(__file__).resolve().parents[1]
     readme = (repository / "examples/supervised_worker/README.md").read_text()
     script = readme.split("```sh\n", 1)[1].split("```", 1)[0]
+    # macOS mktemp can use its per-user directory instead of TMPDIR.
+    # Read the path from the shell without changing the README commands or their exit status.
+    script += (
+        '\nreadme_status=$?\nprintf "%s" "$job_dir" > "$README_JOB_PATH"\nexit "$readme_status"\n'
+    )
     fixture = ResponsesFixture()
 
     async def respond(request: web.Request) -> web.StreamResponse:
@@ -168,6 +174,7 @@ async def test_readme_shell_runs_both_workers_and_publishes(tmp_path: Path) -> N
         PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
         PYTHONPATH=os.pathsep.join(filter(None, (str(repository), env.get("PYTHONPATH")))),
         OPENAI_API_KEY="synthetic-supervised-worker",
+        README_JOB_PATH=str(tmp_path / "job-path.txt"),
     )
     async with timeout(100), TestServer(app) as server:
         env["OPENAI_BASE_URL"] = str(server.make_url("/v1"))
@@ -189,20 +196,28 @@ async def test_readme_shell_runs_both_workers_and_publishes(tmp_path: Path) -> N
                 os.killpg(child.pid, signal.SIGKILL)
             await child.communicate()
 
-    (directory,) = jobs.iterdir()
-    for name in ("alpha", "bravo"):
-        journal = directory / name
-        text = f"{name}: verified\n"
-        assert (journal / "workspace" / worker.ARTIFACT).read_text() == text
-        accepted = worker.read_record(journal, "accepted")
-        assert accepted is not None
-        assert accepted["text"] == text
-        assert accepted["sha256"] == hashlib.sha256(text.encode()).hexdigest()
-        if name == "alpha":
-            assert worker.read_record(journal, "published") == accepted
-        else:
-            assert worker.read_record(journal, "published") is None
-    assert len(fixture.requests) == 8
+    directory_text = (tmp_path / "job-path.txt").read_text()
+    assert directory_text
+    directory = Path(directory_text)
+    assert directory.is_absolute() and directory.name.startswith("tmp.")
+    assert (directory / "alpha" / "identity.json").is_file()
+    assert (directory / "bravo" / "identity.json").is_file()
+    try:
+        for name in ("alpha", "bravo"):
+            journal = directory / name
+            text = f"{name}: verified\n"
+            assert (journal / "workspace" / worker.ARTIFACT).read_text() == text
+            accepted = worker.read_record(journal, "accepted")
+            assert accepted is not None
+            assert accepted["text"] == text
+            assert accepted["sha256"] == hashlib.sha256(text.encode()).hexdigest()
+            if name == "alpha":
+                assert worker.read_record(journal, "published") == accepted
+            else:
+                assert worker.read_record(journal, "published") is None
+        assert len(fixture.requests) == 8
+    finally:
+        shutil.rmtree(directory)
 
 
 async def test_two_workers_revise_reconnect_recover_and_publish_once(

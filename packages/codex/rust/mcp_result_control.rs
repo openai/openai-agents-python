@@ -1698,9 +1698,10 @@ pub(crate) mod tests {
         drop(attached);
         let args = json!({});
         let result = withheld();
-        let mut message = notice(1, "turn", &args, &result);
-        message.tracing_context = Some(&token);
         let control = Arc::new(McpResultControl::new("root".into(), true));
+        let nonce = control.channel.next_nonce.fetch_add(1, Ordering::Relaxed);
+        let mut message = notice(nonce, "turn", &args, &result);
+        message.tracing_context = Some(&token);
         let _reply = control
             .enqueue_with_context(
                 &mut control.state.lock().unwrap(),
@@ -1712,13 +1713,15 @@ pub(crate) mod tests {
         codex_otel::sdk_trace::release_trace_span(handle);
         let wire: Value = serde_json::from_str(&control.next(Some(1)).await.unwrap()).unwrap();
         assert_eq!(wire["tracing_context"], token);
-        assert!(control.handoff(1));
+        let delivered_nonce = wire["nonce"].as_u64().unwrap();
+        assert_eq!(delivered_nonce, nonce);
+        assert!(control.handoff(delivered_nonce));
         control.revoke();
         assert!(
             codex_otel::sdk_trace::context(&token).is_ok(),
             "handed callback still owns its context"
         );
-        assert!(control.release_family(1));
+        assert!(control.release_family(delivered_nonce));
         assert!(
             codex_otel::sdk_trace::context(&token).is_err(),
             "physical release must retire the token"

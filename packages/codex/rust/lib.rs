@@ -264,6 +264,18 @@ impl Engine {
         })
     }
     #[getter]
+    fn _codex_account(&self) -> PyResult<Option<(Option<String>, String, String)>> {
+        let inner = self.current()?;
+        Ok(inner.codex_account.as_ref().map(|account| {
+            (
+                account.account_id.clone(),
+                account.plan_type.clone(),
+                account.binding.clone(),
+            )
+        }))
+    }
+
+    #[getter]
     fn startup_warnings(&self) -> Vec<String> {
         self.startup_warnings.clone()
     }

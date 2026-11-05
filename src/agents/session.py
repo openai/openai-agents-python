@@ -42,6 +42,7 @@ from ._native_async import _NativeCompletionError
 from ._projection import _error_code, project_execution_completion
 from .agent import (
     Agent,
+    CodexAccount,
     ContextT,
     ModelSettings,
     NativeProvider,
@@ -649,6 +650,7 @@ class _Invocation:
 
 
 _invocation: ContextVar[_Invocation | None] = ContextVar("native_agent_invocation", default=None)
+_CODEX_RESPONSES_BASE_URL = "https://chatgpt.com/backend-api/codex"
 
 
 @dataclass(repr=False)
@@ -1376,6 +1378,7 @@ class Session(Generic[ContextT, OutputT]):
         reconciled_calls: Sequence[ReconciledCall] = (),
         _captured_api_key: str | None = None,
         _tracing_context: str | None = None,
+        _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
         if storage is not None and not isinstance(storage, LocalStorage):
             raise TypeError("storage must be a LocalStorage")
@@ -1429,6 +1432,7 @@ class Session(Generic[ContextT, OutputT]):
                 output_type=cast(OutputSpec[OutputT], agent.output_type),
                 programmatic_tool_calling=agent.programmatic_tool_calling,
             )
+        codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
         instructions, instruction_receipts = _load_instruction_files(
             agent.instructions, instruction_files
@@ -1449,9 +1453,12 @@ class Session(Generic[ContextT, OutputT]):
             # importer validates identities, revision, and current tool specs.
             saved = SessionState.from_json(state.to_json())
             _check_checkpoint(saved, instructions)
+            if (saved.codex_login_binding is not None) != (codex_login is not None):
+                raise ValueError("Checkpoint and Session must use the same authentication mode")
             # The binding still consumes its original idle/manual format.
             # Validate the SDK envelope before giving Core the native version.
             payload = json.loads(saved.to_json())
+            payload.pop("codex_login_binding", None)
             if saved.format_version in (4, 5, 6, 7):
                 payload["format_version"] = saved.format_version - 2
             payload.pop("operation_tools", None)
@@ -1662,7 +1669,7 @@ class Session(Generic[ContextT, OutputT]):
             if executor is not None:
                 executor._check_context(context)
             home: TemporaryDirectory[str] | None = None
-            runtime = {
+            runtime: dict[str, Any] = {
                 "strict_config": True,
                 "loader": {"ignore_user_config": True, "ignore_project_config": True},
                 "base_instructions": (
@@ -1670,6 +1677,18 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
+            if codex_login is not None:
+                runtime["_sdk_codex_login"] = {
+                    "codex_home": (
+                        None if codex_login.codex_home is None else str(codex_login.codex_home)
+                    ),
+                    "account_id": codex_login.account_id,
+                    "expected_binding": (
+                        saved.codex_login_binding
+                        if state is not None
+                        else _expected_codex_login_binding
+                    ),
+                }
             if storage is not None:
                 runtime.update(native_thread_store=str(storage.path), ephemeral=False)
                 if resume is not None:
@@ -1717,15 +1736,20 @@ class Session(Generic[ContextT, OutputT]):
                 session = None
                 engine = None
                 thread = None
+                provider_id = (
+                    "native_agent_codex_login" if codex_login is not None else "native_agent"
+                )
                 config = {
                     "include_permissions_instructions": executor is not None,
                     "include_environment_context": executor is not None,
-                    "model_provider": "native_agent",
-                    "model_providers.native_agent": {
-                        "name": "Native agent provider",
-                        "base_url": provider.base_url
-                        if provider.base_url is not None
-                        else "https://api.openai.com/v1",
+                    "model_provider": provider_id,
+                    f"model_providers.{provider_id}": {
+                        "name": "OpenAI" if codex_login is not None else "Native agent provider",
+                        "base_url": (
+                            _CODEX_RESPONSES_BASE_URL
+                            if codex_login is not None
+                            else provider.base_url or "https://api.openai.com/v1"
+                        ),
                         "wire_api": "responses",
                         "requires_openai_auth": True,
                         "supports_websockets": provider._websockets_enabled,
@@ -1817,7 +1841,9 @@ class Session(Generic[ContextT, OutputT]):
                             "tools.experimental_request_user_input.enabled": False,
                         }
                     )
-                if selected is not None:
+                if codex_login is not None:
+                    opening.api_key = None
+                elif selected is not None:
                     opening.api_key = selected.api_key
                 elif _captured_api_key is not None:
                     opening.api_key = _captured_api_key
@@ -1984,8 +2010,8 @@ class Session(Generic[ContextT, OutputT]):
                     create_engine(
                         json.dumps(config),
                         json.dumps(runtime),
-                        # None would let native read a later environment value.
-                        api_key=opening.api_key or "",
+                        # Preserve the captured environment value in API-key mode.
+                        api_key=None if codex_login is not None else (opening.api_key or ""),
                         provider_lease=provider_lease,
                         **(
                             {
@@ -2024,6 +2050,14 @@ class Session(Generic[ContextT, OutputT]):
                 session._trace_context = _tracing_context
                 session._hosted_verification = hosted_verification or chatgpt_apps
                 session._chatgpt_apps = chatgpt_apps
+                if codex_login is not None:
+                    account_id, plan_type, binding = engine._codex_account
+                    session._codex_account = CodexAccount(
+                        account_id=account_id, plan_type=plan_type
+                    )
+                    session._codex_login_binding = binding
+                    # Application-supplied compaction opens a replacement engine.
+                    runtime["_sdk_codex_login"]["expected_binding"] = binding
                 session._bound_tools = bound_tools
                 session._agent = policy_agent
                 session._opening_agent = agent
@@ -2319,6 +2353,8 @@ class Session(Generic[ContextT, OutputT]):
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._model_api_key: str | None = None
+        self._codex_account: CodexAccount | None = None
+        self._codex_login_binding: str | None = None
         self._native_options: str | None = None
         self._websockets_enabled = False
         self._engine = engine
@@ -2406,6 +2442,11 @@ class Session(Generic[ContextT, OutputT]):
     @property
     def id(self) -> str:
         return self._id
+
+    @property
+    def codex_account(self) -> CodexAccount | None:
+        """Read the saved Codex account and plan type selected at opening."""
+        return self._codex_account
 
     def events(self, *, after: int = 0, include_execution_details: bool = False) -> EventStream:
         """Observe all turns until this Session ends.
@@ -3556,7 +3597,9 @@ class Session(Generic[ContextT, OutputT]):
             engine = await native.create_checkpoint_engine(
                 json.dumps(options["config"]),
                 json.dumps(options["runtime"]),
-                api_key=self._model_api_key or "",
+                api_key=(
+                    None if self._codex_login_binding is not None else (self._model_api_key or "")
+                ),
                 provider_lease=self._provider_lease,
                 **(
                     {
@@ -3979,9 +4022,14 @@ class Session(Generic[ContextT, OutputT]):
                 state.issued = issued
                 self._pending.append((state, input))
                 self._promote()
+                if state.task is None and state.completion.done():
+                    state.completion.result()
                 return issued
             self._active = state
-            state.task = _create_task(self._execute(state, input))
+            startup_error = self._start_execution(state, input)
+            if startup_error is not None:
+                self._promote()
+                raise startup_error
             try:
                 return await asyncio.shield(state.accepted)
             except asyncio.CancelledError as error:
@@ -3989,6 +4037,30 @@ class Session(Generic[ContextT, OutputT]):
                 raise
         finally:
             del trace_options
+
+    def _start_execution(
+        self, state: _Submission, input: list[dict[str, Any]] | None
+    ) -> BaseException | None:
+        try:
+            state.task = _create_task(self._execute(state, input))
+        except BaseException as error:
+            tracing, state.tracing = state.tracing, None
+            if tracing is not None:
+                try:
+                    tracing.close(error)
+                except BaseException as cleanup:
+                    _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
+            # No execution body ran. Retire only host admission, preserving
+            # the factory exception rather than cancelling native work.
+            if self._active is state:
+                self._active = None
+            if not state.accepted.done():
+                state.accepted.set_exception(error)
+            if not state.completion.done():
+                state.completion.set_exception(error)
+            self._observations.notify()
+            return error
+        return None
 
     def _discard_pending(self, error: BaseException) -> None:
         while self._pending:
@@ -4008,8 +4080,12 @@ class Session(Generic[ContextT, OutputT]):
             or (self._environment_lease is not None and self._environment_lease.interrupted)
         ):
             self._discard_pending(NativeError("Session ended before queued work was admitted"))
-        elif (
-            self._active is None
+        while (
+            not self._broken
+            and not self._closed
+            and not self._closing
+            and not (self._environment_lease is not None and self._environment_lease.interrupted)
+            and self._active is None
             and self._mutation is None
             and self._checkpoint_task is None
             and not self._graph_interrupts
@@ -4019,7 +4095,7 @@ class Session(Generic[ContextT, OutputT]):
             state, parts = self._pending.popleft()
             self._active = state
             self._last_turn = state.issued
-            state.task = _create_task(self._execute(state, parts))
+            self._start_execution(state, parts)
 
     def _check_idle_update(self) -> None:
         self._check_open()
@@ -5430,7 +5506,7 @@ class Session(Generic[ContextT, OutputT]):
             # must recheck the settled owned continuation without a new event.
             self._observations.notify()
         if continuation is not None:
-            continuation.task = _create_task(self._execute(continuation, []))
+            self._start_execution(continuation, [])
         self._finish_failed_observations()
         self._promote()
 
@@ -5444,7 +5520,8 @@ class Session(Generic[ContextT, OutputT]):
         handle = state.handle
         assert handle is not None and handle.turn_id is not None and self._opening_agent is not None
         provider = self._opening_agent.provider or self._owned_provider
-        assert provider is not None and self._model_api_key is not None
+        assert provider is not None
+        assert self._model_api_key is not None or self._codex_login_binding is not None
         history = json.loads(await self._native.read_thread_history(None))
         captured = None
         for row in reversed(history):
@@ -5480,7 +5557,11 @@ class Session(Generic[ContextT, OutputT]):
                 raise asyncio.CancelledError()
             if state.failure.done():
                 raise state.failure.result()
-            repair = await Session._open(declaration, _captured_api_key=self._model_api_key)
+            repair = await Session._open(
+                declaration,
+                _captured_api_key=self._model_api_key,
+                _expected_codex_login_binding=self._codex_login_binding,
+            )
             repair._trace_context = state.tracing.context if state.tracing is not None else None
             repair._observations.repair_parent = (self._observations, handle.submission_id)
             repair._rate_limit_parent = self
@@ -7572,6 +7653,15 @@ class Session(Generic[ContextT, OutputT]):
             # Current launch options are authority. Saved options may hold MCP
             # endpoints or literal credentials.
             payload["agent_options"] = {}
+            if self._codex_login_binding is not None:
+                payload["codex_login_binding"] = self._codex_login_binding
+                # Core adds creator identity to its live history. Portable
+                # snapshots need only the binding to validate a fresh login.
+                for captured in (payload, *payload["descendants"]):
+                    for item in captured["history"]:
+                        if item["type"] == "session_meta":
+                            item["payload"].pop("creator_account_id", None)
+                            item["payload"].pop("creator_user_id", None)
             if active is None:
                 # Do not persist a temporary operation as an idle default.
                 # Only selectors cross restore, never endpoints or credentials.

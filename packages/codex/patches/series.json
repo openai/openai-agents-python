@@ -177,9 +177,13 @@
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
     },
     {
-      "path": "0045-sdk-native-tracing.patch",
+      "path": "0045-saved-codex-login.patch",
+      "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
+    },
+    {
+      "path": "0046-sdk-native-tracing.patch",
       "sha256": "417c24b71ae57e8af5657bcadd763f9a758473f2a5a877d7360380616bcccd8a"
     }
   ],
-  "result_tree": "af7334c7aa1d8dd6c1338230fc7d23f46ab92daa"
+  "result_tree": "074c933d8a0061bef27c2dd8f98f6c41f07e0f08"
 }

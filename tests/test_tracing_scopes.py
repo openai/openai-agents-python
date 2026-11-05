@@ -1189,8 +1189,10 @@ async def test_flush_rejects_budgets_above_native_contract(
     assert native.flushes == []
 
 
+@pytest.mark.parametrize("started", [False, True])
 async def test_failed_restore_opening_releases_unstarted_submission_after_native_cleanup(
     native: NativeTracing,
+    started: bool,
 ) -> None:
     from agents.schema import _prepare_spec
     from agents.session import _OpeningOwner, _Submission
@@ -1200,13 +1202,13 @@ async def test_failed_restore_opening_releases_unstarted_submission_after_native
     context = captured.context
     assert context is not None
     state = _Submission(_prepare_spec(str), tracing=captured, restored_pending=True)
-    state.task = asyncio.create_task(asyncio.Event().wait())
+    state.task = asyncio.create_task(asyncio.Event().wait()) if started else None
     session = SimpleNamespace(_active=state, _reader=None, _mcp_reader=None, _interception=None)
     opening = _OpeningOwner()
     cleaned: list[bool] = []
 
     async def close_native() -> None:
-        assert state.task is not None and state.task.cancelled()
+        assert state.task is None or state.task.cancelled()
         assert context not in native.released
         cleaned.append(True)
 
@@ -3039,3 +3041,162 @@ async def test_configure_reuses_reservation_through_joined_cancellation(
         assert len(native.routes) == 1 and not telemetry._processor_starting
     finally:
         await _stop_processor_pump()
+
+
+@pytest.mark.parametrize(
+    ("mode", "backlog"),
+    [
+        ("immediate", 1),
+        ("cancelled", 1),
+        ("compact", 1),
+        ("queued", 1),
+        ("queued", 1100),
+        ("continuation", 1),
+    ],
+)
+async def test_execution_factory_rejection_releases_owner_and_allows_progress(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, mode: str, backlog: int
+) -> None:
+    from agents import Agent
+    from agents.schema import _prepare_spec
+    from agents.session import Session, _ToolCatalog
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    requests = []
+    rejected_ids = set()
+    rejected_states = []
+    rejected_tokens = []
+    rejected_work = []
+
+    class FalseyFailure(RuntimeError):
+        def __bool__(self) -> bool:
+            return False
+
+    failure = (
+        asyncio.CancelledError("factory cancelled")
+        if mode == "cancelled"
+        else FalseyFailure("factory rejected execute")
+    )
+
+    class Thread:
+        id = "session"
+
+        def _select_steps(self, *args: Any) -> None:
+            pass
+
+        async def _submit(self, encoded: str) -> str:
+            requests.append(json.loads(encoded))
+            if mode == "queued" and len(requests) == 1:
+                entered.set()
+                await release.wait()
+            state = session._active
+            assert state is not None
+            if mode == "continuation" and len(requests) == 1:
+                state.unsampled_steering = True
+            state.terminal.set_result(
+                {"type": "turn_complete", "last_agent_message": f"reply-{len(requests)}"}
+            )
+            return json.dumps({"status": "started", "turn_id": f"turn-{len(requests)}"})
+
+        async def _compact(self, *args: Any) -> str:
+            state = session._active
+            assert state is not None
+            state.terminal.set_result({"type": "turn_complete"})
+            return json.dumps({"status": "started", "turn_id": "compact-turn"})
+
+        async def call(self, operation: str) -> str:
+            assert operation == "token_usage_info"
+            return "null"
+
+    async def read_events(self: Any) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Session, "_read_events", read_events)
+    session = Session(
+        None,
+        Thread(),
+        None,
+        _ToolCatalog(0, ()),
+        (),
+        None,
+        _prepare_spec(str),
+        "test",
+        _start_readers=False,
+    )
+    session._opening_agent = Agent(instructions="scripted")
+    loop = asyncio.get_running_loop()
+    original_factory = loop.get_task_factory()
+
+    def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
+        if work.cr_code is Session._execute.__code__:
+            state = work.cr_frame.f_locals["state"]
+            reject = (
+                state.issued is not None and state.issued.submission_id in rejected_ids
+                if mode == "queued"
+                else state.continued_from is not None
+                if mode == "continuation"
+                else not rejected_states
+            )
+            if reject:
+                rejected_states.append(state)
+                assert state.tracing is not None
+                rejected_tokens.append(state.tracing.context)
+                rejected_work.append(work)
+                raise failure
+        return asyncio.Task(work, loop=loop, **kwargs)
+
+    try:
+        with telemetry.trace("execution lifetime"):
+            if mode == "queued":
+                first = await session.submit("first")
+                await entered.wait()
+                failed = [await session.submit("rejected", if_busy="queue") for _ in range(backlog)]
+                rejected_ids.update(turn.submission_id for turn in failed)
+                later = await session.submit("later", if_busy="queue")
+                loop.set_task_factory(factory)
+                release.set()
+                assert (await asyncio.wait_for(first.get_result(), 5)).final_output == "reply-1"
+                for turn in failed:
+                    with pytest.raises(FalseyFailure) as raised:
+                        await turn.get_result()
+                    assert raised.value is failure
+                assert (await later.get_result()).final_output == "reply-2"
+                assert (await first.get_result()).final_output == "reply-1"
+                assert len(requests) == 2
+            elif mode == "continuation":
+                loop.set_task_factory(factory)
+                first = await session.submit("steered task")
+                with pytest.raises(FalseyFailure) as raised:
+                    await asyncio.wait_for(first.get_result(), 2)
+                assert raised.value is failure
+                assert len(requests) == 1 and session.active_turn is None
+                later = await session.submit("retry")
+                assert (await later.get_result()).final_output == "reply-2"
+            else:
+                loop.set_task_factory(factory)
+                with pytest.raises(type(failure)) as raised:
+                    if mode == "compact":
+                        await session.compact()
+                    else:
+                        await session.submit("reject first")
+                assert raised.value is failure
+                assert session.active_turn is None and requests == []
+                if mode == "compact":
+                    await session.compact()
+                later = await session.submit("retry")
+                assert (await later.get_result()).final_output == "reply-1"
+            assert session.active_turn is None and not session._pending and not session._broken
+            assert len(rejected_states) == backlog
+            for state, token, work in zip(
+                rejected_states, rejected_tokens, rejected_work, strict=True
+            ):
+                assert state.task is None and state.tracing is None
+                assert state.accepted.done() and state.completion.done()
+                assert state.completion.exception() is failure
+                assert token is not None and native.released.count(token) == 1
+                assert work.cr_frame is None
+    finally:
+        loop.set_task_factory(original_factory)
+        release.set()
+        session._reader.cancel()
+        await asyncio.gather(session._reader, return_exceptions=True)
