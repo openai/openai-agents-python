@@ -22,14 +22,6 @@ from tests.test_native_mcp_tools import Peer, mcp_call
 
 PRIVATE_TAIL = "PRIVATE_REPORT_TAIL"
 REPORT = "Quarterly overview. " + ("資料 📊 detail " * 600) + PRIVATE_TAIL
-IMAGE = {
-    "type": "image",
-    "mimeType": "image/png",
-    "data": (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ"
-        "/pLvAAAAAElFTkSuQmCC"
-    ),
-}
 
 
 @dataclass
@@ -51,25 +43,18 @@ class ReportPeer(Peer):
         return web.json_response({"jsonrpc": "2.0", "id": body["id"], "result": self.result})
 
 
-def original_result(shape: str) -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "content": [] if shape == "structured-only" else [{"type": "text", "text": REPORT}],
+def original_result() -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": REPORT}],
         "isError": False,
         "_meta": {"source": "synthetic-report"},
     }
-    if shape != "text-only":
-        result["structuredContent"] = {"title": "Quarterly overview", "body": REPORT}
-    if shape == "mixed":
-        result["content"].extend([IMAGE, {"type": "text", "text": "Last text slot"}])
-        result["content"][0]["annotations"] = {"audience": ["assistant"]}
-    return result
 
 
-@pytest.mark.parametrize("shape", ["text-only", "mixed", "structured-only"])
 async def test_report_replacement_reaches_model_and_caller_before_private_retrieval(
-    responses: ResponsesFixture, shape: str
+    responses: ResponsesFixture,
 ) -> None:
-    original = original_result(shape)
+    original = original_result()
     release = asyncio.Event()
     peer = ReportPeer(result=original, release_call=release)
     responses.respond(mcp_call("report", "mcp__reports", "report-1"))
@@ -101,11 +86,6 @@ async def test_report_replacement_reaches_model_and_caller_before_private_retrie
                 assert PRIVATE_TAIL not in channel
             output = tool_output(responses.requests[1], "report-1")
             assert len(output.encode("utf-8")) < 4096
-            if shape == "mixed":
-                assert IMAGE["data"] in json.dumps(responses.requests[1])
-                assert output.index("Quarterly") < output.index("Last text slot")
-            if shape == "structured-only":
-                assert "Structured preview:" in output
         with pytest.raises(PermissionError, match="unavailable"):
             reports.read(owner, reference)
 
@@ -130,7 +110,7 @@ async def test_small_success_and_peer_error_are_not_retained(
 async def test_capacity_failure_preserves_earlier_references_until_session_cleanup(
     responses: ResponsesFixture,
 ) -> None:
-    peer = ReportPeer(result=original_result("text-only"))
+    peer = ReportPeer(result=original_result())
     owner = object()
     async with timeout(30), peer.serve() as url:
         async with report_session(url, owner, provider=provider(responses)) as (session, reports):
@@ -153,7 +133,7 @@ async def test_capacity_failure_preserves_earlier_references_until_session_clean
 
 
 async def test_body_failure_expires_retained_reports(responses: ResponsesFixture) -> None:
-    peer = ReportPeer(result=original_result("text-only"))
+    peer = ReportPeer(result=original_result())
     responses.respond(mcp_call("report", "mcp__reports", "before-failure"))
     responses.respond(assistant_output("Stored"))
     owner = object()
@@ -172,7 +152,7 @@ async def test_body_failure_expires_retained_reports(responses: ResponsesFixture
 
 async def test_cancelled_remote_call_publishes_no_reference(responses: ResponsesFixture) -> None:
     release = asyncio.Event()
-    peer = ReportPeer(result=original_result("text-only"), release_call=release)
+    peer = ReportPeer(result=original_result(), release_call=release)
     responses.respond(mcp_call("report", "mcp__reports", "cancelled-report"))
     owner = object()
     async with timeout(30), peer.serve() as url:
@@ -194,38 +174,36 @@ async def test_cancelled_remote_call_publishes_no_reference(responses: Responses
             reports.references(owner)
 
 
-async def test_transform_preserves_protected_blocks_envelope_and_text_slots() -> None:
+async def test_transform_preserves_report_metadata() -> None:
     # Native model/history projection does not expose every MCP envelope field.
     # Check that separate result-envelope contract directly at the application callback.
     owner = object()
     reports = ReportStore(owner)
-    original = original_result("mixed")
+    original = original_result()
+    original["content"][0]["annotations"] = {"audience": ["assistant"]}
     bounded = await reports.transform(None, original)
-    assert [block["type"] for block in bounded["content"]] == ["text", "image", "text"]
-    assert bounded["content"][1] == IMAGE
     assert bounded["content"][0]["annotations"] == {"audience": ["assistant"]}
     assert bounded["_meta"] == original["_meta"]
     assert bounded["isError"] is False
-    assert "structuredContent" not in bounded
-    text_fields = {
-        "content": [block for block in bounded["content"] if block["type"] == "text"],
-    }
-    assert len(json.dumps(text_fields, ensure_ascii=False).encode("utf-8")) <= 4096
+    assert len(json.dumps(bounded, ensure_ascii=False).encode("utf-8")) <= 4096
     reports.close()
 
 
 @pytest.mark.parametrize(
-    "content",
+    "result",
     [
-        [{"type": "text", "text": "x" * (65 * 1024)}],
-        [{"type": "text", "text": "small"}] * 9,
+        {"content": [{"type": "text", "text": "x" * (65 * 1024)}]},
+        {"content": [{"type": "text", "text": "small"}] * 2},
+        {"content": [{"type": "image", "mimeType": "image/png", "data": "AA=="}]},
+        {"content": [], "structuredContent": {"report": REPORT}},
+        {"content": [{"type": "text", "text": REPORT}], "_meta": {"detail": "x" * 4096}},
     ],
-    ids=["report-size", "content-count"],
+    ids=["report-size", "content-count", "media", "structured-content", "metadata-size"],
 )
 async def test_unsupported_reports_fail_without_publishing_a_reference(
-    responses: ResponsesFixture, content: list[dict[str, Any]]
+    responses: ResponsesFixture, result: dict[str, Any]
 ) -> None:
-    peer = ReportPeer(result={"content": content})
+    peer = ReportPeer(result=result)
     responses.respond(mcp_call("report", "mcp__reports", "unsupported"))
     owner = object()
     async with timeout(30), peer.serve() as url:
@@ -234,25 +212,3 @@ async def test_unsupported_reports_fail_without_publishing_a_reference(
                 await (await session.submit("Read")).get_result()
             assert reports.references(owner) == ()
             assert len(responses.requests) == 1
-
-
-async def test_small_mixed_structured_result_keeps_media_and_all_selected_data(
-    responses: ResponsesFixture,
-) -> None:
-    peer = ReportPeer(
-        result={
-            "content": [{"type": "text", "text": "Inline text"}, IMAGE],
-            "structuredContent": {"detail": "Selected structured data"},
-        }
-    )
-    responses.respond(mcp_call("report", "mcp__reports", "small-mixed"))
-    responses.respond(assistant_output("Complete"))
-    owner = object()
-    async with timeout(30), peer.serve() as url:
-        async with report_session(url, owner, provider=provider(responses)) as (session, reports):
-            await (await session.submit("Read")).get_result()
-            output = tool_output(responses.requests[1], "small-mixed")
-            assert "Inline text" in output
-            assert "Selected structured data" in output
-            assert IMAGE["data"] in json.dumps(responses.requests[1])
-            assert reports.references(owner) == ()

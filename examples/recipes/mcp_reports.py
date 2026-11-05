@@ -18,22 +18,11 @@ from agents import Agent, HttpMCP, NativeProvider, Session
 
 MAX_VISIBLE_BYTES = 4096
 MAX_REPORT_BYTES = 64 * 1024
-MAX_STORED_BYTES = 128 * 1024
 MAX_REPORTS = 4
 
 
 def encoded(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-
-
-def visible_bytes(result: dict[str, Any]) -> int:
-    return len(
-        encoded(
-            {
-                "content": [block for block in result["content"] if block["type"] == "text"],
-            }
-        ).encode("utf-8")
-    )
 
 
 class ReportStore:
@@ -42,7 +31,6 @@ class ReportStore:
     def __init__(self, owner: object) -> None:
         self._owner = owner
         self._reports: dict[str, str] = {}
-        self._stored_bytes = 0
         self._closed = False
 
     def _check_owner(self, owner: object) -> None:
@@ -65,60 +53,36 @@ class ReportStore:
         self._check_owner(self._owner)
         if result.get("isError"):
             return result
-        if len(result["content"]) > 8:
-            raise ValueError("This example accepts at most eight content blocks")
+        content = result["content"]
+        if (
+            result.get("structuredContent") is not None
+            or len(content) != 1
+            or content[0]["type"] != "text"
+        ):
+            raise ValueError("This example expects one text block and no structuredContent")
+
         original = encoded(result)
         size = len(original.encode("utf-8"))
-        content = list(result["content"])
-        structured = result.get("structuredContent")
-        if structured is not None:
-            # Native MCP prefers structuredContent over content, including media.
-            # Select content projection and keep structured data in a text slot.
-            for index, block in enumerate(content):
-                if block["type"] == "text":
-                    content[index] = {
-                        **block,
-                        "text": f"{block['text']}\nStructured content: {encoded(structured)}",
-                    }
-                    break
-            else:
-                content.append({"type": "text", "text": encoded(structured)})
-        normalized = {**result, "content": content}
-        normalized.pop("structuredContent", None)
-        if visible_bytes(normalized) <= MAX_VISIBLE_BYTES:
-            return normalized
-        if (
-            size > MAX_REPORT_BYTES
-            or len(self._reports) >= MAX_REPORTS
-            or self._stored_bytes + size > MAX_STORED_BYTES
-        ):
+        if size <= MAX_VISIBLE_BYTES:
+            return result
+        if size > MAX_REPORT_BYTES or len(self._reports) >= MAX_REPORTS:
             raise ValueError("Report storage limit reached; no reference was created")
 
         reference = str(uuid4())
-        structured_preview = encoded(structured)[:32] if structured is not None else None
-        receipt = f"Stored report ({size} bytes). Reference: {reference}"
-        if structured_preview is not None:
-            receipt += f"\nStructured preview: {structured_preview}"
-        bounded = {
-            **normalized,
-            "content": [
-                {**block, "text": f"{receipt}\nPreview: {block['text'][:32]}"}
-                if block["type"] == "text"
-                else block
-                for block in content
-            ],
+        preview = {
+            **content[0],
+            "text": f"Stored report ({size} bytes). Reference: {reference}\n{content[0]['text'][:500]}",
         }
-        if visible_bytes(bounded) > MAX_VISIBLE_BYTES:
-            raise ValueError("The bounded report exceeds the visible result limit")
+        replacement = {**result, "content": [preview]}
+        if len(encoded(replacement).encode("utf-8")) > MAX_VISIBLE_BYTES:
+            raise ValueError("Report metadata leaves too little room for a preview")
         # No await separates checks, retention and returning the replacement.
         self._reports[reference] = original
-        self._stored_bytes += size
-        return bounded
+        return replacement
 
     def close(self) -> None:
         self._closed = True
         self._reports.clear()
-        self._stored_bytes = 0
 
 
 @asynccontextmanager
