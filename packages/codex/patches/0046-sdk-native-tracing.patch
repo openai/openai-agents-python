@@ -1352,10 +1352,10 @@ index 768aa0f473c2e0c4a905cd159dc603bca0d9be8a..42d56a87c9d80e1a3cad25aaf5c12dd6
 +}
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44ef78480b9
+index 0000000000000000000000000000000000000000..e89fb14a0467f958784bb017fcd0e69ebdb75bb9
 --- /dev/null
 +++ b/codex-rs/otel/src/sdk_trace.rs
-@@ -0,0 +1,887 @@
+@@ -0,0 +1,1004 @@
 +//! SDK-owned native spans and immutable, process-local tracing context leases.
 +use std::borrow::Cow;
 +use std::collections::HashMap;
@@ -1418,16 +1418,47 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +}
 +
 +type Identity = (TraceId, SpanId);
-+fn policies() -> &'static Mutex<HashMap<Identity, Weak<ScopePolicy>>> {
-+    static POLICIES: OnceLock<Mutex<HashMap<Identity, Weak<ScopePolicy>>>> = OnceLock::new();
++struct PolicyRegistration {
++    identity: Identity,
++    policy: Arc<ScopePolicy>,
++}
++impl Drop for PolicyRegistration {
++    fn drop(&mut self) {
++        let mut entries = policies().lock().unwrap_or_else(|e| e.into_inner());
++        if entries
++            .get(&self.identity)
++            .is_some_and(|entry| std::ptr::eq(entry.as_ptr(), self))
++        {
++            entries.remove(&self.identity);
++        }
++    }
++}
++fn policies() -> &'static Mutex<HashMap<Identity, Weak<PolicyRegistration>>> {
++    static POLICIES: OnceLock<Mutex<HashMap<Identity, Weak<PolicyRegistration>>>> = OnceLock::new();
 +    POLICIES.get_or_init(Default::default)
 +}
-+pub fn policy_for_span(span: &SpanContext) -> Option<Arc<ScopePolicy>> {
-+    policies()
++fn policy_registration(span: &SpanContext) -> Option<Arc<PolicyRegistration>> {
++    // Release the registry lock before upgrading: dropping the final upgraded
++    // owner removes its entry and must never run while this lock is held.
++    let registration = policies()
 +        .lock()
 +        .unwrap_or_else(|e| e.into_inner())
 +        .get(&(span.trace_id(), span.span_id()))
-+        .and_then(Weak::upgrade)
++        .cloned();
++    registration.and_then(|registration| registration.upgrade())
++}
++fn retain_policy(span: &SpanContext, policy: Arc<ScopePolicy>) -> Arc<PolicyRegistration> {
++    let identity = (span.trace_id(), span.span_id());
++    let mut entries = policies().lock().unwrap_or_else(|e| e.into_inner());
++    if let Some(owner) = entries.get(&identity).and_then(Weak::upgrade) {
++        return owner;
++    }
++    let owner = Arc::new(PolicyRegistration { identity, policy });
++    entries.insert(identity, Arc::downgrade(&owner));
++    owner
++}
++pub fn policy_for_span(span: &SpanContext) -> Option<Arc<ScopePolicy>> {
++    policy_registration(span).map(|registration| registration.policy.clone())
 +}
 +pub fn policy_for_context(context: &Context) -> Option<Arc<ScopePolicy>> {
 +    context
@@ -1453,35 +1484,21 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +pub struct ScopedSpan {
 +    span: Option<global::BoxedSpan>,
 +    span_context: SpanContext,
-+    policy: Option<Arc<ScopePolicy>>,
++    _registration: Option<Arc<PolicyRegistration>>,
 +}
 +pub fn wrap_span(span: global::BoxedSpan, parent: &Context) -> ScopedSpan {
-+    let policy = policy_for_context(parent);
-+    if let Some(policy) = &policy {
-+        let context = span.span_context();
-+        policies().lock().unwrap_or_else(|e| e.into_inner()).insert(
-+            (context.trace_id(), context.span_id()),
-+            Arc::downgrade(policy),
-+        );
-+    }
 +    let span_context = span.span_context().clone();
++    let registration = policy_for_context(parent).map(|policy| retain_policy(&span_context, policy));
 +    ScopedSpan {
 +        span: Some(span),
 +        span_context,
-+        policy,
++        _registration: registration,
 +    }
 +}
 +impl Drop for ScopedSpan {
 +    fn drop(&mut self) {
 +        if let Some(span) = self.span.as_mut() {
 +            span.end();
-+        }
-+        if self.policy.is_some() {
-+            let context = &self.span_context;
-+            policies()
-+                .lock()
-+                .unwrap_or_else(|e| e.into_inner())
-+                .remove(&(context.trace_id(), context.span_id()));
 +        }
 +    }
 +}
@@ -1546,7 +1563,7 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +    }
 +    let policy = policy_for_context(parent);
 +    if policy.is_none() {
-+        return ScopedSpan { span: None, span_context: SpanContext::NONE, policy: None };
++        return ScopedSpan { span: None, span_context: SpanContext::NONE, _registration: None };
 +    }
 +    use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
 +    let generator = RandomIdGenerator::default();
@@ -1563,21 +1580,17 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +        false,
 +        inherited.trace_state().clone(),
 +    );
-+    if let Some(policy) = &policy {
-+        policies()
-+            .lock()
-+            .unwrap_or_else(|e| e.into_inner())
-+            .insert((trace_id, span_context.span_id()), Arc::downgrade(policy));
-+    }
++    let registration = policy.map(|policy| retain_policy(&span_context, policy));
 +    ScopedSpan {
 +        span: None,
 +        span_context,
-+        policy,
++        _registration: registration,
 +    }
 +}
 +
 +struct Handle {
 +    context: Context,
++    _registration: Option<Arc<PolicyRegistration>>,
 +    parent_span_id: Option<String>,
 +    ended: Mutex<bool>,
 +}
@@ -1781,6 +1794,7 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +    let context = context.with_span(span);
 +    let handle = Arc::new(Handle {
 +        context,
++        _registration: None,
 +        parent_span_id: parent_span
 +            .is_valid()
 +            .then(|| parent_span.span_id().to_string()),
@@ -1879,9 +1893,11 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +        .and_then(|trace| crate::trace_context::context_from_w3c_trace_context(&trace))
 +        .filter(|context| policy_for_context(context).is_some())
 +        .unwrap_or_else(|| restore_policy(Context::current()));
-+    policy_for_context(&context)?;
++    let policy = policy_for_context(&context)?;
++    let registration = retain_policy(context.span().span_context(), policy);
 +    let handle = Arc::new(Handle {
 +        context,
++        _registration: Some(registration),
 +        parent_span_id: None,
 +        ended: Mutex::new(true),
 +    });
@@ -2241,6 +2257,107 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +        assert!(handles().lock().unwrap().is_empty());
 +        assert!(policies().lock().unwrap().is_empty());
 +        external.shutdown().unwrap();
++    }
++}
++
++#[cfg(test)]
++mod context_lease_tests {
++    use super::*;
++    use opentelemetry_sdk::trace::{InMemorySpanExporter, Sampler, SdkTracerProvider};
++
++    #[test]
++    fn captured_leases_retain_intermediate_identity_until_last_owner_releases() {
++        const CHILD: &str = "CODEX_SDK_CONTEXT_LEASE_IDENTITY_CHILD";
++        if std::env::var_os(CHILD).is_none() {
++            let status = std::process::Command::new(std::env::current_exe().unwrap())
++                .args([
++                    "--exact",
++                    "sdk_trace::context_lease_tests::captured_leases_retain_intermediate_identity_until_last_owner_releases",
++                    "--nocapture",
++                ])
++                .env(CHILD, "1")
++                .status()
++                .unwrap();
++            assert!(status.success());
++            return;
++        }
++        let provider = SdkTracerProvider::builder()
++            .with_sampler(ScopeSampler {
++                inner: Box::new(Sampler::AlwaysOn),
++            })
++            .with_simple_exporter(InMemorySpanExporter::default())
++            .build();
++        global::set_tracer_provider(provider.clone());
++        for enabled in [true, false] {
++            configure_pipeline(enabled);
++            for disabled in [false, true] {
++                for span_first in [true, false] {
++                    let root: Value = serde_json::from_str(
++                        &start_trace_span(
++                            &json!({
++                                "name": "workflow", "kind": "workflow", "disabled": disabled,
++                                "include_sensitive_data": false,
++                            })
++                            .to_string(),
++                        )
++                        .unwrap(),
++                    )
++                    .unwrap();
++                    let root_key = root["handle"].as_str().unwrap();
++                    let parent = context(root_key).unwrap();
++                    let policy = policy_for_context(&parent).unwrap();
++                    let native = build_span(
++                        "native-lease-fixture",
++                        opentelemetry::trace::SpanBuilder::from_name("intermediate"),
++                        &parent,
++                    );
++                    assert_eq!(native.is_recording(), enabled && !disabled);
++                    let identity = native.span_context().clone();
++                    assert!(identity.is_valid());
++                    // Lifecycle capture reparses the native span's identity; this Context
++                    // deliberately owns no ScopedSpan, only its remote carrier and policy.
++                    let capture = Context::new()
++                        .with_remote_span_context(identity.clone())
++                        .with_value(policy.clone());
++                    let active = capture.attach();
++                    let first = ContextLease::capture().unwrap();
++                    let second = ContextLease::capture().unwrap();
++                    let alias = retain_trace_context(first.token()).unwrap();
++                    let carrier = trace_carrier(first.token()).unwrap();
++                    drop(active);
++                    let assert_policy = || {
++                        let restored = crate::context_from_w3c_trace_context(&carrier).unwrap();
++                        let restored = policy_for_context(&restored)
++                            .expect("live lease must retain intermediate identity policy");
++                        assert!(Arc::ptr_eq(&restored, &policy));
++                        assert_eq!(restored.disabled, disabled);
++                        assert!(!restored.include_sensitive_data);
++                    };
++                    let mut native = Some(native);
++                    if span_first {
++                        drop(native.take());
++                    }
++                    assert_policy();
++                    drop(first);
++                    assert_policy();
++                    release_trace_context(&alias);
++                    assert_policy();
++                    drop(second);
++                    assert_eq!(policy_for_span(&identity).is_some(), !span_first);
++                    drop(native);
++                    assert!(
++                        policy_for_span(&identity).is_none(),
++                        "finished identity must not leak even while its policy stays alive"
++                    );
++                    end_trace_span(root_key, r#"{"status":"ok"}"#).unwrap();
++                    release_trace_span(root_key);
++                    drop(parent);
++                    assert!(handles().lock().unwrap().is_empty());
++                    assert!(policies().lock().unwrap().is_empty());
++                }
++            }
++        }
++        provider.shutdown().unwrap();
 +    }
 +}
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs

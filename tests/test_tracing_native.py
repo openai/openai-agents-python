@@ -1317,7 +1317,9 @@ async def _child_interaction_policy(directory: Path) -> None:
                         agent,
                         tools=[
                             *agent.tools,
-                            HttpMCP(name="vault", url=url, tools=["search"], approval_mode="auto"),
+                            HttpMCP(
+                                name="vault", url=url, tools=["search"], approval_mode="approve"
+                            ),
                         ],
                     )
                 origin_id = str(index) * 32
