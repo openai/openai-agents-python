@@ -175,7 +175,11 @@
     {
       "path": "0044-scan-deep-helper-hard-links.patch",
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
+    },
+    {
+      "path": "0045-saved-codex-login.patch",
+      "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
     }
   ],
-  "result_tree": "fc1ed1b5c1649e5ca265af011f4748f9af391744"
+  "result_tree": "2c9756fe6cd9cce4e6d9a8d36e0fa269bbd3a933"
 }
