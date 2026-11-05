@@ -34,8 +34,14 @@ from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_workflow_persistence import model_restore_agent
 
 
+@pytest.mark.parametrize(
+    "replies",
+    [("accepted-a", "duplicate"), ("duplicate", "accepted-a")],
+    ids=["primary-first", "duplicate-first"],
+)
 async def test_live_manual_code_can_replace_automatic_and_cannot_export_its_stack(
     responses: ResponsesFixture,
+    replies: tuple[str, str],
 ) -> None:
     automatic: list[str] = []
 
@@ -92,8 +98,7 @@ async def test_live_manual_code_can_replace_automatic_and_cannot_export_its_stac
         with pytest.raises(ValueError, match="validation"):
             await by_key["a"].respond(7)
         competing = await asyncio.gather(
-            by_key["a"].respond("accepted-a"),
-            by_key["a"].respond("duplicate"),
+            *(by_key["a"].respond(reply) for reply in replies),
             return_exceptions=True,
         )
         assert sum(result is None for result in competing) == 1
@@ -101,8 +106,11 @@ async def test_live_manual_code_can_replace_automatic_and_cannot_export_its_stac
         assert await by_key["b"].respond("accepted-b") is None
         assert (await (original).get_result()).final_output == "both accepted"
         rendered = code_output(responses.requests[1], "same-outer")
-        assert "accepted-a" in rendered and "accepted-b" in rendered
-        assert "duplicate" not in rendered and automatic == []
+        winning_reply = next(
+            reply for reply, result in zip(replies, competing, strict=True) if result is None
+        )
+        assert json.loads(rendered.split("RESULT:", 1)[1]) == [winning_reply, "accepted-b"]
+        assert automatic == []
         assert (await session.save_state()).format_version == 6
 
         responses.respond(code_call("text(await tools.lookup({key:'fresh'}));", "same-outer"))
