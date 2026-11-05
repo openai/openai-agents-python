@@ -213,6 +213,7 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
     thread_id: String,
+    pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
@@ -395,6 +396,7 @@ enum Phase {
 }
 
 struct PendingCall {
+    _tracing: Option<codex_otel::sdk_trace::ContextLease>,
     invocation: u64,
     manual_request: Option<Value>,
     sender: oneshot::Sender<DynamicToolResponse>,
@@ -1943,7 +1945,8 @@ impl PythonTools {
                 runtime_tool_call_id,
             } => json!({"cell_id": cell_id, "nested_call_id": runtime_tool_call_id}),
         };
-        let request = json!({
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
+        let mut request = json!({
             "id": call,
             "msg": {
                 "type":"dynamic_tool_call_request", "turnId": turn, "callId": call,
@@ -1953,6 +1956,9 @@ impl PythonTools {
                 "_sdk_code_origin": code_origin, "_sdk_model": model
             }
         });
+        if let Some(context) = &tracing {
+            request["msg"]["tracing_context"] = json!(context.token());
+        }
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("Python replies poisoned");
@@ -1960,6 +1966,7 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    _tracing: tracing,
                     invocation,
                     manual_request: entry.manual.then(|| request.clone()),
                     sender,
@@ -2209,6 +2216,9 @@ impl TurnLifecycleContributor for PythonContributor {
     // The default BeforeTaskRegistration phase includes compaction tasks.
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            let tracing = input
+                .turn_store
+                .get_or_init(codex_otel::sdk_trace::CapturedContext::capture);
             #[cfg(test)]
             if let Some(hold) = input.thread_store.get::<admission_order_tests::StartHold>() {
                 hold.entered.add_permits(1);
@@ -2236,6 +2246,7 @@ impl TurnLifecycleContributor for PythonContributor {
                 let graph = tools.family.graph.lock().expect("Python graph poisoned");
                 let receipt = Arc::new(TurnAdmission {
                     thread_id: input.thread_store.level_id().to_owned(),
+                    tracing: tracing.context.clone(),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,
@@ -2802,13 +2813,22 @@ impl ToolContributor for PythonContributor {
                 .read()
                 .expect("Step defaults poisoned")
                 .clone();
-            tools.family.requests.send(QueuedRequest::Step(json!({
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
+            let mut request = json!({
                 "id": turn.level_id(),
                 "msg": {"type": "_sdk_select_step", "turn_id": turn.level_id(),
                     "thread": thread.level_id(), "instance": tools.instance,
                     "step_id": id, "generation": tools.snapshot().id,
                     "native_step": step.level_id(), "candidates": candidates, "defaults": defaults}
-            }))).map_err(|_| "Step reader closed")?;
+            });
+            if let Some(context) = &tracing {
+                request["msg"]["tracing_context"] = json!(context.token());
+            }
+            tools
+                .family
+                .requests
+                .send(QueuedRequest::Step(request))
+                .map_err(|_| "Step reader closed")?;
             let names = receive
                 .await
                 .map_err(|_| "Step selection cancelled")?
@@ -3211,6 +3231,50 @@ pub(crate) mod managed_tests {
         let child = PythonTools::descendant(&tools, "synthetic-child".into());
         assert!(child.prepared_operation().is_none());
         assert!(child.prepare_requests(true).is_err());
+    }
+
+    #[tokio::test]
+    async fn child_receipt_retains_original_tracing_after_origin_scope_ends() {
+        const CHILD: &str = "AGENTS_CHILD_RECEIPT_TRACE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "python_tools::managed_tests::child_receipt_retains_original_tracing_after_origin_scope_ends"]).env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        codex_otel::sdk_trace::configure_pipeline(false);
+        let original: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
+            r#"{"name":"origin","kind":"workflow","trace_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disabled":true,"include_sensitive_data":false}"#,
+        ).unwrap()).unwrap();
+        let handle = original["handle"].as_str().unwrap();
+        let attached = codex_otel::sdk_trace::context(handle).unwrap().attach();
+        let thread = admission_thread();
+        let turn = ExtensionData::new("fixture");
+        let control = crate::native_interception::tests::bind_owner(&thread, &turn);
+        let turn = start_admission(&thread, "original").await;
+        let receipt = turn.get::<Arc<TurnAdmission>>().unwrap();
+        let creation = control.creation_tracing().unwrap();
+        let tracing = receipt.tracing.as_ref().unwrap().clone();
+        drop(attached);
+        codex_otel::sdk_trace::end_trace_span(handle, r#"{"status":"ok"}"#).unwrap();
+        codex_otel::sdk_trace::release_trace_span(handle);
+        let unrelated: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
+            r#"{"name":"unrelated","kind":"workflow","trace_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","include_sensitive_data":true}"#,
+        ).unwrap()).unwrap();
+        let unrelated_handle = unrelated["handle"].as_str().unwrap();
+        let _unrelated = codex_otel::sdk_trace::context(unrelated_handle)
+            .unwrap()
+            .attach();
+        for owner in [creation, tracing] {
+            let snapshot: serde_json::Value = serde_json::from_str(
+                &codex_otel::sdk_trace::trace_span_context(owner.token()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(snapshot["trace_id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            assert_eq!(snapshot["disabled"], true);
+            assert_eq!(snapshot["include_sensitive_data"], false);
+        }
+        codex_otel::sdk_trace::release_trace_span(unrelated_handle);
     }
 
     // Seed the real registered SDK contributors in their Core registration
