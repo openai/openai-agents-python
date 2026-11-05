@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from contextvars import ContextVar
 from copy import copy
 from dataclasses import FrozenInstanceError, dataclass, field, replace
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
 
 from typing_extensions import TypedDict, TypeVar
 
+from ._lifecycle import _close_after_error, _join, _sync_run, _SyncRun
 from ._trace_context import TraceContext, _trace_context
 
 if TYPE_CHECKING:
@@ -46,72 +46,6 @@ SessionContextT = TypeVar("SessionContextT")
 NewOutputT = TypeVar("NewOutputT")
 TextAgentT = TypeVar("TextAgentT", bound="Agent[Any, str]")
 TypedAgentT = TypeVar("TypedAgentT", bound="Agent[Any, Any]")
-_ResultT = TypeVar("_ResultT")
-
-
-class _SyncRun:
-    """Own a sync loop until its last deferred Environment can retire."""
-
-    def __init__(self) -> None:
-        self.loop = asyncio.new_event_loop()
-        self.deferred = 0
-        self.lock = RLock()
-
-    def _close_if_idle(self) -> None:
-        if self.deferred:
-            return
-        try:
-            # Match asyncio.run's task, async generator and executor shutdown.
-            pending = asyncio.all_tasks(self.loop)
-            for task in pending:
-                task.cancel()
-            if pending:
-                self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-                for task in pending:
-                    if not task.cancelled() and task.exception() is not None:
-                        self.loop.call_exception_handler(
-                            {
-                                "message": "unhandled exception during run_sync shutdown",
-                                "exception": task.exception(),
-                                "task": task,
-                            }
-                        )
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
-            self.loop.run_until_complete(self.loop.shutdown_default_executor())
-        finally:
-            self.loop.close()
-
-    def run(self, operation: Awaitable[_ResultT]) -> _ResultT:
-        # Other providers from this sync call may be closed on another thread.
-        # Their on-demand recovery must wait until this call stops driving its loop.
-        with self.lock:
-            token = _sync_run.set(self)
-            try:
-                asyncio.set_event_loop(self.loop)
-                return self.loop.run_until_complete(operation)
-            finally:
-                _sync_run.reset(token)
-                try:
-                    self._close_if_idle()
-                finally:
-                    asyncio.set_event_loop(None)
-
-    def recover(self, operation: Callable[[], Awaitable[None]]) -> None:
-        with self.lock:
-            # Concurrent closes may already have joined every deferred manager.
-            if self.loop.is_closed():
-                return
-            try:
-                asyncio.set_event_loop(self.loop)
-                self.loop.run_until_complete(operation())
-            finally:
-                try:
-                    self._close_if_idle()
-                finally:
-                    asyncio.set_event_loop(None)
-
-
-_sync_run: ContextVar[_SyncRun | None] = ContextVar("agents_sync_run", default=None)
 
 
 class ModelSettings(TypedDict, total=False, closed=True):
@@ -267,8 +201,6 @@ class NativeProvider:
         This also recovers a managed Environment retained after a failed
         run_sync opening, in the task that originally entered its manager.
         """
-        from .session import _close_after_error, _join
-
         with _PROVIDER_LOCK:
             if vars(self).get("_closed", False):
                 return
@@ -350,8 +282,6 @@ class NativeProvider:
         if exc is None:
             await self.aclose()
         else:
-            from .session import _close_after_error
-
             await _close_after_error(exc, self.aclose)
 
 
@@ -665,7 +595,7 @@ class Agent(Generic[ContextT, OutputT]):
         instructions. Use files and parent directories that untrusted actors
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
-        from .session import Session, _close_after_error
+        from .session import Session
         from .telemetry import _capture
 
         try:

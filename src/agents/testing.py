@@ -33,6 +33,7 @@ from threading import Lock, Thread
 from types import TracebackType
 from uuid import uuid4
 
+from ._lifecycle import _close_after_error, _join
 from .agent import NativeProvider
 from .config import JsonValue
 
@@ -130,8 +131,6 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        from .session import _close_after_error, _join
-
         assert self._server is not None
         server = self._server
 

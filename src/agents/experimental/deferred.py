@@ -23,15 +23,13 @@ from pydantic import BaseModel, TypeAdapter
 from pydantic_core import SchemaError, SchemaValidator, ValidationError, core_schema
 
 from .._function_tools import FunctionTool
+from .._lifecycle import _error_contexts, _join, _retain_cleanup_error
 from ..manual import ActionRequested, _CapturedManual
 from ..session import (
     Session,
-    _error_contexts,
-    _join,
     _private_task,
     _restore_declaration,
     _RestoreDeclaration,
-    _retain_cleanup_error,
 )
 from ..state import SessionState
 from ..turn import Turn

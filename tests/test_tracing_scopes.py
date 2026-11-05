@@ -2805,7 +2805,7 @@ def test_capture_rollback_closes_operation_and_preserves_primary_error(
     assert native.released.count("span-1") == 1
     assert telemetry.current_context() is None
     if cleanup_error:
-        from agents.session import _error_contexts
+        from agents._lifecycle import _error_contexts
 
         assert cleanup in _error_contexts(primary.__context__)
 

@@ -38,6 +38,7 @@ from ._compat import cancel_once
 from ._events import SessionItem
 from ._function_tools import FunctionTool, Tool, ToolContext
 from ._history import project_history
+from ._lifecycle import _close_after_error, _error_contexts, _join, _retain_cleanup_error, _SyncRun
 from ._native_async import _NativeCompletionError
 from ._projection import _error_code, project_execution_completion
 from ._trace_context import TraceContext, _native_trace_context, _trace_context
@@ -49,7 +50,6 @@ from .agent import (
     NativeProvider,
     OutputT,
     _copy_model_settings,
-    _SyncRun,
 )
 from .canonical_storage import CustomStorage
 from .executor import Environment, EnvironmentSource, ExecutorContext, _writable_roots
@@ -726,87 +726,6 @@ def _private_task(
         if not started:
             owner.close()
             work.close()
-
-
-async def _join(task: asyncio.Future[Any], *, outcome: Future[Any] | None = None) -> Any:
-    """Join owned cleanup before propagating cancellation of its passive waiter."""
-    cancelled = None
-    try:
-        while True:
-            try:
-                value = await asyncio.shield(task)
-                break
-            except asyncio.CancelledError as error:
-                if task.done() and task.cancelled():
-                    task.result()
-                cancelled = cancelled or error
-                if task.done():
-                    value = task.result()
-                    break
-        if outcome is not None:
-            value = outcome.result()
-    except BaseException as error:
-        if cancelled is None:
-            raise
-        _retain_cleanup_error(cancelled, error, _error_contexts(cancelled.__context__))
-        raise cancelled  # noqa: B904 - keep the caller's explicit cause and owned cleanup contexts
-    if cancelled is not None:
-        raise cancelled
-    return value
-
-
-def _error_contexts(error: BaseException | None) -> tuple[BaseException, ...]:
-    contexts: list[BaseException] = []
-    seen: set[int] = set()
-    while error is not None and id(error) not in seen:
-        seen.add(id(error))
-        contexts.append(error)
-        error = error.__context__
-    return tuple(contexts)
-
-
-def _retain_cleanup_error(
-    primary: BaseException,
-    cleanup_error: BaseException,
-    previous: tuple[BaseException, ...],
-) -> None:
-    """Retain each distinct context without replacing explicit causes."""
-    contexts: list[BaseException] = []
-    seen = {id(primary)}
-    for error in _error_contexts(cleanup_error) + _error_contexts(primary.__context__) + previous:
-        if id(error) not in seen:
-            seen.add(id(error))
-            contexts.append(error)
-    context: BaseException | None = None
-    for error in reversed(contexts):
-        error.__context__ = context
-        context = error
-    primary.__context__ = context
-
-
-async def _close_after_error(primary: BaseException, close: Callable[[], Awaitable[None]]) -> None:
-    """Join close and retain its failures before exception transport can replace context."""
-    previous = _error_contexts(primary.__context__)
-
-    async def capture() -> tuple[BaseException, tuple[BaseException, ...]] | None:
-        # Eager task factories must also leave the caller's active error handler.
-        await asyncio.sleep(0)
-        try:
-            await close()
-        except BaseException as error:  # retain every cleanup failure
-            return error, _error_contexts(error.__context__)
-        return None
-
-    pending = asyncio.create_task(capture())
-    try:
-        await _join(pending)
-    except asyncio.CancelledError:
-        # The first failure wins; _join has finished the owned close task.
-        pass
-    captured = pending.result()
-    if captured is not None:
-        cleanup_error, contexts = captured
-        _retain_cleanup_error(primary, cleanup_error, contexts + previous)
 
 
 class _OpeningOwner:

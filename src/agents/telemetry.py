@@ -21,6 +21,7 @@ from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
 from typing_extensions import ReadOnly, TypedDict
 
+from ._lifecycle import _close_after_error, _error_contexts, _join, _retain_cleanup_error
 from ._trace_context import TraceContext as TraceContext
 
 __all__ = [
@@ -256,8 +257,6 @@ async def configure(
     # another Session can use this process. A failure never replaces the snapshot.
     try:
         native = importlib.import_module("agents._native")
-        from .session import _join
-
         await _join(_create_task(initialize()))
     finally:
         # Task-factory rejection can precede initialize's first instruction.
@@ -272,8 +271,6 @@ async def shutdown(*, timeout_ms: int | None = None) -> None:
     """
     if _engine_options is None:
         raise RuntimeError("Configure telemetry successfully before shutdown")
-    from .session import _close_after_error, _join
-
     budget = None if timeout_ms is None else _timeout(timeout_ms)
     if _in_processor.get():
         raise RuntimeError("Telemetry shutdown cannot run inside a trace processor callback")
@@ -553,8 +550,6 @@ class TraceScope:
                 try:
                     self.__exit__(type(error), error, error.__traceback__)
                 except BaseException as cleanup:
-                    from .session import _error_contexts, _retain_cleanup_error
-
                     _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
                 finally:
                     self._context = None
@@ -711,8 +706,6 @@ def _capture(
                 elif scope is not None:
                     scope.__exit__(type(error), error, None)
             except BaseException as cleanup:
-                from .session import _error_contexts, _retain_cleanup_error
-
                 _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
             raise
     finally:
@@ -1128,8 +1121,6 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
     if ready is not None:
         # Eager task factories must not drain before route publication commits.
         await ready
-    from .session import _join
-
     global _processor_acknowledged
     native = _native_tracing()
     while True:
@@ -1201,8 +1192,6 @@ async def force_flush(*, timeout_ms: int = 10_000) -> FlushResult:
     Success means exporter calls completed without known loss, not storage or
     viewer visibility. Unfinished spans and future records are excluded.
     """
-    from .session import _join
-
     if _engine_options is None:
         raise RuntimeError("Configure telemetry successfully before force_flush")
     budget = _timeout(timeout_ms)

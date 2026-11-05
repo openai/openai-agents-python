@@ -11,6 +11,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 from ._compat import cancel_once
+from ._lifecycle import _join
 
 if TYPE_CHECKING:
     from .executor import Environment
@@ -390,7 +391,7 @@ class _NativeInterception:
         tasks = {task for owner in owners for task in owner.tasks}
         for owner in owners:
             self._retire_cell_owner(owner.owner_id)
-        from .session import NativeError, _join
+        from .session import NativeError
 
         try:
             await _join(asyncio.gather(*tasks, return_exceptions=True))

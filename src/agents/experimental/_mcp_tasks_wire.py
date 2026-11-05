@@ -51,7 +51,7 @@ from mcp_types import (
 from mcp_types.jsonrpc import RequestId
 from pydantic import BeforeValidator, Field, TypeAdapter
 
-from ..session import _join
+from .._lifecycle import _join
 
 VERSION = "2026-07-28"
 EXTENSION = "io.modelcontextprotocol/tasks"
