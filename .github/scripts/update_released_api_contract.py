@@ -111,6 +111,54 @@ def _references(declaration: ast.stmt) -> set[str]:
     return names
 
 
+def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Module) -> None:
+    """Read public-owner alias construction as the original type declaration."""
+    if source.__name__ not in {"agents._runtime._events", "agents._runtime.subagents"}:
+        return
+    declarations = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_PublicTypeAliasType"
+    ]
+    if not declarations:
+        return
+    owner = _public_owner(source.__name__)
+    expected = ast.parse(
+        "if TYPE_CHECKING:\n"
+        "    from typing_extensions import TypeAliasType as _PublicTypeAliasType\n"
+        "else:\n"
+        f"    _PublicTypeAliasType = _type_alias_constructor({owner!r})\n"
+    ).body[0]
+    guards = [node for node in tree.body if ast.dump(node) == ast.dump(expected)]
+    constructors = [
+        alias
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom) and node.level == 1 and node.module == "_public"
+        for alias in node.names
+        if alias.name == "type_alias_constructor" and alias.asname == "_type_alias_constructor"
+    ]
+    if len(guards) != 1 or len(constructors) != 1:
+        raise ValueError(f"Unrecognized public type-alias constructor in {source.__name__}")
+    for declaration in declarations:
+        if len(declaration.targets) != 1 or not isinstance(declaration.targets[0], ast.Name):
+            raise ValueError(f"Unrecognized type-alias declaration in {source.__name__}")
+        name = declaration.targets[0].id
+        value = getattr(module, name)
+        # Identity checks preserve the actual alias and its value, while the
+        # retained call arguments below freeze the reviewed value declaration.
+        if (
+            value is not getattr(source, name)
+            or not isinstance(value, source.TypeAliasType)
+            or value.__module__ != owner
+        ):
+            raise ValueError(f"Public type alias {module.__name__}.{name} differs from {owner}")
+        declaration.value.func.id = "TypeAliasType"
+    tree.body.remove(guards[0])
+
+
 def _module_contract(
     module: ModuleType, exports: set[str] | None = None, *, include: set[str] | None = None
 ) -> dict[str, Any]:
@@ -129,6 +177,7 @@ def _module_contract(
                 assert source.__file__ is not None
                 tree = ast.parse(Path(source.__file__).read_text())
                 break
+    _public_type_aliases(module, source, tree)
     definitions = [(node, _names(node)) for node in tree.body if _names(node)]
     if exports is None:
         exports = (

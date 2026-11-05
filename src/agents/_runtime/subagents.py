@@ -29,8 +29,16 @@ from ..config import (
     ReasoningSummary as ReasoningSummary,
     Verbosity as Verbosity,
 )
-from ._public import preserve_module_identity as _preserve_module_identity
+from ._public import (
+    preserve_module_identity as _preserve_module_identity,
+    type_alias_constructor as _type_alias_constructor,
+)
 from .turn import Turn as Turn
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeAliasType as _PublicTypeAliasType
+else:
+    _PublicTypeAliasType = _type_alias_constructor("agents.subagents")
 
 if TYPE_CHECKING:
     from .input import UserInput
@@ -135,8 +143,8 @@ def _unique_names(names: list[str]) -> list[str]:
     return names
 
 
-_Nonblank = TypeAliasType("_Nonblank", Annotated[str, AfterValidator(_nonblank)])
-_Nickname = TypeAliasType(
+_Nonblank = _PublicTypeAliasType("_Nonblank", Annotated[str, AfterValidator(_nonblank)])
+_Nickname = _PublicTypeAliasType(
     "_Nickname",
     Annotated[
         str,

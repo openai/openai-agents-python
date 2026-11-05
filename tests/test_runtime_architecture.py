@@ -282,3 +282,74 @@ assert public <= {'agents', 'agents.config', 'agents.version'}, sorted(public)
         ],
         check=True,
     )
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="stdlib TypeAliasType requires Python 3.12")
+def test_immutable_type_aliases_preserve_public_contracts_in_a_fresh_process() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib
+import pickle
+import sys
+import typing
+import typing_extensions
+
+assert 'agents' not in sys.modules
+# Use the actual immutable constructor even when typing_extensions provides a mutable backport.
+typing_extensions.TypeAliasType = typing.TypeAliasType
+
+import agents
+assert 'agents._runtime' not in sys.modules
+from agents import Agent, Session
+assert Agent is agents.Agent
+assert Session is agents.Session
+
+aliases = {
+    '_events': (
+        'ElicitationRequest', 'RequiredAction', 'ApprovalDecision', 'EnvironmentStatus',
+        'OutputItemStatus', 'FunctionCallStatus', 'WebSearchAction', 'ExecutionItem',
+        'OutputItem', 'SessionItem', 'SessionEvent',
+    ),
+    'subagents': ('_Nonblank', '_Nickname'),
+}
+for module, names in aliases.items():
+    public = importlib.import_module('agents.' + module)
+    runtime = importlib.import_module('agents._runtime.' + module)
+    for name in names:
+        alias = getattr(public, name)
+        assert type(alias) is typing.TypeAliasType, (module, name)
+        assert alias is getattr(runtime, name), (module, name)
+        assert alias.__module__ == 'agents.' + module, (module, name)
+        assert pickle.loads(pickle.dumps(alias)) is alias, (module, name)
+
+from pydantic import TypeAdapter, ValidationError
+from agents._events import ElicitationRequest
+from agents.subagents import _Nickname
+
+form = {
+    'mode': 'form',
+    'message': 'Choose a synthetic option.',
+    'requested_schema': {'type': 'object', 'properties': {}},
+}
+assert TypeAdapter(ElicitationRequest).validate_python(form) == form
+nickname = TypeAdapter(_Nickname)
+assert nickname.validate_python('  Reviewer_1  ') == 'Reviewer_1'
+for adapter, invalid in (
+    (TypeAdapter(ElicitationRequest), {'mode': 'form', 'message': 'Missing schema.'}),
+    (nickname, 'invalid!'),
+):
+    try:
+        adapter.validate_python(invalid)
+    except ValidationError:
+        pass
+    else:
+        raise AssertionError('Invalid alias value was accepted: ' + repr(invalid))
+assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
+        timeout=30,
+    )

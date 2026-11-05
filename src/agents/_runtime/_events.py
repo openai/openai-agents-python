@@ -5,7 +5,7 @@ live SDK session, not durable API resources or replay cursors. Required-action
 variants extend Managed Agents where it has no matching native interaction.
 """
 
-from typing import Literal as Literal
+from typing import TYPE_CHECKING, Literal as Literal
 
 from typing_extensions import (
     NotRequired as NotRequired,
@@ -15,8 +15,16 @@ from typing_extensions import (
 
 from ..config import JsonValue as JsonValue
 from ._options import LegacyPermissionProfile as LegacyPermissionProfile
-from ._public import preserve_module_identity as _preserve_module_identity
+from ._public import (
+    preserve_module_identity as _preserve_module_identity,
+    type_alias_constructor as _type_alias_constructor,
+)
 from .subagents import Subagent as Subagent
+
+if TYPE_CHECKING:
+    from typing_extensions import TypeAliasType as _PublicTypeAliasType
+else:
+    _PublicTypeAliasType = _type_alias_constructor("agents._events")
 
 
 class NativeEvent(TypedDict):
@@ -110,7 +118,7 @@ class VerificationElicitation(ElicitationMetadata):
     challenge: str
 
 
-ElicitationRequest = TypeAliasType(
+ElicitationRequest = _PublicTypeAliasType(
     "ElicitationRequest", FormElicitation | UrlElicitation | VerificationElicitation
 )
 
@@ -200,7 +208,7 @@ class EnvironmentConnectionRequiredAction(_ActionSource):
     environment_id: str
 
 
-RequiredAction = TypeAliasType(
+RequiredAction = _PublicTypeAliasType(
     "RequiredAction",
     (
         FunctionCallRequiredAction
@@ -242,7 +250,7 @@ class NetworkPolicyApproval(TypedDict):
     network_policy_amendment: NetworkPolicyAmendment
 
 
-ApprovalDecision = TypeAliasType(
+ApprovalDecision = _PublicTypeAliasType(
     "ApprovalDecision",
     (
         Literal[
@@ -350,7 +358,9 @@ class EnvironmentError(TypedDict):
     message: str
 
 
-EnvironmentStatus = TypeAliasType("EnvironmentStatus", Literal["pending", "connected", "failed"])
+EnvironmentStatus = _PublicTypeAliasType(
+    "EnvironmentStatus", Literal["pending", "connected", "failed"]
+)
 
 
 class EnvironmentSnapshot(TypedDict):
@@ -458,10 +468,10 @@ class SummaryText(TypedDict):
     text: str
 
 
-OutputItemStatus = TypeAliasType(
+OutputItemStatus = _PublicTypeAliasType(
     "OutputItemStatus", Literal["in_progress", "completed", "incomplete"]
 )
-FunctionCallStatus = TypeAliasType(
+FunctionCallStatus = _PublicTypeAliasType(
     "FunctionCallStatus", Literal["in_progress", "completed", "failed", "incomplete"]
 )
 
@@ -505,7 +515,7 @@ class WebSearchActionOther(TypedDict):
     type: Literal["other"]
 
 
-WebSearchAction = TypeAliasType(
+WebSearchAction = _PublicTypeAliasType(
     "WebSearchAction",
     (
         WebSearchActionSearch
@@ -589,7 +599,7 @@ class PatchExecutionItem(TypedDict):
     stderr: str | None
 
 
-ExecutionItem = TypeAliasType(
+ExecutionItem = _PublicTypeAliasType(
     "ExecutionItem", CommandExecutionItem | PatchExecutionItem | McpCallItem
 )
 
@@ -636,7 +646,7 @@ class WaitForSubagentsCallItem(_SubagentCallItem):
     sender_agent_id: str
 
 
-OutputItem = TypeAliasType(
+OutputItem = _PublicTypeAliasType(
     "OutputItem",
     (
         MessageItem
@@ -664,7 +674,9 @@ class UserMessageItem(TypedDict):
     content: list[InputText | InputImage]
 
 
-SessionItem = TypeAliasType("SessionItem", OutputItem | FunctionCallOutputItem | UserMessageItem)
+SessionItem = _PublicTypeAliasType(
+    "SessionItem", OutputItem | FunctionCallOutputItem | UserMessageItem
+)
 
 
 class ItemAddedEvent(EventHeader):
@@ -768,7 +780,7 @@ class ErrorEvent(TypedDict):
     error: StreamError
 
 
-SessionEvent = TypeAliasType(
+SessionEvent = _PublicTypeAliasType(
     "SessionEvent",
     (
         SessionCreatedEvent

@@ -110,6 +110,16 @@ def implementation(candidate: Path, name: str) -> Path:
             "class Failure(TypedDict):\n    code: bytes",
         ),
         (
+            "_events.py",
+            'Literal["in_progress", "completed", "failed", "incomplete"]',
+            'Literal["in_progress", "completed", "incomplete"]',
+        ),
+        (
+            "subagents.py",
+            "Annotated[str, AfterValidator(_nonblank)]",
+            "Annotated[bytes, AfterValidator(_nonblank)]",
+        ),
+        (
             "_function_tools.py",
             "Callable[[ToolContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]",
             "Callable[[ToolContextT, FunctionTool[Any, Any, Any]], Any]",
@@ -196,6 +206,39 @@ def test_public_facade_export_removal_fails(candidate: Path) -> None:
     assert before in text
     source.write_text(text.replace(before, "", 1))
     assert check(candidate).returncode == 1
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (
+            "TypeAliasType as _PublicTypeAliasType",
+            "TypeAliasType as _DifferentConstructor",
+        ),
+        ('_type_alias_constructor("agents._events")', '_type_alias_constructor("agents.input")'),
+    ],
+)
+def test_public_alias_constructor_pattern_cannot_change(
+    candidate: Path, before: str, after: str
+) -> None:
+    source = implementation(candidate, "_events.py")
+    text = source.read_text()
+    assert before in text
+    source.write_text(text.replace(before, after, 1))
+    result = check(candidate)
+    assert result.returncode != 0
+    assert "Unrecognized public type-alias constructor" in result.stderr
+
+
+def test_public_type_alias_must_keep_its_runtime_identity(candidate: Path) -> None:
+    source = candidate / "src/agents/_events.py"
+    source.write_text(
+        source.read_text()
+        + '\nEnvironmentStatus = TypeAliasType("EnvironmentStatus", EnvironmentStatus.__value__)\n'
+    )
+    result = check(candidate)
+    assert result.returncode != 0
+    assert "Public type alias agents._events.EnvironmentStatus differs" in result.stderr
 
 
 def test_contract_comparison_ignores_only_redundant_import_aliases() -> None:

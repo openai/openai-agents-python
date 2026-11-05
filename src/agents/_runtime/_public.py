@@ -1,6 +1,24 @@
 """Retain import and pickle identities while implementations live privately."""
 
+from collections.abc import Callable
+from types import FunctionType
 from typing import Any
+
+from typing_extensions import TypeAliasType
+
+
+def _new_type_alias(name: str, value: Any, constructor: Callable[[str, Any], Any]) -> Any:
+    return constructor(name, value)
+
+
+def type_alias_constructor(public_module: str) -> Callable[[str, Any], Any]:
+    """Create immutable aliases with their public owner from the start."""
+    # TypeAliasType reads its caller's module. Keep the runtime globals intact.
+    return FunctionType(
+        _new_type_alias.__code__,
+        {"__name__": public_module},
+        argdefs=(TypeAliasType,),
+    )
 
 
 def preserve_module_identity(namespace: dict[str, Any], public_module: str) -> None:
