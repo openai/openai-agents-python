@@ -929,18 +929,28 @@ class DaytonaSandboxSession(BaseSandboxSession):
         except Exception:
             pass
         finally:
-            worker_task = entry.worker_task
-            entry.worker_task = None
-            if worker_task is not None and worker_task is not asyncio.current_task():
-                if not worker_task.done():
-                    worker_task.cancel()
-                try:
-                    await asyncio.wait_for(
-                        asyncio.gather(worker_task, return_exceptions=True),
-                        timeout=self.state.timeouts.cleanup_s,
-                    )
-                except asyncio.TimeoutError:
-                    pass
+            try:
+                if entry.tty:
+                    # Daytona shields its reader from cancellation of our waiter.
+                    try:
+                        await asyncio.wait_for(
+                            entry.pty_handle.disconnect(), timeout=self.state.timeouts.cleanup_s
+                        )
+                    except Exception:
+                        pass
+            finally:
+                worker_task = entry.worker_task
+                entry.worker_task = None
+                if worker_task is not None and worker_task is not asyncio.current_task():
+                    if not worker_task.done():
+                        worker_task.cancel()
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(worker_task, return_exceptions=True),
+                            timeout=self.state.timeouts.cleanup_s,
+                        )
+                    except asyncio.TimeoutError:
+                        pass
 
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
         workspace_path = await self._validate_path_access(path)

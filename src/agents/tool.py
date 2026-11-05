@@ -2361,7 +2361,7 @@ def _build_function_tool_output_type(
 ) -> tuple[dict[str, Any], TypeAdapter[Any]]:
     """Build a strict object schema and runtime adapter for a function output type."""
     try:
-        output_type_adapter = TypeAdapter(output_type)
+        output_type_adapter: TypeAdapter[Any] = TypeAdapter(output_type)
         output_json_schema = output_type_adapter.json_schema(mode="serialization")
         if not _json_schema_is_object(output_json_schema):
             raise UserError("the generated JSON Schema is not an object schema")

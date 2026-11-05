@@ -13,7 +13,7 @@ from pydantic.dataclasses import dataclass
 
 _RAW_USAGE_ATTRIBUTE = "_agents_sdk_raw_usage"
 _NORMALIZED_USAGE_ATTRIBUTE = "_agents_sdk_normalized_usage"
-_RAW_USAGE_ADAPTER = TypeAdapter(dict[str, JsonValue])
+_RAW_USAGE_ADAPTER: TypeAdapter[dict[str, JsonValue]] = TypeAdapter(dict[str, JsonValue])
 _RAW_USAGE_MISSING = object()
 
 

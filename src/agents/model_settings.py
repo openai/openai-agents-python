@@ -295,15 +295,15 @@ class ModelSettings:
         return replace(self, **changes)
 
     def to_json_dict(self) -> dict[str, Any]:
-        return cast(dict[str, Any], TypeAdapter(ModelSettings).dump_python(self, mode="json"))
+        adapter: TypeAdapter[ModelSettings] = TypeAdapter(ModelSettings)
+        return cast(dict[str, Any], adapter.dump_python(self, mode="json"))
 
     def to_traceable_dict(self) -> dict[str, Any]:
         """Serialize settings for tracing without provider-specific request extras."""
+        adapter: TypeAdapter[ModelSettings] = TypeAdapter(ModelSettings)
         payload = cast(
             dict[str, Any],
-            TypeAdapter(ModelSettings).dump_python(
-                self, mode="json", include=set(_TRACEABLE_MODEL_SETTING_FIELDS)
-            ),
+            adapter.dump_python(self, mode="json", include=set(_TRACEABLE_MODEL_SETTING_FIELDS)),
         )
         return {key: payload[key] for key in _TRACEABLE_MODEL_SETTING_FIELDS if key in payload}
 

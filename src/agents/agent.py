@@ -719,6 +719,7 @@ class Agent(AgentBase, Generic[TContext]):
             has_custom_parameters or include_schema or input_builder is not None
         )
 
+        params_adapter: TypeAdapter[Any]
         if parameters is None:
             params_adapter = TypeAdapter(AgentAsToolInput)
             params_schema = ensure_strict_json_schema(params_adapter.json_schema())
