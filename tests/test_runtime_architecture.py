@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import get_origin, get_type_hints
 
 import pytest
+from typing_extensions import ReadOnly
 
 import agents
 
@@ -211,7 +212,7 @@ def test_public_models_resolve_annotations_without_rebuilding() -> None:
     from agents.telemetry import TraceLifecycleEvent
 
     assert get_type_hints(ModelSettings)["reasoning_effort"] is str
-    assert get_type_hints(TraceLifecycleEvent)["sequence"] is int
+    assert get_type_hints(TraceLifecycleEvent, include_extras=True)["sequence"] == ReadOnly[int]
     assert SessionState.__pydantic_complete__
     state = SessionState(
         format_version=2,
@@ -356,6 +357,113 @@ for adapter, invalid in (
     else:
         raise AssertionError('Invalid alias value was accepted: ' + repr(invalid))
 assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.parametrize("module", ["agents._runtime.state", "agents.state"])
+def test_fresh_checkpoint_annotations_use_definition_namespaces(module: str) -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib
+import json
+import pickle
+import sys
+from pydantic import TypeAdapter, ValidationError
+
+module = importlib.import_module(sys.argv[1])
+SessionState = module.SessionState
+assert SessionState.__pydantic_complete__
+payload = {
+    'format_version': 2, 'codex_revision': 'synthetic',
+    'source_session_id': 'synthetic', 'history': [], 'root_metadata': {},
+    'subagents': {'worker': {'description': 'Synthetic role'}},
+}
+state = SessionState.from_json(json.dumps(payload))
+assert SessionState.from_json(state.to_json()) == state
+try:
+    SessionState.from_json(json.dumps({**payload, 'subagents': {'worker': {}}}))
+except ValidationError:
+    pass
+else:
+    raise AssertionError('Required role description was lost')
+
+from agents._runtime.turn_receipt import TurnReceipt
+receipt = {
+    'thread_id': 'synthetic', 'turn_id': 'synthetic', 'model': 'synthetic',
+    'reasoning_effort': None, 'instruction_revision': None,
+    'developer_instructions_sha256': None,
+    'instruction_files': [{'path': '/synthetic', 'source': 'application_file', 'sha256': '0' * 64}],
+    'user_config_applied': False, 'codex_revision': 'synthetic',
+    'codex_source_tree': 'synthetic', 'approval_policy': 'never', 'executors': None,
+}
+adapter = TypeAdapter(TurnReceipt)
+assert adapter.validate_python(receipt) == receipt
+try:
+    adapter.validate_python({**receipt, 'instruction_files': [{'path': '/synthetic'}]})
+except ValidationError:
+    pass
+else:
+    raise AssertionError('Instruction receipt fields were lost')
+
+from agents._runtime.subagents import SubagentConfig
+from agents.subagents import SubagentConfig as PublicConfig
+from agents.turn_receipt import TurnReceipt as PublicReceipt
+assert SubagentConfig is PublicConfig
+assert TurnReceipt is PublicReceipt
+for value in (SubagentConfig, TurnReceipt):
+    assert pickle.loads(pickle.dumps(value)) is value
+assert 'agents._native' not in sys.modules
+""",
+            module,
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="Deferred TypedDict annotations require 3.14"
+)
+def test_public_metadata_keeps_unresolved_annotation_bindings() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import annotationlib
+import pickle
+import sys
+import types
+from typing import get_args, get_type_hints
+from typing_extensions import ReadOnly, Required
+from agents._runtime._public import preserve_module_identity
+
+private = types.ModuleType('agents._runtime._annotation_probe')
+public = types.ModuleType('agents._annotation_probe')
+sys.modules[private.__name__] = private
+sys.modules[public.__name__] = public
+exec(chr(10).join([
+    'from __future__ import annotations',
+    'from typing_extensions import TypedDict, Required, ReadOnly',
+    'class Deferred(TypedDict):',
+    '    value: Required[ReadOnly[Later]]',
+]), private.__dict__)
+preserve_module_identity(private.__dict__, public.__name__)
+public.Deferred = private.Deferred
+assert private.Deferred.__module__ == public.__name__
+annotation = private.Deferred.__annotations__['value']
+assert isinstance(get_args(get_args(annotation)[0])[0], annotationlib.ForwardRef)
+private.Later = int
+hints = get_type_hints(private.Deferred, globalns=private.__dict__, include_extras=True)
+assert hints['value'] == Required[ReadOnly[int]]
+assert pickle.loads(pickle.dumps(private.Deferred)) is private.Deferred
 """,
         ],
         check=True,
