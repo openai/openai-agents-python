@@ -1059,7 +1059,6 @@ def test_native_build_selection(
 ) -> None:
     import io
     import json
-    import time
     import urllib.error
     import urllib.parse
     import urllib.request
@@ -1845,10 +1844,6 @@ def test_native_build_selection(
         )
 
     monkeypatch.setattr(subprocess, "run", tool)
-    if scenario in {"branch_running", "branch_queued"}:
-        monkeypatch.setattr(
-            time, "sleep", lambda _: pytest.fail("CI waited for a pending native build")
-        )
 
     def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
         url = request.full_url
@@ -1857,6 +1852,8 @@ def test_native_build_selection(
         if "/workflows/" in url:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
             assert query["event"] in [["push"], ["pull_request"]]
+            if scenario in {"branch_running", "branch_queued"}:
+                assert query.get("status") == ["success"]
             status_matches = (
                 "status" not in query
                 or source["status"] in query["status"]

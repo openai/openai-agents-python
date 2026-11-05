@@ -14,7 +14,16 @@ from typing import Any
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, FunctionTool, ToolContext, TraceContext, function_tool, telemetry
+from agents import (
+    Agent,
+    CustomStorage,
+    FunctionTool,
+    SQLiteSessionStore,
+    ToolContext,
+    TraceContext,
+    function_tool,
+    telemetry,
+)
 from agents._trace_context import _native_trace_context, _trace_context
 from agents.testing import ScriptedResponses, text, tool_call
 
@@ -127,6 +136,30 @@ async def test_parent_trace_and_instruction_files_keep_admission_order(tmp_path:
             instruction_files=[missing], parent_trace=TraceContext(traceparent=PARENT)
         ):
             pytest.fail("Missing instruction file opened a Session")
+
+
+@pytest.mark.parametrize("resume", [None, "synthetic-existing-session"])
+async def test_custom_storage_trace_admission_precedes_ownership(
+    tmp_path: Path, resume: str | None
+) -> None:
+    backend = SQLiteSessionStore(tmp_path / "history.sqlite")
+    storage = CustomStorage(backend)
+    agent = Agent(instructions="Synthetic test")
+    missing = tmp_path / "missing-instructions.txt"
+    with pytest.raises(ValueError, match="Invalid W3C traceparent"):
+        async with agent.session(
+            storage=storage, resume=resume, parent_trace={"traceparent": "invalid"}
+        ):
+            pytest.fail("Invalid parent acquired stored state")
+    with pytest.raises(FileNotFoundError):
+        async with agent.session(
+            storage=storage,
+            resume=resume,
+            instruction_files=[missing],
+            parent_trace={"traceparent": PARENT},
+        ):
+            pytest.fail("Missing instruction file acquired stored state")
+    assert not backend._owners
 
 
 async def test_trace_parent_preserves_reconciliation_validation() -> None:
@@ -311,6 +344,18 @@ def test_fresh_process_manual_resume_uses_current_worker_parent(tmp_path: Path) 
     )
 
 
+def test_custom_storage_reopen_uses_current_trace_parent(tmp_path: Path) -> None:
+    from examples.observability.trace_walkthrough import Collector
+
+    with Collector().serve() as collector:
+        receipt = _run_case("store-reopen", collector.url, tmp_path / "store.json")
+    spans = _spans(collector)
+    _assert_parent(_dispatch(spans, receipt["first"]), PARENT)
+    _assert_parent(_dispatch(spans, receipt["rebound"]), WORKER)
+    fresh = _dispatch(spans, receipt["fresh"])
+    assert fresh["traceId"] not in (PARENT[3:35], WORKER[3:35])
+
+
 def test_disabled_tracing_preserves_sync_run_and_callback(tmp_path: Path) -> None:
     assert _run_case("disabled", "", tmp_path / "disabled.json") == {"result": "done"}
 
@@ -343,6 +388,8 @@ async def _native_case(case: str, collector: str, output: str) -> None:
             receipt = await _compact_case()
         elif case.startswith("flags-"):
             receipt = await _flags_case(case.removeprefix("flags-"))
+        elif case == "store-reopen":
+            receipt = await _store_reopen_case(Path(output))
         elif case == "manual-limit":
             receipt = await _manual_limit_case()
         elif case == "unsupported":
@@ -352,6 +399,27 @@ async def _native_case(case: str, collector: str, output: str) -> None:
     finally:
         await telemetry.shutdown()
     Path(output).write_text(json.dumps(receipt))
+
+
+async def _store_reopen_case(output: Path) -> dict[str, Any]:
+    storage = CustomStorage(SQLiteSessionStore(output.with_suffix(".sqlite")))
+    receipt: dict[str, Any] = {}
+    session_id = None
+    async with ScriptedResponses([text("first")], [text("rebound")], [text("fresh")]) as peer:
+        agent = Agent(instructions="Synthetic stored session", provider=peer.provider)
+        for label, parent in [("first", PARENT), ("rebound", WORKER), ("fresh", None)]:
+            async with agent.session(
+                storage=storage,
+                resume=session_id,
+                parent_trace={"traceparent": parent} if parent is not None else None,
+            ) as session:
+                if session_id is not None:
+                    assert session.id == session_id
+                session_id = session.id
+                turn = await session.submit(label)
+                assert (await turn.get_result()).final_output == label
+                receipt[label] = turn.turn_id
+    return receipt
 
 
 async def _flags_case(flags: str) -> dict[str, Any]:
