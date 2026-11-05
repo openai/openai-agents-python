@@ -51,6 +51,18 @@ The raised callback and output-validation runs did not emit dedicated Python fai
 
 If the command reports no receipt, check the exporter endpoint and loopback proxy bypass. A successful SDK run alone does not prove telemetry arrived. The process keeps the receiver alive until `telemetry.shutdown()` flushes. Closing the receiver first can lose batches.
 
+## Continue a parent trace into another worker
+
+The [`trace_context.py`](trace_context.py) example requires APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](../../docs/sdk/installation.md#examples-and-upgrades), then run:
+
+```sh
+python -m examples.observability.trace_context
+```
+
+The example supplies an explicit `TraceContext` to the first run. Its Python tool passes `ToolContext.trace_context.to_headers()` to a second Agent through `parent_trace`. Both runs use synthetic model responses and a local collector, so no API key is needed. The command prints `Done` and the number of received native spans; the count can vary.
+
+The application passes trace headers explicitly across the worker boundary. Configure telemetry once before opening Sessions, and call `telemetry.shutdown()` after the Sessions close so the collector can receive the final spans.
+
 ## Read supported tool history
 
 [`history_reader.py`](history_reader.py) uses public `session.turns()` and `session.items()` while a settled Session remains open. The walkthrough stores its result under `receipt.history`.

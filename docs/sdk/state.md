@@ -1,6 +1,6 @@
 # Save and restore conversations
 
-Save a conversation when it must survive closing its Session. Use a portable `SessionState` checkpoint or keep the native conversation in a `LocalStorage` profile. Both require your current application configuration when you reopen the conversation.
+Save a conversation when it must survive closing its Session. Use a portable `SessionState` checkpoint, keep the native conversation in a `LocalStorage` profile, or supply an application backend with `CustomStorage`. Each requires your current application configuration when you reopen the conversation.
 
 Complete the [SDK setup](index.md#before-you-begin), including model credentials, before running these examples.
 
@@ -16,13 +16,16 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 | Save an idle conversation and restore it in a new Session | `SessionState` from `await session.save_state()` | The checkpoint in trusted storage, serialized with `state.to_json()` when needed. |
 | Save [supported pending manual requests](#save-a-settled-manual-request) for later replies | `SessionState` from `await session.suspend()` | The checkpoint. Successful suspension retires the original Session and expires its live requests. |
 | Reopen a native conversation from a local profile directory | [`LocalStorage`](reference.md#localstorage) | The profile directory and `session.id`; reopen with the same profile and `resume=saved_id`. |
+| Store root conversation history in an application-owned backend | `CustomStorage` with a `SessionStore` backend | The backend and `session.id`; reopen with the same backend and `resume=saved_id`. |
 
 The storage choices have these limits:
 
 - Portable checkpoints can retain settled native stored values and terminal code-cell observations. They do not copy workspace files, live processes, or arbitrary JavaScript heap state.
 - A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`.
 - Do not combine `storage` or `resume` with portable `state`.
-- Both restore methods require current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
+- Each restore method requires current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
+
+`CustomStorage` currently supports root Sessions with automatic Python tools. It cannot be combined with portable checkpoints and rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage) explains the synchronous `SessionStore` contract, the persistent SQLite reference adapter, and recovery of tool calls with unknown outcomes. Storage does not guarantee exactly-once external actions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 

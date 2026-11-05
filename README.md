@@ -64,7 +64,7 @@ asyncio.run(main())
 
 Set an [OpenAI API key](docs/published.md#set-an-openai-api-key), then run `python agent.py` in your activated environment.
 
-This example makes live model requests and prints a greeting for Ada, such as `Hello, Ada!`. The wording can vary. When the model requests the `greeting` tool, the SDK calls your Python function and sends its result back to the model.
+The example prints a greeting for Ada, such as `Hello, Ada!`. The wording can vary. When the model requests the `greeting` tool, the SDK calls your Python function and sends its result back to the model.
 
 ## SDK guides
 

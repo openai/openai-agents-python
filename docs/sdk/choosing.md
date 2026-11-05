@@ -30,6 +30,7 @@ Start with the smallest configuration that meets your needs. Check the limits be
 | --- | --- | --- |
 | A typed answer | `output_type=Answer` and `agent.run` | Native strict schemas have [restrictions](configuration.md#structured-output). `PromptedOutput` requests JSON and validates it in Python without provider schema enforcement. |
 | Continue on one machine | `LocalStorage` and the same profile | One native writer at a time. No portable `save_state`, `suspend`, or `fork`. Prompted output requires `max_retries=0`. |
+| Keep history in an application database | `CustomStorage` backed by a `SessionStore` | Start with the [storage guide](state.md) and check its preview limits. Reconcile uncertain tool effects before resuming. |
 | Move to another worker | An idle `SessionState` checkpoint in trusted application storage | Supply current tools, credentials, and context when restoring. Copy workspace artifacts separately. Check readiness before saving. |
 
 ### Combine approvals, generated code, and delegation

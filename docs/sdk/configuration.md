@@ -249,6 +249,16 @@ Exporter settings are:
 
 Content defaults are `log_user_prompt=False`, `log_agent_responses=False` and `tool_result_max_bytes=0`. The switches control only the named native records. They do not sanitize all telemetry. The byte limit bounds only result text. Select exporters and controls for the data your collector may receive.
 
+### Continue a trace across workers
+
+Pass `parent_trace=TraceContext(traceparent=...)` or a W3C header mapping to `agent.run()`, `agent.run_sync()`, or `agent.session()`. Import `TraceContext` from `agents`. A Session uses this parent for startup and as the default for new root Turns and restored manual continuations. Pass a fresh parent when restoring state; saved conversation state does not retain an active trace context.
+
+`session.submit(parent_trace=...)` overrides the Session parent for the new root and its automatic continuations. Omission and `None` inherit the Session parent. Queued work captures the parent when submitted. Steering cannot change an admitted Turn's parent.
+
+A Python tool's `ToolContext.trace_context` supplies the issuing native span's optional W3C context. Use `to_headers()` to pass that context to another worker or an application HTTP client. Keep credentials and private content out of trace headers. This context does not create a Python span or retain local tracing policy. Use `agents.telemetry.TraceOptions` for native tracing policy and an SDK `SpanContext` as its local parent.
+
+The synthetic [trace-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/trace_context.py) connects a parent, a Python tool, and a second worker through a local collector. It requires no model key or collector account. Follow the [example-project setup](installation.md#examples-and-upgrades), then run `python -m examples.observability.trace_context` from the directory containing `examples/`.
+
 ## Programmatic tool calling
 
 Set `programmatic_tool_calling=True` on `Agent` to let the model generate JavaScript cells that call declared Python, manual and MCP tools. Cells can combine calls with loops, conditions and result processing. Ordinary tool calls do not require this option, which defaults to off.

@@ -19,13 +19,16 @@ agent.validate() -> None
 agent.with_output_type(output_type) -> Agent
 await agent.run(input, *, context=None, on_interaction=None,
                 provider=None, model=None, model_settings=None, environment=None,
-                tools=None, before_step=None, state=None, return_state=False) -> Completed
+                tools=None, before_step=None, state=None, return_state=False,
+                parent_trace=None, trace_options=None) -> Completed
 agent.run_sync(input, *, context=None, on_interaction=None,
                provider=None, model=None, model_settings=None, environment=None,
-               tools=None, before_step=None, state=None, return_state=False) -> Completed
+               tools=None, before_step=None, state=None, return_state=False,
+               parent_trace=None, trace_options=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
-              instruction_files=(), reconciled_calls=())
+              instruction_files=(), reconciled_calls=(),
+              parent_trace=None, trace_options=None)
               -> async context manager[Session]
 ```
 
@@ -52,7 +55,7 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
+| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
@@ -357,6 +360,12 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 ### CodexAccount
 
 `session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. `account_id` identifies the saved workspace and is `None` for personal logins without a workspace ID. `plan_type` comes from saved login metadata. See [account identity, refresh, and usage](configuration.md#account-identity-refresh-and-usage).
+
+### TraceContext and trace options
+
+`TraceContext(*, traceparent, tracestate=None)` holds validated W3C trace headers. `to_headers()` returns a new header mapping. Import `TraceContext` from `agents`. Pass it or a mapping containing `traceparent` and optional `tracestate` as `parent_trace` when opening a Session, running an Agent, or submitting a new root Turn. See [trace correlation](configuration.md#continue-a-trace-across-workers) for inheritance and restore rules.
+
+Import `TraceOptions` from `agents.telemetry` for the `trace_options` argument. These options control native tracing linkage and policy. A local `TraceOptions.parent` uses an SDK `SpanContext`; a `TraceContext` carries only W3C headers between workers. Neither type grants tool or workspace access.
 
 ### ModelSettings
 
