@@ -26,7 +26,9 @@ class TraceContext:
     characters. Optional whitespace and empty members are normalized. These
     limits define the supported native carrier profile. Put no credentials or
     private content in either header. This value does not keep a span alive,
-    create spans, or propagate baggage.
+    create spans, or propagate baggage. Header IDs carry ancestry only; they do
+    not transfer SDK workflow policy or export credentials. Use an SDK-owned
+    SpanContext through TraceOptions.parent to retain local workflow policy.
     """
 
     traceparent: str = field(repr=False)

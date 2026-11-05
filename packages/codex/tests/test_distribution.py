@@ -82,7 +82,7 @@ def test_sdk_archive_has_current_native_api_and_licenses(sdk_wheel):
             assert (info.external_attr >> 16) & 0o111
 
 
-def test_sdk_metadata_declares_only_native_runtime_dependencies(
+def test_sdk_metadata_declares_base_and_optional_runtime_dependencies(
     sdk_wheel,
 ):
     path, archive = sdk_wheel
@@ -103,32 +103,35 @@ def test_sdk_metadata_declares_only_native_runtime_dependencies(
         metadata.get_payload().strip()
         == (SOURCE.parents[1] / "packages/codex/README.md").read_text().strip()
     )
-    assert not metadata.get_all("Provides-Extra")
+    assert metadata.get_all("Provides-Extra") == ["a2a"]
     observed = {Requirement(value) for value in metadata.get_all("Requires-Dist", [])}
     expected = {
         Requirement("jsonschema>=4.25.1,<5"),
         Requirement("referencing>=0.36.2,<1"),
         Requirement("pydantic>=2.12.2,<3"),
         Requirement("typing-extensions>=4.15,<5"),
+        Requirement('a2a-sdk==1.3.0; extra == "a2a"'),
     }
     assert {(item.name, item.specifier, frozenset(item.extras), item.url) for item in observed} == {
         (item.name, item.specifier, frozenset(item.extras), item.url) for item in expected
     }
     # Maturin normalizes the Python-version marker when writing METADATA.
     for full_version in ("3.10.0", "3.10.22", "3.11.0", "3.12.13", "3.14.0"):
-        environment = {
-            "python_version": ".".join(full_version.split(".")[:2]),
-            "python_full_version": full_version,
-        }
-        assert {
-            item.name
-            for item in observed
-            if item.marker is None or item.marker.evaluate(environment)
-        } == {
-            item.name
-            for item in expected
-            if item.marker is None or item.marker.evaluate(environment)
-        }
+        for extra in ("", "a2a"):
+            environment = {
+                "python_version": ".".join(full_version.split(".")[:2]),
+                "python_full_version": full_version,
+                "extra": extra,
+            }
+            assert {
+                item.name
+                for item in observed
+                if item.marker is None or item.marker.evaluate(environment)
+            } == {
+                item.name
+                for item in expected
+                if item.marker is None or item.marker.evaluate(environment)
+            }
     wheel_path = metadata_path.removesuffix("METADATA") + "WHEEL"
     wheel = BytesParser().parsebytes(archive.read(wheel_path))
     assert wheel["Root-Is-Purelib"] == "false"

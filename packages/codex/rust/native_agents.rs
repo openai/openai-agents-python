@@ -7,6 +7,7 @@ use codex_core::context::{
 use codex_core_api::{CodexThread, Config, Feature, ThreadId, WithTurnExtensionData};
 use codex_extension_api::ToolPolicy;
 use codex_models_manager::manager::{RefreshStrategy, SharedModelsManager};
+use codex_otel::sdk_trace::FutureExt as _;
 use codex_protocol::models::{ContentItem, MessagePhase, ResponseItem};
 use codex_protocol::openai_models::{ConfigShellToolType, ModelInfo, ReasoningEffort, ToolMode};
 use codex_protocol::protocol::{Event, EventMsg, TokenUsageInfo};
@@ -717,7 +718,18 @@ pub async fn submit(
             );
             // Core enforces the captured identity at mutation even if the
             // child completes and a native followup arrives after our checks.
-            match thread.steer_turn(request, turn.turn_id.clone()).await? {
+            let context = receipt
+                .tracing
+                .as_ref()
+                .map(|lease| codex_otel::sdk_trace::context(lease.token()))
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or_default();
+            match thread
+                .steer_turn(request, turn.turn_id.clone())
+                .with_context(codex_otel::sdk_trace::explicit_submission_context(context))
+                .await?
+            {
                 SteerSubmission::Steered { turn_id } => turn_id,
                 SteerSubmission::NotSubmitted { reason } => {
                     anyhow::bail!("Native child steer was not submitted: {reason:?}")
@@ -755,7 +767,18 @@ pub async fn submit(
                     "Native child changed while finishing its previous turn"
                 );
             }
-            match thread.start_turn_if_idle(request).await? {
+            let context = control
+                .creation_tracing()
+                .as_ref()
+                .map(|lease| codex_otel::sdk_trace::context(lease.token()))
+                .transpose()
+                .map_err(anyhow::Error::msg)?
+                .unwrap_or_default();
+            match thread
+                .start_turn_if_idle(request)
+                .with_context(codex_otel::sdk_trace::explicit_submission_context(context))
+                .await?
+            {
                 StartIfIdleSubmission::Started { turn_id } => turn_id,
                 StartIfIdleSubmission::NotSubmitted { reason } => {
                     anyhow::bail!("Native child start was not submitted: {reason:?}")
@@ -899,11 +922,19 @@ pub async fn continue_retained(
         .transpose()
         .map_err(anyhow::Error::msg)?;
 
+    let context = receipt
+        .tracing
+        .as_ref()
+        .map(|lease| codex_otel::sdk_trace::context(lease.token()))
+        .transpose()
+        .map_err(anyhow::Error::msg)?
+        .unwrap_or_default();
     let submitted = thread
         .continue_turn_if_idle(
             WithTurnExtensionData::new(request, init),
             turn.turn_id.clone(),
         )
+        .with_context(codex_otel::sdk_trace::explicit_submission_context(context))
         .await?;
     let turn_id = match submitted {
         TurnInputSubmission::Started { turn_id } => turn_id,

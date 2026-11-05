@@ -1072,10 +1072,16 @@ async def second():
     result=await telemetry.force_flush(timeout_ms=2000)
     assert result.status=='partial', result
     assert result.dropped_records==0, result
-    assert result.failed_deliveries==2, result
+    first_events=[lifecycle for _,name,lifecycle in seen if name=='first']
+    assert first_events in (['start'], ['start','end']), first_events
+    # The pump may select start before end is queued. Only the selected
+    # records are lost at loop shutdown; a queued end can reach the next loop.
+    assert result.failed_deliveries==2-int('end' in first_events), result
     again=await telemetry.force_flush(timeout_ms=2000)
-    assert again.status=='partial' and again.failed_deliveries==2, again
-    assert [name for _,name,lifecycle in seen if name=='first']==['first']
+    assert again.status=='partial', again
+    assert again.dropped_records==0, again
+    assert again.failed_deliveries==result.failed_deliveries, again
+    assert [lifecycle for _,name,lifecycle in seen if name=='first']==first_events
     if sys.argv[1]=='True':
         second_events=[(name,lifecycle) for _,name,lifecycle in seen if name=='second']
         assert second_events==[('second','start'),('second','end')]
@@ -1239,21 +1245,52 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                     ) as creation_scope:
                         initial = await session.submit("Create child")
                     assert (await initial.get_result()).final_output == "root complete"
-                    await model.entered["alpha"].wait()
                     [first] = await handles(session, 1)
-                    with telemetry.trace(
-                        "unrelated child caller",
-                        options=telemetry.TraceOptions(
-                            trace_id="f" * 32, include_sensitive_data=True
-                        ),
-                    ):
-                        await first.steer(steer)
+                    initial_wait = asyncio.create_task(first.get_result())
+                    entered_wait = asyncio.create_task(model.entered["alpha"].wait())
+                    try:
+                        ready, _ = await asyncio.wait(
+                            (initial_wait, entered_wait), return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if initial_wait in ready:
+                            try:
+                                await initial_wait
+                            except Exception as error:
+                                raise AssertionError(
+                                    (
+                                        mode,
+                                        len(model.requests),
+                                        seen,
+                                        "child failed before its response hold",
+                                    )
+                                ) from error
+                            raise AssertionError(
+                                (
+                                    mode,
+                                    len(model.requests),
+                                    seen,
+                                    "child completed before its response hold",
+                                )
+                            )
+                        with telemetry.trace(
+                            "unrelated child caller",
+                            options=telemetry.TraceOptions(
+                                trace_id="f" * 32, include_sensitive_data=True
+                            ),
+                        ):
+                            await first.steer(steer)
+                            model.release["alpha"].set()
+                            assert (await initial_wait).final_output == "alpha complete"
+                            [child] = [child async for child in session.subagents()]
+                            later = await child.start(fresh)
+                            assert later.turn_id != first.turn_id
+                            assert (await later.get_result()).final_output == "alpha complete"
+                    finally:
                         model.release["alpha"].set()
-                        assert (await first.get_result()).final_output == "alpha complete"
-                        [child] = [child async for child in session.subagents()]
-                        later = await child.start(fresh)
-                        assert later.turn_id != first.turn_id
-                        assert (await later.get_result()).final_output == "alpha complete"
+                        for waiter in (initial_wait, entered_wait):
+                            if not waiter.done():
+                                waiter.cancel()
+                        await asyncio.gather(initial_wait, entered_wait, return_exceptions=True)
                     assert {row[0] for row in seen} == {"initial", "steer", "fresh"}, seen
                     assert all(
                         row[1:] == (origin_id, disabled, mode != "metadata") for row in seen
