@@ -289,8 +289,12 @@ class NativeA2AExecutor(AgentExecutor):
         **changes: Any,
     ) -> NativeA2ATask:
         candidate, snapshot = await projection.preview(events)
-        if len(snapshot) > self.limits.checkpoint_bytes and changes.get("status") == "failed":
-            events = [_status(binding, p.TASK_STATE_FAILED)]
+        if (
+            len(snapshot) > self.limits.checkpoint_bytes
+            and changes.get("status") in {"failed", "canceled"}
+            and events[-1].status.HasField("message")
+        ):
+            events[-1].status.ClearField("message")
             candidate, snapshot = await projection.preview(events)
         if len(snapshot) > self.limits.checkpoint_bytes:
             raise ValueError("A2A snapshot exceeds configured byte limit")

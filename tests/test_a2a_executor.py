@@ -578,3 +578,58 @@ async def test_official_handler_acknowledges_failure_near_snapshot_limit(
     assert await executor.recover(binding, call_context()) == saved
     assert effects == (["once"] if with_tool else [])
     assert len(responses.requests) == (2 if with_tool else 1)
+
+
+@pytest.mark.parametrize(("prompt_size", "has_message"), [(1, True), (305, False)])
+async def test_official_cancel_preserves_canceled_outcome_within_snapshot_limit(
+    tmp_path, responses, prompt_size, has_message
+):
+    import asyncio
+
+    entered, release, joined = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        entered.set()
+        try:
+            await release.wait()
+            return "released"
+        finally:
+            joined.set()
+
+    responses.respond(function_call("hold", {}, "call-cancel"))
+    executor = make_executor(
+        tmp_path, responses, [hold], limits=A2ALimits(message_bytes=4096, checkpoint_bytes=512)
+    )
+    handler = DefaultRequestHandler(executor, executor.store, card("http://127.0.0.1:1"))
+    prompt = "p" * prompt_size
+    try:
+        running = await asyncio.wait_for(
+            handler.on_message_send(
+                p.SendMessageRequest(
+                    message=new_text_message(prompt, role=p.ROLE_USER),
+                    configuration=p.SendMessageConfiguration(return_immediately=True),
+                ),
+                call_context(),
+            ),
+            20,
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        task = await asyncio.wait_for(
+            handler.on_cancel_task(p.CancelTaskRequest(id=running.id), call_context()), 5
+        )
+        assert joined.is_set()
+    finally:
+        release.set()
+        await handler.aclose()
+
+    binding = NativeA2ABinding(principal="alice", task_id=task.id, context_id=task.context_id)
+    saved = executor.store.read(binding)
+    assert task.status.state == p.TASK_STATE_CANCELED
+    assert task.status.HasField("message") is has_message
+    assert task.history[0].parts[0].text == prompt
+    assert saved.status == "canceled" and saved.acknowledges(task)
+    assert executor.store.acknowledged(binding) == saved.publication_revision
+    assert all(len(snapshot) <= 512 for snapshot in executor.store.saved)
+    assert await executor.recover(binding, call_context()) == saved
+    assert len(responses.requests) == 1
