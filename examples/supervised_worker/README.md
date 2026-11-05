@@ -5,7 +5,7 @@ Use a wheel and native helpers built from this revision. See [the source build g
 Keep the wheel and native helpers outside both job directories. Use trusted prompts and workspace files for this demo. For untrusted input, run each job in its own OS sandbox or VM with access only to that job's data.
 
 ```sh
-job_dir="$(mktemp -d)"
+job_dir="$(mktemp -d "${TMPDIR:-/tmp}/supervised-worker.XXXXXX")"
 python -m examples.supervised_worker work "$job_dir/alpha" &
 alpha_pid=$!
 python -m examples.supervised_worker work "$job_dir/bravo" &
