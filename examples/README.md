@@ -24,6 +24,7 @@ If an example imports `agents`, install the matching preview wheel and any extra
 | [offline_unix_sockets.py](offline_unix_sockets.py) | Unix-socket access inside an independently offline job. | Current SDK, an isolated Linux or macOS executor, gateway credentials and a local synthetic Responses peer. |
 | [offline_docker.py](offline_docker.py) | Application helpers that create and inspect an offline Docker job. | Docker and a prepared image; the application supplies the gateway and executor configuration. |
 | [External jobs](external_job/README.md) | A journal, a separate thumbnail worker, and a deferred tool result. | Current SDK, the source checkout, private POSIX storage and a local Responses peer. |
+| [A2A](a2a/README.md) | Official remote discovery, native execution, cancellation and host-owned publication recovery. | Matching SDK with the A2A extra; host identity and storage. |
 
 ## Workflow recipes
 

@@ -25,14 +25,20 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 
+[project.optional-dependencies]
+a2a = ["a2a-sdk==1.3.0"]
+
 [project.urls]
 Homepage = "https://github.com/openai/openai-agents-python/tree/feat/codex-harness"
 Repository = "https://github.com/openai/openai-agents-python"
 
 [dependency-groups]
 dev = [
+    "a2a-sdk[http-server]==1.3.0",
+    "uvicorn>=0.30,<1",
     "mypy>=2.2,<3",
     "types-jsonschema>=4.25,<5",
+    "types-protobuf>=5,<8",
     "ruff==0.16.8",
     "pytest>=9.0.3",
     "pytest-asyncio",
