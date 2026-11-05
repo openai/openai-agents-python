@@ -28,7 +28,7 @@ use codex_thread_store::{
 };
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock, broadcast, mpsc, watch};
 
-use crate::environment::LocalStorageHome;
+use crate::environment::{LocalPrivatePaths, LocalStorageHome};
 use crate::{NativeThread, config, extensions, goals, options, telemetry};
 
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -217,11 +217,21 @@ impl EngineState {
             path: config.sqlite_config().home(),
             persistent_rollouts: local_home.is_some(),
         });
+        let private_paths = LocalPrivatePaths {
+            storage_home: None,
+            saved_login_file: codex_account
+                .as_ref()
+                .map(|account| account.auth_file.as_path()),
+        };
         let environment_options = config::environment(&runtime_json)?;
         // A local executor must pass its storage check before the profile opens.
         let local_environment = match (&environment_options, storage_home) {
             (Some(environment), Some(home)) if environment.is_local() => {
-                Some(environment.connect(&config, Some(home)).await?)
+                let private_paths = LocalPrivatePaths {
+                    storage_home: Some(home),
+                    ..private_paths
+                };
+                Some(environment.connect(&config, private_paths).await?)
             }
             _ => None,
         };
@@ -353,7 +363,7 @@ impl EngineState {
         let (environment, local_environment_error) = match (local_environment, environment_options)
         {
             (Some(environment), _) => (environment, None),
-            (None, Some(environment)) => (environment.connect(&config, None).await?, None),
+            (None, Some(environment)) => (environment.connect(&config, private_paths).await?, None),
             (None, None) if deferred_environment => (
                 EnvironmentManager::without_environments(config.http_client_factory()),
                 None,
@@ -1152,6 +1162,16 @@ impl EngineState {
         })
     }
 
+    pub(crate) fn local_private_paths(&self) -> LocalPrivatePaths<'_> {
+        LocalPrivatePaths {
+            storage_home: self.native_storage_home(),
+            saved_login_file: self
+                .codex_account
+                .as_ref()
+                .map(|account| account.auth_file.as_path()),
+        }
+    }
+
     pub(crate) async fn build_startup(
         &self,
         options: options::ThreadOptions,
@@ -1170,7 +1190,7 @@ impl EngineState {
                 self.cloud_config.clone(),
                 initial_config,
                 &self.manager.environment_manager(),
-                self.native_storage_home(),
+                self.local_private_paths(),
             )
             .await?;
         self.apply_deferred_environment(&mut startup)?;

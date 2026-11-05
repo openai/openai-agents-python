@@ -25,18 +25,20 @@ pub(crate) struct CodexAccount {
     pub account_id: String,
     pub plan_type: String,
     pub binding: String,
+    pub auth_file: PathBuf,
 }
 
 impl SavedCodexLogin {
     pub fn open(self, config: &Config) -> Result<(Arc<AuthManager>, CodexAccount)> {
         let codex_home = match self.codex_home {
-            Some(path) => path
-                .canonicalize()
-                .context("Cannot open the Codex login directory")?,
+            Some(path) => path,
             None => codex_core::config::find_codex_home()
                 .context("Cannot locate the Codex login directory")?
                 .to_path_buf(),
-        };
+        }
+        .canonicalize()
+        .context("Cannot open the Codex login directory")?;
+        let auth_file = codex_home.join("auth.json");
         let manager = AuthManager::shared_saved_chatgpt(codex_home, config.auth_route_config())
             .map_err(|_| anyhow::anyhow!(
                 "No usable saved Codex OAuth login. Sign in with ChatGPT using codex login first."
@@ -78,6 +80,7 @@ impl SavedCodexLogin {
                 account_id,
                 plan_type,
                 binding,
+                auth_file,
             },
         ))
     }

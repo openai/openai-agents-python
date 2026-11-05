@@ -1,0 +1,17 @@
+name: Native products for SDK pull requests
+
+on:
+  push:
+    branches-ignore: [main, feat/codex-harness]
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  native-only:
+    if: github.repository == 'openai/openai-agents-python' && !github.event.deleted && github.ref_name != github.event.repository.default_branch
+    uses: ./.github/workflows/tests.yml
+    with:
+      native_only: true

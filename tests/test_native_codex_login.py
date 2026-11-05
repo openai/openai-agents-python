@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import importlib
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from agents import (
     Agent,
     CodexAccount,
     CodexLogin,
+    Environment,
     LocalStorage,
     NativeError,
     NativeProvider,
@@ -104,7 +106,7 @@ def codex_endpoint(responses, monkeypatch):
     return responses
 
 
-def codex_agent(home: Path, **kwargs):
+def codex_agent(home: Path | None, **kwargs):
     return Agent(
         instructions=INSTRUCTIONS,
         model="gpt-5.1-codex",
@@ -115,6 +117,78 @@ def codex_agent(home: Path, **kwargs):
 
 async def submit(session, prompt: str):
     return await (await session.submit(prompt)).get_result()
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@pytest.mark.parametrize("overlap", ["cwd", "additional", "symlink_target", "hard_link"])
+async def test_local_executor_rejects_saved_login_overlap(
+    codex_endpoint: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    overlap: str,
+) -> None:
+    workspace = tmp_path / "work"
+    workspace.mkdir()
+    home = saved_login((workspace if overlap == "cwd" else tmp_path) / "login")
+    auth_file = home / "auth.json"
+    agent = codex_agent(home)
+    roots: list[Path] = []
+    reason = "writable roots must stay outside the saved Codex login"
+    if overlap == "additional":
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        agent = codex_agent(None)
+        roots = [home]
+    elif overlap == "symlink_target":
+        target = workspace / "credentials"
+        auth_file.rename(target)
+        auth_file.symlink_to(target)
+    elif overlap == "hard_link":
+        (workspace / "ordinary-name").hardlink_to(auth_file)
+        reason = "writable roots contain a hard link"
+
+    with pytest.raises(RuntimeError, match=reason):
+        async with agent.session(
+            environment=Environment.local(
+                cwd=workspace, writable_roots=roots, tools=["exec_command"]
+            ),
+        ):
+            pytest.fail("A local executor opened with access to the saved login")
+    assert codex_endpoint.requests == []
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+async def test_local_executor_rejects_saved_login_replacement(
+    codex_endpoint: ResponsesFixture, tmp_path: Path
+) -> None:
+    home = saved_login(tmp_path / "login")
+    workspace = home / "worktree"
+    workspace.mkdir()
+    additional = tmp_path / "additional"
+    additional.mkdir()
+    alias = additional / "ordinary-name"
+    alias.hardlink_to(home / "auth.json")
+    agent = codex_agent(home)
+
+    async with timeout(30), agent.session(environment=Environment.local(cwd=workspace)) as session:
+        for root, reason in (
+            (home, "writable roots must stay outside the saved Codex login"),
+            (additional, "writable roots contain a hard link"),
+        ):
+            turn = await session.submit("Reject this grant.", writable_roots=[root.resolve()])
+            with pytest.raises(NativeError, match=reason) as refused:
+                await turn.get_result()
+            assert refused.value.effects == "not_started"
+        assert codex_endpoint.requests == []
+
+        alias.unlink()
+        codex_endpoint.respond(assistant_output("allowed"))
+        turn = await session.submit("Allow this grant.", writable_roots=[additional.resolve()])
+        assert (await turn.get_result()).final_output == "allowed"
 
 
 @pytest.mark.parametrize(
