@@ -424,9 +424,10 @@ async def test_evicted_root_with_retained_repair_requires_resync(
         value: int
 
     # Real repair events fill the bounded suffix exactly, evicting the
-    # original start while retaining the repair start and its output.
+    # original start while retaining the repair start and its output, including
+    # the repair request dispatch and response link.
     responses.respond(*text_response("msg_invalid", "not json"))
-    responses.respond(*text_response("msg_repair", *([" "] * 251), '{"value":7}'))
+    responses.respond(*text_response("msg_repair", *([" "] * 249), '{"value":7}'))
     async with (
         timeout(20),
         Agent(instructions="Answer.", provider=provider(responses)).session() as session,

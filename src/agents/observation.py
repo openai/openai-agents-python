@@ -31,6 +31,8 @@ __all__ = [
     "EventStream",
     "ExecutionItemCompleted",
     "Observation",
+    "ModelRequestDispatching",
+    "ModelResponseLinked",
     "OutputTextDelta",
     "SubagentLifecycle",
     "SessionEnded",
@@ -55,6 +57,47 @@ class _SubmissionEvent(_Event):
     submission_id: str
     turn_id: str
     parent_submission_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelRequestDispatching(_SubmissionEvent):
+    """Resolved root sampling fields before entering a transport client API.
+
+    This may precede encoding failure or zero socket writes. A record does not
+    prove provider receipt, success or billing. None means the wire field is
+    omitted, with server defaults unknown. Transport retries share request_id;
+    later client invocations have new IDs. Metadata is bounded and best effort.
+    Separately managed correction roots keep their own thread/submission IDs and
+    the existing parent_submission_id link. Native children, warmup and compaction
+    and background/reviewer requests are outside this event's coverage. Restored
+    manual roots emit fresh events for resumed work; prior events are not replayed.
+    """
+
+    request_id: str
+    thread_id: str
+    model: str
+    reasoning_effort: str | int | None
+    reasoning_summary: str | None
+    service_tier: str | None
+    wire: Literal["responses", "responses_lite"]
+    transport: Literal["http_sse", "websocket"]
+    type: Literal["model_request_dispatching"] = field(
+        default="model_request_dispatching", init=False
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelResponseLinked(_SubmissionEvent):
+    """Best-effort link to one retained response occurrence, independent of provider ID.
+
+    Cancellation or retirement can suppress this link after history retention.
+    Its absence does not prove that no terminal was retained. Links are transient.
+    """
+
+    request_id: str
+    thread_id: str
+    response_observation_id: str
+    type: Literal["model_response_linked"] = field(default="model_response_linked", init=False)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -204,6 +247,8 @@ class EventGap(_Event):
 
 Observation: TypeAlias = (
     TurnStarted
+    | ModelRequestDispatching
+    | ModelResponseLinked
     | TurnFinished
     | SubagentLifecycle
     | OutputTextDelta
@@ -396,3 +441,89 @@ class EventStream(AsyncIterator[Observation]):
         self._check_loop()
         self._closed = True
         self._buffer.notify()
+
+
+def _request_observation(
+    value: Any, *, session_id: str, submission_id: str
+) -> ModelRequestDispatching | ModelResponseLinked | None:
+    """Decode only the safe tagged bridge; malformed passive metadata is harmless."""
+    if not isinstance(value, dict):
+        return None
+    common = {"type", "request_id", "thread_id", "turn_id"}
+    if not all(isinstance(value.get(key), str) and value[key] for key in common):
+        return None
+    if value["type"] == "model_response_linked":
+        if (
+            set(value) != common | {"response_observation_id"}
+            or not isinstance(value.get("response_observation_id"), str)
+            or not value["response_observation_id"]
+        ):
+            return None
+        return ModelResponseLinked(
+            session_id=session_id,
+            submission_id=submission_id,
+            turn_id=value["turn_id"],
+            thread_id=value["thread_id"],
+            request_id=value["request_id"],
+            response_observation_id=value["response_observation_id"],
+        )
+    if value["type"] != "model_request_dispatching" or set(value) != common | {
+        "model",
+        "reasoning_effort",
+        "reasoning_summary",
+        "service_tier",
+        "wire",
+        "transport",
+    }:
+        return None
+    if (
+        not isinstance(value["model"], str)
+        or value["wire"] not in ("responses", "responses_lite")
+        or value["transport"] not in ("http_sse", "websocket")
+    ):
+        return None
+    if any(
+        value[key] is not None and not isinstance(value[key], str)
+        for key in ("reasoning_summary", "service_tier")
+    ):
+        return None
+    raw = value["reasoning_effort"]
+    effort: str | int | None = None
+    if raw is not None:
+        if not isinstance(raw, dict):
+            return None
+        if (
+            raw.get("kind") == "text"
+            and set(raw) == {"kind", "value"}
+            and isinstance(raw.get("value"), str)
+        ):
+            effort = raw["value"]
+        elif raw.get("kind") == "integer" and set(raw) == {"kind", "decimal"}:
+            digits = raw["decimal"]
+            if (
+                not isinstance(digits, str)
+                or not digits
+                or len(digits) > 20
+                or not digits.isascii()
+                or not digits.isdigit()
+                or (len(digits) > 1 and digits[0] == "0")
+            ):
+                return None
+            effort = int(digits)
+            if effort > 18446744073709551615:
+                return None
+        else:
+            return None
+    return ModelRequestDispatching(
+        session_id=session_id,
+        submission_id=submission_id,
+        turn_id=value["turn_id"],
+        thread_id=value["thread_id"],
+        request_id=value["request_id"],
+        model=value["model"],
+        reasoning_effort=effort,
+        reasoning_summary=value["reasoning_summary"],
+        service_tier=value["service_tier"],
+        wire=value["wire"],
+        transport=value["transport"],
+    )

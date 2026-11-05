@@ -35,6 +35,45 @@ class ModelContext:
     items: tuple[dict[str, Any], ...]
 
 
+class ReceivedInputTokensDetails(TypedDict, total=False):
+    cached_tokens: int
+    cache_write_tokens: int
+
+
+class ReceivedOutputTokensDetails(TypedDict, total=False):
+    reasoning_tokens: int
+
+
+class ReceivedTokenUsage(TypedDict, total=False):
+    """Received counters only. Missing fields remain unknown; zero is known."""
+
+    input_tokens: int
+    input_tokens_details: ReceivedInputTokensDetails
+    output_tokens: int
+    output_tokens_details: ReceivedOutputTokensDetails
+    total_tokens: int
+
+
+class RecordedResponse(TypedDict):
+    """Retained response occurrence, not a bill or evidence of SDK acceptance.
+
+    Native origin IDs survive restore and inherited history. Legacy accounting
+    records lack an observation ID and received terminal facts. Their normalized
+    usage does not prove which counters the provider supplied.
+    """
+
+    id: str | None
+    thread_id: str
+    turn_id: str
+    response_id: str | None
+    usage_source: Literal["received", "native_normalized"]
+    usage: ReceivedTokenUsage | TokenUsage | None
+    status: NotRequired[Literal["completed", "incomplete", "failed"]]
+    incomplete_reason: NotRequired[
+        Literal["content_filter", "max_output_tokens", "interrupted", "unknown"]
+    ]
+
+
 class RecordedTurn(TypedDict):
     """Recorded turn; unavailable timestamps and usage are null.
 
@@ -60,3 +99,6 @@ class RecordedTurn(TypedDict):
     parent_session_id: NotRequired[str]
     parent_turn_id: NotRequired[str]
     receipt: NotRequired[TurnReceipt]
+    # Retained occurrences only, without a guarantee of complete attempt coverage.
+    # Absence leaves response coverage unknown for legacy snapshots.
+    responses: NotRequired[list[RecordedResponse]]
