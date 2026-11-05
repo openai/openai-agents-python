@@ -16,6 +16,7 @@ from agents import (
     FunctionTool,
     NativeAgents,
     NativeError,
+    StopTurn,
     ToolContext,
     function_tool,
 )
@@ -65,6 +66,73 @@ async def selected_children_peer():
     async with TestServer(app, shutdown_timeout=1) as server:
         peer.url = str(server.make_url("/v1"))
         yield peer
+
+
+async def test_child_step_stop_preserves_sibling_and_allows_successor(tmp_path, monkeypatch):
+    owners = {}
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+    allow_successor = False
+
+    @function_tool
+    def first(ctx: ToolContext[None]) -> str:
+        calls.append(ctx.submission)
+        return "record found"
+
+    async def select(child: ChildInvocation, *, step_index: int):
+        if child in calls:
+            return []
+        owners.setdefault(child.child_id, child)
+        if len(owners) == 2:
+            entered.set()
+        await release.wait()
+        if not allow_successor and child.child_id == next(iter(owners)):
+            return StopTurn("synthetic-private-child-policy")
+        return [first]
+
+    async with (
+        timeout(40),
+        selected_children_peer() as peer,
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+    ):
+        trust(executor, tmp_path, monkeypatch)
+        async with Agent(
+            instructions="Spawn the children.",
+            model="gpt-5.5",
+            tools=[first, NativeAgents(before_step=select, max_children=2)],
+            provider=peer.provider(websocket=False),
+        ).session(environment=declaration(executor)) as session:
+            root = await session.submit("Spawn alpha and beta")
+            try:
+                await entered.wait()
+                assert (await root.get_result()).final_output == "root complete"
+                children = [child async for child in session.subagents()]
+                stopped, surviving = sorted(
+                    children, key=lambda child: child.id != next(iter(owners))
+                )
+                assert stopped.turn is not None and surviving.turn is not None
+                assert not peer.child_requests
+                release.set()
+                with pytest.raises(NativeError, match="^Turn stopped by policy$"):
+                    await stopped.turn.get_result()
+                assert (await surviving.turn.get_result()).final_output.endswith("complete")
+                assert calls == [owners[surviving.id]]
+                assert all(
+                    item["thread_id"] != stopped.id
+                    for requests in peer.child_metadata.values()
+                    for item in requests
+                )
+                allow_successor = True
+                successor = await stopped.start("Read the record now")
+                assert successor.turn_id != stopped.turn.turn_id
+                assert (await successor.get_result()).final_output.endswith("complete")
+                assert len(calls) == 2
+                assert calls[-1].child_id == stopped.id
+                assert calls[-1].turn_id == successor.turn_id
+                assert (await root.get_result()).final_output == "root complete"
+            finally:
+                release.set()
 
 
 @pytest.mark.requires_native_linux_sandbox

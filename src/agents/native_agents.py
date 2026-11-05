@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
-from .native_interception import NativeToolCall
+from .native_interception import NativeToolCall, StopTurn
 from .turn import _child_submission_id
 
 if TYPE_CHECKING:
@@ -75,7 +75,10 @@ class _ChildBeforeStep(Protocol):
     ) -> (
         Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents]
         | None
-        | Awaitable[Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None]
+        | StopTurn
+        | Awaitable[
+            Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | StopTurn
+        ]
     ): ...
 
 
@@ -115,6 +118,11 @@ class NativeAgents:
     native child model request. The child is a ChildInvocation for that exact
     incarnation and turn. None restores its captured operation defaults; []
     disables every model tool. Root submissions use their own before_step.
+    Return StopTurn to stop only this child turn before its next model request
+    and join its owned cleanup. The parent and sibling turns keep running;
+    the child can accept a new turn afterward. The stopped turn retains the
+    existing NativeError policy-stop outcome. step_index counts ordinary step
+    preparations, not transport retries, compaction or output-repair requests.
 
     """
 

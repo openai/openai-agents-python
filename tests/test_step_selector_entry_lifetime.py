@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
+from agents import StopTurn
 from agents.session import Session, _ChildCallbacks
 
 
@@ -147,6 +148,30 @@ async def test_started_child_step_selector_is_joined_after_nonce_retirement():
     assert effects == ["joined"]
     assert checks and not state.completion.done()
     assert not state.failure.done()
+
+
+@pytest.mark.parametrize("expiry", ["terminal", "nonce"])
+async def test_late_child_step_stop_cannot_claim_retired_owner(expiry):
+    # The double controls retirement after entry, which public child handles do not expose.
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def select(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return StopTurn("No longer admitted")
+
+    session, state, message, native, checks = owner(select)
+    task = asyncio.create_task(Session._select_step(session, state, message))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        expire(state, native, expiry)
+    finally:
+        release.set()
+    await asyncio.wait_for(task, 5)
+    assert state.policy_stop is None
+    assert not state.failure.done()
+    assert checks
 
 
 def settlement(session, state):

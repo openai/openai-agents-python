@@ -51,6 +51,11 @@ struct Generation {
     specs: Vec<DynamicToolSpec>,
 }
 
+struct StepReply {
+    reply: oneshot::Sender<Option<Vec<ToolName>>>,
+    stop: crate::native_interception::CapturedTurnStop,
+}
+
 impl Generation {
     fn set_manual(&mut self, slots: &[usize]) -> Result<()> {
         for &slot in slots {
@@ -129,7 +134,7 @@ pub struct PythonTools {
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
     // share the lock so a late step cannot wait on an already closed reader.
-    step_replies: Mutex<Option<HashMap<u64, oneshot::Sender<Option<Vec<ToolName>>>>>>,
+    step_replies: Mutex<Option<HashMap<u64, StepReply>>>,
     #[cfg(test)]
     pub(crate) before_result: Mutex<Option<Arc<manual_checkpoint_tests::BeforeResult>>>,
 }
@@ -1234,18 +1239,42 @@ impl PythonTools {
         drop(pending);
     }
 
-    pub(crate) fn reply_step(&self, id: u64, names: Option<Vec<ToolName>>) -> Result<()> {
-        let reply = self
-            .step_replies
+    fn take_step(&self, id: u64) -> Result<StepReply> {
+        self.step_replies
             .lock()
             .expect("Python step replies poisoned")
             .as_mut()
             .context("Expired step selection")?
             .remove(&id)
-            .context("Expired step selection")?;
-        reply
+            .context("Expired step selection")
+    }
+
+    pub(crate) fn reply_step(&self, id: u64, names: Option<Vec<ToolName>>) -> Result<()> {
+        self.take_step(id)?
+            .reply
             .send(names)
             .map_err(|_| anyhow::anyhow!("Expired step selection"))
+    }
+
+    pub(crate) fn stop_owned_step(
+        self: &Arc<Self>,
+        id: u64,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> bool {
+        let Ok(owner) = self.step_owner(thread, instance) else {
+            return false;
+        };
+        let Ok(pending) = owner.take_step(id) else {
+            return false;
+        };
+        if pending.reply.send(None).is_err() {
+            return false;
+        }
+        // Claim the live preparation before fencing its captured turn. Neither
+        // a late reply nor a successor with the same display ID owns this stop.
+        pending.stop.stop();
+        true
     }
 
     fn step_owner(
@@ -1286,7 +1315,7 @@ impl PythonTools {
             replies
                 .as_ref()
                 .and_then(|pending| pending.get(&id))
-                .is_some_and(|reply| !reply.is_closed()),
+                .is_some_and(|pending| !pending.reply.is_closed()),
             "Expired step selection"
         );
         Ok(())
@@ -2819,6 +2848,8 @@ impl ToolContributor for PythonContributor {
             if !tools.selecting_steps.load(Ordering::Acquire) {
                 return Ok(None);
             }
+            let stop = crate::native_interception::capture_step_stop(thread, turn)
+                .ok_or("Step owner unavailable")?;
             let id = tools.family.next_invocation.fetch_add(1, Ordering::Relaxed);
             let (reply, receive) = oneshot::channel();
             {
@@ -2827,7 +2858,7 @@ impl ToolContributor for PythonContributor {
                     .lock()
                     .expect("Python step replies poisoned");
                 let pending = replies.as_mut().ok_or("Expired step owner")?;
-                pending.insert(id, reply);
+                pending.insert(id, StepReply { reply, stop });
             }
             // Dropping the native step retires this exact nonce even if Python
             // returns later, after another step or incarnation has started.
