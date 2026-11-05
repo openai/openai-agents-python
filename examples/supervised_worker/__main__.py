@@ -44,7 +44,6 @@ from agents.observation import (
     ExecutionItemCompleted,
     ToolFinished,
     ToolStarted,
-    TurnFinished,
     TurnStarted,
 )
 
@@ -186,6 +185,9 @@ class TurnTrace:
     steering: list[dict[str, str]] = field(default_factory=list)
     execution_ids: list[str] = field(default_factory=list)
     denied_approvals: int = 0
+    _observation: tuple[Turn[Any], asyncio.Task[None]] | None = field(
+        default=None, init=False, repr=False, compare=False
+    )
 
     def elapsed_ms(self) -> float:
         return (monotonic() - self.started) * 1000
@@ -218,8 +220,18 @@ async def observe(worker: Worker, turn: Turn[Any], trace: TurnTrace, *, interrup
                     trace.first_tool_result_ms = trace.elapsed_ms()
                 if isinstance(event, ExecutionItemCompleted):
                     trace.execution_ids.append(event.item["id"])
-            elif isinstance(event, TurnFinished):
-                return
+
+
+def _finish_handed_off_observation(
+    trace: TurnTrace, observation: tuple[Turn[Any], asyncio.Task[None]]
+) -> None:
+    observer = observation[1]
+    if observer.cancelled():
+        return
+    if (error := observer.exception()) is not None:
+        logger.error("The handed-off worker observer failed (%s).", type(error).__name__)
+    elif trace._observation is observation:
+        trace._observation = None
 
 
 async def wait_for_result(turn: Turn[OutputT], trace: TurnTrace) -> NativeOutcome[OutputT]:
@@ -251,8 +263,17 @@ async def _wait_for_attention(
 async def wait_for_result_with_quota(
     turn: Turn[OutputT], trace: TurnTrace, quota: QuotaWatch
 ) -> QuotaOutcome[OutputT]:
-    """Wait passively for native attention or an application account block."""
-    return await _wait_with_quota(turn, trace, quota)
+    """Wait passively for attention. Reuse the trace when continuing a worker turn."""
+    observation = trace._observation
+    if observation is None:
+        return await _wait_with_quota(turn, trace, quota)
+    observed_turn, observer = observation
+    if observed_turn is not turn:
+        raise ValueError("The worker trace belongs to a different turn.")
+    outcome = await _wait_with_quota(turn, trace, quota, observer)
+    if isinstance(outcome, (Completed, TurnNeedsAttention)):
+        await asyncio.shield(observer)
+    return outcome
 
 
 async def _wait_with_quota(
@@ -329,11 +350,24 @@ async def supervise(
     interrupt: bool = False,
     quota: QuotaWatch | None = None,
 ) -> QuotaOutcome[OutputT]:
+    if trace._observation is not None:
+        raise RuntimeError("Use wait_for_result_with_quota to continue an observed worker turn.")
     observer = asyncio.create_task(observe(worker, turn, trace, interrupt=interrupt))
     waiter: asyncio.Task[NativeOutcome[OutputT]] | None = None
+    handed_off = False
     try:
         if quota is not None:
-            return await asyncio.wait_for(_wait_with_quota(turn, trace, quota, observer), timeout)
+            observation = (turn, observer)
+            trace._observation = observation
+            outcome = await asyncio.wait_for(
+                _wait_with_quota(turn, trace, quota, observer), timeout
+            )
+            handed_off = isinstance(outcome, (AccountQuotaAttention, PendingRequests))
+            if handed_off:
+                observer.add_done_callback(
+                    lambda _: _finish_handed_off_observation(trace, observation)
+                )
+            return outcome
         waiter = asyncio.create_task(wait_for_result(turn, trace))
         pair = await asyncio.wait_for(asyncio.gather(observer, waiter), timeout)
         return pair[1]
@@ -346,12 +380,14 @@ async def supervise(
         raise
     finally:
         trace.completion_ms = trace.elapsed_ms()
-        observer.cancel()
-        if waiter is None:
-            await asyncio.gather(observer, return_exceptions=True)
-        else:
-            waiter.cancel()
-            await asyncio.gather(observer, waiter, return_exceptions=True)
+        if not handed_off:
+            trace._observation = None
+            observer.cancel()
+            if waiter is None:
+                await asyncio.gather(observer, return_exceptions=True)
+            else:
+                waiter.cancel()
+                await asyncio.gather(observer, waiter, return_exceptions=True)
 
 
 async def work(

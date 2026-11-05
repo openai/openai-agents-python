@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
@@ -25,7 +25,10 @@ from agents import (
     NativeError,
     NativeProvider,
     PendingRequests,
+    SteeringReceipt,
+    Turn,
     TurnNeedsAttention,
+    UserInput,
     _native,
     function_tool,
 )
@@ -291,6 +294,152 @@ async def test_current_read_and_sparse_credit_update_can_wake_an_active_turn(
         assert (await turn.get_result()).final_output == "still ran"
 
 
+@pytest.mark.parametrize("during_steering", [False, True], ids=["before-brief", "during-steering"])
+async def test_worker_continues_brief_after_quota_handoff(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    feed: Feed,
+    monkeypatch: pytest.MonkeyPatch,
+    during_steering: bool,
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    if during_steering:
+        steer_exact = Turn.steer_exact
+
+        async def hold_receipt(
+            turn: Turn[Any], input: UserInput, *, expected_turn_id: str
+        ) -> SteeringReceipt:
+            receipt = await steer_exact(turn, input, expected_turn_id=expected_turn_id)
+            if input == worker.CORRECTIONS[0]:
+                entered.set()
+                await release.wait()
+            return receipt
+
+        monkeypatch.setattr(Turn, "steer_exact", hold_receipt)
+    else:
+
+        async def hold_tool_call(event: dict[str, Any]) -> None:
+            if event.get("item", {}).get("call_id") == "call-brief":
+                entered.set()
+                await release.wait()
+
+        responses.before_event = hold_tool_call
+
+    responses.respond(function_call("brief", {}, "call-brief"))
+    responses.respond(assistant_output("done"))
+    watch = quota.QuotaWatch()
+    binding = watch.attach("account-a")
+    active_worker = worker.Worker(tmp_path, False)
+    connection = provider(responses)
+    agent = Agent(instructions="Call brief and reply.", tools=[worker.brief], provider=connection)
+    async with timeout(15), connection, agent.session(context=active_worker) as session:
+        turn = await session.submit("Call brief and reply.")
+        report = trace()
+        waiting = asyncio.create_task(
+            worker.supervise(active_worker, turn, report, timeout=12, quota=watch)
+        )
+        try:
+            await entered.wait()
+            feed.read(watch, binding, NO_CREDITS)
+            assert isinstance(await waiting, quota.AccountQuotaAttention)
+            assert not active_worker.brief_release.is_set()
+            feed.read(watch, binding, USABLE_CREDITS)
+            release.set()
+            result = await worker.wait_for_result_with_quota(turn, report, watch)
+            assert isinstance(result, Completed) and result.final_output == "done"
+            assert len(report.steering) == len(worker.CORRECTIONS)
+            assert tool_output(responses.requests[1], "call-brief") == active_worker.expected_text
+            next_request = json.dumps(responses.requests[1])
+            assert all(next_request.count(correction) == 1 for correction in worker.CORRECTIONS)
+        finally:
+            release.set()
+            waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+
+@pytest.mark.parametrize("close_session", [False, True], ids=["cancel-turn", "close-session"])
+async def test_direct_worker_stop_releases_handed_off_observer(
+    responses: ResponsesFixture, tmp_path: Path, feed: Feed, close_session: bool
+) -> None:
+    responses.respond(assistant_output("held"))
+    watch = quota.QuotaWatch()
+    feed.read(watch, watch.attach("account-a"), NO_CREDITS)
+    active_worker = worker.Worker(tmp_path, False)
+    connection = provider(responses)
+    agent = Agent(instructions="Reply.", provider=connection)
+    report = trace()
+    async with (
+        timeout(15),
+        connection,
+        hold_final_text(responses) as (entered, _),
+        AsyncExitStack() as sessions,
+    ):
+        session = await sessions.enter_async_context(agent.session())
+        turn = await session.submit("Reply.")
+        await entered.wait()
+        outcome = await worker.supervise(active_worker, turn, report, timeout=10, quota=watch)
+        assert isinstance(outcome, quota.AccountQuotaAttention)
+        attachment = report._observation
+        assert attachment is not None and attachment[0] is turn
+        observer = attachment[1]
+        stopped = asyncio.Event()
+        observer.add_done_callback(lambda _: stopped.set())
+        if close_session:
+            await sessions.aclose()
+        else:
+            await turn.cancel()
+        await stopped.wait()
+        observer.result()
+        assert report._observation is None
+
+
+async def test_handed_off_observer_failure_surfaces_on_passive_resume(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    feed: Feed,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fail = asyncio.Event()
+    failure = RuntimeError("synthetic observer failure")
+
+    async def failing_observe(
+        _worker: worker.Worker, _turn: Turn[Any], _trace: worker.TurnTrace, *, interrupt: bool
+    ) -> None:
+        await fail.wait()
+        raise failure
+
+    monkeypatch.setattr(worker, "observe", failing_observe)
+    responses.respond(assistant_output("held"))
+    watch = quota.QuotaWatch()
+    feed.read(watch, watch.attach("account-a"), NO_CREDITS)
+    connection = provider(responses)
+    agent = Agent(instructions="Reply.", provider=connection)
+    async with (
+        timeout(15),
+        connection,
+        agent.session() as session,
+        hold_final_text(responses) as (entered, _),
+    ):
+        turn = await session.submit("Reply.")
+        await entered.wait()
+        report = trace()
+        outcome = await worker.supervise(
+            worker.Worker(tmp_path, False), turn, report, timeout=10, quota=watch
+        )
+        assert isinstance(outcome, quota.AccountQuotaAttention)
+        attachment = report._observation
+        assert attachment is not None
+        stopped = asyncio.Event()
+        attachment[1].add_done_callback(lambda _: stopped.set())
+        fail.set()
+        await stopped.wait()
+        assert "The handed-off worker observer failed (RuntimeError)." in caplog.messages
+        with pytest.raises(RuntimeError) as caught:
+            await worker.wait_for_result_with_quota(turn, report, watch)
+        assert caught.value is failure
+
+
 @pytest.mark.parametrize(
     ("snapshot", "field", "value"),
     [
@@ -416,15 +565,17 @@ async def test_supervise_returns_a_live_native_question(
     agent = Agent(instructions="Ask the application.", tools=[ask], provider=connection)
     async with timeout(15), connection, agent.session() as session:
         turn = await session.submit("Ask a question.")
+        report = trace()
         result = await worker.supervise(
-            worker.Worker(tmp_path, False), turn, trace(), timeout=10, quota=watch
+            worker.Worker(tmp_path, False), turn, report, timeout=10, quota=watch
         )
         assert isinstance(result, PendingRequests) and result.turn is turn
         (request,) = result.requests
         assert isinstance(request, ActionRequested)
         assert request.call_id == "call-question" and request.arguments.topic == "color"
         await request.respond("blue")
-        assert (await turn.get_result()).final_output == "answered"
+        completed = await worker.wait_for_result_with_quota(turn, report, watch)
+        assert isinstance(completed, Completed) and completed.final_output == "answered"
         assert tool_output(responses.requests[1], "call-question") == "blue"
 
 

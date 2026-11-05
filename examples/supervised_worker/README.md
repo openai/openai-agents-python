@@ -81,15 +81,11 @@ when the backend denies ordinary usage and both credit flags are false. Missing
 facts leave the block unproven. API-key request and token limits stay separate
 in `Session.rate_limits()`.
 
-The worker still denies approvals. An account wake or native question hands
-the live turn back to the caller.
-Choose whether to answer, keep waiting, or call `turn.cancel()` to stop and
-join it. Use `wait_for_result_with_quota(turn, trace, watch)` for a passive
-wait. Cancelling that wait leaves the turn running. A timeout or cancellation
-of the owning `supervise` call stops and joins the turn. The worker reports
-`connection_lost` when the native turn ends with a connection error. The native
-provider applies its own retry policy before it reports a terminal error.
-The application decides whether to reopen the session and send new input.
+The worker still denies approvals. An account block or native question hands the live turn back to the application. The worker keeps observing the turn so it can steer when the brief tool starts.
+
+Keep the session open while you handle the question or wait for quota to recover. To resume, pass the same turn and trace to `wait_for_result_with_quota(turn, trace, watch)`. Cancelling that passive wait leaves the turn and its observer running. Call `turn.cancel()` to stop and join the turn, or close its session when done. A timeout or cancellation of the owning `supervise` call stops and joins the turn.
+
+The worker reports `connection_lost` when the native turn ends with a connection error. The native provider applies its own retry policy before it reports a terminal error. The application decides whether to reopen the session and send new input.
 
 ## Add trusted instructions and tools
 
