@@ -26,7 +26,7 @@ Known receipts support observation without creating another task. Lost create, i
 
 `server.py` composes `NativeA2AExecutor` with official routes and an application-provided `NativeA2AStore`. The host supplies authentication middleware and a `ServerCallContextBuilder` that includes the authenticated user and the incoming `a2a-version` header in `state['headers']`. The host factory receives the trusted principal/task/context binding and current official `ServerCallContext`. It returns current `NativeA2AAgent` configuration and application context. Filter incoming trace headers from that call context and supply the resulting `parent_trace`; a fresh worker supplies a fresh parent. It must not reconstruct authority from peer metadata or checkpoint contents.
 
-Data parts must preserve JSON values exactly. The executor fails a task if encoding its result or approval proposal would round a number. Use strings for large integer identifiers that must retain every digit.
+Data parts must preserve JSON values exactly. The executor fails a task if encoding its result or approval proposal would round a number. The job provider rejects such replies before reserving an action. Use strings for large integer identifiers that must retain every digit.
 
 Each A2A task owns one native Session. Reusing a conversation context ID does not combine Sessions. Core owns model requests, tools and accepted history. Tool progress is passive; successful final artifacts follow validated `get_result()` and joined Session cleanup. Disconnecting an SSE observer leaves remote work running. Explicit CancelTask joins owned native work and reports settled state; it does not roll back completed external effects.
 

@@ -173,6 +173,77 @@ async def test_lost_creation_acknowledgment_stays_unknown_after_restart(
             assert db.execute("SELECT count(*) FROM private").fetchone()[0] == 1
 
 
+@pytest.mark.parametrize(
+    ("output_type", "invalid_result", "valid_result"),
+    [
+        pytest.param(int, 9007199254740993, 9007199254740992, id="integer"),
+        pytest.param(
+            list[list[int]], [[9007199254740993]], [[9007199254740992]], id="nested-integer"
+        ),
+    ],
+)
+async def test_lossy_reply_preserves_reservation_and_current_challenge(
+    tmp_path, responses, output_type, invalid_result, valid_result
+):
+    tool = FunctionTool(
+        name="approve", description="Host approval", input_type=Approval, output_type=output_type
+    )
+    executor = make_executor(tmp_path / "host", responses, [tool])
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    responses.respond(assistant_output("approved"))
+    async with serve(lambda url: service(executor, executor.store, url)) as url:
+        journal = tmp_path / "journal.db"
+        provider = make_provider(endpoint(url), journal)
+        first = await provider.start(claim(provider), Query(text="Synthetic request"))
+        for _ in range(200):
+            current = await provider.observe(claim(provider, first, "observe"))
+            if current.status == "input_required":
+                break
+            await asyncio.sleep(0.01)
+        assert current.status == "input_required"
+        remote = json.loads(first.receipt)
+        proposal = current.value["message"]["parts"][0]["data"]
+        reply = A2AInputReply(
+            task_id=remote["task_id"],
+            context_id=remote["context_id"],
+            challenge=proposal["challenge"],
+            generation=int(proposal["generation"]),
+            result=invalid_result,
+        )
+        with pytest.raises(ValueError, match="exactly"):
+            await provider.respond(claim(provider, current, "respond"), reply)
+        with sqlite3.connect(journal) as db:
+            assert (
+                db.execute(
+                    "SELECT count(*) FROM reservations WHERE operation='respond'"
+                ).fetchone()[0]
+                == 0
+            )
+        assert len(responses.requests) == 1
+        observed = await provider.observe(claim(provider, current, "observe"))
+        assert observed.status == "input_required"
+        assert observed.value == current.value
+
+        update = await provider.respond(
+            claim(provider, current, "respond"), replace(reply, result=valid_result)
+        )
+        for _ in range(200):
+            if update.status == "completed":
+                break
+            await asyncio.sleep(0.01)
+            update = await provider.observe(claim(provider, current, "observe"))
+        assert update.status == "completed"
+        assert update.value == {"answer": "approved"}
+        with sqlite3.connect(journal) as db:
+            assert (
+                db.execute(
+                    "SELECT count(*) FROM reservations WHERE operation='respond'"
+                ).fetchone()[0]
+                == 1
+            )
+        assert len(responses.requests) == 2
+
+
 async def test_stale_reply_does_not_spend_reservation(tmp_path, responses):
 
     tool = FunctionTool(

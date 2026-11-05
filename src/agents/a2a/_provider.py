@@ -222,7 +222,15 @@ class A2AJobProvider(Generic[_Input]):
             "result": response.result,
         }
         _json(value, self.limits.message_bytes)
-        return await self._mutate(claim, receipt, "respond", value)
+        message = new_data_message(
+            value,
+            task_id=receipt["task_id"],
+            context_id=receipt["context_id"],
+            role=p.ROLE_USER,
+        )
+        if MessageToDict(message.parts[0].data) != value:
+            raise ValueError("A2A data cannot represent this JSON value exactly")
+        return await self._mutate(claim, receipt, "respond", value, message=message)
 
     async def cancel(self, claim: JobClaim) -> JobUpdate:
         await self._check(claim, "cancel")
@@ -234,6 +242,8 @@ class A2AJobProvider(Generic[_Input]):
         receipt: dict[str, str],
         operation: Literal["respond", "cancel"],
         value: dict[str, object] | None,
+        *,
+        message: p.Message | None = None,
     ) -> JobUpdate:
         result = None
         invalid = False
@@ -263,12 +273,7 @@ class A2AJobProvider(Generic[_Input]):
                     )
                     if not invalid:
                         request = p.SendMessageRequest(
-                            message=new_data_message(
-                                value,
-                                task_id=receipt["task_id"],
-                                context_id=receipt["context_id"],
-                                role=p.ROLE_USER,
-                            ),
+                            message=message,
                             configuration=p.SendMessageConfiguration(return_immediately=True),
                         )
                 if not invalid:
