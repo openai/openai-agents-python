@@ -100,11 +100,12 @@ index 8bdb9ba22e7d6157b992417b63541009a707e5f8..94faba5acb993d98497ba85b0204c88e
 +}
 diff --git a/codex-rs/core/src/session/context_metadata_tests.rs b/codex-rs/core/src/session/context_metadata_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..ac21da85b10c7184d57b24acce8e0107a0957f5d
+index 0000000000000000000000000000000000000000..e48bdb5e4622c05435a3a59683e476a58bef9b7f
 --- /dev/null
 +++ b/codex-rs/core/src/session/context_metadata_tests.rs
-@@ -0,0 +1,237 @@
+@@ -0,0 +1,238 @@
 +use super::*;
++use pretty_assertions::assert_eq;
 +
 +#[tokio::test]
 +async fn unknown_context_metadata_replaces_prior_usage_without_changing_limits() {
@@ -492,10 +493,18 @@ index d1080745c2a4058f12ead8c37733a5d11a18319a..784c769924ae1e5f7d8b8798968414f7
      per_turn_config.model = Some(model);
      per_turn_config.model_reasoning_effort = reasoning_effort;
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index 0202c02075fc3b3d8c4379f393a01b0695d25690..9abd00334133ddc88b5a3a5abab58f996f0d711c 100644
+index 0202c02075fc3b3d8c4379f393a01b0695d25690..68e2cf78f21f8ec42a8636967ecb5089bd05832e 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
-@@ -689,6 +689,33 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
+@@ -44,6 +44,7 @@ use codex_protocol::openai_models::ModelsResponse;
+ use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::Op;
++use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TurnAbortReason;
+ use pretty_assertions::assert_eq;
+ use std::collections::BTreeSet;
+@@ -689,6 +690,33 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
              step.settings.reasoning_summary,
          );
      }
@@ -529,7 +538,7 @@ index 0202c02075fc3b3d8c4379f393a01b0695d25690..9abd00334133ddc88b5a3a5abab58f99
      assert_eq!(after.settings.model_info.as_ref(), &expected_destination);
      let initial_budget = turn
          .config
-@@ -1066,6 +1093,7 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
+@@ -1066,6 +1094,7 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
          Arc::new(selected),
          Arc::new(model_info),
          session.features.enabled(Feature::FastMode),
