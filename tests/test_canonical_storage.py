@@ -96,6 +96,7 @@ def test_reference_adapter_rejects_unknown_database_schema(tmp_path: Path) -> No
     database = tmp_path / "history.sqlite"
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA user_version=2")
+    database.chmod(0o600)
     with pytest.raises(RuntimeError, match="Unsupported canonical storage schema"):
         SQLiteSessionStore(database)
     with sqlite3.connect(database) as connection:
@@ -144,14 +145,43 @@ def test_reference_adapter_keeps_database_and_journal_private(tmp_path: Path) ->
         os.umask(previous_umask)
 
 
-def test_reference_adapter_secures_existing_database(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [0o644, 0o660])
+@pytest.mark.parametrize("stage", ["initialization", "acquisition", "connection"])
+def test_reference_adapter_rejects_permissive_database_before_writes(
+    tmp_path: Path, mode: int, stage: str
+) -> None:
     import stat
 
     path = tmp_path / "history.sqlite"
-    SQLiteSessionStore(path)
-    path.chmod(0o666)
-    SQLiteSessionStore(path)
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    store = SQLiteSessionStore(path)
+    token = store.acquire("session") if stage == "connection" else None
+    path.chmod(mode)
+    before = path.read_bytes()
+    reader = os.open(path, os.O_RDONLY)
+    try:
+        with pytest.raises(PermissionError, match="owner-only"):
+            if stage == "initialization":
+                SQLiteSessionStore(path)
+            elif stage == "acquisition":
+                acquired = store.acquire("session")
+                store.release("session", acquired)
+            else:
+                assert token is not None
+                store.commit(
+                    "session",
+                    token,
+                    0,
+                    "write",
+                    json.dumps({"revision": 1, "write_id": "write", "items": ["private-result"]}),
+                )
+        assert path.read_bytes() == before
+        assert os.pread(reader, len(before), 0) == before
+        assert stat.S_IMODE(path.stat().st_mode) == mode
+    finally:
+        os.close(reader)
+        if token is not None:
+            with pytest.raises(PermissionError, match="owner-only"):
+                store.release("session", token)
 
 
 def test_reference_adapter_allows_distinct_sessions_in_one_database(tmp_path: Path) -> None:
@@ -255,7 +285,8 @@ async def test_reconcile_rejects_invalid_output_before_native_acquisition(
     assert not store._owners
 
 
-def test_reference_adapter_secures_existing_wal_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_reference_adapter_rejects_permissive_live_wal_files(tmp_path: Path, suffix: str) -> None:
     import sqlite3
     import stat
 
@@ -266,12 +297,14 @@ def test_reference_adapter_secures_existing_wal_files(tmp_path: Path) -> None:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("INSERT INTO canonical_threads(id) VALUES ('synthetic')")
         connection.commit()
-        sidecars = [path.with_name(path.name + suffix) for suffix in ("-wal", "-shm")]
-        for sidecar in sidecars:
-            assert sidecar.exists()
-            sidecar.chmod(0o666)
-        SQLiteSessionStore(path)
-        assert all(stat.S_IMODE(sidecar.stat().st_mode) == 0o600 for sidecar in sidecars)
+        sidecar = path.with_name(path.name + suffix)
+        assert sidecar.exists()
+        sidecar.chmod(0o644)
+        before = path.read_bytes(), sidecar.read_bytes()
+        with pytest.raises(PermissionError, match="owner-only"):
+            SQLiteSessionStore(path)
+        assert (path.read_bytes(), sidecar.read_bytes()) == before
+        assert stat.S_IMODE(sidecar.stat().st_mode) == 0o644
     finally:
         connection.close()
 
@@ -419,7 +452,8 @@ def test_reference_adapter_rejects_foreign_owner_database_without_mutation(
             assert list(tmp_path.glob("*.lock")) == locks
     finally:
         if store is not None and existing_token is not None:
-            store.release("existing", existing_token)
+            with pytest.raises(PermissionError, match="owner-only"):
+                store.release("existing", existing_token)
 
 
 @pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
@@ -430,7 +464,6 @@ def test_reference_adapter_rejects_foreign_owner_sidecar_without_mutation(
 
     path = tmp_path / "history.sqlite"
     SQLiteSessionStore(path)
-    path.chmod(0o644)
     before = path.read_bytes()
     sidecar = path.with_name(path.name + suffix)
     sidecar.touch(mode=0o644)
@@ -438,7 +471,7 @@ def test_reference_adapter_rejects_foreign_owner_sidecar_without_mutation(
         with pytest.raises(PermissionError, match="effective user"):
             SQLiteSessionStore(path)
         assert path.read_bytes() == before
-        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(sidecar.stat().st_mode) == 0o644
         assert sidecar.read_bytes() == b""
 
@@ -451,7 +484,6 @@ def test_reference_adapter_rejects_foreign_owner_lock_without_fencing(
 
     path = tmp_path / "history.sqlite"
     store = SQLiteSessionStore(path)
-    path.chmod(0o644)
     before = path.read_bytes()
     lock = path.with_name(path.name + "." + hashlib.sha256(b"session").hexdigest() + ".lock")
     lock.touch(mode=0o644)
@@ -460,26 +492,27 @@ def test_reference_adapter_rejects_foreign_owner_lock_without_fencing(
             token = store.acquire("session")
             store.release("session", token)
         assert path.read_bytes() == before
-        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
         assert stat.S_IMODE(lock.stat().st_mode) == 0o644
         assert lock.read_bytes() == b""
 
 
-def test_reference_adapter_repairs_same_owner_lock_permissions(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", [0o644, 0o660, 0o602])
+def test_reference_adapter_rejects_permissive_same_owner_lock(tmp_path: Path, mode: int) -> None:
     import hashlib
     import stat
 
     path = tmp_path / "history.sqlite"
     store = SQLiteSessionStore(path)
     lock = path.with_name(path.name + "." + hashlib.sha256(b"session").hexdigest() + ".lock")
-    lock.touch(mode=0o666)
-    lock.chmod(0o666)
-    token = store.acquire("session")
-    try:
-        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
-        assert store.read("session", token) is None
-    finally:
+    lock.touch(mode=mode)
+    lock.chmod(mode)
+    before = path.read_bytes()
+    with pytest.raises(PermissionError, match="owner-only"):
+        token = store.acquire("session")
         store.release("session", token)
+    assert stat.S_IMODE(lock.stat().st_mode) == mode
+    assert path.read_bytes() == before
 
 
 def _attempt_sqlite_writer(path: str, result: multiprocessing.Queue) -> None:
@@ -544,3 +577,44 @@ def test_reference_adapter_preserves_another_connection_writer_lock(
         connection.rollback()
         connection.close()
         store.release("session", token)
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_reference_adapter_rejects_permissive_sidecar_before_initialization(
+    tmp_path: Path, suffix: str
+) -> None:
+    import stat
+
+    path = tmp_path / "history.sqlite"
+    SQLiteSessionStore(path)
+    before = path.read_bytes()
+    sidecar = path.with_name(path.name + suffix)
+    sidecar.touch(mode=0o644)
+    with pytest.raises(PermissionError, match="owner-only"):
+        SQLiteSessionStore(path)
+    assert path.read_bytes() == before
+    assert sidecar.read_bytes() == b""
+    assert stat.S_IMODE(sidecar.stat().st_mode) == 0o644
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "directory"])
+def test_reference_adapter_rejects_non_dedicated_lock_before_fencing(
+    tmp_path: Path, kind: str
+) -> None:
+    import hashlib
+
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    lock = path.with_name(path.name + "." + hashlib.sha256(b"session").hexdigest() + ".lock")
+    target = tmp_path / "target"
+    target.touch(mode=0o600)
+    if kind == "symlink":
+        lock.symlink_to(target)
+    elif kind == "hardlink":
+        os.link(target, lock)
+    else:
+        lock.mkdir()
+    before = path.read_bytes()
+    with pytest.raises(ValueError, match="regular|hard-linked"):
+        store.acquire("session")
+    assert path.read_bytes() == before

@@ -92,9 +92,11 @@ class SQLiteSessionStore:
     a database. Symlinks resolve once to the same per-session lock path;
     hard-linked databases are unsupported. Do not replace database or lock files
     during live use. Network filesystems and cross-host access are unsupported.
-    Database, sidecar and lock files must belong to the effective user. Keep
-    their directory under trusted application control. Files are owner-only;
-    the application owns encryption and backups of sensitive conversation data.
+    Database, sidecar and lock files must belong to the effective user and
+    already have owner-only permissions. Keep their directory under trusted
+    application control, with a trusted private file history: mode checks cannot
+    detect prior exposure or revoke existing readers. The application owns
+    encryption and backups of sensitive conversation data.
     """
 
     def __init__(self, path: Path):
@@ -137,29 +139,28 @@ class SQLiteSessionStore:
             except FileNotFoundError:
                 pass
         for _, info in files:
-            if not stat.S_ISREG(info.st_mode):
-                raise ValueError("SQLiteSessionStore requires regular database and sidecar files")
-            if info.st_uid != os.geteuid():
-                raise PermissionError(
-                    "SQLiteSessionStore files must be owned by the effective user"
-                )
-            if info.st_nlink != 1:
-                raise ValueError("SQLiteSessionStore does not support hard-linked database files")
+            self._check_private_file(info, os.geteuid())
         info = files[0][1]
         identity = (info.st_dev, info.st_ino)
         if self._database_identity is not None and identity != self._database_identity:
             raise RuntimeError("SQLiteSessionStore database file changed")
         self._database_identity = identity
-        # The directory is trusted and stable. SQLite must own its existing
-        # file descriptors: closing our own descriptor for the same inode would
-        # release another connection's process-owned POSIX locks.
-        self.path.chmod(0o600)
-        for sidecar, _ in files[1:]:
-            try:
-                sidecar.chmod(0o600)
-            except FileNotFoundError:
-                # SQLite may remove its own journal or WAL files normally.
-                pass
+        # Inspect metadata only. Closing a raw descriptor for an existing
+        # SQLite inode would release another connection's POSIX locks; chmod
+        # would not revoke readers that opened a previously permissive file.
+
+    @staticmethod
+    def _check_private_file(info: os.stat_result, effective_uid: int) -> None:
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("SQLiteSessionStore requires regular files")
+        if info.st_uid != effective_uid:
+            raise PermissionError("SQLiteSessionStore files must be owned by the effective user")
+        if info.st_nlink != 1:
+            raise ValueError("SQLiteSessionStore does not support hard-linked files")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise PermissionError(
+                "SQLiteSessionStore files must already have owner-only permissions"
+            )
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -191,24 +192,18 @@ class SQLiteSessionStore:
             )
             descriptor = None
             try:
-                # Inspect a pre-existing lock before repairing any permissions
-                # or allowing SQLite to change canonical history.
+                self._check_database()
                 try:
-                    descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+                    info = lock_path.lstat()
                 except FileNotFoundError:
                     pass
-                if descriptor is not None and os.fstat(descriptor).st_uid != os.geteuid():
-                    raise PermissionError(
-                        "SQLiteSessionStore files must be owned by the effective user"
-                    )
-                self._check_database()
-                if descriptor is None:
-                    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-                    if os.fstat(descriptor).st_uid != os.geteuid():
-                        raise PermissionError(
-                            "SQLiteSessionStore files must be owned by the effective user"
-                        )
-                os.fchmod(descriptor, 0o600)
+                else:
+                    self._check_private_file(info, os.geteuid())
+                try:
+                    descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+                except FileExistsError:
+                    descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+                self._check_private_file(os.fstat(descriptor), os.geteuid())
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 token = uuid.uuid4().hex
                 with self._connect() as connection:
