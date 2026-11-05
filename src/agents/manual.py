@@ -827,7 +827,7 @@ class _CapturedManual:
     output_adapter: TypeAdapter[Any] = field(repr=False)
     namespace: None = field(default=None, init=False)
 
-    def encode_result(
+    def _encode_result(
         self, value: Any, *, expected_json: str | None = None, strict: bool = False
     ) -> str:
         from .tools import ToolOutput

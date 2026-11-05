@@ -3346,7 +3346,7 @@ class Session(Generic[ContextT, OutputT]):
                 value = entry.output_adapter.validate_python(result)
                 if not self._native._check_manual_tool(request._grant):
                     raise InteractionExpiredError("Manual tool reply expired during validation")
-                output = entry.encode_result(value, expected_json=expected_json)
+                output = entry._encode_result(value, expected_json=expected_json)
             else:
                 output = prepared.output
         except Exception:

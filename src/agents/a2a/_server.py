@@ -260,7 +260,7 @@ class NativeA2AExecutor(AgentExecutor):
                         prepared = _PreparedManualResult(
                             captured.declaration,
                             record.call_id,
-                            captured.encode_result(checked, strict=True),
+                            captured._encode_result(checked, strict=True),
                         )
         except Exception:
             pass
