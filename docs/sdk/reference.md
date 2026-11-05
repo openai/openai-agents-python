@@ -43,6 +43,8 @@ Restore uses the checkpoint's model and settings. Any non-`None` opening `model`
 
 A Session owns a native conversation, opened with `agent.session()` in an async context. See [conversations and state](sessions.md).
 
+`session.codex_account` exposes the saved Codex account metadata when the Session uses `CodexLogin`. See [`CodexAccount`](#codexaccount).
+
 #### Submission and control
 
 | Call | Result |
@@ -305,11 +307,23 @@ Supplies application context, the owning Python Session and Agent, and the actua
 ### NativeProvider
 
 ```text
-NativeProvider(*, base_url=None, api_key=None, supports_websockets=None)
+NativeProvider(*, base_url=None, api_key=None, supports_websockets=None, auth=None)
 await provider.aclose() -> None
 ```
 
 Connection defaults, WebSocket selection and provider lifetime follow [provider configuration](configuration.md#provider-connection). Custom endpoints require Responses support. `aclose()` runs after every Session using the provider closes.
+
+### CodexLogin
+
+```text
+CodexLogin(*, codex_home: str | Path | None = None, account_id: str | None = None)
+```
+
+Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin())`. `codex_home` selects the existing file-backed Codex ChatGPT login directory; omission uses standard `CODEX_HOME` discovery. `account_id` requires the expected workspace ID. The native runtime owns token refresh for the same user and workspace. See [experimental Codex login reuse](configuration.md#reuse-a-codex-login-experimental) for setup and limits. The public beta and general availability of the Agents SDK may ship without this feature.
+
+### CodexAccount
+
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. `account_id` identifies the saved workspace. `plan_type` comes from saved login metadata. See [account identity, refresh, and usage](configuration.md#account-identity-refresh-and-usage).
 
 ### ModelSettings
 
