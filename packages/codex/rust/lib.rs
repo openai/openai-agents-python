@@ -1413,7 +1413,7 @@ impl NativeThread {
                     .map_err(py_error)?;
                 serde_json::to_string(&result).map_err(py_error)
             }
-            .with_context(context),
+            .with_context(codex_otel::sdk_trace::explicit_submission_context(context)),
         )
     }
 
@@ -1491,7 +1491,7 @@ impl NativeThread {
                 };
                 serde_json::to_string(&receipt).map_err(py_error)
             }
-            .with_context(context),
+            .with_context(codex_otel::sdk_trace::explicit_submission_context(context)),
         )
     }
 
@@ -1760,7 +1760,7 @@ impl NativeThread {
                 .map_err(py_error)?;
                 serde_json::to_string(&receipt).map_err(py_error)
             }
-            .with_context(context),
+            .with_context(codex_otel::sdk_trace::explicit_submission_context(context)),
         )
     }
 

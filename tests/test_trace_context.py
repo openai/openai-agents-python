@@ -391,6 +391,16 @@ def test_same_parent_keeps_concurrent_workflow_policies_separate(tmp_path: Path)
     assert receipt["callbacks"]["fresh"]["sensitive"] in (None, False)
 
 
+def test_raw_parent_cannot_recover_workflow_export_credentials(tmp_path: Path) -> None:
+    assert _run_case("policy-authority", "", tmp_path / "authority.json") == {
+        "raw_start": "default",
+        "raw_submit": "default",
+        "raw_defined_flags": "default",
+        "opaque_parent": "victim",
+        "independent_caller": "caller",
+    }
+
+
 def test_disabled_tracing_preserves_sync_run_and_callback(tmp_path: Path) -> None:
     assert _run_case("disabled", "", tmp_path / "disabled.json") == {"result": "done"}
 
@@ -410,6 +420,9 @@ class _Lookup(BaseModel):
 
 
 async def _native_case(case: str, collector: str, output: str) -> None:
+    if case == "policy-authority":
+        Path(output).write_text(json.dumps(await _policy_authority_case()))
+        return
     if case == "disabled":
         Path(output).write_text(json.dumps(await _disabled_case()))
         return
@@ -792,3 +805,119 @@ async def _manual_case(case: str, output: Path, *, workflow: bool = False) -> di
             "pid": os.getpid(),
             "result": result.final_output,
         }
+
+
+async def _policy_authority_case() -> dict[str, str]:
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    batches: list[dict[str, Any]] = []
+
+    async def receive(request: web.Request) -> web.Response:
+        batches.append(
+            {"authorization": request.headers.get("authorization"), "data": await request.json()}
+        )
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/v1/traces", receive)
+    async with TestServer(app) as collector:
+        await telemetry.configure(
+            traces=telemetry.OtlpHttp(
+                endpoint=str(collector.make_url("/v1/traces")),
+                protocol="json",
+                headers={"authorization": "synthetic-default"},
+            )
+        )
+        try:
+            with telemetry.trace(
+                "victim",
+                options=telemetry.TraceOptions(
+                    export_credentials=telemetry.TraceExportCredentials(
+                        headers={"authorization": "synthetic-victim"}
+                    ),
+                    include_sensitive_data=True,
+                ),
+            ) as victim:
+                victim_context = victim.context
+            with telemetry.trace(
+                "caller",
+                options=telemetry.TraceOptions(
+                    export_credentials=telemetry.TraceExportCredentials(
+                        headers={"authorization": "synthetic-caller"}
+                    )
+                ),
+            ) as caller:
+                caller_context = caller.context
+            assert telemetry.current_context() is None
+            # Ended scopes remain valid opaque capabilities. Their public IDs are not.
+            parent = f"00-{victim_context.trace_id}-{victim_context.span_id}-01"
+            await telemetry.force_flush()
+            batches.clear()
+            result: dict[str, str] = {}
+            async with ScriptedResponses(*[[text("done")] for _ in range(5)]) as peer:
+                agent = Agent(instructions="Synthetic route isolation", provider=peer.provider)
+                for case, expected in (
+                    ("raw_start", "default"),
+                    ("raw_submit", "default"),
+                    ("raw_defined_flags", "default"),
+                    ("opaque_parent", "victim"),
+                    ("independent_caller", "caller"),
+                ):
+                    if case == "raw_submit":
+                        async with agent.session() as session:
+                            turn = await session.submit("Run", parent_trace={"traceparent": parent})
+                            response = await turn.get_result()
+                    elif case == "opaque_parent":
+                        response = await agent.run(
+                            "Run", trace_options=telemetry.TraceOptions(parent=victim_context)
+                        )
+                    elif case == "independent_caller":
+                        response = await agent.run(
+                            "Run",
+                            parent_trace={"traceparent": parent},
+                            trace_options=telemetry.TraceOptions(parent=caller_context),
+                        )
+                    else:
+                        carrier = (
+                            TraceContext(traceparent=parent[:-2] + "03")
+                            if case == "raw_defined_flags"
+                            else {"traceparent": parent}
+                        )
+                        response = await agent.run("Run", parent_trace=carrier)
+                    await telemetry.force_flush()
+                    matching = []
+                    for batch in batches:
+                        for resource in batch["data"].get("resourceSpans", []):
+                            for scope in resource.get("scopeSpans", []):
+                                for span in scope.get("spans", []):
+                                    attrs = _attributes(span)
+                                    if attrs.get("submission.id") == response.turn.turn_id and span[
+                                        "name"
+                                    ].startswith("op.dispatch."):
+                                        matching.append((batch["authorization"], span))
+                    assert matching, case
+                    assert all(auth == f"synthetic-{expected}" for auth, _ in matching), case
+                    if case != "opaque_parent":
+                        assert all(
+                            span["traceId"] == victim_context.trace_id for _, span in matching
+                        )
+                    if case == "raw_start":
+                        startup = [
+                            (batch["authorization"], span)
+                            for batch in batches
+                            for resource in batch["data"].get("resourceSpans", [])
+                            for scope in resource.get("scopeSpans", [])
+                            for span in scope.get("spans", [])
+                            if span["name"] == "thread_spawn"
+                        ]
+                        assert startup
+                        assert all(auth == "synthetic-default" for auth, _ in startup)
+                        assert all(
+                            span["traceId"] == victim_context.trace_id for _, span in startup
+                        )
+                    batches.clear()
+                    result[case] = expected
+            return result
+        finally:
+            await telemetry.shutdown()
