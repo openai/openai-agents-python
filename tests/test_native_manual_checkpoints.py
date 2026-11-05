@@ -322,6 +322,67 @@ async def test_manual_checkpoint_restores_core_default_namespace(
     assert len(outputs) == 1
 
 
+async def test_cancelled_manual_reply_after_native_acceptance_resumes_restored_turn(
+    responses: ResponsesFixture,
+) -> None:
+    lookup = FunctionTool(
+        name="lookup", description="Look up a key", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "A"}, "cancelled-reply"))
+    native_provider = provider(responses)
+    agent = Agent(instructions="Look up A.", tools=[lookup], provider=native_provider)
+    accepted, release = asyncio.Event(), asyncio.Event()
+    async with timeout(15):
+        async with agent.session() as source:
+            await source.submit("Read A")
+            await next_request(source.interactions(), lookup)
+            saved = await source.suspend()
+        assert saved is not None
+        async with agent.session(state=saved) as restored:
+            request = await next_request(restored.interactions(), lookup)
+            actual = restored._native
+
+            class HeldReply:
+                def __getattr__(self, name: str) -> Any:
+                    return getattr(actual, name)
+
+                async def _respond_manual_tool(self, *args: Any) -> bool:
+                    result = await actual._respond_manual_tool(*args)
+                    assert result is True
+                    accepted.set()
+                    await release.wait()
+                    return result
+
+            restored._native = HeldReply()
+            responses.respond(assistant_output("restored after cancellation"))
+            replying = asyncio.create_task(request.respond("accepted answer"))
+            try:
+                await accepted.wait()
+                replying.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await replying
+                assert restored.restored_turn is not None
+                async with timeout(3):
+                    result = await restored.restored_turn.get_result()
+                assert result.final_output == "restored after cancellation"
+                with pytest.raises(InteractionExpiredError, match="expired|used|stale|delivered"):
+                    await request.respond("already accepted")
+                assert len(responses.requests) == 2
+                outputs = [
+                    item
+                    for item in responses.requests[1]["input"]
+                    if item.get("type") == "function_call_output"
+                    and item.get("call_id") == "cancelled-reply"
+                ]
+                assert len(outputs) == 1
+                assert tool_output(responses.requests[1], "cancelled-reply") == "accepted answer"
+            finally:
+                release.set()
+                await asyncio.gather(replying, return_exceptions=True)
+        await native_provider.aclose()
+
+
 @pytest.mark.parametrize("fail_cleanup", [False, True])
 async def test_failed_manual_restore_joins_unpublished_submission(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, fail_cleanup: bool

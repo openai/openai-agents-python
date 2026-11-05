@@ -3419,55 +3419,62 @@ class Session(Generic[ContextT, OutputT]):
             if not self._native._check_manual_tool(request._grant):
                 raise InteractionExpiredError("Manual tool reply expired during validation")
             raise ValueError("Manual tool result failed validation")
-        if (
-            state.stopping
-            or state.failure.done()
-            or self._closing
-            or self._closed
-            or self._broken
-            or (self._environment_lease is not None and self._environment_lease.interrupted)
-            or self._sealed_checkpoint is not None
-            or not await self._native._respond_manual_tool(request._grant, output)
-        ):
-            raise InteractionExpiredError("Manual tool reply is expired or already delivered")
-        self._observations.notify()
-        if isinstance(state, _Submission) and state.restored_pending:
-            assert state.handle is not None
-            observation_route = state.handle.submission_id
 
-            async def continue_restored_turn() -> None:
-                try:
-                    # Core may already have queued recovery when this callback
-                    # is cancelled. Retain its mutation ownership through the
-                    # admission acknowledgement before retirement can pass it.
-                    with _private_task(self._native._continue_manual(observation_route)) as (
-                        admitting,
-                        admitted,
-                    ):
-                        receipt = json.loads(await _join(admitting, outcome=admitted))
-                    if receipt["status"] == "pending":
-                        return
-                    if receipt["status"] == "not_pending":
-                        # A concurrently submitted last reply already recovered
-                        # this frame. Its owned task validates the receipt.
-                        state.restored_pending = False
-                        return
-                    if receipt["status"] != "started" or receipt["turn_id"] != request.turn_id:
-                        raise NativeError("Native manual continuation was not resumed")
-                    state.restored_pending = False
-                except BaseException as error:
-                    if not state.stopping and not state.failure.done():
-                        state.failure.set_result(error)
-                    raise
-                finally:
-                    state.changed.set()
+        async def deliver_and_continue() -> Turn[Any]:
+            if (
+                state.stopping
+                or state.failure.done()
+                or self._closing
+                or self._closed
+                or self._broken
+                or (self._environment_lease is not None and self._environment_lease.interrupted)
+                or self._sealed_checkpoint is not None
+                or not await self._native._respond_manual_tool(request._grant, output)
+            ):
+                raise InteractionExpiredError("Manual tool reply is expired or already delivered")
+            self._observations.notify()
+            if isinstance(state, _Submission) and state.restored_pending:
+                submission = state
+                assert submission.handle is not None
+                observation_route = submission.handle.submission_id
 
-            continuation = asyncio.create_task(continue_restored_turn())
-            state.add_callback(continuation)
-            await _join(continuation)
-        if isinstance(state, _Submission):
-            state.changed.set()
-        return handle
+                async def continue_restored_turn() -> None:
+                    try:
+                        # Core may already have queued recovery when this callback
+                        # is cancelled. Retain its mutation ownership through the
+                        # admission acknowledgement before retirement can pass it.
+                        with _private_task(self._native._continue_manual(observation_route)) as (
+                            admitting,
+                            admitted,
+                        ):
+                            receipt = json.loads(await _join(admitting, outcome=admitted))
+                        if receipt["status"] == "pending":
+                            return
+                        if receipt["status"] == "not_pending":
+                            # A concurrently submitted last reply already recovered
+                            # this frame. Its owned task validates the receipt.
+                            submission.restored_pending = False
+                            return
+                        if receipt["status"] != "started" or receipt["turn_id"] != request.turn_id:
+                            raise NativeError("Native manual continuation was not resumed")
+                        submission.restored_pending = False
+                    except BaseException as error:
+                        if not submission.stopping and not submission.failure.done():
+                            submission.failure.set_result(error)
+                        raise
+                    finally:
+                        submission.changed.set()
+
+                continuation = asyncio.create_task(continue_restored_turn())
+                submission.add_callback(continuation)
+                await _join(continuation)
+            if isinstance(state, _Submission):
+                state.changed.set()
+            return handle
+
+        with _private_task(deliver_and_continue()) as (delivery, delivered):
+            state.add_callback(delivery)
+            return cast(Turn[Any], await _join(delivery, outcome=delivered))
 
     async def compact(self, *, summary: str | None = None) -> None:
         """Compact native conversation context and wait for owned settlement.

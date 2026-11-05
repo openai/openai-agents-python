@@ -132,10 +132,12 @@ class SQLiteSessionStore:
     hard-linked databases are unsupported. Do not replace database or lock files
     during live use. Network filesystems and cross-host access are unsupported.
     Database, sidecar and lock files must belong to the effective user and
-    already have owner-only permissions. Keep their directory under trusted
-    application control, with a trusted private file history: mode checks cannot
-    detect prior exposure or revoke existing readers. The application owns
-    encryption and backups of sensitive conversation data.
+    already have owner-only permissions. Keep the supplied path, its ancestor
+    directories and every symlink target under trusted control and protected
+    from untrusted replacement during initialization and use. File checks do
+    not make attacker-controlled paths safe. Keep a trusted private file
+    history: mode checks cannot detect prior exposure or revoke existing
+    readers. The application owns encryption and backups of sensitive data.
     """
 
     def __init__(self, path: Path):
