@@ -1,8 +1,8 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 59bee0fec40f983672f626b31111a7175917206b..b109c77966021f181add7ad1367d6a3ef0aec9b3 100644
+index 07aacade1a01b6fc41cffc22492545f2bf70f28c..79a14d031e52aac1907fa9223ede50a0a2ac2e7b 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -319,7 +319,8 @@ async fn run_compact_task_inner_impl(
+@@ -322,7 +322,8 @@ async fn run_compact_task_inner_impl(
                      retries = 0;
                      continue;
                  }
@@ -12,18 +12,18 @@ index 59bee0fec40f983672f626b31111a7175917206b..b109c77966021f181add7ad1367d6a3e
                  return Err(e);
              }
              Err(e) => {
-@@ -385,8 +386,7 @@ async fn run_compact_task_inner_impl(
+@@ -388,8 +389,7 @@ async fn run_compact_task_inner_impl(
          },
      )
      .await;
 -    sess.recompute_token_usage(&replacement_step_context.turn)
 -        .await;
 +    sess.recompute_token_usage(&replacement_step_context).await;
-
+ 
      sess.emit_turn_item_completed(&turn_context, compaction_item)
          .await;
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
-index bb266ca2c7fbb92bfbcad80f919f8ba1f7a704a3..5c4a913789c2838bbd21a1fc989b8d3d1f636df8 100644
+index 604c5e0dbd056071cfc813162c38961e6b2163e4..0ae9403682bf0f437cfd59feddd44b674e0cb83e 100644
 --- a/codex-rs/core/src/compact_remote_v2.rs
 +++ b/codex-rs/core/src/compact_remote_v2.rs
 @@ -364,8 +364,7 @@ async fn run_remote_compact_task_inner_impl(
@@ -381,7 +381,7 @@ index 6ff5ab358960273d3de2c237b2dd50c4724d146f..a728999e9baee03b9b22fe881dd2a77b
 +    }
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 787322e570eeb7be1432300cac44242849211b42..8c72198d5ac1169b6d42c10e4c00e2c87f9cdd3c 100644
+index da730dccdf7ee125e1620dbfae1fec95ba97ad74..31c50465f6a813ce9a63eeae9461aa6e18dce583 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -2278,7 +2278,7 @@ impl Session {
@@ -409,8 +409,8 @@ index 787322e570eeb7be1432300cac44242849211b42..8c72198d5ac1169b6d42c10e4c00e2c8
 +        self.recompute_token_usage(step_context).await;
          window_number
      }
-
-@@ -4787,8 +4788,8 @@ impl Session {
+ 
+@@ -4816,8 +4817,8 @@ impl Session {
          if let Some(token_usage) = token_usage {
              let token_info = {
                  let mut state = self.state.lock().await;
@@ -421,31 +421,31 @@ index 787322e570eeb7be1432300cac44242849211b42..8c72198d5ac1169b6d42c10e4c00e2c8
                  if matches!(
                      turn_context.config.model_auto_compact_token_limit_scope,
                      AutoCompactTokenLimitScope::BodyAfterPrefix
-@@ -4826,7 +4827,8 @@ impl Session {
+@@ -4855,7 +4856,8 @@ impl Session {
          Ok(())
      }
-
+ 
 -    pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
 +    pub(crate) async fn recompute_token_usage(&self, step_context: &StepContext) {
 +        let turn_context = step_context.turn.as_ref();
          let history = self.clone_history().await;
          let base_instructions = self.get_base_instructions().await;
          let Some(estimated_total_tokens) =
-@@ -4852,9 +4854,7 @@ impl Session {
+@@ -4881,9 +4883,7 @@ impl Session {
                  codex_rollout_budget_units: None,
              };
-
+ 
 -            if let Some(model_context_window) = turn_context.model_context_window() {
 -                info.model_context_window = Some(model_context_window);
 -            }
 +            info.model_context_window = step_context.settings.reported_context_window();
-
+ 
              state.set_token_info(Some(info));
          }
-@@ -4931,10 +4931,15 @@ impl Session {
+@@ -4960,10 +4960,15 @@ impl Session {
              .await;
      }
-
+ 
 -    pub(crate) async fn set_total_tokens_full(&self, turn_context: &TurnContext) {
 -        if let Some(context_window) = turn_context.model_context_window() {
 +    pub(crate) async fn set_total_tokens_full(
@@ -701,7 +701,7 @@ index 38fd6d1ad903fc593d3680dba41239f110e47fbe..c5c85bedcb197b9a057a35706ab37821
 +    .reported_context_window();
 +}
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 756c097d715fb612a8ed2fd4884f80a1a1c80e54..2bf7732a5a90a36d55a297e035f3326abe16e400 100644
+index 875832829ce57613b9ae25e1e1ebf2228f55f483..2eedfa09a714ae26a0a3da34fedf30fa01f4dd1e 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -253,6 +253,10 @@ pub(crate) fn update_turn_settings_for_test(
@@ -786,18 +786,17 @@ index 756c097d715fb612a8ed2fd4884f80a1a1c80e54..2bf7732a5a90a36d55a297e035f3326a
          )));
      let step_b = session
          .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
-@@ -13596,3 +13609,6 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
-         "rejection must not permit same-name ordinary-auth replacement in this session"
+@@ -13655,3 +13668,5 @@ async fn response_integrity_reason_tracks_the_originating_terminal_error_event()
+         Some(ResponseIntegrityReason::UndecodableOutputItem)
      );
  }
-+
 +#[path = "context_metadata_tests.rs"]
 +mod context_metadata_tests;
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index bcf6fa284f200164485b1b6dcee97fa1d6d6f0f2..c105672e2043e02097472dae9d3b7556f25ef7b9 100644
+index 8efea5400ed3845692bae56ef665db7c8fe2eb02..58dd13aa7811ec4a9cff34f2b1e893d7a517ebd3 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -1706,7 +1706,8 @@ async fn run_sampling_request(
+@@ -1726,7 +1726,8 @@ async fn run_sampling_request(
                  }
                  match err.details() {
                      CodexErrorDetails::ContextWindowExceeded => {
@@ -808,7 +807,7 @@ index bcf6fa284f200164485b1b6dcee97fa1d6d6f0f2..c105672e2043e02097472dae9d3b7556
                      }
                      CodexErrorDetails::UsageLimitReached(e) => {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 0b00915161474caaa30191035ba8477d249e5adb..83910c5cbc41f5e477ea4a529500cc2da512b07a 100644
+index 6d147216956f1636bd25f481d0456e2dd230774b..66a076ce5e58d26cc0ef07caa220faed93877533 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -757,7 +757,12 @@ impl TurnContext {
@@ -833,7 +832,7 @@ index 0b00915161474caaa30191035ba8477d249e5adb..83910c5cbc41f5e477ea4a529500cc2d
          ));
          config.service_tier = step_settings.service_tier.clone();
          let session_telemetry = step_settings.telemetry(&self.session_telemetry);
-@@ -1397,6 +1403,7 @@ impl Session {
+@@ -1398,6 +1404,7 @@ impl Session {
              Arc::clone(&session_configuration.step_settings),
              Arc::new(model_info),
              self.features.enabled(Feature::FastMode),
