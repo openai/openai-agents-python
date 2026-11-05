@@ -1,3 +1,7 @@
+#[path = "prepared_requests.rs"]
+mod prepared_requests;
+pub(crate) use prepared_requests::Contributor as PreparedRequestContributor;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
@@ -119,6 +123,7 @@ pub struct PythonTools {
     admission: Mutex<Option<Arc<TurnAdmission>>>,
     // A live native thread owns both. Keep no family-to-thread ownership cycle.
     interception: OnceLock<Weak<crate::native_interception::Control>>,
+    prepared_requests: Mutex<prepared_requests::State>,
     selecting_steps: AtomicBool,
     selecting_children: AtomicBool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
@@ -130,6 +135,7 @@ pub struct PythonTools {
 }
 
 enum QueuedRequest {
+    Prepared(Value),
     Step(Value),
     Call(Weak<PythonTools>, PendingKey, u64, Value),
     Retired {
@@ -142,6 +148,7 @@ enum QueuedRequest {
         receipt: Weak<TurnAdmission>,
         thread: String,
         policy_message: Option<&'static str>,
+        response_integrity_reason: Option<codex_protocol::error::ResponseIntegrityReason>,
     },
 }
 
@@ -206,10 +213,12 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 // Core emits TurnComplete before releasing its active-turn slot. This receipt
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
+    thread_id: String,
     pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
+    prepared_operation: Option<u64>,
     state: watch::Sender<AdmissionState>,
     completed_calls: Mutex<HashSet<String>>,
     graceful_requested: AtomicBool,
@@ -227,6 +236,8 @@ pub(crate) struct TurnAdmission {
     steering_tail: AtomicBool,
     exact_steering: OnceLock<bool>,
     provider_error: Mutex<Option<(Value, Value)>>,
+    // An unseeded event cannot distinguish a queued old same-ID lifecycle.
+    same_id_recovery: bool,
     policy_failure: OnceLock<&'static str>,
 }
 
@@ -237,6 +248,10 @@ tokio::task_local! {
 }
 
 impl TurnAdmission {
+    pub(crate) fn permits_integrity_reason(&self) -> bool {
+        !self.same_id_recovery
+    }
+
     pub(crate) fn is_current(self: &Arc<Self>) -> bool {
         self.owner
             .upgrade()
@@ -278,7 +293,11 @@ impl TurnAdmission {
         }
     }
 
-    pub(crate) fn reject_model(self: &Arc<Self>, thread: &str) {
+    pub(crate) fn reject_model(
+        self: &Arc<Self>,
+        thread: &str,
+        reason: codex_protocol::error::ResponseIntegrityReason,
+    ) {
         if let Some(owner) = self.owner.upgrade() {
             // Core drains tool futures before reporting the model error. Wake
             // the SDK's existing failure settlement so it can interrupt the
@@ -288,6 +307,7 @@ impl TurnAdmission {
                 receipt: Arc::downgrade(self),
                 thread: thread.to_owned(),
                 policy_message: None,
+                response_integrity_reason: Some(reason),
             });
         }
     }
@@ -302,6 +322,7 @@ impl TurnAdmission {
                 receipt: Arc::downgrade(self),
                 thread: thread.to_owned(),
                 policy_message: Some(message),
+                response_integrity_reason: None,
             });
         }
     }
@@ -933,6 +954,15 @@ impl PythonTools {
         Ok(())
     }
 
+    pub(crate) fn observed_admission(&self, turn_id: &str) -> Option<Arc<TurnAdmission>> {
+        self.admission
+            .lock()
+            .expect("Python admission receipt poisoned")
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn_id && receipt.permits_integrity_reason())
+            .cloned()
+    }
+
     pub(crate) fn admission_ready(&self, turn_id: &str) -> Result<Arc<TurnAdmission>> {
         self.admission
             .lock()
@@ -1070,6 +1100,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
             step_defaults: RwLock::new(None),
@@ -1113,6 +1144,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(
                 parent.selecting_steps.load(Ordering::Acquire)
                     || parent.selecting_children.load(Ordering::Acquire),
@@ -1192,6 +1224,7 @@ impl PythonTools {
     }
 
     pub(crate) fn retire_steps(&self) {
+        self.retire_prepared_requests();
         // Dropping the owned senders wakes blocked selectors with no authority.
         let pending = self
             .step_replies
@@ -1791,6 +1824,7 @@ impl PythonTools {
         let mut receiver = self.family.receiver.lock().await;
         loop {
             match receiver.recv().await {
+                Some(QueuedRequest::Prepared(request)) => return request,
                 Some(QueuedRequest::Step(request)) => return request,
                 Some(QueuedRequest::Call(owner, key, invocation, request)) => {
                     if owner.upgrade().is_some_and(|tools| {
@@ -1840,6 +1874,7 @@ impl PythonTools {
                     receipt,
                     thread,
                     policy_message,
+                    response_integrity_reason,
                 }) => {
                     if let (Some(owner), Some(receipt)) = (owner.upgrade(), receipt.upgrade())
                         && Arc::ptr_eq(&self.family, &owner.family)
@@ -1860,6 +1895,7 @@ impl PythonTools {
                                 "turn_id": receipt.turn_id,
                                 "message": policy_message.unwrap_or(crate::response_integrity::UNSUPPORTED_OUTPUT),
                                 "policy_stop": policy_message.is_some(),
+                                "response_integrity_reason": response_integrity_reason,
                             }
                         });
                         if let Some(instance) = &owner.instance {
@@ -2248,11 +2284,20 @@ impl TurnLifecycleContributor for PythonContributor {
                     false
                 };
                 let graph = tools.family.graph.lock().expect("Python graph poisoned");
+                let mut admission = tools
+                    .admission
+                    .lock()
+                    .expect("Python admission receipt poisoned");
+                let same_id_recovery = admission
+                    .as_ref()
+                    .is_some_and(|prior| prior.turn_id == input.turn_id);
                 let receipt = Arc::new(TurnAdmission {
+                    thread_id: input.thread_store.level_id().to_owned(),
                     tracing: tracing.context.clone(),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,
+                    prepared_operation: tools.prepared_operation(),
                     state: watch::channel(AdmissionState::Pending).0,
                     completed_calls: Mutex::default(),
                     graceful_requested: AtomicBool::new(false),
@@ -2268,16 +2313,12 @@ impl TurnLifecycleContributor for PythonContributor {
                     steering_tail: AtomicBool::new(false),
                     exact_steering: OnceLock::new(),
                     provider_error: Mutex::default(),
+                    same_id_recovery,
                     policy_failure: OnceLock::new(),
                 });
                 crate::native_interception::attach_sdk_admission(input.turn_store, &receipt);
                 input.turn_store.insert(receipt.clone());
-                if let Some(previous) = tools
-                    .admission
-                    .lock()
-                    .expect("Python admission receipt poisoned")
-                    .replace(receipt)
-                {
+                if let Some(previous) = admission.replace(receipt) {
                     previous.graceful_requested.store(false, Ordering::Release);
                     previous.state.send_if_modified(|state| {
                         if *state == AdmissionState::Pending {
@@ -2288,6 +2329,7 @@ impl TurnLifecycleContributor for PythonContributor {
                         }
                     });
                 }
+                drop(admission);
                 tools.family.graph_changed.send_replace(());
             }
         })
@@ -2643,6 +2685,7 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                     receipt.terminal.store(true, Ordering::Release);
                     receipt.state.send_replace(AdmissionState::Closed);
                 }
+                tools.retire_prepared_requests();
                 tools.family.graph_changed.send_replace(());
                 // A callback may still retain its issuer after Core tears it
                 // down. Stop must revoke its pending senders immediately.
@@ -3205,6 +3248,48 @@ pub(crate) mod managed_tests {
     }
 
     #[tokio::test]
+    async fn prepared_request_marker_survives_operation_and_thread_retirement() {
+        use codex_extension_api::ModelRequestContributor;
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        let contributor = PreparedRequestContributor;
+        let original = start_admission(&thread, "original").await;
+        assert!(!contributor.prepares_request(&original));
+        tools.prepare_requests(true).unwrap();
+        let edited = start_admission(&thread, "edited").await;
+        let captured = edited
+            .get::<Arc<TurnAdmission>>()
+            .unwrap()
+            .prepared_operation;
+        assert!(contributor.prepares_request(&edited));
+        tools.prepare_requests(false).unwrap();
+        assert!(contributor.prepares_request(&edited));
+        assert_ne!(tools.prepared_operation(), captured);
+        let ordinary = start_admission(&thread, "ordinary").await;
+        assert!(!contributor.prepares_request(&ordinary));
+        tools.retire_steps();
+        assert!(contributor.prepares_request(&edited));
+        assert!(tools.prepare_requests(true).is_err());
+    }
+
+    #[tokio::test]
+    async fn prepared_request_operations_and_selection_have_separate_owners() {
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        tools.prepare_requests(true).unwrap();
+        let operation = tools.prepared_operation();
+        tools.select_steps(true, None, false);
+        tools.select_steps(false, None, false);
+        assert_eq!(tools.prepared_operation(), operation);
+        tools.prepare_requests(false).unwrap();
+        tools.prepare_requests(true).unwrap();
+        assert_ne!(tools.prepared_operation(), operation);
+        let child = PythonTools::descendant(&tools, "synthetic-child".into());
+        assert!(child.prepared_operation().is_none());
+        assert!(child.prepare_requests(true).is_err());
+    }
+
+    #[tokio::test]
     async fn child_receipt_retains_original_tracing_after_origin_scope_ends() {
         const CHILD: &str = "AGENTS_CHILD_RECEIPT_TRACE_TEST";
         if std::env::var_os(CHILD).is_none() {
@@ -3677,6 +3762,54 @@ pub(crate) mod managed_tests {
             })
             .await;
         assert!(receipt.wait().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn integrity_reason_projection_refuses_a_same_id_recovery_receipt() {
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        let _first = start_admission(&thread, "same-id").await;
+        let receipt = tools.observed_admission("same-id").unwrap();
+        assert!(receipt.permits_integrity_reason());
+        let _second = start_admission(&thread, "same-id").await;
+        assert!(tools.observed_admission("same-id").is_none());
+        assert!(
+            !tools
+                .admission_ready("same-id")
+                .unwrap()
+                .permits_integrity_reason()
+        );
+    }
+
+    #[tokio::test]
+    async fn model_failure_reason_cannot_follow_same_id_receipt_replacement() {
+        use codex_protocol::error::ResponseIntegrityReason;
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        tools
+            .family
+            .members
+            .write()
+            .unwrap()
+            .insert("thread".into(), Arc::downgrade(&tools));
+        let _first_store = start_admission(&thread, "same-id").await;
+        let first = tools.admission_ready("same-id").unwrap();
+        first.reject_model("thread", ResponseIntegrityReason::UndecodableOutputItem);
+        let _second_store = start_admission(&thread, "same-id").await;
+        let second = tools.admission_ready("same-id").unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+        let mut read = Box::pin(tools.next_request());
+        assert!(futures_util::poll!(&mut read).is_pending());
+        second.reject_model("thread", ResponseIntegrityReason::UnfinishedAssistantItem);
+        let notice = read.await;
+        assert_eq!(
+            notice["msg"]["response_integrity_reason"],
+            "unfinished_assistant_item"
+        );
+        assert_eq!(
+            notice["msg"]["message"],
+            crate::response_integrity::UNSUPPORTED_OUTPUT
+        );
     }
 
     #[tokio::test]
@@ -4567,6 +4700,7 @@ pub(crate) mod managed_tests {
             suspended: AtomicBool::new(false),
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            prepared_requests: Mutex::default(),
             manual_restore: Mutex::new(None),
             manual_progress: watch::channel(0).0,
             selecting_steps: AtomicBool::new(false),

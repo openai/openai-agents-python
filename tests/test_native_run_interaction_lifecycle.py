@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 
-from agents import ActionRequested, Agent, FunctionTool, InteractionExpiredError
+from agents import ActionRequested, Agent, FunctionTool, InteractionExpiredError, Session
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     assistant_output,
@@ -39,6 +39,36 @@ async def test_run_sync_defaults_preserve_existing_agent_override():
     )
     assert actual is result
     assert received == [("Read A", context)]
+
+
+@pytest.mark.parametrize("synchronous", [False, True])
+async def test_run_defaults_preserve_existing_session_submit_override(responses, synchronous):
+    received = []
+
+    class ExistingSession(Session):
+        async def submit(self, input, *, tools=None, before_step=None):
+            received.append(input)
+            return await super().submit(input, tools=tools, before_step=before_step)
+
+    class ExistingAgent(Agent):
+        @asynccontextmanager
+        async def session(self, **options):
+            session = await ExistingSession._open(self, **options)
+            try:
+                yield session
+            finally:
+                await session._exit_scope()
+
+    responses.respond(assistant_output("complete"))
+    agent = ExistingAgent(instructions="Answer.", provider=provider(responses))
+    result = (
+        await asyncio.to_thread(agent.run_sync, "Read A")
+        if synchronous
+        else await agent.run("Read A")
+    )
+    assert result.final_output == "complete"
+    assert received == ["Read A"]
+    assert len(responses.requests) == 1
 
 
 def manual_agent(responses):

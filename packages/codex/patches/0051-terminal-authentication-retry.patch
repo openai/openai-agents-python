@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c2c6973f0 100644
+index ad2416fa7f2f40b59091a45245addfaa44a44c1f..308e701dc70df9295eac9b302c6e0e5690c1dfde 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -151,6 +151,7 @@ use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
@@ -75,7 +75,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
              );
              let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
                  session_telemetry,
-@@ -1812,11 +1818,11 @@ impl ModelClientSession {
+@@ -1833,11 +1839,11 @@ impl ModelClientSession {
                          response_debug_context.request_id.as_deref(),
                          /*output_items*/ &[],
                      );
@@ -90,7 +90,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
                              session_telemetry,
                              &self.client.state.provider,
                              self.client.event_sender.as_ref(),
-@@ -1868,16 +1874,10 @@ impl ModelClientSession {
+@@ -1889,16 +1895,10 @@ impl ModelClientSession {
          warmup: bool,
          request_trace: Option<W3cTraceContext>,
          inference_trace: &InferenceTraceContext,
@@ -108,7 +108,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
          loop {
              let client_setup = self
                  .client
-@@ -1896,7 +1896,7 @@ impl ModelClientSession {
+@@ -1917,7 +1917,7 @@ impl ModelClientSession {
                  client_setup.auth.as_ref().map(CodexAuth::auth_mode),
                  client_setup.api_auth.as_ref(),
                  client_setup.agent_identity_telemetry.clone(),
@@ -117,7 +117,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
              );
              let mut request = self.client.build_responses_request(
                  prompt,
-@@ -1951,18 +1951,28 @@ impl ModelClientSession {
+@@ -1972,18 +1972,28 @@ impl ModelClientSession {
                  Err(ApiError::Transport(unauthorized_transport))
                      if provider.is_recoverable_auth_error(&unauthorized_transport) =>
                  {
@@ -158,7 +158,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
                      continue;
                  }
                  Err(err) => return Err(provider.map_api_error(err)),
-@@ -2200,6 +2210,7 @@ impl ModelClientSession {
+@@ -2239,6 +2249,7 @@ impl ModelClientSession {
          }
  
          let disabled_trace = InferenceTraceContext::disabled();
@@ -166,7 +166,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
          match self
              .stream_responses_websocket(
                  prompt,
-@@ -2212,6 +2223,7 @@ impl ModelClientSession {
+@@ -2251,6 +2262,7 @@ impl ModelClientSession {
                  /*warmup*/ true,
                  current_span_w3c_trace_context(),
                  &disabled_trace,
@@ -174,7 +174,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
              )
              .await
          {
-@@ -2257,6 +2269,7 @@ impl ModelClientSession {
+@@ -2296,6 +2308,7 @@ impl ModelClientSession {
          let wire_api = self.client.state.provider.info().wire_api;
          match wire_api {
              WireApi::Responses => {
@@ -182,7 +182,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
                  if self.client.responses_websocket_enabled() {
                      let request_trace = current_span_w3c_trace_context();
                      match self
-@@ -2271,6 +2284,7 @@ impl ModelClientSession {
+@@ -2310,6 +2323,7 @@ impl ModelClientSession {
                              /*warmup*/ false,
                              request_trace,
                              inference_trace,
@@ -190,7 +190,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
                          )
                          .await?
                      {
-@@ -2290,6 +2304,7 @@ impl ModelClientSession {
+@@ -2329,6 +2343,7 @@ impl ModelClientSession {
                      service_tier,
                      responses_metadata,
                      inference_trace,
@@ -198,7 +198,7 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
                  )
                  .await
              }
-@@ -2572,6 +2587,27 @@ impl PendingUnauthorizedRetry {
+@@ -2633,6 +2648,27 @@ impl PendingUnauthorizedRetry {
      }
  }
  
@@ -227,10 +227,10 @@ index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c
  struct AuthRequestTelemetryContext {
      auth_mode: Option<&'static str>,
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 779a40ca2be8f8687ca067f6e922d53be852c51c..54c62e5da35da7f2889363e134a06dc6e57d20ee 100644
+index 05ea1c6119e5ae199d747d664f13b72e9c784c46..5ade27a2f44a06c773e8b2ecdc5d2b1648bc2eb7 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -1674,6 +1674,8 @@ struct TestRecoveryProvider {
+@@ -1837,6 +1837,8 @@ struct TestRecoveryProvider {
      inner: SharedModelProvider,
      should_fail: bool,
      attempts: Arc<AtomicUsize>,
@@ -239,7 +239,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..54c62e5da35da7f2889363e134a06dc6
  }
  
  impl ModelProvider for TestRecoveryProvider {
-@@ -1686,6 +1688,13 @@ impl ModelProvider for TestRecoveryProvider {
+@@ -1849,6 +1851,13 @@ impl ModelProvider for TestRecoveryProvider {
      }
  
      fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
@@ -253,7 +253,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..54c62e5da35da7f2889363e134a06dc6
          self.inner.auth()
      }
  
-@@ -1705,6 +1714,10 @@ impl ModelProvider for TestRecoveryProvider {
+@@ -1868,6 +1877,10 @@ impl ModelProvider for TestRecoveryProvider {
      ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
          self.attempts.fetch_add(1, Ordering::Relaxed);
          Box::pin(async move {
@@ -264,7 +264,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..54c62e5da35da7f2889363e134a06dc6
              if self.should_fail {
                  Err(CodexErr::Io(std::io::Error::other(
                      "provider recovery failed",
-@@ -1732,6 +1745,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+@@ -1895,6 +1908,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
              inner: test_model_provider(),
              should_fail,
              attempts: Arc::clone(&attempts),
@@ -273,7 +273,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..54c62e5da35da7f2889363e134a06dc6
          });
          assert!(provider.auth_manager().is_none());
  
-@@ -2208,3 +2223,374 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+@@ -2371,3 +2386,374 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
          );
      }
  }
@@ -700,10 +700,10 @@ index 65aa29397c5f5524116b0b9f932ab3719e1ed488..7046d163858432e7e7baa4b69da4edb7
 +    assert!(details.body.contains("invalid_api_key"));
 +}
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index be922daf5cb1514ca6823d1ef55745e5be5749a8..7127ab14169fb70d2fec1d74437bea0f4aa58766 100644
+index a077d7efabeae9529e11a9ffc9c7e128f8b61c1d..60cca6fe0aa4a30cdefd93a7a0190a783f5bfd9b 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
-@@ -420,6 +420,16 @@ impl CodexErr {
+@@ -444,6 +444,16 @@ impl CodexErr {
              CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
                  self.server_retry_delay()
              }
@@ -721,12 +721,12 @@ index be922daf5cb1514ca6823d1ef55745e5be5749a8..7127ab14169fb70d2fec1d74437bea0f
              | CodexErrorDetails::ContentFilter
              | CodexErrorDetails::RateLimitExceeded(_)
 diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
-index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..e178133b22882dc801d7c1887b3741d26274e7d0 100644
+index a01036f32ea8eca1241d9c9797c391e73b1d7bdc..7c8e5a165520b82ddc1ddd3182cba93f12331035 100644
 --- a/codex-rs/protocol/src/error_tests.rs
 +++ b/codex-rs/protocol/src/error_tests.rs
-@@ -755,3 +755,47 @@ fn usage_limit_reached_with_promo_message() {
-         assert_eq!(err.to_string(), expected);
-     });
+@@ -854,3 +854,47 @@ fn response_integrity_reason_has_only_the_four_safe_wire_values() {
+         .is_err()
+     );
  }
 +
 +/// Terminal authentication keeps its details and cannot gain eligibility from advice.
@@ -773,10 +773,10 @@ index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..e178133b22882dc801d7c1887b3741d2
 +    }
 +}
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 181e430fc839d812563fa94a7f7ea898dac910ec..5fba04f110f917f3b76e9b0a1a796b5df591dd39 100644
+index 2eb1a223d10146b674319ae4037cd1f85a5250e4..83007345f5c834bc3a330fd1fd2550793ca28901 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -6222,6 +6222,7 @@ mod tests {
+@@ -6287,6 +6287,7 @@ mod tests {
      fn turn_context_item_serializes_network_when_present() -> Result<()> {
          let item = TurnContextItem {
              turn_id: None,

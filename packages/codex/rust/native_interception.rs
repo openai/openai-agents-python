@@ -1264,6 +1264,31 @@ impl Control {
         Ok(())
     }
 
+    pub(crate) fn admits_prepared_turn(
+        &self,
+        store: &ExtensionData,
+        receipt: &Arc<crate::python_tools::TurnAdmission>,
+    ) -> bool {
+        let Some(owner) = store.get::<DirectTurn>() else {
+            return false;
+        };
+        let current = self
+            .direct_turn
+            .lock()
+            .expect("interception turn poisoned")
+            .clone();
+        current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, &owner))
+            && !owner.cancelled.is_cancelled()
+            && owner
+                .sdk_admission
+                .get()
+                .and_then(Weak::upgrade)
+                .is_some_and(|captured| Arc::ptr_eq(&captured, receipt))
+            && self.admit_model_request(&owner).is_ok()
+    }
+
     fn admit_model_request(&self, owner: &DirectTurn) -> Result<(), String> {
         let state = self
             .channel
