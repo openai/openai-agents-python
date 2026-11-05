@@ -2705,3 +2705,337 @@ async def test_retained_cell_executor_span_records_its_own_outcome(
         assert accepted == [{"action": "replace", "value": "accepted result"}]
     else:
         assert accepted == [{"action": "deny"}]
+
+
+async def test_capture_releases_ambient_lease_when_task_factory_rejects(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    with telemetry.trace(
+        "ambient credential owner",
+        options=telemetry.TraceOptions(
+            export_credentials=telemetry.TraceExportCredentials(
+                headers={"authorization": "private-key"}
+            )
+        ),
+    ) as parent:
+        before = set(native.leases)
+        monkeypatch.setattr(
+            telemetry,
+            "_processors",
+            {"old": telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))},
+        )
+        loop = asyncio.get_running_loop()
+        original = loop.get_task_factory()
+        failure = RuntimeError("factory rejected capture")
+
+        def reject(*args: Any, **kwargs: Any) -> Any:
+            raise failure
+
+        loop.set_task_factory(reject)
+        try:
+            with pytest.raises(RuntimeError) as raised:
+                telemetry._capture()
+        finally:
+            loop.set_task_factory(original)
+        assert raised.value is failure
+        [captured] = set(native.leases) - before
+        assert native.released.count(captured) == 1
+        assert telemetry.current_context() is parent.context
+        assert telemetry._processor_task is None
+
+
+@pytest.mark.parametrize("cleanup_error", [False, True])
+def test_capture_rollback_closes_operation_and_preserves_primary_error(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, cleanup_error: bool
+) -> None:
+    primary = RuntimeError("pump startup failed")
+    cleanup = RuntimeError("context cleanup failed")
+    calls = 0
+    retained = []
+    original_release = native.release_trace_context
+
+    def ensure() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return  # Operation admission succeeds before capture's pump check.
+        retained.append(next(reversed(native.leases)))
+        if cleanup_error:
+
+            def release(context: str) -> None:
+                original_release(context)
+                raise cleanup
+
+            monkeypatch.setattr(native, "release_trace_context", release)
+        raise primary
+
+    monkeypatch.setattr(telemetry, "_ensure_processor_pump", ensure)
+    with pytest.raises(RuntimeError) as raised:
+        telemetry._capture(telemetry.TraceOptions())
+    assert raised.value is primary
+    assert native.released.count(retained[0]) == 1
+    assert [handle for handle, _ in native.ends] == ["span-1"]
+    assert native.released.count("span-1") == 1
+    assert telemetry.current_context() is None
+    if cleanup_error:
+        from agents.session import _error_contexts
+
+        assert cleanup in _error_contexts(primary.__context__)
+
+
+def test_capture_retain_failure_still_closes_operation_once(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original = native.retain_trace_context
+
+    def retain(handle: str) -> str:
+        if handle.startswith("lease-"):
+            raise RuntimeError("capture retain failed")
+        return original(handle)
+
+    monkeypatch.setattr(native, "retain_trace_context", retain)
+    with pytest.raises(RuntimeError, match="capture retain failed"):
+        telemetry._capture(telemetry.TraceOptions())
+    assert [handle for handle, _ in native.ends] == ["span-1"]
+    assert native.released.count("span-1") == 1
+    assert telemetry.current_context() is None
+
+
+@pytest.mark.parametrize("disabled", [False, True])
+async def test_restored_manual_validation_uses_fresh_owner_without_saved_carrier(
+    native: NativeTracing, disabled: bool
+) -> None:
+    from pydantic import BaseModel, model_validator
+
+    from agents import FunctionTool
+    from agents.schema import _prepare_spec
+    from agents.session import Session, _Submission, _ToolCatalog
+    from agents.turn import _root_turn
+
+    seen = []
+
+    class Arguments(BaseModel):
+        value: str
+
+        @model_validator(mode="after")
+        def check_context(self) -> Arguments:
+            context = telemetry.current_context()
+            assert context is not None and context.disabled == disabled
+            assert not context.include_sensitive_data
+            parent = native.starts[-1]["parent"]
+            assert native.leases[parent] == native.leases[captured.context]
+            with telemetry.span("validator nested work") as child:
+                assert child.context.disabled == disabled
+            seen.append(context.span_id)
+            return self
+
+    entry = FunctionTool(
+        name="manual", description="restore", input_type=Arguments, output_type=str
+    )._capture(None)
+    message = {
+        "msg": {
+            "turnId": "restored-turn",
+            "callId": "call",
+            "tool": "manual",
+            "arguments": {"value": "synthetic"},
+            "_sdk_python_tool": {"thread": "session", "generation": 0, "slot": 0},
+            "_sdk_code_origin": None,
+        }
+    }
+
+    class Thread:
+        id = "session"
+
+        def _pending_manual_tools(self):
+            return [(1, object(), json.dumps(message))]
+
+        def _check_manual_tool(self, grant):
+            return True
+
+    session = Session(
+        None,
+        Thread(),
+        None,
+        _ToolCatalog(0, (entry,)),
+        (),
+        None,
+        _prepare_spec(str),
+        "restored",
+        _start_readers=False,
+    )
+    captured = telemetry._capture(
+        telemetry.TraceOptions(disabled=disabled, include_sensitive_data=False)
+    )
+    state = _Submission(_prepare_spec(str), tracing=captured, restored_pending=True)
+    state.handle = _root_turn(session, "restored-turn", "restored-submission", state.completion)
+    session._active = state
+    try:
+        with telemetry.trace(
+            "unrelated permissive caller",
+            options=telemetry.TraceOptions(include_sensitive_data=True),
+        ) as unrelated:
+            assert session._validate_pending_manual(state)
+            request = session._manual_request(state.handle.submission_id, set())
+            assert request is not None and request._tracing_context == captured.context
+            assert telemetry.current_context() is unrelated.context
+        assert len(seen) == 1  # Opening validation is cached for later cursors.
+        assert "tracing_context" not in message["msg"]
+    finally:
+        captured.close()
+
+
+@pytest.mark.parametrize("rejected", ["initialize", "pump"])
+async def test_configure_factory_rejection_precedes_native_admission_and_drops_credentials(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, rejected: str
+) -> None:
+    from tests.test_tracing_failure_cleanup import (
+        _assert_no_exporter_credentials,
+        _private_exporter,
+    )
+
+    admissions = []
+    original_import = telemetry.importlib.import_module
+
+    async def configure(encoded: str) -> None:
+        admissions.append(True)
+        assert len(admissions) == 1  # The rejected attempt left native unclaimed.
+
+    monkeypatch.setattr(native, "configure_telemetry", configure, raising=False)
+    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(
+        telemetry.importlib,
+        "import_module",
+        lambda name, package=None: (
+            native if name == "agents._native" else original_import(name, package)
+        ),
+    )
+    loop = asyncio.get_running_loop()
+    old_factory = loop.get_task_factory()
+    rejected_work = []
+    failure = RuntimeError("configuration task factory rejected")
+
+    def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
+        if work.cr_code.co_name == (
+            "initialize" if rejected == "initialize" else "_pump_processors"
+        ):
+            rejected_work.append(work)
+            raise failure
+        return asyncio.Task(work, loop=loop, **kwargs)
+
+    processor = SimpleNamespace(on_trace_event=lambda event: None)
+    exporter = _private_exporter()
+    loop.set_task_factory(factory)
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            await telemetry.configure(
+                traces=exporter, logs=exporter, metrics=exporter, processors=[processor]
+            )
+    finally:
+        loop.set_task_factory(old_factory)
+    assert raised.value is failure
+    _assert_no_exporter_credentials(failure)
+    assert rejected_work and rejected_work[0].cr_frame is None
+    assert admissions == [] and native.routes == []
+    assert telemetry._engine_options is None and telemetry._processor_task is None
+    assert not telemetry._processor_starting and telemetry._processors == {}
+    try:
+        await telemetry.configure(processors=[processor])
+        assert admissions == [True] and telemetry._engine_options is not None
+        assert telemetry._active_processor_ids == {"python-0"}
+    finally:
+        await _stop_processor_pump()
+
+
+@pytest.mark.parametrize("eager", [False, True])
+async def test_configure_native_failure_cancels_only_its_gated_pump(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, eager: bool
+) -> None:
+    if eager and not hasattr(asyncio, "eager_task_factory"):
+        pytest.skip("Eager task factories require Python 3.12")
+    original_import = telemetry.importlib.import_module
+    created = []
+    drains = []
+
+    async def configure(encoded: str) -> None:
+        assert created and not created[0].done()
+        assert telemetry._processor_task is None and telemetry._processors == {}
+        raise RuntimeError("native configuration rejected")
+
+    async def drain(count: int) -> str:
+        drains.append(count)
+        raise AssertionError("Unconfigured pump reached native drain")
+
+    monkeypatch.setattr(native, "configure_telemetry", configure, raising=False)
+    monkeypatch.setattr(native, "drain_trace_events", drain)
+    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(
+        telemetry.importlib,
+        "import_module",
+        lambda name, package=None: (
+            native if name == "agents._native" else original_import(name, package)
+        ),
+    )
+    loop = asyncio.get_running_loop()
+    old_factory = loop.get_task_factory()
+
+    def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
+        task = (
+            asyncio.eager_task_factory(loop, work, **kwargs)
+            if eager
+            else asyncio.Task(work, loop=loop, **kwargs)
+        )
+        if work.cr_code is telemetry._pump_processors.__code__:
+            created.append(task)
+        return task
+
+    loop.set_task_factory(factory)
+    try:
+        with pytest.raises(RuntimeError, match="Native telemetry configuration failed"):
+            await telemetry.configure(
+                processors=[SimpleNamespace(on_trace_event=lambda event: None)]
+            )
+    finally:
+        loop.set_task_factory(old_factory)
+    await asyncio.gather(*created, return_exceptions=True)
+    assert created[0].cancelled() and drains == []
+    assert telemetry._engine_options is None and telemetry._processor_task is None
+    assert not telemetry._processor_starting and telemetry._processors == {}
+
+
+async def test_configure_reuses_reservation_through_joined_cancellation(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+    original_import = telemetry.importlib.import_module
+
+    async def configure(encoded: str) -> None:
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(native, "configure_telemetry", configure, raising=False)
+    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(
+        telemetry.importlib,
+        "import_module",
+        lambda name, package=None: (
+            native if name == "agents._native" else original_import(name, package)
+        ),
+    )
+    processor = SimpleNamespace(on_trace_event=lambda event: None)
+    pending = asyncio.create_task(telemetry.configure(processors=[processor]))
+    await entered.wait()
+    assert telemetry._processor_task is None and telemetry._processor_starting
+    with pytest.raises(RuntimeError, match="startup or shutdown"):
+        telemetry.add_trace_processor(processor)
+    pending.cancel()
+    await asyncio.sleep(0)
+    assert not pending.done()
+    release.set()
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert telemetry._engine_options is not None
+        assert telemetry._processor_task is not None
+        assert len(native.routes) == 1 and not telemetry._processor_starting
+    finally:
+        await _stop_processor_pump()

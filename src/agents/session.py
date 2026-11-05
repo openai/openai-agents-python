@@ -2228,6 +2228,7 @@ class Session(Generic[ContextT, OutputT]):
                         native_agents is not None and native_agents.before_step is not None,
                     )
                     thread._prepare_manual_restore()
+                    active.tracing = _capture(fallback=_tracing_context)
                     session._validate_pending_manual(active)
                     session._observations.append(
                         TurnStarted(
@@ -2236,7 +2237,6 @@ class Session(Generic[ContextT, OutputT]):
                             submission_id=handle.submission_id,
                         )
                     )
-                    active.tracing = _capture(fallback=_tracing_context)
                     active.task = _create_task(session._execute(active, [], admitted=True))
                 session._start_readers()
                 opening.disown(session)
@@ -3165,12 +3165,18 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     )
                     return None
+                tracing_context = message.get("tracing_context")
+                if (
+                    tracing_context is None
+                    and isinstance(state, _Submission)
+                    and state.restored_pending
+                    and state.tracing is not None
+                ):
+                    tracing_context = state.tracing.context
                 if invocation not in state.manual_inputs:
                     with (
                         _clear_current(),
-                        _owned_span(
-                            "manual input validation", "validation", message.get("tracing_context")
-                        ),
+                        _owned_span("manual input validation", "validation", tracing_context),
                     ):
                         arguments = entry.input_adapter.validate_python(message["arguments"])
                     if (
@@ -3202,7 +3208,7 @@ class Session(Generic[ContextT, OutputT]):
                     arguments,
                     message["_sdk_code_origin"],
                     model=message.get("_sdk_model"),
-                    tracing_context=message.get("tracing_context"),
+                    tracing_context=tracing_context,
                 )
         except BaseException:
             # Do not retain validator frames or private native arguments.

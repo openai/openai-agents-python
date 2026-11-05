@@ -83,16 +83,16 @@ def _string_map(value: Mapping[str, str] | None, name: str) -> dict[str, str]:
 
 
 def _exporter(value: Exporter | None, signal: str) -> str | dict[str, Any]:
-    if value is None:
-        return "none"
-    if not isinstance(value, (OtlpGrpc, OtlpHttp)):
-        raise TypeError(f"{signal} must be OtlpGrpc, OtlpHttp, or None")
-    if not isinstance(value.endpoint, str) or not value.endpoint:
-        raise ValueError(f"{signal} endpoint must be a non-empty string")
     options: dict[str, Any] = {}
     tls: dict[str, str] = {}
     path: Any = None
     try:
+        if value is None:
+            return "none"
+        if not isinstance(value, (OtlpGrpc, OtlpHttp)):
+            raise TypeError(f"{signal} must be OtlpGrpc, OtlpHttp, or None")
+        if not isinstance(value.endpoint, str) or not value.endpoint:
+            raise ValueError(f"{signal} endpoint must be a non-empty string")
         options.update(
             endpoint=value.endpoint,
             headers=_string_map(value.headers, f"{signal} headers"),
@@ -117,7 +117,7 @@ def _exporter(value: Exporter | None, signal: str) -> str | dict[str, Any]:
         return {"otlp-http" if isinstance(value, OtlpHttp) else "otlp-grpc": options}
     finally:
         # Release these SDK locals on success and on any later conversion error.
-        del options, tls, path
+        del value, options, tls, path
 
 
 async def configure(
@@ -143,23 +143,23 @@ async def configure(
     to 16 active Python processors are supported. Configure before any Session;
     later add/set calls change routes without replacing the native provider.
     """
-    processors = tuple(processors)
-    _validate_processors(processors)
-    # Native gates response records on either OTLP kind, not its destination.
-    # This marker satisfies native's required HTTP fields; only the already
-    # configured process provider can route exports.
-    emission = {
-        "otel.exporter": (
-            "none"
-            if logs is None
-            else {"otlp-http": {"endpoint": "http://127.0.0.1:9", "protocol": "binary"}}
-        ),
-        "otel.log_user_prompt": log_user_prompt,
-        "otel.log_agent_responses": log_agent_responses,
-        "otel.tool_result": {"max_bytes": tool_result_max_bytes},
-    }
     options: dict[str, Any] = {}
     try:
+        processors = tuple(processors)
+        _validate_processors(processors)
+        # Native gates response records on either OTLP kind, not its destination.
+        # This marker satisfies native's required HTTP fields; only the already
+        # configured process provider can route exports.
+        emission = {
+            "otel.exporter": (
+                "none"
+                if logs is None
+                else {"otlp-http": {"endpoint": "http://127.0.0.1:9", "protocol": "binary"}}
+            ),
+            "otel.log_user_prompt": log_user_prompt,
+            "otel.log_agent_responses": log_agent_responses,
+            "otel.tool_result": {"max_bytes": tool_result_max_bytes},
+        }
         # Serialize non-secret values before building credential-bearing maps.
         snapshot = json.dumps(emission)
         options.update(
@@ -178,44 +178,80 @@ async def configure(
         private = _NativeConfig(json.dumps(options))
     finally:
         # Release SDK config references on conversion success and failure.
-        del options, span_attributes
-    native = importlib.import_module("agents._native")
-    from .session import _join
+        del options, span_attributes, traces, logs, metrics
 
     async def initialize() -> None:
-        global _engine_options, _processor_closing
-        message = None
+        global _engine_options, _processor_closing, _processor_starting
+        reserved: asyncio.Task[None] | None = None
+        ready: asyncio.Future[None] | None = None
+        owns_startup = False
+        committed = False
         try:
-            await native.configure_telemetry(private.encoded)
-        except RuntimeError as error:
-            # These are fixed messages from the native lifecycle owner. Other
-            # errors can include caller paths, headers or endpoint credentials.
-            if str(error) in (
-                "Codex telemetry can only be configured once per process",
-                "Configure telemetry before creating any Codex clients",
-                "A Rust tracing subscriber is already installed; Codex telemetry cannot replace it",
-            ):
-                message = str(error)
-            else:
-                message = (
-                    "Native telemetry configuration failed. Check the exporter settings. "
-                    "If native initialization claimed the subscriber, start a new process."
-                )
+            with _processor_lock:
+                if _processor_starting:
+                    raise RuntimeError("Trace processor startup is in progress")
+                _processor_starting = True
+                owns_startup = True
+                _check_processor_capacity(len(processors), replace=False)
+                if (
+                    processors
+                    and not _in_processor.get()
+                    and (
+                        _processor_task is None
+                        or _processor_task.done()
+                        or _processor_task.get_loop().is_closed()
+                    )
+                ):
+                    ready = asyncio.get_running_loop().create_future()
+                    reserved = _create_task(_pump_processors(ready))
+            message = None
+            try:
+                await native.configure_telemetry(private.encoded)
+            except RuntimeError as error:
+                # Only fixed native diagnostics may leave this credential boundary.
+                if str(error) in (
+                    "Codex telemetry can only be configured once per process",
+                    "Configure telemetry before creating any Codex clients",
+                    "A Rust tracing subscriber is already installed; "
+                    "Codex telemetry cannot replace it",
+                ):
+                    message = str(error)
+                else:
+                    message = (
+                        "Native telemetry configuration failed. Check the exporter settings. "
+                        "If native initialization claimed the subscriber, start a new process."
+                    )
+            if message is not None:
+                raise RuntimeError(message)
+            with _processor_lock:
+                _processor_closing = False
+                if processors:
+                    _set_processors(processors, replace=False, _startup=(reserved, ready))
+                _engine_options = snapshot
+                committed = True
+                if ready is not None:
+                    ready.set_result(None)
         finally:
-            # Release the wire value after native completes, including a
-            # failure joined during caller cancellation, before it propagates.
             private.encoded = ""
-        if message is not None:
-            raise RuntimeError(message)
-        with _processor_lock:
-            _engine_options = snapshot
-            _processor_closing = False
-            if processors:
-                _set_processors(processors, replace=False)
+            with _processor_lock:
+                if owns_startup:
+                    if not committed:
+                        if ready is not None:
+                            ready.cancel()
+                        if reserved is not None:
+                            reserved.cancel()
+                    _processor_starting = False
 
     # Cancellation must join native initialization and publish a success before
     # another Session can use this process. A failure never replaces the snapshot.
-    await _join(asyncio.create_task(initialize()))
+    try:
+        native = importlib.import_module("agents._native")
+        from .session import _join
+
+        await _join(_create_task(initialize()))
+    finally:
+        # Task-factory rejection can precede initialize's first instruction.
+        private.encoded = ""
 
 
 async def shutdown(*, timeout_ms: int | None = None) -> None:
@@ -615,6 +651,7 @@ def _capture(
 ) -> _CapturedTrace:
     try:
         scope = None
+        captured = None
         native = None
         context = current_context()
         handle = context._handle if context else fallback
@@ -658,11 +695,18 @@ def _capture(
             _ensure_processor_pump()
             return captured
         except BaseException as error:
-            if scope is not None:
-                scope.__exit__(type(error), error, None)
+            try:
+                if captured is not None:
+                    captured.close(error)
+                elif scope is not None:
+                    scope.__exit__(type(error), error, None)
+            except BaseException as cleanup:
+                from .session import _error_contexts, _retain_cleanup_error
+
+                _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
             raise
     finally:
-        del options
+        del options, scope, context, captured
 
 
 class TraceLifecycleEvent(TypedDict):
@@ -731,6 +775,16 @@ def _validate_processors(processors: Sequence[TraceProcessor]) -> None:
         raise TypeError("Processors must define on_trace_event")
 
 
+def _check_processor_capacity(count: int, *, replace: bool) -> None:
+    active_count = count if replace else len(_active_processor_ids) + count
+    if active_count > _MAX_PROCESSOR_WORKERS:
+        raise RuntimeError("At most 16 active Python trace processors are supported")
+    if len(_processors) + count > 64:
+        raise RuntimeError(
+            "Trace processor route capacity exhausted; flush completed records before adding routes"
+        )
+
+
 _TaskT = TypeVar("_TaskT")
 
 
@@ -783,38 +837,37 @@ def _ensure_processor_pump() -> None:
                 _processor_starting = False
 
 
-def _set_processors(processors: Sequence[TraceProcessor], *, replace: bool) -> None:
+def _set_processors(
+    processors: Sequence[TraceProcessor],
+    *,
+    replace: bool,
+    _startup: tuple[asyncio.Task[None] | None, asyncio.Future[None] | None] | None = None,
+) -> None:
     global _processor_serial, _processor_task, _active_processor_ids, _processor_starting
     values = tuple(processors)
-    _validate_processors(values)
+    if _startup is None:
+        _validate_processors(values)
     with _processor_lock:
-        if _processor_starting or _processor_closing:
+        if (_processor_starting and _startup is None) or _processor_closing:
             raise RuntimeError("Trace processor startup or shutdown is in progress")
         _processor_starting = True
         try:
-            active_count = len(values) if replace else len(_active_processor_ids) + len(values)
-            if active_count > _MAX_PROCESSOR_WORKERS:
-                raise RuntimeError("At most 16 active Python trace processors are supported")
-            if len(_processors) + len(values) > 64:
-                raise RuntimeError(
-                    "Trace processor route capacity exhausted; "
-                    "flush completed records before adding routes"
-                )
+            _check_processor_capacity(len(values), replace=replace)
             ids = [f"python-{_processor_serial + i}" for i in range(len(values))]
             routes = {
                 identifier: _ProcessorRoute(value)
                 for identifier, value in zip(ids, values, strict=True)
             }
             native = _native_tracing()
-            reserved: asyncio.Task[None] | None = None
-            ready: asyncio.Future[None] | None = None
+            reserved, ready = _startup if _startup is not None else (None, None)
             try:
                 try:
                     loop = asyncio.get_running_loop()
                 except RuntimeError:
                     loop = None
                 if (
-                    loop is not None
+                    _startup is None
+                    and loop is not None
                     and not _in_processor.get()
                     and (_processors or routes)
                     and (
@@ -845,7 +898,8 @@ def _set_processors(processors: Sequence[TraceProcessor], *, replace: bool) -> N
             if reserved is not None:
                 _processor_task = reserved
                 assert ready is not None
-                ready.set_result(None)
+                if _startup is None:
+                    ready.set_result(None)
         finally:
             _processor_starting = False
 
@@ -1142,6 +1196,8 @@ async def force_flush(*, timeout_ms: int = 10_000) -> FlushResult:
     if _engine_options is None:
         raise RuntimeError("Configure telemetry successfully before force_flush")
     budget = _timeout(timeout_ms)
+    if _in_processor.get():
+        raise RuntimeError("Telemetry force_flush cannot run inside a trace processor callback")
     _ensure_processor_pump()
     result = await _join(asyncio.ensure_future(_native_tracing().force_flush_telemetry(budget)))
     return FlushResult(**json.loads(result))

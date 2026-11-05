@@ -534,8 +534,26 @@ async def _flush_budget(*, shutdown: bool = False) -> None:
 async def _manual_restore(
     fixture: ResponsesFixture, provider: NativeProvider, peer: DecodedCollector
 ) -> None:
+    checking_restore = False
+    restored_input_contexts = []
+
     class Arguments(BaseModel):
         key: str
+
+        @model_validator(mode="after")
+        def check_restored_context(self) -> Arguments:
+            if checking_restore:
+                current = telemetry.current_context()
+                assert current is not None
+                assert current.trace_id == restored_scope.context.trace_id
+                assert not current.include_sensitive_data
+                with telemetry.span(
+                    "restored validator nested work",
+                    options=telemetry.TraceOptions(include_sensitive_data=True),
+                ) as child:
+                    assert not child.context.include_sensitive_data
+                restored_input_contexts.append(current)
+            return self
 
     manual = FunctionTool(
         name="manual_lookup", description="Read a record.", input_type=Arguments, output_type=str
@@ -562,13 +580,17 @@ async def _manual_restore(
     assert "credential_ref" not in serialized
     assert "default-key" not in serialized
     _answer(fixture, "RESTORED_OUTPUT_CANARY")
+    checking_restore = True
     with telemetry.trace(
         "restored workflow",
         options=telemetry.TraceOptions(
-            include_sensitive_data=False,
+            include_sensitive_data=True,
         ),
     ) as restored_scope:
-        async with agent.session(state=saved) as restored:
+        async with agent.session(
+            state=saved, trace_options=telemetry.TraceOptions(include_sensitive_data=False)
+        ) as restored:
+            assert len(restored_input_contexts) == 1
             async for interaction in restored.interactions():
                 request = manual.match(interaction)
                 if request is not None:
