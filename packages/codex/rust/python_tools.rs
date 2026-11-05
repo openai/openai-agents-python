@@ -63,6 +63,7 @@ impl Generation {
 
 // No Python constructor or serialization. The weak owner avoids retaining a
 // session through application-held requests after its native waiter is gone.
+#[derive(Clone)]
 #[pyclass(frozen, module = "agents._native")]
 pub(crate) struct ManualToolGrant {
     pub(crate) owner: ManualOwner,
@@ -70,6 +71,7 @@ pub(crate) struct ManualToolGrant {
     pub(crate) invocation: u64,
 }
 
+#[derive(Clone)]
 pub(crate) enum ManualOwner {
     Core(Weak<PythonTools>),
 }
@@ -2162,6 +2164,7 @@ fn provider_error_code(body: &str) -> Option<String> {
 
 #[derive(Default)]
 pub struct PythonContributor {
+    pub(crate) managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     pub(crate) manager: Weak<ThreadManager>,
     pub(crate) models_config: codex_models_manager::ModelsManagerConfig,
     pub(crate) code_mode_enabled: bool,
@@ -2659,6 +2662,7 @@ impl PythonContributor {
             .copied()
             .map(|slot| {
                 Arc::new(PythonExecutor {
+                    managed_calls: self.managed_calls.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -2820,6 +2824,7 @@ impl ToolContributor for PythonContributor {
 }
 
 struct PythonExecutor {
+    managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
     generation: Arc<Generation>,
@@ -2884,6 +2889,11 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     false,
                 )
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            // A rejected enqueue never reaches application code. Keep Core's
+            // error output for it instead of recording an unknown effect.
+            if let Some(calls) = &self.managed_calls {
+                calls.register(&self.thread, &call.turn_id, &call.call_id);
+            }
             let _reply = PendingReply {
                 tools: &self.tools,
                 invocation,
@@ -2911,9 +2921,13 @@ pub(crate) struct PythonOutput(pub(crate) DynamicToolResponse);
 
 impl PythonOutput {
     pub(crate) fn receipt(&self, key: &PendingKey) -> ResponseItem {
+        self.receipt_for(&key.turn, &key.call)
+    }
+
+    pub(crate) fn receipt_for(&self, turn: &str, call: &str) -> ResponseItem {
         let mut item: ResponseItem = self
             .to_response_item(
-                &key.call,
+                call,
                 &ToolPayload::Function {
                     arguments: String::new(),
                 },
@@ -2926,7 +2940,7 @@ impl PythonOutput {
         {
             *internal_chat_message_metadata_passthrough = Some(
                 codex_protocol::models::InternalChatMessageMetadataPassthrough {
-                    turn_id: Some(key.turn.clone()),
+                    turn_id: Some(turn.to_owned()),
                     ..Default::default()
                 },
             );
@@ -4524,12 +4538,80 @@ pub(crate) mod managed_tests {
 
     fn executor(tools: Arc<PythonTools>) -> PythonExecutor {
         PythonExecutor {
+            managed_calls: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,
             slot: 0,
             use_deferred_specs: false,
             code_mode_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn only_enqueued_calls_filter_core_outputs() {
+        for rejected in [true, false] {
+            let tools = catalog(
+                ToolPolicy::default(),
+                DynamicToolSpec::Function(function("lookup")),
+            );
+            if rejected {
+                tools.family.receiver.lock().await.close();
+            }
+            let thread = codex_protocol::ThreadId::new();
+            let managed = Arc::new(crate::storage::ManagedCalls::default());
+            let mut executor = executor(Arc::clone(&tools));
+            executor.thread = thread.to_string();
+            executor.managed_calls = Some(Arc::clone(&managed));
+            let key = PendingKey {
+                reply: ReplyKey {
+                    thread: thread.to_string(),
+                    generation: executor.generation.id,
+                    slot: 0,
+                    instance: None,
+                },
+                turn: "turn".into(),
+                call: "call".into(),
+            };
+            let mut handled = executor.handle(ToolCall {
+                turn_id: key.turn.clone(),
+                call_id: key.call.clone(),
+                tool_name: ToolName::new(None, "lookup"),
+                model: "test-model".into(),
+                codex_turn_metadata: None,
+                truncation_policy: codex_protocol::protocol::TruncationPolicy::Bytes(1000),
+                source: ToolCallSource::Direct,
+                conversation_history: Default::default(),
+                turn_item_emitter: Arc::new(codex_tools::NoopTurnItemEmitter),
+                environments: vec![],
+                payload: ToolPayload::Function {
+                    arguments: "{}".into(),
+                },
+            });
+            if rejected {
+                assert!(matches!(
+                    handled.await,
+                    Err(FunctionCallError::RespondToModel(message))
+                    if message == "Python tool session closed"
+                ));
+                assert!(tools.pending.lock().unwrap().is_empty());
+            } else {
+                assert!(futures_util::poll!(&mut handled).is_pending());
+                assert_eq!(tools.next_request().await["msg"]["callId"], "call");
+            }
+            let output = PythonOutput(DynamicToolResponse {
+                content_items: vec![],
+                success: false,
+            })
+            .receipt(&key);
+            assert_eq!(
+                managed.owns_output(
+                    thread,
+                    &codex_history::RolloutItem::ResponseItem(output.into())
+                ),
+                !rejected,
+                "only application-admitted calls may suppress a Core error receipt"
+            );
         }
     }
 

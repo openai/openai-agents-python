@@ -1,0 +1,313 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 59bee0fec40f983672f626b31111a7175917206b..6caf74268d82df87945bc5083ad72ef9994a96d0 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -748,6 +748,7 @@ async fn drain_to_completed(
+     prompt: &Prompt,
+     phase: CompactionPhase,
+ ) -> CodexResult<CompactionResponse> {
++    sess.ensure_rollout_durable().await?;
+     let mut stream = client_session
+         .stream(
+             prompt,
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index e20b0a7f5cf5f6d4c5f8bc701facfb785aa900c0..6e4187502b5c4d414d1648a8964d0cd3b93f539f 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -387,6 +387,7 @@ async fn run_remote_compaction_request_v2(
+         .min(MAX_REMOTE_COMPACTION_V2_STREAM_RETRIES);
+     let mut retry_state = ResponsesStreamRetryState::default();
+     loop {
++        sess.ensure_rollout_durable().await?;
+         let result = match client_session
+             .stream(
+                 prompt,
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 787322e570eeb7be1432300cac44242849211b42..223166ee99b58bfec63ab602ef40f78a4f1f7c98 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1462,6 +1462,20 @@ impl Session {
+         }
+     }
+ 
++    /// Fence accepted history before dependent model or tool execution.
++    pub(crate) async fn ensure_rollout_durable(&self) -> CodexResult<()> {
++        let failure = |_| {
++            CodexErr::Fatal(
++                "Canonical thread persistence failed; execution stopped pending recovery"
++                    .to_string(),
++            )
++        };
++        self.try_ensure_rollout_materialized(PersistContext::Standard)
++            .await
++            .map_err(failure)?;
++        self.flush_rollout().await.map_err(failure)
++    }
++
+     pub(crate) async fn try_ensure_rollout_materialized(
+         &self,
+         context: PersistContext,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..3847a18578431730d0d0441f38a8d22d194ae1a7 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2513,9 +2513,7 @@ async fn drain_in_flight(
+                 sess.record_tool_result(turn_context, &step_context.settings.model_info, result)
+                     .await;
+             }
+-            Err(err) => {
+-                error_or_panic(format!("in-flight tool future failed during drain: {err}"));
+-            }
++            Err(err) => return Err(err),
+         }
+     }
+     Ok(())
+@@ -2615,6 +2613,8 @@ async fn try_run_sampling_request(
+             turn_context.extension_data.insert(LastSdkReceipt(receipt));
+         }
+     }
++    // Every request, including a stream retry, depends on accepted durable history.
++    sess.ensure_rollout_durable().await?;
+     let mut stream = client_session
+         .stream(
+             prompt,
+@@ -3219,6 +3219,9 @@ async fn try_run_sampling_request(
+         drain_in_flight(&mut in_flight, sess.clone(), &step_context).await?;
+     }
+ 
++    // Tool effects have completed. Save their results before any dependent work.
++    sess.ensure_rollout_durable().await?;
++
+     if should_emit_token_count {
+         // A tool call such as request_user_input can intentionally pause the turn. Emit token
+         // counts only after pending tools resolve so clients do not see progress events while the
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 32a4adbbce586d4f0a0e7a7cb6f92abf3e45553e..7ab17543188a2c285e6495c4ad77f1212bb4395f 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -60,6 +60,7 @@ use codex_protocol::protocol::WarningEvent;
+ use codex_thread_store::PersistContext;
+ 
+ use codex_features::Feature;
++use codex_protocol::error::CodexErr;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::error::Result as CodexResult;
+ pub(crate) use compact::CompactTask;
+@@ -366,7 +367,7 @@ impl Session {
+         let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
+         let task_future = async move {
+             let ctx_for_finish = Arc::clone(&ctx);
+-            let task_result = match session.begin_owned_child_stdio(&ctx, &task_cancellation_token).await {
++            let mut task_result = match session.begin_owned_child_stdio(&ctx, &task_cancellation_token).await {
+                 Ok(()) => task_for_run
+                     .run(
+                         Arc::clone(&session),
+@@ -387,12 +388,14 @@ impl Session {
+                 && let Err(err) = sess.flush_rollout().await
+             {
+                 warn!("failed to flush rollout before completing turn: {err}");
++                task_result = Err(CodexErr::Fatal(
++                    "Canonical thread persistence failed; turn completion stopped".to_string(),
++                ));
+                 sess.send_event(
+                     ctx_for_finish.as_ref(),
+                     EventMsg::Warning(WarningEvent {
+-                        message: format!(
+-                            "Failed to save the conversation transcript; Codex will continue retrying. Error: {err}"
+-                        ),
++                        message: "Canonical thread persistence failed; execution stopped pending recovery"
++                            .to_string(),
+                     }),
+                 )
+                 .await;
+diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
+index d58f23756ec43a7bd3608fdf75606d6f371f67b0..b825a5455982ece51150dae14579ec65be009609 100644
+--- a/codex-rs/core/src/tools/parallel.rs
++++ b/codex-rs/core/src/tools/parallel.rs
+@@ -251,6 +251,13 @@ impl ToolCallRuntime {
+                 } else {
+                     Either::Right(lock.write().await)
+                 };
++                // A recorded call is not permission to execute until its history is durable.
++                // This also fences nested code-mode dispatches before entering their handler.
++                session.ensure_rollout_durable().await.map_err(|_| {
++                    FunctionCallError::Fatal(
++                        "Canonical thread persistence failed; tool execution stopped".to_string(),
++                    )
++                })?;
+                 // Admission through the parallel-execution gate marks the end
+                 // of dispatch waiting and the start of handler execution.
+                 if let Some(execution_started_at) = execution_started_at {
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index ab18df6d8e19a709f299b14dd7d70a76df439133..012d2baa51a4908914e427936a443aaee43902eb 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -1,6 +1,8 @@
+ use std::future::Future;
+ use std::path::PathBuf;
+ use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
+ 
+ use codex_protocol::ThreadId;
+ use codex_protocol::protocol::ThreadHistoryMode;
+@@ -41,6 +43,7 @@ pub struct LiveThread {
+     thread_store: Arc<dyn ThreadStore>,
+     metadata_sync: Arc<Mutex<ThreadMetadataSync>>,
+     persistence_telemetry: RolloutPersistenceTelemetry,
++    canonical_history_failed: Arc<AtomicBool>,
+ }
+ 
+ /// Owns persistence acquisition and its live thread while initialization is still fallible.
+@@ -145,6 +148,7 @@ impl LiveThread {
+             thread_store,
+             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
++            canonical_history_failed: Arc::new(AtomicBool::new(false)),
+         })
+     }
+ 
+@@ -207,6 +211,7 @@ impl LiveThread {
+                 thread_store,
+                 metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+                 persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
++                canonical_history_failed: Arc::new(AtomicBool::new(false)),
+             },
+             history,
+         ))
+@@ -258,12 +263,15 @@ impl LiveThread {
+         } else {
+             (persisted_rollout_items(raw_items, self.history_mode), None)
+         };
+-        self.thread_store
++        self.check_canonical_history()?;
++        let result = self
++            .thread_store
+             .append_items(AppendThreadItemsParams {
+                 thread_id: self.thread_id,
+                 items: raw_items.to_vec(),
+             })
+-            .await?;
++            .await;
++        self.retain_canonical_result(result)?;
+         if let Some(measurement) = measurement.as_ref() {
+             self.persistence_telemetry
+                 .record_batch(raw_items, measurement);
+@@ -280,24 +288,61 @@ impl LiveThread {
+                 .take_pending_update_for_existing_history();
+             self.apply_pending_metadata_update(update, context).await?;
+         }
+-        self.thread_store
++        self.check_canonical_history()?;
++        let result = self
++            .thread_store
+             .persist_thread(self.thread_id, context)
+-            .await?;
++            .await;
++        self.retain_canonical_result(result)?;
+         let update = self.metadata_sync.lock().await.take_pending_update();
+         self.apply_pending_metadata_update(update, context).await
+     }
+ 
+     pub async fn flush(&self) -> ThreadStoreResult<()> {
+-        self.thread_store.flush_thread(self.thread_id).await?;
++        let result = self.thread_store.flush_thread(self.thread_id).await;
++        self.retain_canonical_result(result)?;
+         self.flush_pending_metadata_update_for_existing_history()
+             .await
+     }
+ 
++    fn check_canonical_history(&self) -> ThreadStoreResult<()> {
++        if self.canonical_history_failed.load(Ordering::Acquire) {
++            return Err(ThreadStoreError::Internal {
++                message: "Canonical thread persistence failed; execution requires recovery"
++                    .to_string(),
++            });
++        }
++        Ok(())
++    }
++
++    fn retain_canonical_result(&self, result: ThreadStoreResult<()>) -> ThreadStoreResult<()> {
++        if result.is_err() {
++            self.canonical_history_failed.store(true, Ordering::Release);
++        }
++        result?;
++        self.check_canonical_history()
++    }
++
+     pub async fn shutdown(&self) -> ThreadStoreResult<()> {
+         let metadata_result = self
+             .flush_pending_metadata_update_for_existing_history()
+             .await;
++        // Always close the backend, including after a failed append. A successful close
++        // cannot prove that history omitted by an earlier failed write was repaired.
+         let shutdown_result = self.thread_store.shutdown_thread(self.thread_id).await;
++        if shutdown_result.is_err() {
++            // A failed flush may leave a backend writer alive. Close is terminal for this
++            // handle: release ownership without discarding already committed history.
++            if let Err(discard_error) = self.thread_store.discard_thread(self.thread_id).await {
++                self.canonical_history_failed.store(true, Ordering::Release);
++                return Err(ThreadStoreError::Internal {
++                    message: format!(
++                        "thread shutdown failed and writer release failed: {discard_error}"
++                    ),
++                });
++            }
++        }
++        let shutdown_result = self.retain_canonical_result(shutdown_result);
+         match (metadata_result, shutdown_result) {
+             (Err(metadata_error), Err(shutdown_error)) => Err(ThreadStoreError::Internal {
+                 message: format!(
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 0ed72ba6d49d561b16ced3323d863756163db7f5..fe88afa56361f7d07c0e54e73f7caa718f5c1b0d 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -849,6 +849,48 @@ mod tests {
+     use crate::local::test_support::write_session_file;
+     use crate::local::test_support::write_session_file_with_history_mode;
+ 
++    #[tokio::test]
++    async fn live_thread_keeps_failed_append_through_flush_and_close() {
++        let home = TempDir::new().expect("temp dir");
++        let store = Arc::new(LocalThreadStore::new(test_config(home.path()), None));
++        let thread_id = ThreadId::default();
++        let live = LiveThread::create(store.clone(), create_thread_params(thread_id))
++            .await
++            .expect("create live thread");
++        let clone = live.clone();
++        store
++            .discard_thread(thread_id)
++            .await
++            .expect("remove live writer");
++        live.append_items(&[user_message_item("accepted input")])
++            .await
++            .expect_err("missing writer rejects canonical append");
++        // The backend recovers, but the missing append is still unresolved. Successful
++        // backend barriers must not erase the failure retained by either live handle.
++        store
++            .create_thread(create_thread_params(thread_id))
++            .await
++            .expect("recover backend writer");
++        store
++            .flush_thread(thread_id)
++            .await
++            .expect("backend flush succeeds");
++        clone
++            .flush()
++            .await
++            .expect_err("retain append failure across clones");
++        live.persist(PersistContext::Standard)
++            .await
++            .expect_err("stop dependent execution");
++        live.shutdown()
++            .await
++            .expect_err("close must retain failure");
++        assert!(
++            !store.live_recorders.lock().await.contains_key(&thread_id),
++            "close releases the backend writer despite the retained error"
++        );
++    }
++
+     #[tokio::test]
+     async fn live_writer_lifecycle_writes_and_closes() {
+         let home = TempDir::new().expect("temp dir");

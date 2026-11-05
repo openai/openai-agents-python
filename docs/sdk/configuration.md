@@ -26,17 +26,77 @@ Pass application state through `context=...` and read it in a callback with `Too
 
 ## Provider connection
 
-Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client and requires an API key. It does not accept an `openai.OpenAI` or `openai.AsyncOpenAI` instance as the model connection.
+Pass `NativeProvider(base_url=..., api_key=...)` to configure the native Responses connection for model requests. The SDK uses Codex's built-in model client. It does not accept an `openai.OpenAI` or `openai.AsyncOpenAI` instance as the model connection.
 
 Custom endpoints must support Responses. Chat Completions compatibility alone is insufficient. Use the [endpoint checks](providers.md) to test the features your application needs.
 
-Connection defaults are:
+API-key connections use these defaults.
 
 - `base_url=None` sends model requests to `https://api.openai.com/v1`. The SDK does not read `OPENAI_BASE_URL`. To use it, import `os` and pass `base_url=os.environ["OPENAI_BASE_URL"]`.
 - An omitted key reads `OPENAI_API_KEY` when the Session opens. Keep credentials in current application configuration, outside saved conversation state.
 - `supports_websockets=None` enables WebSockets for `base_url=None` and disables them for any explicit `base_url`. Set `True` for a compatible custom provider or `False` to require HTTP. When enabled, the native runtime selects the final transport for the provider and model.
 
 The pinned Codex bypasses HTTP proxies with `CODEX_SANDBOX=seatbelt`. To prevent unintended direct requests, the SDK rejects Session startup if `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, or their lowercase forms are nonempty in that mode. The check applies even with a `NO_PROXY` exemption or WebSockets enabled. Run outside that sandboxed environment, or remove unneeded proxy settings.
+
+### Reuse a Codex login (experimental)
+
+Pass `NativeProvider(auth=CodexLogin())` to reuse an existing Codex-managed ChatGPT OAuth login. API-key authentication remains the default when `auth` is omitted.
+
+!!! warning "Local experimental use only"
+    This feature may change or be removed. The public beta and general availability of the Agents SDK may ship without this feature. Follow the official [Codex authentication guidance](https://learn.chatgpt.com/docs/auth) and [application authentication policy](https://learn.chatgpt.com/docs/app-server#auth-endpoints) for permitted uses.
+
+Complete `codex login` separately before opening an SDK Session. This mode reads the ChatGPT login saved in `auth.json`. If Codex uses the operating system credential store, configure file storage and sign in again. See [Codex credential storage](https://learn.chatgpt.com/docs/auth#credential-storage) to configure file storage. Protect the login file and keep its tokens out of logs and source control.
+
+`CodexLogin()` looks in `CODEX_HOME` if set and in `~/.codex` otherwise. Pass `CodexLogin(codex_home=...)` to select another existing Codex directory. Pass `account_id=...` to require the expected ChatGPT workspace ID. The Session fails to open if the saved login has a different workspace ID or has no workspace ID.
+
+#### Run a coding turn without an API key
+
+This complete script makes a live model request using the saved login. Run it with an SDK build that includes this experimental API:
+
+```python
+import asyncio
+
+from agents import Agent, CodexLogin, NativeProvider
+
+
+async def main() -> None:
+    async with NativeProvider(auth=CodexLogin()) as provider:
+        agent = Agent(
+            instructions="Write concise Python code with unit tests.",
+            provider=provider,
+        )
+        async with agent.session() as session:
+            account = session.codex_account
+            if account is None:
+                raise RuntimeError("Expected a saved Codex login")
+            print("Saved workspace ID:", account.account_id)
+            print("Saved plan:", account.plan_type)
+            turn = await session.submit(
+                "Write an is_prime(n: int) -> bool function and three unit tests."
+            )
+            result = await turn.get_result()
+            print(result.final_output)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Save the script as `coding_turn.py`. On macOS or Linux, run it with both API-key variables unset.
+
+```bash
+env -u OPENAI_API_KEY -u CODEX_API_KEY python coding_turn.py
+```
+
+The example asks for code and tests in the answer. To execute commands or edit workspace files, configure an [execution Environment](execution.md).
+
+#### Account identity, refresh, and usage
+
+`session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type` for a Session opened with `CodexLogin`, or `None` in API-key mode. Check `account_id` to identify the saved ChatGPT workspace before submitting work. Some personal logins have no workspace ID and report `account_id=None`. Pass the expected ID to `CodexLogin(account_id=...)` to check it when opening the Session. The saved `plan_type` may be `"unknown"`. For actual usage on that account, check the [Codex usage dashboard](https://chatgpt.com/codex/settings/usage).
+
+The native runtime refreshes the saved login for the same user and workspace. Portable restore and local conversation resume must use that same identity. If you switch users or workspaces, start a new conversation. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
+
+This mode uses HTTPS on the standard Codex backend. Workspaces that require a separate backend need their own integration. Omit `api_key` and `base_url`, and leave `supports_websockets` unset or set it to `False`. If the saved login fails, the SDK stops even when API keys or other credentials are set.
 
 ### Read API-key rate limits
 

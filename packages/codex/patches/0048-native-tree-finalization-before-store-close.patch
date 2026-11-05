@@ -1,0 +1,391 @@
+diff --git a/codex-rs/core/src/agent/control/completion.rs b/codex-rs/core/src/agent/control/completion.rs
+index 8e041dcf70ce0c974d7cd99137c4f4c1c56ca3cb..4712f7104851634818f5693eb094814652de4848 100644
+--- a/codex-rs/core/src/agent/control/completion.rs
++++ b/codex-rs/core/src/agent/control/completion.rs
+@@ -116,15 +116,19 @@ impl LocalAgentControl {
+         );
+         let context =
+             AgentCommunicationContext::new(AgentCommunicationKind::Result, outcome.thread_id);
+-        if let Err(err) = self
+-            .send_inter_agent_communication(
++        // Canonical completion activity above must finish even during shutdown. Queue-only
++        // notification is best effort: a canceled parent's bounded SQ is no longer drained.
++        let delivery = tokio::select! {
++            biased;
++            _ = self.runtime.shutdown.cancelled() => return,
++            result = self.send_inter_agent_communication(
+                 parent_thread_id,
+                 communication,
+                 context,
+                 TurnStartOptions::default(),
+-            )
+-            .await
+-        {
++            ) => result,
++        };
++        if let Err(err) = delivery {
+             debug!("failed to notify parent thread {parent_thread_id}: {err}");
+             return;
+         }
+diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
+index bf50a59550618f6196d93a6d96b78938b56c0136..4a37b39d14e72d099a3bd3c03230fdf3aaaeaa17 100644
+--- a/codex-rs/core/src/agent/control/runtime.rs
++++ b/codex-rs/core/src/agent/control/runtime.rs
+@@ -28,6 +28,8 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
+ #[derive(Debug, Default)]
+ pub(crate) struct AgentTreeShutdownState {
+     members: TaskTracker,
++    // Physical task futures include detached completion delivery and final persistence.
++    tasks: TaskTracker,
+     failed: AtomicBool,
+     managed_process_shutdown_failed: AtomicBool,
+ }
+@@ -216,7 +218,28 @@ impl LocalAgentRuntime {
+         Ok(membership)
+     }
+ 
++    /// Owns the whole task future, including terminal delivery after its active slot is cleared.
++    pub(crate) fn admit_task(&self) -> Option<TaskTrackerToken> {
++        if self.shutdown_state.tasks.is_closed() || self.shutdown.is_cancelled() {
++            return None;
++        }
++        let task = self.shutdown_state.tasks.token();
++        // TaskTracker tokens can be created after close. A racing registration must either
++        // retain the barrier before it closes or refuse to start any task afterward.
++        if self.shutdown_state.tasks.is_closed() || self.shutdown.is_cancelled() {
++            return None;
++        }
++        Some(task)
++    }
++
++    pub(crate) async fn wait_for_tasks_before_writer_shutdown(&self) {
++        if self.shutdown_state.tasks.is_closed() {
++            self.shutdown_state.tasks.wait().await;
++        }
++    }
++
+     pub(crate) fn request_shutdown(&self) -> Arc<AgentTreeShutdownState> {
++        self.shutdown_state.tasks.close();
+         self.shutdown_state.members.close();
+         self.shutdown.cancel();
+         self.mailboxes.close();
+diff --git a/codex-rs/core/src/agent/control/runtime_tests.rs b/codex-rs/core/src/agent/control/runtime_tests.rs
+index 6f035271936b4fec7c9c315ade6e052fd4e2d9e7..23de453fd6955ce690bf79a0fc3bcdcd18dbc1ac 100644
+--- a/codex-rs/core/src/agent/control/runtime_tests.rs
++++ b/codex-rs/core/src/agent/control/runtime_tests.rs
+@@ -54,3 +54,28 @@ async fn managed_process_shutdown_waits_for_members_and_reports_failure() {
+         .await
+         .expect_err("tree shutdown also failed");
+ }
++
++#[tokio::test]
++async fn writer_shutdown_joins_tasks_without_waiting_for_session_membership() {
++    let runtime = LocalAgentRuntime::new(Weak::default(), default_thread_id_generator(), None);
++    let session = runtime.admit_start().expect("session admitted");
++    let task = runtime.admit_task().expect("task admitted");
++    let shutdown = runtime.request_shutdown();
++    assert!(
++        runtime.admit_task().is_none(),
++        "tree fence rejects later tasks"
++    );
++    let writers = runtime.wait_for_tasks_before_writer_shutdown();
++    futures::pin_mut!(writers);
++    assert!(futures::poll!(writers.as_mut()).is_pending());
++    drop(task);
++    writers.await;
++    // The live session still owns its writer. Waiting for sessions here would deadlock.
++    let sessions = shutdown.wait();
++    futures::pin_mut!(sessions);
++    assert!(futures::poll!(sessions.as_mut()).is_pending());
++    drop(session);
++    sessions
++        .await
++        .expect("session teardown finishes separately");
++}
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 1acd116f119642a1556a78d84cc70c2a3f857c4c..09148a57d87eb2f2b9aebf2410b8eec25eb99b28 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -5801,3 +5801,134 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails()
+         .await
+         .expect("tree shutdown after partial subtree resume should succeed");
+ }
++
++#[tokio::test]
++async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_queue() {
++    let harness = AgentControlHarness::new().await;
++    let (parent_id, original_parent) = harness.start_thread().await;
++    let runtime = original_parent.session.services.local_agent_runtime.clone();
++    let control = runtime.control(Default::default());
++    let state = runtime.upgrade().expect("manager lives");
++    // Replace only the loaded parent's SQ. Retain its real sender so the actual session
++    // loop stays alive and can exercise tree shutdown while this bounded fixture stays full.
++    let registered = state
++        .threads
++        .write()
++        .await
++        .remove(&parent_id)
++        .expect("registered parent");
++    drop(original_parent);
++    let mut parent = match Arc::try_unwrap(registered) {
++        Ok(parent) => parent,
++        Err(_) => panic!("fixture parent unexpectedly shared"),
++    };
++    let (tx_sub, _rx_sub) = async_channel::bounded(1);
++    let _original_sender = std::mem::replace(&mut parent.io.tx_sub, tx_sub.clone());
++    tx_sub
++        .try_send(crate::session::Submission {
++            id: "fill-parent-queue".to_owned(),
++            op: Op::ReloadUserConfig,
++            trace: None,
++            turn_extension_init: None,
++            parent_turn_id: None,
++            root_turn_id: None,
++            residency_guard: None,
++        })
++        .expect("fill parent queue");
++    let parent = Arc::new(parent);
++    state
++        .threads
++        .write()
++        .await
++        .insert(parent_id, parent.clone());
++    let first_token = runtime
++        .admit_task()
++        .expect("first child finalizer admitted");
++    let second_token = runtime
++        .admit_task()
++        .expect("second child finalizer admitted");
++    let outcome = |turn: &str| crate::agent::api::AgentTurnOutcome {
++        thread_id: ThreadId::new(),
++        turn_id: turn.to_owned(),
++        source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++            parent_thread_id: parent_id,
++            depth: 1,
++            agent_path: Some(AgentPath::try_from(format!("/root/{turn}")).expect("child path")),
++            agent_nickname: None,
++            agent_role: None,
++        }),
++        parent_turn_id: Some("parent-turn".to_owned()),
++        initiating_agent_path: None,
++        status: AgentStatus::Completed(Some("finished".to_owned())),
++        error_info: None,
++    };
++    let first = outcome("first");
++    let first_control = control.clone();
++    let first_delivery = tokio::spawn(async move {
++        let _task = first_token;
++        first_control
++            .notify_parent_of_terminal_turn(
++                first,
++                &codex_rollout_trace::ThreadTraceContext::disabled(),
++            )
++            .await;
++    });
++    // Observing the real completion event proves its canonical append preceded the
++    // queue-only notification. The notification then parks on the full parent SQ.
++    timeout(Duration::from_secs(5), async {
++        loop {
++            if let EventMsg::ItemCompleted(event) =
++                parent.next_event().await.expect("parent event").msg
++                && event.item.id() == "subagent-completed-first"
++            {
++                break;
++            }
++        }
++    })
++    .await
++    .expect("first activity persisted");
++    assert!(
++        !first_delivery.is_finished(),
++        "full queue must park notification"
++    );
++    runtime.request_shutdown();
++    timeout(Duration::from_secs(5), first_delivery)
++        .await
++        .expect("cancellation releases queued notification")
++        .expect("first finalizer");
++    // The first rejected notification must not evict the still-live parent from the
++    // manager. Its writer remains available for the independently finishing sibling.
++    assert!(
++        state.get_thread(parent_id).await.is_ok(),
++        "parent retained during finalizers"
++    );
++    {
++        let _task = second_token;
++        control
++            .notify_parent_of_terminal_turn(
++                outcome("second"),
++                &codex_rollout_trace::ThreadTraceContext::disabled(),
++            )
++            .await;
++    }
++    timeout(
++        Duration::from_secs(5),
++        parent.io.session_loop_termination.clone(),
++    )
++    .await
++    .expect("writer shutdown after both finalizers");
++    let (history, _, parse_errors) = codex_rollout::RolloutRecorder::load_rollout_items(
++        &parent.rollout_path().expect("local parent rollout"),
++    )
++    .await
++    .expect("read canonical history after writer close");
++    assert_eq!(parse_errors, 0, "canonical history parses cleanly");
++    for turn in ["first", "second"] {
++        let id = format!("subagent-completed-{turn}");
++        assert_eq!(history.iter().filter(|item| matches!(item,
++            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
++                if matches!(&event.item, TurnItem::SubAgentActivity(activity)
++                    if activity.id == id && activity.kind == codex_protocol::protocol::SubAgentActivityKind::Completed)
++        )).count(), 1, "one durable sibling completion after close: {turn}");
++    }
++}
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index dbaa1091216719e825d6601aa0368401c648e3a7..dccc2da3cde466c70ea3688d17dfcd355dbba29c 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -297,6 +297,21 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+     }
+     let _ = sess.conversation.shutdown().await;
+     sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
++    {
++        // A normally completed task can already have detached its active handle. Join its
++        // terminal delivery and idle flush before any shutdown work releases the writer.
++        let finalization = sess
++            .services
++            .thread_extension_data
++            .get_or_init(crate::tasks::TaskFinalization::default);
++        let _finalization = finalization.0.lock().await;
++    }
++    // Tree cancellation keeps all writers open until every task has delivered its child
++    // completion activity. The session-members tracker is deliberately a separate barrier.
++    sess.services
++        .local_agent_runtime
++        .wait_for_tasks_before_writer_shutdown()
++        .await;
+     let shell_snapshot_prewarm = sess.state.lock().await.shell_snapshot_prewarm.take();
+     if let Some(shell_snapshot_prewarm) = shell_snapshot_prewarm {
+         shell_snapshot_prewarm.abort();
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 7ab17543188a2c285e6495c4ad77f1212bb4395f..fc66c2bd5207a9fb29c8791b598ee2eea9a319e1 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -76,6 +76,10 @@ static ACTIVE_TURNS: Gauge = Gauge::new("core.turns.active");
+ 
+ pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
+ 
++/// Keeps a detached task's terminal delivery and final flush ahead of its writer shutdown.
++#[derive(Default)]
++pub(crate) struct TaskFinalization(pub(crate) Mutex<()>);
++
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum InterruptedTurnHistoryMarker {
+     Disabled,
+@@ -292,6 +296,10 @@ impl Session {
+         input: Vec<TurnInput>,
+         task: T,
+     ) {
++        let Some(tree_task) = self.services.local_agent_runtime.admit_task() else {
++            return;
++        };
++
+         self.activate_plugin_selection(&turn_context).await;
+         // Inherited or recovered roots are applied before task start. Otherwise this
+         // task owns its turn, including background work. Later mail cannot change it.
+@@ -366,18 +374,24 @@ impl Session {
+         );
+         let storage_originator = AuthStorageOriginator::from_client_name(&turn_context.originator);
+         let task_future = async move {
++            // Retain membership until on_task_finished has delivered to ancestors and flushed.
++            let _tree_task = tree_task;
+             let ctx_for_finish = Arc::clone(&ctx);
+-            let mut task_result = match session.begin_owned_child_stdio(&ctx, &task_cancellation_token).await {
+-                Ok(()) => task_for_run
+-                    .run(
+-                        Arc::clone(&session),
+-                        ctx,
+-                        task_input,
+-                        task_cancellation_token.child_token(),
+-                    )
+-                    .instrument(trace_span!("session_task.run"))
+-                    .await,
+-                Err(error) => Err(error),
++            let mut task_result = if session.services.local_agent_runtime.shutdown.is_cancelled() {
++                Err(CodexErr::TurnAborted)
++            } else {
++                match session.begin_owned_child_stdio(&ctx, &task_cancellation_token).await {
++                    Ok(()) => task_for_run
++                        .run(
++                            Arc::clone(&session),
++                            ctx,
++                            task_input,
++                            task_cancellation_token.child_token(),
++                        )
++                        .instrument(trace_span!("session_task.run"))
++                        .await,
++                    Err(error) => Err(error),
++                }
+             };
+             let sess = Arc::clone(&session);
+             // Private reviewers save their transcript together with the terminal event.
+@@ -628,6 +642,11 @@ impl Session {
+         turn_context: Arc<TurnContext>,
+         task_result: SessionTaskResult,
+     ) {
++        let finalization = self
++            .services
++            .thread_extension_data
++            .get_or_init(TaskFinalization::default);
++        let _finalization = finalization.0.lock().await;
+         // Retire before terminal delivery or automatic follow-up admission. Preserve the
+         // original task error if shutdown also fails, and retain the failed cleanup receipt.
+         let task_result = match self.end_owned_child_stdio(&turn_context).await {
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 356238944b04b1011d8f868d80d5b68ec91a6932..d39e375b36d121c532f57a59a4b2c5f6b7601d98 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -1393,6 +1393,15 @@ impl ThreadManager {
+                 .collect::<Vec<_>>()
+         };
+ 
++        // Fence and signal every captured tree before closing any of its writers. Descendant
++        // finalizers may still append completion activity to an ancestor's canonical history.
++        for (_, thread) in &threads {
++            thread
++                .session
++                .services
++                .local_agent_runtime
++                .request_shutdown();
++        }
+         let mut shutdowns = threads
+             .into_iter()
+             .map(|(thread_id, thread)| async move {
+diff --git a/codex-rs/core/src/thread_manager/shutdown.rs b/codex-rs/core/src/thread_manager/shutdown.rs
+index 9526a48b31f73a23870252d91c6e880dc5a4b633..c9fd9b61270e2fb88b5b4d5c29e65ef74f0a6b12 100644
+--- a/codex-rs/core/src/thread_manager/shutdown.rs
++++ b/codex-rs/core/src/thread_manager/shutdown.rs
+@@ -47,13 +47,19 @@ impl ThreadManager {
+ }
+ 
+ impl CodexThread {
++    /// Fence and signal this handle's exact tree without waiting for its writers to close.
++    #[doc(hidden)]
++    pub fn request_agent_tree_shutdown(&self) -> AgentTreeShutdown {
++        AgentTreeShutdown {
++            state: self.session.services.local_agent_runtime.request_shutdown(),
++        }
++    }
++
+     /// Shut down this handle's exact tree and report unconfirmed managed process cleanup.
+     #[doc(hidden)]
+     pub async fn shutdown_agent_tree_and_check_managed_processes(&self) -> CodexResult<()> {
+-        self.session
+-            .services
+-            .local_agent_runtime
+-            .request_shutdown()
++        self.request_agent_tree_shutdown()
++            .state
+             .wait_for_managed_process_shutdown()
+             .await
+     }

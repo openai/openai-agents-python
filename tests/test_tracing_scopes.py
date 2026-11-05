@@ -1081,10 +1081,12 @@ def test_explicit_start_end_restores_parent_and_ends_once(native: NativeTracing)
 
 
 @pytest.mark.parametrize("scoped", [False, True])
+@pytest.mark.parametrize("cancel_phase", ["delivery", "continuation"])
 async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
     native: NativeTracing,
     monkeypatch: pytest.MonkeyPatch,
     scoped: bool,
+    cancel_phase: str,
 ) -> None:
     from contextlib import nullcontext
 
@@ -1102,6 +1104,8 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
     entry = tool._capture(None)
     admitted = asyncio.Event()
     resume = asyncio.Event()
+    delivering, durable = asyncio.Event(), asyncio.Event()
+    deliveries = []
     calls: list[tuple[str, str | None]] = []
 
     class Thread:
@@ -1110,7 +1114,13 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
         def _check_manual_tool(self, grant: Any) -> bool:
             return True
 
-        def _respond_manual_tool(self, grant: Any, output: str) -> bool:
+        async def _respond_manual_tool(self, grant: Any, output: str) -> bool:
+            assert telemetry.current_context() is None
+            delivering.set()
+            await durable.wait()
+            if captured.context is not None:
+                assert captured.context not in native.released
+            deliveries.append(output)
             return True
 
         async def _continue_manual(
@@ -1153,14 +1163,22 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
             request = entry.request(
                 object(), 0, 0, session, handle, "manual-call", Args(value="synthetic"), None
             )
-            pending = asyncio.create_task(request.respond("accepted"))
+            with telemetry.trace("unrelated response caller"):
+                pending = asyncio.create_task(request.respond("accepted"))
+            await delivering.wait()
+            if cancel_phase == "delivery":
+                pending.cancel()
+                await asyncio.sleep(0)
+                assert not pending.done() and calls == [] and deliveries == []
+            durable.set()
             await admitted.wait()
             context = captured.context
             assert calls == [(handle.submission_id, context)]
             if scoped:
                 assert context is not None
                 assert json.loads(native.trace_span_context(context))["span_id"] != old
-            pending.cancel()
+            if cancel_phase == "continuation":
+                pending.cancel()
             await asyncio.sleep(0)
             assert not pending.done()
             if context is not None:
@@ -1168,6 +1186,7 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
             resume.set()
             with pytest.raises(asyncio.CancelledError):
                 await pending
+            assert len(deliveries) == 1 and "accepted" in deliveries[0]
             assert not state.restored_pending
             if context is not None:
                 assert context not in native.released

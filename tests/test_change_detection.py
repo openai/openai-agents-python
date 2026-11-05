@@ -164,13 +164,18 @@ def test_manual_verification_checks_unchanged_tree_without_deploying(
         ("pyrightconfig.json", True, False, False, False),
         (".agents/skills/code-change-verification/SKILL.md", True, False, False, False),
         (".agents/skills/code-change-verification/scripts/run.sh", True, False, False, False),
-        ("docs/native-alpha/index.md", True, True, True, True),
+        ("docs/native-alpha/index.md", False, True, True, True),
         ("docs/sdk/topics.json", True, True, True, True),
+        ("docs/sdk/configuration.md", False, True, True, True),
+        ("docs/sdk/reference.md", False, True, True, True),
+        ("docs/sdk/providers.md", True, True, True, True),
+        ("docs/sdk/execution.md", True, True, True, True),
+        ("docs/sdk/testing.md", True, True, True, True),
         ("docs/assets/diagram.png", False, True, True, True),
-        ("docs/日本語 guide.md", True, True, True, True),
+        ("docs/日本語 guide.md", False, True, True, True),
         pytest.param(
             "docs/line\nbreak.md",
-            True,
+            False,
             True,
             True,
             True,
@@ -936,17 +941,9 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "branch_capture_attempt_changed",
         "branch_identity_replaced",
         "branch_corrupt_archive",
-        "branch_wait_success",
+        "branch_running",
+        "branch_queued",
         "branch_completed_precedence",
-        "branch_active_incompatible",
-        "branch_wait_changed_source",
-        "branch_wait_failed",
-        "branch_wait_cancelled",
-        "branch_wait_attempt",
-        "branch_wait_timeout",
-        "branch_wait_missing_artifact",
-        "branch_wait_missing",
-        "branch_wait_api_error",
         "trusted_push_to_pr",
         "stacked_pr",
         "stacked_pr_native_changed",
@@ -1060,13 +1057,11 @@ def test_native_selection_only_runs_for_trusted_code_events(
 def test_native_build_selection(
     change_repo: tuple[Path, str], monkeypatch: pytest.MonkeyPatch, scenario: str
 ) -> None:
-    import builtins
     import io
     import json
     import urllib.error
     import urllib.parse
     import urllib.request
-    from types import SimpleNamespace
 
     pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
     scenario = scenario.removeprefix("pending_python_")
@@ -1412,7 +1407,6 @@ def test_native_build_selection(
     if scenario in {
         "branch_merge_python",
         "branch_merge_native_changed",
-        "branch_active_incompatible",
     }:
         _git(repo, "checkout", "-b", "advanced-base", base)
         _commit(
@@ -1600,20 +1594,11 @@ def test_native_build_selection(
         source["referenced_workflows"][0]["sha"] = initial
     if scenario == "branch_untrusted":
         source["head_repository"]["full_name"] = "example/fork"
-    if scenario in {
-        "branch_wait_success",
-        "branch_wait_failed",
-        "branch_wait_cancelled",
-        "branch_wait_attempt",
-        "branch_wait_timeout",
-        "branch_active_incompatible",
-        "branch_wait_changed_source",
-        "branch_wait_missing_artifact",
-        "branch_wait_missing",
-        "branch_wait_api_error",
-    }:
+    if scenario in {"branch_running", "branch_queued"}:
         source["head_sha"] = head
-        source.update(status="in_progress", conclusion=None)
+        source.update(
+            status="in_progress" if scenario == "branch_running" else "queued", conclusion=None
+        )
         for reference in source["referenced_workflows"]:
             reference["sha"] = head
             reference["path"] = reference["path"].split("@", 1)[0] + "@" + head
@@ -1859,20 +1844,6 @@ def test_native_build_selection(
         )
 
     monkeypatch.setattr(subprocess, "run", tool)
-    elapsed = [0]
-    polls = []
-    clock = SimpleNamespace(
-        monotonic=lambda: elapsed[0],
-        sleep=lambda seconds: elapsed.__setitem__(0, elapsed[0] + seconds),
-    )
-
-    # Keep Git subprocess waits on real time while the workflow uses its own clock.
-    def selector_import(name, *args, **kwargs):
-        if name == "time":
-            return clock
-        return builtins.__import__(name, *args, **kwargs)
-
-    selector_globals = {"__builtins__": {**vars(builtins), "__import__": selector_import}}
 
     def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
         url = request.full_url
@@ -1881,7 +1852,13 @@ def test_native_build_selection(
         if "/workflows/" in url:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
             assert query["event"] in [["push"], ["pull_request"]]
-            status_matches = "status" not in query or source["status"] in query["status"]
+            if scenario in {"branch_running", "branch_queued"}:
+                assert query.get("status") == ["success"]
+            status_matches = (
+                "status" not in query
+                or source["status"] in query["status"]
+                or source["conclusion"] in query["status"]
+            )
             # Return PR runs even for a filtered search to exercise the trust gate itself.
             response = {
                 "workflow_runs": [] if scenario == "no_history" or not status_matches else [source]
@@ -1902,22 +1879,7 @@ def test_native_build_selection(
                 }
                 response["workflow_runs"].insert(0, active)
         elif url.endswith("/runs/123"):
-            polls.append(url)
-            if scenario == "branch_wait_missing":
-                raise urllib.error.HTTPError(url, 404, "missing", {}, None)
-            if scenario == "branch_wait_api_error":
-                raise urllib.error.HTTPError(url, 500, "unavailable", {}, None)
-            response = dict(source)
-            if scenario != "branch_wait_timeout":
-                response.update(status="completed", conclusion="success")
-            if scenario == "branch_wait_failed":
-                response["conclusion"] = "failure"
-            if scenario == "branch_wait_cancelled":
-                response["conclusion"] = "cancelled"
-            if scenario == "branch_wait_attempt":
-                response["run_attempt"] = 2
-            if scenario == "branch_wait_changed_source":
-                response["head_sha"] = initial
+            pytest.fail("CI polled a pending native build")
         elif "/pulls/" in url:
             response = {
                 "merged": True,
@@ -1928,8 +1890,6 @@ def test_native_build_selection(
         else:
             key = "jobs" if "/jobs?" in url else "artifacts"
             items = jobs if key == "jobs" else artifacts
-            if scenario == "branch_wait_missing_artifact" and key == "artifacts":
-                items = [item for item in artifacts if item["name"] != "native-snapshot-Linux-X64"]
             if scenario == "release_split_donors" and "/runs/124/" in url:
                 items = (
                     [
@@ -1998,35 +1958,24 @@ def test_native_build_selection(
     script = selection["run"].split("\n", 1)[1].removesuffix("PYTHON\n")
     if scenario.startswith("incomplete_"):
         with pytest.raises(SystemExit, match="Incomplete source metadata"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
+            exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "invalid_snapshot_digest":
         with pytest.raises(SystemExit, match="Invalid native snapshot digest"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
+            exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "missing_sdk_start":
         with pytest.raises(SystemExit, match="Incomplete SDK execution history"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
+            exec(compile(script, workflow_path, "exec"), {})
     elif scenario in {"branch_corrupt_identity", "branch_capture_attempt_changed"}:
         with pytest.raises(SystemExit, match="Inconsistent native producer identity"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
+            exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "branch_corrupt_archive":
         with pytest.raises(ValueError, match="digest mismatch"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
-    elif scenario == "branch_wait_api_error":
-        with pytest.raises(urllib.error.HTTPError):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
-    elif scenario == "branch_wait_changed_source":
-        with pytest.raises(SystemExit, match="Inconsistent pinned push producer"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
+            exec(compile(script, workflow_path, "exec"), {})
     elif scenario == "api_error":
         with pytest.raises(urllib.error.URLError, match="API unavailable"):
-            exec(compile(script, workflow_path, "exec"), selector_globals)
+            exec(compile(script, workflow_path, "exec"), {})
     else:
-        exec(compile(script, workflow_path, "exec"), selector_globals)
-    if scenario.startswith("branch_wait_"):
-        assert len(polls) == (75 if scenario == "branch_wait_timeout" else 1)
-        assert elapsed[0] <= 75 * 60
-    else:
-        assert not polls
+        exec(compile(script, workflow_path, "exec"), {})
     assert (output.read_text() if output.exists() else "") == (
         "run_id=123\nartifacts="
         + json.dumps(
@@ -2052,7 +2001,6 @@ def test_native_build_selection(
             "branch_merge_python",
             "branch_nullable_association",
             "branch_copied",
-            "branch_wait_success",
             "branch_completed_precedence",
             "feature_push",
             "feature_push_to_pr",
@@ -2089,3 +2037,42 @@ def test_v1_qualification_requests_windows_without_a_release_manifest(
         exec(compile(script, workflow_path, "exec"), {})
     assert result.value.code == 0
     assert output.read_text() == "run=true\n"
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "delete", "rename"])
+def test_changed_executable_docs_require_native_checks(
+    change_repo: tuple[Path, str], change: str
+) -> None:
+    repo, _ = change_repo
+    page = repo / "docs/sdk/custom.md"
+    _commit(repo, "docs/sdk/custom.md")
+    if change != "add":
+        page.write_text("<!-- docs-check: run -->\n```python\nprint('ok')\n```\n")
+    base = _commit(repo)
+    if change == "add":
+        page.write_text("<!-- docs-check: run -->\n```python\nprint('ok')\n```\n")
+    elif change == "remove":
+        page.write_text("# Now prose only\n")
+    elif change == "delete":
+        page.unlink()
+    else:
+        _git(repo, "mv", "docs/sdk/custom.md", "docs/sdk/renamed.md")
+    head = _commit(repo)
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+
+
+def test_docs_import_validation_runs_without_a_native_producer() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text())
+    job = workflow["jobs"]["build-docs"]
+    # All producer jobs are skipped for a prose-only change. Keep this check green.
+    assert "needs.changes.outputs.code == 'false'" in job["if"]
+    for platform in ("linux", "windows", "macos"):
+        assert f"needs.produce-{platform}.result == 'skipped'" in job["if"]
+    check = next(step for step in job["steps"] if step.get("name") == "Check documentation imports")
+    assert check["if"] == "steps.changes.outputs.run == 'true'"
+    assert check["run"] == "uv run --no-sync python .github/scripts/check_docs.py --imports-only"
+    assert job["env"]["PYTHONPATH"] == "src"
+    assert not any(
+        step.get("uses", "").startswith("./.github/actions/use-native") for step in job["steps"]
+    )
