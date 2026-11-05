@@ -173,8 +173,6 @@ jobs:
           import runpy
           import subprocess
           import tempfile
-          import time
-          import urllib.error
           import urllib.parse
           import urllib.request
           from datetime import datetime
@@ -394,56 +392,21 @@ jobs:
           # Search a bounded history. API errors fail visibly.
           def candidates():
               if os.environ.get('CURRENT_PR'):
-                  query = urllib.parse.urlencode({'branch': os.environ['CURRENT_HEAD_REF'], 'event': 'push', 'per_page': 20})
+                  query = urllib.parse.urlencode({'branch': os.environ['CURRENT_HEAD_REF'], 'event': 'push', 'status': 'success', 'per_page': 20})
                   yield from get(api + '/workflows/native-python-push.yml/runs?' + query)['workflow_runs']
-              query = urllib.parse.urlencode({'branch': os.environ['SOURCE_BRANCH'], 'event': 'push', 'per_page': 20})
+              query = urllib.parse.urlencode({'branch': os.environ['SOURCE_BRANCH'], 'event': 'push', 'status': 'success', 'per_page': 20})
               yield from get(api + '/workflows/tests.yml/runs?' + query)['workflow_runs']
 
-          selected, chosen, active = None, None, None
           for run in candidates():
               selected = qualified(run)
               if selected:
-                  chosen = run
+                  with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+                      output.write(f"run_id={run['id']}\n")
+                      output.write('artifacts=' + json.dumps(selected, sort_keys=True) + '\n')
+                  print(f"Reusing native build from {repo} push run {run['id']} at {run['head_sha']}")
                   break
-              if (active is None and os.environ.get('GITHUB_EVENT_NAME') == 'pull_request'
-                      and run['status'] in {'queued', 'in_progress', 'waiting', 'pending'}
-                      and run['path'] == '.github/workflows/native-python-push.yml'
-                      and run['head_sha'] == os.environ['CURRENT_PR_HEAD'] and compatible(run)):
-                  active = run
-          if chosen is None and active is not None:
-              print(f"Waiting up to 75 minutes for push run {active['id']} attempt {active['run_attempt']}")
-              pinned_attempt = active['run_attempt']
-              deadline = time.monotonic() + 75 * 60
-              while time.monotonic() + 60 <= deadline:
-                  time.sleep(60)
-                  try:
-                      current = get(api + '/runs/' + str(active['id']))
-                  except urllib.error.HTTPError as error:
-                      if error.code == 404:
-                          break
-                      raise
-                  if current['run_attempt'] != pinned_attempt:
-                      break
-                  if (current['id'] != active['id'] or current['head_sha'] != active['head_sha']
-                          or current['path'] != active['path']
-                          or current['repository']['id'] != active['repository']['id']):
-                      raise SystemExit('Inconsistent pinned push producer')
-                  if current['status'] == 'completed':
-                      selected = qualified(current)
-                      if selected:
-                          chosen = current
-                      break
-                  if current['status'] not in {'queued', 'in_progress', 'waiting', 'pending'}:
-                      break
-                  if not compatible(current):
-                      break
-          if chosen:
-              with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-                  output.write(f"run_id={chosen['id']}\n")
-                  output.write('artifacts=' + json.dumps(selected, sort_keys=True) + '\n')
-              print(f"Reusing native build from {repo} push run {chosen['id']} at {chosen['head_sha']}")
           else:
-              print('No compatible retained native build found; building the native runtime once per platform.')
+              print('No qualified native build is available. Building from source now.')
           PYTHON
 
   produce-linux:
