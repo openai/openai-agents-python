@@ -398,7 +398,7 @@ index 690fdd9094decfb1c1a99ca2164534192697b550..51f5dd4ce9246eed52d86fe9bd1596a2
  mod tool_result;
  
 diff --git a/codex-rs/otel/src/provider.rs b/codex-rs/otel/src/provider.rs
-index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b3f2c49ec 100644
+index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..8d066965ba8f55b8c509bb3b9e57b9272e043408 100644
 --- a/codex-rs/otel/src/provider.rs
 +++ b/codex-rs/otel/src/provider.rs
 @@ -28,15 +28,13 @@ use opentelemetry_sdk::Resource;
@@ -426,15 +426,16 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
  use std::time::Duration;
  use tracing::debug;
  use tracing_subscriber::Layer;
-@@ -64,6 +63,7 @@ pub struct OtelProvider {
+@@ -64,6 +63,8 @@ pub struct OtelProvider {
      pub tracer_provider: Option<SdkTracerProvider>,
      pub tracer: Option<Tracer>,
      pub metrics: Option<MetricsClient>,
 +    trace_shutdown: Option<crate::sdk_trace_routes::BatchShutdown>,
++    log_shutdown: Option<Arc<LogShutdown>>,
      shutdown_started: AtomicBool,
      shutdown_worker: Option<mpsc::SyncSender<ShutdownWorker>>,
  }
-@@ -84,10 +84,10 @@ struct GlobalTracer {
+@@ -84,10 +85,10 @@ struct GlobalTracer {
  }
  
  impl opentelemetry::trace::Tracer for GlobalTracer {
@@ -447,17 +448,20 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
      }
  }
  
-@@ -98,6 +98,9 @@ impl OtelProvider {
+@@ -98,6 +99,12 @@ impl OtelProvider {
              return;
          }
  
++        if let Some(owner) = &self.log_shutdown {
++            owner.begin(std::time::Instant::now() + Duration::from_secs(10));
++        }
 +        if let Some(owner) = &self.trace_shutdown {
 +            owner.begin(std::time::Instant::now() + Duration::from_secs(10));
 +        }
          if let Some(tracer_provider) = &self.tracer_provider {
              let _ = tracer_provider.shutdown();
          }
-@@ -109,6 +112,80 @@ impl OtelProvider {
+@@ -109,6 +116,80 @@ impl OtelProvider {
          }
      }
  
@@ -538,17 +542,20 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
      /// Starts the detached shutdown worker before shutdown-time resource pressure.
      fn prepare_shutdown_worker(&mut self) -> io::Result<()> {
          self.prepare_shutdown_worker_with_spawner(|startup| {
-@@ -156,6 +233,9 @@ impl OtelProvider {
+@@ -156,6 +237,12 @@ impl OtelProvider {
  
      /// Shuts down exporters on a prepared detached thread within a time budget.
      pub async fn shutdown_with_timeout(mut self, timeout: Duration) -> io::Result<()> {
++        if let Some(owner) = &self.log_shutdown {
++            owner.begin(std::time::Instant::now() + timeout);
++        }
 +        if let Some(owner) = &self.trace_shutdown {
 +            owner.begin(std::time::Instant::now() + timeout);
 +        }
          let Some(worker_tx) = self.shutdown_worker.take() else {
              // Best-effort shutdown must not run a potentially blocking destructor
              // when its worker could not be prepared.
-@@ -193,7 +273,8 @@ impl OtelProvider {
+@@ -193,7 +280,8 @@ impl OtelProvider {
  
      pub fn try_new(settings: &OtelSettings) -> Result<Option<Self>, Box<dyn Error>> {
          let log_enabled = !matches!(settings.exporter, OtelExporter::None);
@@ -558,7 +565,26 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
          let metric_exporter = crate::config::resolve_exporter(&settings.metrics_exporter);
          let metrics_enabled = !matches!(metric_exporter, OtelExporter::None);
  
-@@ -263,6 +344,14 @@ impl OtelProvider {
+@@ -233,12 +321,14 @@ impl OtelProvider {
+ 
+         let log_resource = make_resource(settings, ResourceKind::Logs);
+         let trace_resource = make_resource(settings, ResourceKind::Traces);
++        let log_shutdown = log_enabled.then(LogShutdown::new);
+         let logger = log_enabled
+             .then(|| {
+                 build_logger(
+                     &log_resource,
+                     &settings.exporter,
+                     &settings.http_client_factory,
++                    log_shutdown.as_ref().expect("enabled log shutdown").clone(),
+                 )
+             })
+             .transpose()?;
+@@ -260,13 +350,23 @@ impl OtelProvider {
+ 
+         let mut provider = Self {
+             logger,
++            log_shutdown,
              tracer_provider,
              tracer,
              metrics,
@@ -573,7 +599,12 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
              shutdown_started: AtomicBool::default(),
              shutdown_worker: None,
          };
-@@ -405,7 +494,9 @@ fn tracer_provider_builder(
+         provider.prepare_shutdown_worker()?;
++        crate::sdk_trace_routes::configure_log_shutdown(provider.log_shutdown.as_ref());
+ 
+         crate::trace_context::set_tracestate_entries(settings.tracestate.clone())?;
+         if let Some(tracer_provider) = provider.tracer_provider.clone() {
+@@ -405,7 +505,9 @@ fn tracer_provider_builder(
      resource: &Resource,
      span_attributes: BTreeMap<String, String>,
  ) -> TracerProviderBuilder {
@@ -584,7 +615,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
      if span_attributes.is_empty() {
          builder
      } else {
-@@ -424,6 +515,17 @@ struct SpanAttributesProcessor {
+@@ -424,6 +526,17 @@ struct SpanAttributesProcessor {
      attributes: BTreeMap<String, String>,
  }
  
@@ -602,7 +633,192 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
  impl SpanProcessor for SpanAttributesProcessor {
      fn on_start(&self, span: &mut Span, _cx: &Context) {
          for (key, value) in self.attributes.iter() {
-@@ -531,8 +633,62 @@ fn build_tracer_provider(
+@@ -442,10 +555,137 @@ impl SpanProcessor for SpanAttributesProcessor {
+     }
+ }
+ 
++/// Generation-local terminal control shared with log exporters and flush clones.
++#[derive(Debug)]
++pub(crate) struct LogShutdown {
++    deadline: tokio::sync::watch::Sender<Option<std::time::Instant>>,
++    runtime: Mutex<Option<tokio::runtime::Handle>>,
++}
++impl LogShutdown {
++    fn new() -> Arc<Self> {
++        Arc::new(Self {
++            deadline: tokio::sync::watch::channel(None).0,
++            runtime: Mutex::new(tokio::runtime::Handle::try_current().ok()),
++        })
++    }
++    pub(crate) fn begin(&self, deadline: std::time::Instant) {
++        // Async terminal callers also support providers constructed outside a runtime.
++        let mut runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
++        if runtime.is_none() {
++            *runtime = tokio::runtime::Handle::try_current().ok();
++        }
++        drop(runtime);
++        self.deadline.send_if_modified(|current| {
++            if current.is_none_or(|previous| deadline < previous) {
++                *current = Some(deadline);
++                true
++            } else {
++                false
++            }
++        });
++    }
++    fn expired(&self) -> bool {
++        self.deadline
++            .borrow()
++            .is_some_and(|deadline| deadline <= std::time::Instant::now())
++    }
++    async fn cancelled(&self) {
++        let mut changes = self.deadline.subscribe();
++        loop {
++            let deadline = *changes.borrow_and_update();
++            if let Some(deadline) = deadline {
++                if deadline <= std::time::Instant::now() {
++                    return;
++                }
++                let runtime = self
++                    .runtime
++                    .lock()
++                    .unwrap_or_else(|e| e.into_inner())
++                    .clone();
++                if let Some(runtime) = runtime {
++                    // SDK BatchLogProcessor polls on a plain OS thread. Construct
++                    // the timer on the captured runtime, then poll it without an EnterGuard.
++                    let sleep = {
++                        let _entered = runtime.enter();
++                        tokio::time::sleep_until(deadline.into())
++                    };
++                    tokio::select! {
++                        biased;
++                        _ = sleep => return,
++                        _ = changes.changed() => {}
++                    }
++                    continue;
++                }
++                // Synchronous legacy callers without a runtime retain their
++                // existing transport timeout. SDK bounded shutdown always has one.
++            }
++            let _ = changes.changed().await;
++        }
++    }
++}
++
++#[derive(Debug)]
++struct DeadlineLogExporter<E> {
++    exporter: tokio::sync::Mutex<Option<E>>,
++    shutdown: Arc<LogShutdown>,
++}
++impl<E> DeadlineLogExporter<E> {
++    fn new(exporter: E, shutdown: Arc<LogShutdown>) -> Self {
++        Self {
++            exporter: tokio::sync::Mutex::new(Some(exporter)),
++            shutdown,
++        }
++    }
++}
++impl<E: opentelemetry_sdk::logs::LogExporter> opentelemetry_sdk::logs::LogExporter
++    for DeadlineLogExporter<E>
++{
++    async fn export(&self, batch: opentelemetry_sdk::logs::LogBatch<'_>) -> OTelSdkResult {
++        let mut owned = self.exporter.lock().await;
++        if self.shutdown.expired() {
++            drop(owned.take());
++            return Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown);
++        }
++        let result = {
++            let Some(exporter) = owned.as_ref() else {
++                return Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown);
++            };
++            tokio::select! {
++                biased;
++                _ = self.shutdown.cancelled() => Err(opentelemetry_sdk::error::OTelSdkError::AlreadyShutdown),
++                result = exporter.export(batch) => result,
++            }
++        };
++        if self.shutdown.expired() {
++            // The borrowed export future has dropped before the client/header
++            // owner is removed, including when an old force_flush owns a clone.
++            drop(owned.take());
++        }
++        result
++    }
++    fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
++        let mut owned = self.exporter.try_lock().map_err(|_| {
++            opentelemetry_sdk::error::OTelSdkError::InternalFailure(
++                "log export is still active".into(),
++            )
++        })?;
++        match owned.take() {
++            Some(exporter) => exporter.shutdown_with_timeout(timeout),
++            None => Ok(()),
++        }
++    }
++    fn set_resource(&mut self, resource: &Resource) {
++        if let Some(exporter) = self.exporter.get_mut().as_mut() {
++            exporter.set_resource(resource);
++        }
++    }
++}
++
+ fn build_logger(
+     resource: &Resource,
+     exporter: &OtelExporter,
+     factory: &codex_http_client::HttpClientFactory,
++    shutdown: Arc<LogShutdown>,
+ ) -> Result<SdkLoggerProvider, Box<dyn Error>> {
+     let mut builder = SdkLoggerProvider::builder().with_resource(resource.clone());
+ 
+@@ -477,10 +717,13 @@ fn build_logger(
+                 .with_tls_config(tls_config)
+                 .build()?;
+ 
+-            builder = builder.with_batch_exporter(crate::network_policy::PolicyExporter {
+-                exporter,
+-                policy: factory.network_policy().clone(),
+-            });
++            builder = builder.with_batch_exporter(DeadlineLogExporter::new(
++                crate::network_policy::PolicyExporter {
++                    exporter,
++                    policy: factory.network_policy().clone(),
++                },
++                shutdown.clone(),
++            ));
+         }
+         OtelExporter::OtlpHttp {
+             endpoint,
+@@ -501,7 +744,9 @@ fn build_logger(
+                 .with_protocol(protocol)
+                 .with_headers(headers);
+ 
+-            if factory.network_policy().is_managed() {
++            if factory.network_policy().is_managed()
++                || tokio::runtime::Handle::try_current().is_ok()
++            {
+                 let client = crate::otlp::build_async_http_client(
+                     factory,
+                     tls.as_ref(),
+@@ -515,10 +760,13 @@ fn build_logger(
+ 
+             let exporter = exporter_builder.build()?;
+ 
+-            builder = builder.with_batch_exporter(crate::network_policy::PolicyExporter {
+-                exporter,
+-                policy: factory.network_policy().clone(),
+-            });
++            builder = builder.with_batch_exporter(DeadlineLogExporter::new(
++                crate::network_policy::PolicyExporter {
++                    exporter,
++                    policy: factory.network_policy().clone(),
++                },
++                shutdown.clone(),
++            ));
+         }
+     }
+ 
+@@ -531,8 +779,62 @@ fn build_tracer_provider(
      span_attributes: BTreeMap<String, String>,
      factory: &codex_http_client::HttpClientFactory,
  ) -> Result<SdkTracerProvider, Box<dyn Error>> {
@@ -666,7 +882,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
          OtelExporter::Statsig => unreachable!("statsig exporter should be resolved"),
          OtelExporter::OtlpGrpc {
              endpoint,
-@@ -567,39 +723,6 @@ fn build_tracer_provider(
+@@ -567,39 +869,6 @@ fn build_tracer_provider(
          } => {
              debug!("Using OTLP Http exporter for traces: {endpoint}");
  
@@ -706,7 +922,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
              let protocol = match protocol {
                  OtelHttpProtocol::Binary => Protocol::HttpBinary,
                  OtelHttpProtocol::Json => Protocol::HttpJson,
-@@ -611,7 +734,9 @@ fn build_tracer_provider(
+@@ -611,7 +880,9 @@ fn build_tracer_provider(
                  .with_protocol(protocol)
                  .with_headers(headers);
  
@@ -717,7 +933,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
                  let client = crate::otlp::build_async_http_client(
                      factory,
                      tls.as_ref(),
-@@ -628,15 +753,116 @@ fn build_tracer_provider(
+@@ -628,15 +899,116 @@ fn build_tracer_provider(
          }
      };
  
@@ -842,7 +1058,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
  }
  
  #[cfg(test)]
-@@ -836,6 +1062,96 @@ mod tests {
+@@ -836,6 +1208,97 @@ mod tests {
          Ok(())
      }
  
@@ -868,6 +1084,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
 +            tracer: Some(tracer.clone()),
 +            metrics: None,
 +            trace_shutdown: None,
++            log_shutdown: None,
 +            shutdown_started: AtomicBool::new(false),
 +            shutdown_worker: None,
 +        };
@@ -939,7 +1156,7 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
      fn test_otel_settings() -> OtelSettings {
          OtelSettings {
              http_client_factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
-@@ -845,6 +1161,7 @@ mod tests {
+@@ -845,6 +1308,7 @@ mod tests {
              codex_home: PathBuf::from("."),
              exporter: OtelExporter::None,
              trace_exporter: OtelExporter::None,
@@ -948,17 +1165,191 @@ index 0b2aeb58cd9166e5c53a4e31cbbaeee2b5974c35..034de9510353597dcc3394fd62f2a24b
              runtime_metrics: false,
              span_attributes: BTreeMap::new(),
 diff --git a/codex-rs/otel/src/provider_shutdown_tests.rs b/codex-rs/otel/src/provider_shutdown_tests.rs
-index 768aa0f473c2e0c4a905cd159dc603bca0d9be8a..d5ad46eb98cdb9f44b1237d98054f9e6dba66756 100644
+index 768aa0f473c2e0c4a905cd159dc603bca0d9be8a..42d56a87c9d80e1a3cad25aaf5c12dd627bbf1e7 100644
 --- a/codex-rs/otel/src/provider_shutdown_tests.rs
 +++ b/codex-rs/otel/src/provider_shutdown_tests.rs
-@@ -159,6 +159,7 @@ fn test_provider(behavior: ShutdownBehavior) -> TestProvider {
+@@ -159,6 +159,8 @@ fn test_provider(behavior: ShutdownBehavior) -> TestProvider {
              tracer_provider: Some(tracer_provider),
              tracer: None,
              metrics: None,
 +            trace_shutdown: None,
++            log_shutdown: None,
              shutdown_started: AtomicBool::default(),
              shutdown_worker: None,
          },
+@@ -467,3 +469,172 @@ fn drop_shuts_down_exporters_without_force_flush() {
+     assert_eq!(state.shutdowns.load(Ordering::Relaxed), 1);
+     assert_eq!(state.force_flushes.load(Ordering::Relaxed), 0);
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn timed_out_log_flush_observes_early_terminal_deadline() {
++    use opentelemetry::InstrumentationScope;
++    use opentelemetry::logs::{Logger as _, LoggerProvider as _};
++    use opentelemetry_sdk::logs::{
++        BatchConfigBuilder, BatchLogProcessor, LogBatch, LogExporter, LogProcessor, SdkLogRecord,
++        SdkLoggerProvider,
++    };
++    const CHILD: &str = "CODEX_LOG_FLUSH_DEADLINE_TEST";
++    if std::env::var_os(CHILD).is_none() {
++        let status = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--exact",
++                "provider::shutdown_tests::timed_out_log_flush_observes_early_terminal_deadline",
++            ])
++            .env(CHILD, "1")
++            .status()
++            .unwrap();
++        assert!(status.success());
++        return;
++    }
++    #[derive(Debug)]
++    struct PendingExporter {
++        calls: Arc<AtomicUsize>,
++        dropped_futures: Arc<AtomicUsize>,
++        block: Arc<AtomicBool>,
++        credentials: Arc<()>,
++    }
++    impl LogExporter for PendingExporter {
++        async fn export(&self, _: LogBatch<'_>) -> OTelSdkResult {
++            struct Active(Arc<AtomicUsize>, Arc<()>);
++            impl Drop for Active {
++                fn drop(&mut self) {
++                    self.0.fetch_add(1, Ordering::SeqCst);
++                }
++            }
++            let _active = Active(self.dropped_futures.clone(), self.credentials.clone());
++            self.calls.fetch_add(1, Ordering::SeqCst);
++            if self.block.load(Ordering::SeqCst) {
++                std::future::pending::<()>().await;
++            }
++            Ok(())
++        }
++    }
++    #[derive(Debug)]
++    struct TrackedProcessor {
++        inner: BatchLogProcessor,
++        completed: Arc<AtomicUsize>,
++    }
++    impl LogProcessor for TrackedProcessor {
++        fn emit(&self, record: &mut SdkLogRecord, scope: &InstrumentationScope) {
++            self.inner.emit(record, scope);
++        }
++        fn force_flush(&self) -> OTelSdkResult {
++            let result = self.inner.force_flush();
++            self.completed.fetch_add(1, Ordering::SeqCst);
++            result
++        }
++        fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
++            self.inner.shutdown_with_timeout(timeout)
++        }
++        fn set_resource(&mut self, resource: &opentelemetry_sdk::Resource) {
++            self.inner.set_resource(resource);
++        }
++    }
++    let calls = Arc::new(AtomicUsize::new(0));
++    let dropped_futures = Arc::new(AtomicUsize::new(0));
++    let completed = Arc::new(AtomicUsize::new(0));
++    let block = Arc::new(AtomicBool::new(false));
++    let credentials = Arc::new(());
++    let weak_credentials = Arc::downgrade(&credentials);
++    let terminal = super::LogShutdown::new();
++    let processor = BatchLogProcessor::builder(super::DeadlineLogExporter::new(
++        PendingExporter {
++            calls: calls.clone(),
++            dropped_futures: dropped_futures.clone(),
++            block: block.clone(),
++            credentials,
++        },
++        terminal.clone(),
++    ))
++    .with_batch_config(
++        BatchConfigBuilder::default()
++            .with_max_export_batch_size(1)
++            .with_scheduled_delay(Duration::from_secs(60))
++            .build(),
++    )
++    .build();
++    let logger_provider = SdkLoggerProvider::builder()
++        .with_log_processor(TrackedProcessor {
++            inner: processor,
++            completed: completed.clone(),
++        })
++        .build();
++    let logger = logger_provider.logger("deadline-test");
++    let mut provider = OtelProvider {
++        logger: Some(logger_provider),
++        tracer_provider: None,
++        tracer: None,
++        metrics: None,
++        trace_shutdown: None,
++        log_shutdown: Some(terminal.clone()),
++        shutdown_started: AtomicBool::new(false),
++        shutdown_worker: None,
++    };
++    provider.prepare_shutdown_worker().unwrap();
++    crate::sdk_trace_routes::configure_log_shutdown(Some(&terminal));
++    let state = tokio::sync::Mutex::new(provider);
++    let owner = state.lock().await;
++    // Successful nonterminal flushes leave this same provider usable.
++    for expected in 1..=2 {
++        logger.emit(logger.create_log_record());
++        assert_eq!(
++            owner
++                .force_flush_with_timeout(Duration::from_secs(1))
++                .await
++                .status,
++            "success"
++        );
++        assert_eq!(calls.load(Ordering::SeqCst), expected);
++    }
++    block.store(true, Ordering::SeqCst);
++    logger.emit(logger.create_log_record());
++    tokio::time::timeout(Duration::from_secs(1), async {
++        while calls.load(Ordering::SeqCst) != 3 {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
++    logger.emit(logger.create_log_record());
++    logger.emit(logger.create_log_record());
++    assert_eq!(
++        owner
++            .force_flush_with_timeout(Duration::from_millis(15))
++            .await
++            .status,
++        "timeout"
++    );
++    assert_eq!(completed.load(Ordering::SeqCst), 2);
++    assert!(weak_credentials.upgrade().is_some());
++    assert!(state.try_lock().is_err());
++    // This is the binding's early publication path, before it can acquire STATE.
++    let early = std::time::Instant::now() + Duration::from_millis(20);
++    crate::sdk_trace_routes::begin_shutdown(early + Duration::from_secs(1));
++    crate::sdk_trace_routes::begin_shutdown(early);
++    terminal.begin(early + Duration::from_secs(2));
++    tokio::time::timeout(Duration::from_millis(300), async {
++        while completed.load(Ordering::SeqCst) != 3 || weak_credentials.upgrade().is_some() {
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .unwrap();
++    assert_eq!(*terminal.deadline.borrow(), Some(early));
++    assert_eq!(
++        calls.load(Ordering::SeqCst),
++        3,
++        "queued log exports must never enter the exporter"
++    );
++    assert_eq!(dropped_futures.load(Ordering::SeqCst), 3);
++    drop(owner);
++    state
++        .into_inner()
++        .shutdown_with_timeout(Duration::from_secs(1))
++        .await
++        .unwrap();
++}
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44ef78480b9
@@ -1854,10 +2245,10 @@ index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44e
 +}
 diff --git a/codex-rs/otel/src/sdk_trace_routes.rs b/codex-rs/otel/src/sdk_trace_routes.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..a0f910fff5b074ebe4b08d4bb9324baa49adbd3e
+index 0000000000000000000000000000000000000000..37c576f1149e3babc5fca680558522ea4ac8c20f
 --- /dev/null
 +++ b/codex-rs/otel/src/sdk_trace_routes.rs
-@@ -0,0 +1,1453 @@
+@@ -0,0 +1,1466 @@
 +//! Bounded SDK lifecycle delivery and private exporter credentials.
 +use opentelemetry::Context;
 +use opentelemetry::trace::Span as _;
@@ -1906,6 +2297,7 @@ index 0000000000000000000000000000000000000000..a0f910fff5b074ebe4b08d4bb9324baa
 +    failed: u64,
 +    flush_snapshot: Option<(u64, u64, u64)>,
 +    batch: Option<std::sync::Weak<BatchShared>>,
++    log_shutdown: Option<std::sync::Weak<crate::provider::LogShutdown>>,
 +    credentials: HashMap<String, Arc<TraceCredentials>>,
 +    next_credential: u64,
 +}
@@ -2178,12 +2570,24 @@ index 0000000000000000000000000000000000000000..a0f910fff5b074ebe4b08d4bb9324baa
 +pub(crate) fn shutdown_owner() -> Option<BatchShutdown> {
 +    lock().batch.clone().map(BatchShutdown)
 +}
++pub(crate) fn configure_log_shutdown(owner: Option<&Arc<crate::provider::LogShutdown>>) {
++    lock().log_shutdown = owner.map(Arc::downgrade);
++}
 +pub fn begin_shutdown(deadline: Instant) {
-+    let batch = {
++    let (batch, logs) = {
 +        let mut routes = lock();
 +        routes.default_available = false;
-+        routes.batch.as_ref().and_then(std::sync::Weak::upgrade)
++        (
++            routes.batch.as_ref().and_then(std::sync::Weak::upgrade),
++            routes
++                .log_shutdown
++                .as_ref()
++                .and_then(std::sync::Weak::upgrade),
++        )
 +    };
++    if let Some(logs) = logs {
++        logs.begin(deadline);
++    }
 +    if let Some(batch) = batch {
 +        batch.begin_shutdown(deadline);
 +    }
