@@ -20,6 +20,7 @@ from agents import (
     Turn,
     function_tool,
 )
+from agents.telemetry import TraceOptions
 
 from .test_native_agent_typing import (
     Answer,
@@ -139,6 +140,8 @@ if TYPE_CHECKING:
         await agent.run("input")  # pyright: ignore[reportCallIssue]
         await agent.run("input", context="wrong context")  # pyright: ignore[reportArgumentType]
         async with agent.session(context=Application("tenant")) as session:
+            await session.submit("input", if_busy="steer", trace_options=TraceOptions())  # pyright: ignore[reportCallIssue, reportArgumentType]
+            await session.submit("input", if_busy="steer", trace_options={"disabled": True})  # pyright: ignore[reportCallIssue, reportArgumentType]
             turn = await session.submit("read")
             session.events(turn)  # pyright: ignore[reportCallIssue]
             turn.get_result(1)  # pyright: ignore[reportCallIssue]
