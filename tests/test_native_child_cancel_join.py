@@ -452,6 +452,8 @@ async def test_unconfirmed_child_cancel_error_leaves_callback_owner_live(
             pending = None
             try:
                 await (await session.submit("Start both children")).get_result()
+                # Observe the child turn before releasing its callback.
+                await handles(session, 2)
                 peer.release["alpha"].set()
                 await entered.wait()
                 alpha_id = peer.child_metadata["alpha"][0]["thread_id"]

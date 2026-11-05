@@ -486,7 +486,10 @@ async def _mcp_policy(
     children = [event for event in ended if event["name"] == "MCP policy child"]
     assert len(callbacks) == len(children) == 1
     assert callbacks[0]["trace_id"] == "a" * 32
-    assert children[0]["parent_span_id"] == callbacks[0]["span_id"]
+    active_callbacks = [event for event in ended if event["span_id"] == seen[0][0].span_id]
+    assert len(active_callbacks) == 1 and active_callbacks[0]["name"] == "callback"
+    assert active_callbacks[0]["parent_span_id"] == callbacks[0]["span_id"]
+    assert children[0]["parent_span_id"] == active_callbacks[0]["span_id"]
     assert not any(event["trace_id"] == "b" * 32 for event in recorder.events)
 
 
@@ -575,7 +578,9 @@ async def _manual_restore(
 
     # Native history can retain historical trace IDs. It must not retain a
     # live scope lease or the process's exporter credentials/routing context.
-    assert source_scope.context._handle not in serialized
+    # Registry handles are short tokens, so exclude the complete JSON value
+    # rather than coincidental substrings of retained revision/content hashes.
+    assert json.dumps(source_scope.context._handle) not in serialized
     assert "tracing_context" not in serialized
     assert "credential_ref" not in serialized
     assert "default-key" not in serialized
@@ -1231,20 +1236,48 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                             disabled=mode == "origin_disabled",
                             include_sensitive_data=True,
                         ),
-                    ):
+                    ) as creation_scope:
                         initial = await session.submit("Create child")
                     assert (await initial.get_result()).final_output == "root complete"
-                    await model.entered["alpha"].wait()
                     [first] = await handles(session, 1)
+                    initial_wait = asyncio.create_task(first.get_result())
+                    entered_wait = asyncio.create_task(model.entered["alpha"].wait())
+                    ready, _ = await asyncio.wait(
+                        (initial_wait, entered_wait), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if initial_wait in ready:
+                        entered_wait.cancel()
+                        await asyncio.gather(entered_wait, return_exceptions=True)
+                        try:
+                            await initial_wait
+                        except Exception as error:
+                            raise AssertionError(
+                                (
+                                    mode,
+                                    len(model.requests),
+                                    seen,
+                                    "child failed before its response hold",
+                                )
+                            ) from error
+                        raise AssertionError(
+                            (
+                                mode,
+                                len(model.requests),
+                                seen,
+                                "child completed before its response hold",
+                            )
+                        )
                     with telemetry.trace(
                         "unrelated child caller",
                         options=telemetry.TraceOptions(
                             trace_id="f" * 32, include_sensitive_data=True
                         ),
                     ):
-                        await first.steer(steer)
-                        model.release["alpha"].set()
-                        assert (await first.get_result()).final_output == "alpha complete"
+                        try:
+                            await first.steer(steer)
+                        finally:
+                            model.release["alpha"].set()
+                        assert (await initial_wait).final_output == "alpha complete"
                         [child] = [child async for child in session.subagents()]
                         later = await child.start(fresh)
                         assert later.turn_id != first.turn_id
@@ -1254,10 +1287,31 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                         row[1:] == (origin_id, disabled, mode != "metadata") for row in seen
                     ), seen
                 assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+                origin_events = [
+                    event for event in recorder.events if event["trace_id"] == origin_id
+                ]
+                caller_events = [
+                    event
+                    for event in origin_events
+                    if event["span_id"] == creation_scope.context.span_id
+                ]
+                # The independent caller workflow may record even when the
+                # session/child is disabled. It does not grant child export.
+                assert bool(caller_events) == (mode != "origin_disabled")
+                if caller_events:
+                    assert {event["lifecycle"] for event in caller_events} == {"start", "end"}
+                assert all(
+                    event["name"] == "child creation"
+                    and event["parent_span_id"] == creation_scope.context.parent_span_id
+                    for event in caller_events
+                )
                 if disabled:
-                    assert not any(event["trace_id"] == origin_id for event in recorder.events)
+                    assert origin_events == caller_events
                 else:
-                    assert any(event["trace_id"] == origin_id for event in recorder.events)
+                    assert any(
+                        event["span_id"] != creation_scope.context.span_id
+                        for event in origin_events
+                    )
                     assert fresh not in json.dumps(peer.records)
                     assert steer not in json.dumps(peer.records)
 
