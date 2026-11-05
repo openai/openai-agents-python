@@ -974,8 +974,11 @@ class Agent(Generic[ContextT, OutputT]):
                     submission = cast("Turn[OutputT]", restored)
                 else:
                     assert input is not None
+                    submit_options: dict[str, Any] = {}
+                    if prepare_request is not None:
+                        submit_options["prepare_request"] = prepare_request
                     submission = await session.submit(
-                        input, tools=tools, before_step=before_step, prepare_request=prepare_request
+                        input, tools=tools, before_step=before_step, **submit_options
                     )
                 if on_interaction is not None or pause_manual:
                     return await session._run_with_interactions(
