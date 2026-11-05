@@ -1,9 +1,12 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
 //! Python ownership and asyncio boundaries for the unchanged Codex runtime.
 
 mod application_instructions;
 mod async_bridge;
 mod auth;
 mod canonical_rules;
+mod canonical_storage;
 mod checkpoint;
 mod config;
 mod context;
@@ -30,6 +33,8 @@ mod subagents;
 mod telemetry;
 mod turn_settlement;
 mod verification;
+
+use codex_otel::sdk_trace::FutureExt as _;
 
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -1428,41 +1433,51 @@ impl NativeThread {
 
     // Managed ingress: the SDK holds its single active owner until terminal
     // settlement. Keep raw Compact blocked because it replaces active work.
-    #[pyo3(signature = (trace_json=None))]
+    #[pyo3(signature = (tracing_context=None, trace_json=None))]
     fn _compact<'py>(
         &self,
         py: Python<'py>,
+        tracing_context: Option<&str>,
         trace_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let context = tracing_context
+            .map(codex_otel::sdk_trace::context)
+            .transpose()
+            .map_err(py_error)?
+            .unwrap_or_default();
         let trace = trace_json
             .as_deref()
             .map(serde_json::from_str::<codex_protocol::protocol::W3cTraceContext>)
             .transpose()
             .map_err(|_| PyValueError::new_err("Invalid trace carrier"))?;
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
-            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            let _mutation = inner.mutations.lock().await;
-            let tools = inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .ok_or_else(|| py_error("compact requires a replaceable tool session"))?;
-            let receipt = if let Err(error) = tools.check_idle(&inner.thread).await {
-                serde_json::json!({
-                    "status": "not_submitted",
-                    "reason": {"type": "not_idle", "message": error.to_string()}
-                })
-            } else {
-                let turn_id = inner
+        async_bridge::future_into_py(
+            py,
+            async move {
+                let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+                let _mutation = inner.mutations.lock().await;
+                let tools = inner
                     .thread
-                    .submit_with_trace(codex_protocol::protocol::Op::Compact, trace)
-                    .await
-                    .map_err(py_error)?;
-                serde_json::json!({"status": "started", "turn_id": turn_id})
-            };
-            serde_json::to_string(&receipt).map_err(py_error)
-        })
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+                    .ok_or_else(|| py_error("compact requires a replaceable tool session"))?;
+                let receipt = if let Err(error) = tools.check_idle(&inner.thread).await {
+                    serde_json::json!({
+                        "status": "not_submitted",
+                        "reason": {"type": "not_idle", "message": error.to_string()}
+                    })
+                } else {
+                    let turn_id = inner
+                        .thread
+                        .submit_with_trace(codex_protocol::protocol::Op::Compact, trace)
+                        .await
+                        .map_err(py_error)?;
+                    serde_json::json!({"status": "started", "turn_id": turn_id})
+                };
+                serde_json::to_string(&receipt).map_err(py_error)
+            }
+            .with_context(context),
+        )
     }
 
     fn _validate_hosted_search_model<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1697,13 +1712,19 @@ impl NativeThread {
         manual_checkpoint::prepare(&inner, &self.manual).map_err(py_error)
     }
 
-    #[pyo3(signature = (observation_submission_id=None, trace_json=None))]
+    #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None))]
     fn _continue_manual<'py>(
         &self,
         py: Python<'py>,
         observation_submission_id: Option<String>,
+        tracing_context: Option<&str>,
         trace_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let context = tracing_context
+            .map(codex_otel::sdk_trace::context)
+            .transpose()
+            .map_err(py_error)?
+            .unwrap_or_default();
         let trace = trace_json
             .as_deref()
             .map(serde_json::from_str::<codex_protocol::protocol::W3cTraceContext>)
@@ -1711,17 +1732,21 @@ impl NativeThread {
             .map_err(|_| PyValueError::new_err("Invalid trace carrier"))?;
         let inner = self.current()?;
         let manual = self.manual.clone();
-        async_bridge::future_into_py(py, async move {
-            let receipt = manual_checkpoint::continue_if_ready(
-                &inner,
-                &manual,
-                trace,
-                observation_submission_id,
-            )
-            .await
-            .map_err(py_error)?;
-            serde_json::to_string(&receipt).map_err(py_error)
-        })
+        async_bridge::future_into_py(
+            py,
+            async move {
+                let receipt = manual_checkpoint::continue_if_ready(
+                    &inner,
+                    &manual,
+                    observation_submission_id,
+                    trace,
+                )
+                .await
+                .map_err(py_error)?;
+                serde_json::to_string(&receipt).map_err(py_error)
+            }
+            .with_context(context),
+        )
     }
 
     // The Python owner has committed to retiring an unrecovered manual import.
@@ -1853,27 +1878,55 @@ impl NativeThread {
             .is_some_and(|tools| tools.check_manual(&grant.key.reply.thread, grant)))
     }
 
-    fn _respond_manual_tool(
+    fn _respond_manual_tool<'py>(
         &self,
+        py: Python<'py>,
         grant: &python_tools::ManualToolGrant,
         response_json: &str,
-    ) -> PyResult<bool> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
-        let _operation = inner.engine.operation(false).map_err(py_error)?;
-        let Some(tools) = inner
-            .thread
-            .thread_extension_data()
-            .get::<python_tools::PythonTools>()
-            .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
-        else {
-            return Ok(false);
-        };
-        // Reject foreign/expired grants before parsing a supplied result.
-        if !tools.check_manual(&grant.key.reply.thread, grant) {
-            return Ok(false);
-        }
-        let response = serde_json::from_str(response_json).map_err(py_error)?;
-        Ok(tools.respond_manual(&grant.key.reply.thread, grant, response))
+        let grant = grant.clone();
+        let response_json = response_json.to_owned();
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let _mutation = Arc::clone(&inner.mutations).lock_owned().await;
+            let Some(tools) = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+                .and_then(|tools| tools.owner(&inner.id.to_string(), &grant.key))
+            else {
+                return Ok(false);
+            };
+            // Reject foreign, expired and duplicate grants before writing a receipt.
+            if !tools.check_manual(&grant.key.reply.thread, &grant) {
+                return Ok(false);
+            }
+            let response: codex_protocol::dynamic_tools::DynamicToolResponse =
+                serde_json::from_str(&response_json).map_err(py_error)?;
+            if inner.engine.local_checklist_store.is_some() {
+                let id = codex_protocol::ThreadId::from_string(&grant.key.reply.thread)
+                    .map_err(py_error)?;
+                let reentry = tools.is_reentry(&grant.key);
+                let item = python_tools::PythonOutput(response.clone()).receipt(&grant.key);
+                return async_bridge::retain_writer_operation(async move {
+                    let _operation = _context_operation;
+                    let _mutation = _mutation;
+                    let store = inner
+                        .engine
+                        .local_checklist_store
+                        .as_ref()
+                        .expect("selected local SDK writer");
+                    store
+                        .commit_sdk_receipt(id, &grant.key, item, reentry)
+                        .await
+                        .map_err(py_error)?;
+                    Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+                })
+                .await;
+            }
+            Ok(tools.respond_manual(&grant.key.reply.thread, &grant, response))
+        })
     }
 
     fn _respond_python_tool<'py>(
@@ -1922,8 +1975,29 @@ impl NativeThread {
                         else {
                             return Ok(false);
                         };
-                        // Native Codex owns child history. These calls never
-                        // enter or park an SDK manual continuation.
+                        // Child results use the same canonical receipt gate;
+                        // they never enter an SDK manual continuation.
+                        if inner.engine.local_checklist_store.is_some() {
+                            let id = codex_protocol::ThreadId::from_string(&request.reply.thread)
+                                .map_err(py_error)?;
+                            let item =
+                                python_tools::PythonOutput(response.clone()).receipt(&request);
+                            return async_bridge::retain_writer_operation(async move {
+                                let _operation = _context_operation;
+                                let _mutation = _mutation;
+                                let store = inner
+                                    .engine
+                                    .local_checklist_store
+                                    .as_ref()
+                                    .expect("selected local writer");
+                                store
+                                    .commit_sdk_receipt(id, &request, item, false)
+                                    .await
+                                    .map_err(py_error)?;
+                                Ok(sender.send(response).is_ok())
+                            })
+                            .await;
+                        }
                         return Ok(sender.send(response).is_ok());
                     }
                     let reentry = tools.is_reentry(&request);
@@ -1933,7 +2007,31 @@ impl NativeThread {
                     else {
                         return Ok(false);
                     };
-                    if tools.sdk_owned() && inner.engine.local_checklist_store.is_some() {
+                    if inner
+                        .engine
+                        .store
+                        .as_any()
+                        .is::<canonical_storage::CanonicalStore>()
+                    {
+                        let item = python_tools::PythonOutput(response.clone()).receipt(&request);
+                        return async_bridge::retain_writer_operation(async move {
+                            let _operation = _context_operation;
+                            let _mutation = _mutation;
+                            let store = inner
+                                .engine
+                                .store
+                                .as_any()
+                                .downcast_ref::<canonical_storage::CanonicalStore>()
+                                .expect("selected canonical writer");
+                            store
+                                .commit_sdk_receipt(inner.id, &request, item)
+                                .await
+                                .map_err(py_error)?;
+                            Ok(sender.send(response).is_ok())
+                        })
+                        .await;
+                    }
+                    if inner.engine.local_checklist_store.is_some() {
                         let item = python_tools::PythonOutput(response.clone()).receipt(&request);
                         return async_bridge::retain_writer_operation(async move {
                             // Both leases move with the real result. Python
@@ -2585,13 +2683,14 @@ impl ContextChange {
 }
 
 #[pyfunction]
-#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None))]
+#[pyo3(signature = (config_json="{}", runtime_json="{}", api_key=None, *, provider_lease=None, canonical_store=None))]
 fn create_engine<'py>(
     py: Python<'py>,
     config_json: &str,
     runtime_json: &str,
     api_key: Option<String>,
     provider_lease: Option<PyRef<'py, provider_owner::NativeProviderLease>>,
+    canonical_store: Option<Py<PyAny>>,
 ) -> PyResult<Bound<'py, PyAny>> {
     let lease = provider_lease.map(|lease| lease.inner.clone());
     let config_json = config_json.to_owned();
@@ -2600,10 +2699,16 @@ fn create_engine<'py>(
         if let Some(lease) = &lease {
             lease.check_live()?;
         }
-        let inner =
-            engine::EngineState::new_with_model(config_json, runtime_json, false, api_key, None)
-                .await
-                .map_err(py_error)?;
+        let inner = engine::EngineState::new_with_store(
+            config_json,
+            runtime_json,
+            false,
+            api_key,
+            None,
+            canonical_store,
+        )
+        .await
+        .map_err(py_error)?;
         let mut engine = Engine::new(inner);
         if let Some(lease) = lease {
             lease.register_engine(engine.inner.clone())?;
@@ -2737,6 +2842,25 @@ fn _validate_known_root_function_output(output_json: &str) -> PyResult<()> {
 }
 
 #[pyfunction]
+fn reconcile_canonical_store<'py>(
+    py: Python<'py>,
+    backend: Py<PyAny>,
+    thread_id: String,
+    turn_id: String,
+    call_id: String,
+    output: String,
+) -> PyResult<Bound<'py, PyAny>> {
+    let id = codex_protocol::ThreadId::from_string(&thread_id).map_err(py_error)?;
+    async_bridge::future_into_py(py, async move {
+        let store = canonical_storage::CanonicalStore::new(backend);
+        store
+            .reconcile(id, &turn_id, &call_id, &output)
+            .await
+            .map_err(py_error)
+    })
+}
+
+#[pyfunction]
 #[pyo3(signature = (config_json="{}", runtime_json="{}"))]
 fn configure_telemetry<'py>(
     py: Python<'py>,
@@ -2753,11 +2877,91 @@ fn configure_telemetry<'py>(
 }
 
 #[pyfunction]
-fn shutdown_telemetry<'py>(py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-    async_bridge::future_into_py(
-        py,
-        async move { telemetry::shutdown().await.map_err(py_error) },
-    )
+#[pyo3(signature = (timeout_ms=None))]
+fn shutdown_telemetry<'py>(
+    py: Python<'py>,
+    timeout_ms: Option<u32>,
+) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        async_bridge::retain_writer_operation(async move {
+            telemetry::shutdown(timeout_ms).await.map_err(py_error)
+        })
+        .await
+    })
+}
+
+#[pyfunction]
+fn start_trace_span(options_json: &str) -> PyResult<String> {
+    telemetry::scope_ready().map_err(py_error)?;
+    codex_otel::sdk_trace::start_trace_span(options_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn end_trace_span(handle: &str, outcome_json: &str) -> PyResult<()> {
+    codex_otel::sdk_trace::end_trace_span(handle, outcome_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn retain_trace_context(handle: &str) -> PyResult<String> {
+    codex_otel::sdk_trace::retain_trace_context(handle).map_err(py_error)
+}
+
+#[pyfunction]
+fn trace_span_context(handle: &str) -> PyResult<String> {
+    codex_otel::sdk_trace::trace_span_context(handle).map_err(py_error)
+}
+
+#[pyfunction]
+fn set_trace_routes(options_json: &str) -> PyResult<u64> {
+    telemetry::tracing_ready().map_err(py_error)?;
+    codex_otel::sdk_trace_routes::set_trace_routes(options_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn register_trace_credentials(headers_json: &str) -> PyResult<String> {
+    telemetry::tracing_ready().map_err(py_error)?;
+    codex_otel::sdk_trace_routes::register_trace_credentials(headers_json).map_err(py_error)
+}
+
+#[pyfunction]
+fn release_trace_credentials(credential_ref: &str) -> PyResult<()> {
+    codex_otel::sdk_trace_routes::release_trace_credentials(credential_ref).map_err(py_error)
+}
+
+#[pyfunction]
+fn ack_trace_events(through_sequence: u64, failed_deliveries: u64) -> PyResult<()> {
+    codex_otel::sdk_trace_routes::ack_trace_events(through_sequence, failed_deliveries)
+        .map_err(py_error)
+}
+
+#[pyfunction]
+fn release_trace_context(handle: &str) {
+    codex_otel::sdk_trace::release_trace_context(handle);
+}
+
+#[pyfunction]
+fn release_trace_span(handle: &str) {
+    codex_otel::sdk_trace::release_trace_span(handle);
+}
+
+#[pyfunction]
+#[pyo3(signature = (timeout_ms=None))]
+fn force_flush_telemetry<'py>(
+    py: Python<'py>,
+    timeout_ms: Option<u32>,
+) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        async_bridge::retain_writer_operation(async move {
+            telemetry::force_flush(timeout_ms).await.map_err(py_error)
+        })
+        .await
+    })
+}
+#[pyfunction]
+fn drain_trace_events<'py>(py: Python<'py>, max_count: u32) -> PyResult<Bound<'py, PyAny>> {
+    async_bridge::future_into_py(py, async move {
+        codex_otel::sdk_trace_routes::drain_trace_events(max_count as usize).map_err(py_error)
+    })
 }
 
 #[pymodule]
@@ -2776,6 +2980,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<provider_owner::NativeProviderLease>()?;
     module.add_class::<provider_owner::NativeProviderHome>()?;
     module.add_function(wrap_pyfunction!(create_engine, module)?)?;
+    module.add_function(wrap_pyfunction!(reconcile_canonical_store, module)?)?;
     module.add_function(wrap_pyfunction!(create_checkpoint_engine, module)?)?;
     module.add_function(wrap_pyfunction!(config_schema, module)?)?;
     module.add_function(wrap_pyfunction!(live::_connect_live, module)?)?;
@@ -2793,6 +2998,19 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     module.add_function(wrap_pyfunction!(configure_telemetry, module)?)?;
     module.add_function(wrap_pyfunction!(shutdown_telemetry, module)?)?;
+    module.add_function(wrap_pyfunction!(start_trace_span, module)?)?;
+    module.add_function(wrap_pyfunction!(end_trace_span, module)?)?;
+    module.add_function(wrap_pyfunction!(retain_trace_context, module)?)?;
+    module.add_function(wrap_pyfunction!(trace_span_context, module)?)?;
+    module.add_function(wrap_pyfunction!(set_trace_routes, module)?)?;
+    module.add_function(wrap_pyfunction!(register_trace_credentials, module)?)?;
+    module.add_function(wrap_pyfunction!(release_trace_credentials, module)?)?;
+    module.add_function(wrap_pyfunction!(ack_trace_events, module)?)?;
+    module.add_function(wrap_pyfunction!(release_trace_context, module)?)?;
+    module.add_function(wrap_pyfunction!(release_trace_span, module)?)?;
+    module.add_function(wrap_pyfunction!(force_flush_telemetry, module)?)?;
+    module.add_function(wrap_pyfunction!(drain_trace_events, module)?)?;
+
     module.add("CODEX_REVISION", include_str!("../CODEX_REVISION").trim())?;
     let mut operations = ops::OPERATIONS.to_vec();
     operations.push("set_instructions");

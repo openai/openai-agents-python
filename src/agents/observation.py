@@ -419,13 +419,7 @@ class EventStream(AsyncIterator[Observation]):
                 if self._buffer.closed:
                     break
                 if self._turn is not None:
-                    step = list(self._turn._steps())[-1]
-                    completion = step._completion
-                    if (
-                        completion is not None
-                        and completion.done()
-                        and (step._continuation is None or step._continuation.done())
-                    ):
+                    if self._turn._root_result_ready():
                         break
                     children = self._turn._session._callbacks_for_child(self._turn)
                     if children and all(child.completion.done() for child in children):

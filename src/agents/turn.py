@@ -185,6 +185,16 @@ class Turn(Generic[OutputT]):
                 return
             step = successor.result()
 
+    def _root_result_ready(self) -> bool:
+        """Check whether a root result can be read without waiting on native work."""
+        step = list(self._steps())[-1]
+        completion = step._completion
+        return (
+            completion is not None
+            and completion.done()
+            and (step._continuation is None or step._continuation.done())
+        )
+
 
 def _root_turn(
     session: Session[Any, Any],

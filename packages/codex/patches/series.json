@@ -189,9 +189,29 @@
       "sha256": "e4b910cb9e9c649d04d63fedc46c21cd75ae7da921511c19a943d82fd13f6f02"
     },
     {
-      "path": "0048-w3c-defined-trace-flags.patch",
-      "sha256": "29aaa5b2397e6580a43709c598af50191d66127be18770f4252ad49ccd83ea15"
+      "path": "0046-native-history-durability.patch",
+      "sha256": "2d34645a3030982a41fed43d7a31aa4a8933bd6be604c737cc79ce4293134288"
+    },
+    {
+      "path": "0047-native-history-write-reconciliation.patch",
+      "sha256": "e8da877bf23d570c3cde2bc5a776e7cf5945b854245288137ab765376baa6647"
+    },
+    {
+      "path": "0048-native-tree-finalization-before-store-close.patch",
+      "sha256": "637dc7d1c29d6f98bba7cf43c885a0d3830e267c6524d675baa2b9d0d192823f"
+    },
+    {
+      "path": "0049-native-metadata-durability.patch",
+      "sha256": "10136a8852249737dbf7974c579cb84faf0d36fc495fcbaeeafe66a3dfa7e3d6"
+    },
+    {
+      "path": "0050-sdk-native-tracing.patch",
+      "sha256": "0e45e726652f4df20626a7f21be11a7eb1cdc81f65f9d3c4030470962e7cb6b1"
+    },
+    {
+      "path": "0051-w3c-defined-trace-flags.patch",
+      "sha256": "5b47cd6400488030a86af0259541b4a8c6f937dfc8be3e1990e4e266336b1eb2"
     }
   ],
-  "result_tree": "c7c8c1f8f25b359abbc5d8a7dce1a0fd917555d4"
+  "result_tree": "8adaf866205b43a17b5fe04840b2104b6187032d"
 }

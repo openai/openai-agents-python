@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/trace_context.rs b/codex-rs/otel/src/trace_context.rs
-index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59ebcd171e15 100644
+index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f53656f0f6 100644
 --- a/codex-rs/otel/src/trace_context.rs
 +++ b/codex-rs/otel/src/trace_context.rs
 @@ -9,7 +9,10 @@ use std::sync::RwLock;
@@ -27,10 +27,10 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59eb
  const TRACEPARENT_ENV_VAR: &str = "TRACEPARENT";
  const TRACESTATE_ENV_VAR: &str = "TRACESTATE";
  static TRACEPARENT_CONTEXT: OnceLock<Option<Context>> = OnceLock::new();
-@@ -38,6 +48,22 @@ pub fn span_w3c_trace_context(span: &Span) -> Option<W3cTraceContext> {
+@@ -42,6 +52,22 @@ pub(crate) fn context_w3c_trace_context(context: &Context) -> Option<W3cTraceCon
  
      let mut headers = HashMap::new();
-     TraceContextPropagator::new().inject_context(&context, &mut headers);
+     TraceContextPropagator::new().inject_context(context, &mut headers);
 +    // The pinned propagator predates the W3C random-trace-id flag. Child
 +    // spans retain it, so preserve it when writing their canonical header.
 +    let mut flags = context.span().span_context().trace_flags().to_u8() & 0x03;
@@ -50,7 +50,7 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59eb
      let tracestate = headers.remove("tracestate");
      let configured_tracestate_guard = tracestate_entries()
          .read()
-@@ -117,7 +143,23 @@ pub fn set_parent_from_w3c_trace_context(span: &Span, trace: &W3cTraceContext) -
+@@ -122,7 +148,23 @@ pub fn set_parent_from_w3c_trace_context(span: &Span, trace: &W3cTraceContext) -
  }
  
  pub fn set_parent_from_context(span: &Span, context: Context) {
@@ -75,7 +75,7 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59eb
  }
  
  pub fn traceparent_context_from_env() -> Option<Context> {
-@@ -130,9 +172,38 @@ pub(crate) fn context_from_trace_headers(
+@@ -135,9 +177,38 @@ pub(crate) fn context_from_trace_headers(
      traceparent: Option<&str>,
      tracestate: Option<&str>,
  ) -> Option<Context> {
@@ -116,7 +116,7 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59eb
      if let Some(tracestate) = tracestate {
          headers.insert("tracestate".to_string(), tracestate.to_string());
      }
-@@ -142,7 +213,20 @@ pub(crate) fn context_from_trace_headers(
+@@ -147,7 +218,20 @@ pub(crate) fn context_from_trace_headers(
      if !context.span().span_context().is_valid() {
          return None;
      }
@@ -138,7 +138,7 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59eb
  }
  
  fn load_traceparent_context() -> Option<Context> {
-@@ -368,6 +452,134 @@ mod tests {
+@@ -373,6 +457,134 @@ mod tests {
          assert!(span_context.is_remote());
      }
  
@@ -273,3 +273,19 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59eb
      #[test]
      fn invalid_traceparent_returns_none() {
          let parent = context_from_trace_headers(
+@@ -413,4 +625,15 @@ mod tests {
+         assert!(trace_id.chars().all(|ch| ch.is_ascii_hexdigit()));
+         assert_ne!(trace_id, "00000000000000000000000000000000");
+     }
++
++    #[test]
++    fn attached_context_preserves_defined_trace_flags() {
++        let trace = W3cTraceContext {
++            traceparent: Some("00-11111111111111111111111111111111-2222222222222222-03".into()),
++            tracestate: None,
++        };
++        let context = super::context_from_w3c_trace_context(&trace).unwrap();
++        let _guard = context.attach();
++        assert_eq!(super::current_span_w3c_trace_context(), Some(trace));
++    }
+ }

@@ -682,10 +682,15 @@ pub async fn submit(
         control.has_native_agents(),
         "Child submission requires current NativeAgents ownership"
     );
-    let request = TurnInputRequest::new(TurnInput::UserInput {
+    let mut request = TurnInputRequest::new(TurnInput::UserInput {
         content: input.input,
         client_id: None,
     });
+    if let Some(tracing) = control.creation_tracing() {
+        request.trace = Some(
+            codex_otel::sdk_trace::trace_carrier(tracing.token()).map_err(anyhow::Error::msg)?,
+        );
+    }
     let tools = thread
         .thread_extension_data()
         .get::<crate::python_tools::PythonTools>()
@@ -696,6 +701,12 @@ pub async fn submit(
             // sole event reader may beat this admission's acknowledgement.
             let receipt = tools.child_steer_admission(&turn.turn_id)?;
             let mut request = request;
+            request.trace = receipt
+                .tracing
+                .as_ref()
+                .map(|tracing| codex_otel::sdk_trace::trace_carrier(tracing.token()))
+                .transpose()
+                .map_err(anyhow::Error::msg)?;
             if let TurnInput::UserInput { client_id, .. } = &mut request.input {
                 *client_id = Some(receipt.steering_client_id());
             }
@@ -875,12 +886,19 @@ pub async fn continue_retained(
         child_id: turn.child_id,
         instance_id: turn.instance_id,
     };
-    let request = TurnInputRequest::new(TurnInput::ResponseItem(ContextualUserFragment::into(
+    let mut request = TurnInputRequest::new(TurnInput::ResponseItem(ContextualUserFragment::into(
         InternalModelContextFragment::new(
             InternalContextSource::from_static("agents_steering"),
             "Continue with the latest user input already in the conversation. Do not repeat completed work.",
         ),
     )));
+    request.trace = receipt
+        .tracing
+        .as_ref()
+        .map(|tracing| codex_otel::sdk_trace::trace_carrier(tracing.token()))
+        .transpose()
+        .map_err(anyhow::Error::msg)?;
+
     let submitted = thread
         .continue_turn_if_idle(
             WithTurnExtensionData::new(request, init),

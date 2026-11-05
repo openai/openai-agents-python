@@ -63,6 +63,7 @@ impl Generation {
 
 // No Python constructor or serialization. The weak owner avoids retaining a
 // session through application-held requests after its native waiter is gone.
+#[derive(Clone)]
 #[pyclass(frozen, module = "agents._native")]
 pub(crate) struct ManualToolGrant {
     pub(crate) owner: ManualOwner,
@@ -70,6 +71,7 @@ pub(crate) struct ManualToolGrant {
     pub(crate) invocation: u64,
 }
 
+#[derive(Clone)]
 pub(crate) enum ManualOwner {
     Core(Weak<PythonTools>),
 }
@@ -204,6 +206,7 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 // Core emits TurnComplete before releasing its active-turn slot. This receipt
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
+    pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
@@ -385,6 +388,7 @@ enum Phase {
 }
 
 struct PendingCall {
+    _tracing: Option<codex_otel::sdk_trace::ContextLease>,
     invocation: u64,
     manual_request: Option<Value>,
     sender: oneshot::Sender<DynamicToolResponse>,
@@ -1929,7 +1933,8 @@ impl PythonTools {
                 runtime_tool_call_id,
             } => json!({"cell_id": cell_id, "nested_call_id": runtime_tool_call_id}),
         };
-        let request = json!({
+        let tracing = codex_otel::sdk_trace::ContextLease::capture();
+        let mut request = json!({
             "id": call,
             "msg": {
                 "type":"dynamic_tool_call_request", "turnId": turn, "callId": call,
@@ -1940,6 +1945,9 @@ impl PythonTools {
                 "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
+        if let Some(context) = &tracing {
+            request["msg"]["tracing_context"] = json!(context.token());
+        }
         let (sender, receiver) = oneshot::channel();
         {
             let mut pending = self.pending.lock().expect("Python replies poisoned");
@@ -1947,6 +1955,7 @@ impl PythonTools {
             pending.insert(
                 key.clone(),
                 PendingCall {
+                    _tracing: tracing,
                     invocation,
                     manual_request: entry.manual.then(|| {
                         let mut manual = request.clone();
@@ -2162,6 +2171,7 @@ fn provider_error_code(body: &str) -> Option<String> {
 
 #[derive(Default)]
 pub struct PythonContributor {
+    pub(crate) managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     pub(crate) manager: Weak<ThreadManager>,
     pub(crate) models_config: codex_models_manager::ModelsManagerConfig,
     pub(crate) code_mode_enabled: bool,
@@ -2201,6 +2211,9 @@ impl TurnLifecycleContributor for PythonContributor {
     // The default BeforeTaskRegistration phase includes compaction tasks.
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            let tracing = input
+                .turn_store
+                .get_or_init(codex_otel::sdk_trace::CapturedContext::capture);
             #[cfg(test)]
             if let Some(hold) = input.thread_store.get::<admission_order_tests::StartHold>() {
                 hold.entered.add_permits(1);
@@ -2227,6 +2240,7 @@ impl TurnLifecycleContributor for PythonContributor {
                 };
                 let graph = tools.family.graph.lock().expect("Python graph poisoned");
                 let receipt = Arc::new(TurnAdmission {
+                    tracing: tracing.context.clone(),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,
@@ -2655,6 +2669,7 @@ impl PythonContributor {
             .copied()
             .map(|slot| {
                 Arc::new(PythonExecutor {
+                    managed_calls: self.managed_calls.clone(),
                     thread: thread.level_id().to_string(),
                     tools: tools.clone(),
                     generation: generation.clone(),
@@ -2790,13 +2805,22 @@ impl ToolContributor for PythonContributor {
                 .read()
                 .expect("Step defaults poisoned")
                 .clone();
-            tools.family.requests.send(QueuedRequest::Step(json!({
+            let tracing = codex_otel::sdk_trace::ContextLease::capture();
+            let mut request = json!({
                 "id": turn.level_id(),
                 "msg": {"type": "_sdk_select_step", "turn_id": turn.level_id(),
                     "thread": thread.level_id(), "instance": tools.instance,
                     "step_id": id, "generation": tools.snapshot().id,
                     "native_step": step.level_id(), "candidates": candidates, "defaults": defaults}
-            }))).map_err(|_| "Step reader closed")?;
+            });
+            if let Some(context) = &tracing {
+                request["msg"]["tracing_context"] = json!(context.token());
+            }
+            tools
+                .family
+                .requests
+                .send(QueuedRequest::Step(request))
+                .map_err(|_| "Step reader closed")?;
             let names = receive
                 .await
                 .map_err(|_| "Step selection cancelled")?
@@ -2807,6 +2831,7 @@ impl ToolContributor for PythonContributor {
 }
 
 struct PythonExecutor {
+    managed_calls: Option<Arc<crate::storage::ManagedCalls>>,
     thread: String,
     tools: Arc<PythonTools>,
     generation: Arc<Generation>,
@@ -2871,6 +2896,11 @@ impl<'call> ToolExecutor<ToolCall<'call>> for PythonExecutor {
                     false,
                 )
                 .map_err(|error| FunctionCallError::RespondToModel(error.to_string()))?;
+            // A rejected enqueue never reaches application code. Keep Core's
+            // error output for it instead of recording an unknown effect.
+            if let Some(calls) = &self.managed_calls {
+                calls.register(&self.thread, &call.turn_id, &call.call_id);
+            }
             let _reply = PendingReply {
                 tools: &self.tools,
                 invocation,
@@ -2898,9 +2928,13 @@ pub(crate) struct PythonOutput(pub(crate) DynamicToolResponse);
 
 impl PythonOutput {
     pub(crate) fn receipt(&self, key: &PendingKey) -> ResponseItem {
+        self.receipt_for(&key.turn, &key.call)
+    }
+
+    pub(crate) fn receipt_for(&self, turn: &str, call: &str) -> ResponseItem {
         let mut item: ResponseItem = self
             .to_response_item(
-                &key.call,
+                call,
                 &ToolPayload::Function {
                     arguments: String::new(),
                 },
@@ -2913,7 +2947,7 @@ impl PythonOutput {
         {
             *internal_chat_message_metadata_passthrough = Some(
                 codex_protocol::models::InternalChatMessageMetadataPassthrough {
-                    turn_id: Some(key.turn.clone()),
+                    turn_id: Some(turn.to_owned()),
                     ..Default::default()
                 },
             );
@@ -3147,6 +3181,50 @@ pub(crate) mod managed_tests {
         };
         thread.insert(tools);
         thread
+    }
+
+    #[tokio::test]
+    async fn child_receipt_retains_original_tracing_after_origin_scope_ends() {
+        const CHILD: &str = "AGENTS_CHILD_RECEIPT_TRACE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "python_tools::managed_tests::child_receipt_retains_original_tracing_after_origin_scope_ends"]).env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        codex_otel::sdk_trace::configure_pipeline(false);
+        let original: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
+            r#"{"name":"origin","kind":"workflow","trace_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disabled":true,"include_sensitive_data":false}"#,
+        ).unwrap()).unwrap();
+        let handle = original["handle"].as_str().unwrap();
+        let attached = codex_otel::sdk_trace::context(handle).unwrap().attach();
+        let thread = admission_thread();
+        let turn = ExtensionData::new("fixture");
+        let control = crate::native_interception::tests::bind_owner(&thread, &turn);
+        let turn = start_admission(&thread, "original").await;
+        let receipt = turn.get::<Arc<TurnAdmission>>().unwrap();
+        let creation = control.creation_tracing().unwrap();
+        let tracing = receipt.tracing.as_ref().unwrap().clone();
+        drop(attached);
+        codex_otel::sdk_trace::end_trace_span(handle, r#"{"status":"ok"}"#).unwrap();
+        codex_otel::sdk_trace::release_trace_span(handle);
+        let unrelated: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
+            r#"{"name":"unrelated","kind":"workflow","trace_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","include_sensitive_data":true}"#,
+        ).unwrap()).unwrap();
+        let unrelated_handle = unrelated["handle"].as_str().unwrap();
+        let _unrelated = codex_otel::sdk_trace::context(unrelated_handle)
+            .unwrap()
+            .attach();
+        for owner in [creation, tracing] {
+            let snapshot: serde_json::Value = serde_json::from_str(
+                &codex_otel::sdk_trace::trace_span_context(owner.token()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(snapshot["trace_id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            assert_eq!(snapshot["disabled"], true);
+            assert_eq!(snapshot["include_sensitive_data"], false);
+        }
+        codex_otel::sdk_trace::release_trace_span(unrelated_handle);
     }
 
     // Seed the real registered SDK contributors in their Core registration
@@ -4467,12 +4545,80 @@ pub(crate) mod managed_tests {
 
     fn executor(tools: Arc<PythonTools>) -> PythonExecutor {
         PythonExecutor {
+            managed_calls: None,
             thread: "owner".into(),
             generation: tools.snapshot(),
             tools,
             slot: 0,
             use_deferred_specs: false,
             code_mode_enabled: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn only_enqueued_calls_filter_core_outputs() {
+        for rejected in [true, false] {
+            let tools = catalog(
+                ToolPolicy::default(),
+                DynamicToolSpec::Function(function("lookup")),
+            );
+            if rejected {
+                tools.family.receiver.lock().await.close();
+            }
+            let thread = codex_protocol::ThreadId::new();
+            let managed = Arc::new(crate::storage::ManagedCalls::default());
+            let mut executor = executor(Arc::clone(&tools));
+            executor.thread = thread.to_string();
+            executor.managed_calls = Some(Arc::clone(&managed));
+            let key = PendingKey {
+                reply: ReplyKey {
+                    thread: thread.to_string(),
+                    generation: executor.generation.id,
+                    slot: 0,
+                    instance: None,
+                },
+                turn: "turn".into(),
+                call: "call".into(),
+            };
+            let mut handled = executor.handle(ToolCall {
+                turn_id: key.turn.clone(),
+                call_id: key.call.clone(),
+                tool_name: ToolName::new(None, "lookup"),
+                model: "test-model".into(),
+                codex_turn_metadata: None,
+                truncation_policy: codex_protocol::protocol::TruncationPolicy::Bytes(1000),
+                source: ToolCallSource::Direct,
+                conversation_history: Default::default(),
+                turn_item_emitter: Arc::new(codex_tools::NoopTurnItemEmitter),
+                environments: vec![],
+                payload: ToolPayload::Function {
+                    arguments: "{}".into(),
+                },
+            });
+            if rejected {
+                assert!(matches!(
+                    handled.await,
+                    Err(FunctionCallError::RespondToModel(message))
+                    if message == "Python tool session closed"
+                ));
+                assert!(tools.pending.lock().unwrap().is_empty());
+            } else {
+                assert!(futures_util::poll!(&mut handled).is_pending());
+                assert_eq!(tools.next_request().await["msg"]["callId"], "call");
+            }
+            let output = PythonOutput(DynamicToolResponse {
+                content_items: vec![],
+                success: false,
+            })
+            .receipt(&key);
+            assert_eq!(
+                managed.owns_output(
+                    thread,
+                    &codex_history::RolloutItem::ResponseItem(output.into())
+                ),
+                !rejected,
+                "only application-admitted calls may suppress a Core error receipt"
+            );
         }
     }
 
