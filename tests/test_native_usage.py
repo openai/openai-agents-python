@@ -116,6 +116,25 @@ async def test_native_multiple_responses_turns_and_repeated_rate_observations(
             "output_tokens_details": {"reasoning_tokens": 4},
             "total_tokens": 48,
         }
+        first_responses = turns[first.turn_id]["responses"]
+        assert [response["response_id"] for response in first_responses] == ["resp_1", "resp_2"]
+        assert len({response["id"] for response in first_responses}) == 2
+        assert all(response["thread_id"] == session.id for response in first_responses)
+        assert all(response["turn_id"] == first.turn_id for response in first_responses)
+        assert all(response["usage_source"] == "received" for response in first_responses)
+        assert all(response.get("status") == "completed" for response in first_responses)
+        assert all(
+            response["usage"]
+            == {
+                "input_tokens": 17,
+                "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 4},
+                "output_tokens": 7,
+                "output_tokens_details": {"reasoning_tokens": 2},
+                "total_tokens": 24,
+            }
+            for response in first_responses
+        )
+        assert "not-for-usage-readers" not in repr(first_responses)
         assert turns[second.turn_id]["usage"] == {
             "input_tokens": 17,
             "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 4},
