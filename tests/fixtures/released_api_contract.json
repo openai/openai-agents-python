@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "a3cf563badd9c2020bd77148c9c26b9b74fa5042",
+  "baseline_commit": "abbf4cd222f8fece875551a2bcf9d22a44c4db98",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -130,10 +130,18 @@
       "agents.history": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ModelContext:\n    revision: str\n    items: tuple[dict[str, Any], ...]",
-          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]"
+          "class ReceivedInputTokensDetails(TypedDict, total=False):\n    cached_tokens: int\n    cache_write_tokens: int",
+          "class ReceivedOutputTokensDetails(TypedDict, total=False):\n    reasoning_tokens: int",
+          "class ReceivedTokenUsage(TypedDict, total=False):\n    input_tokens: int\n    input_tokens_details: ReceivedInputTokensDetails\n    output_tokens: int\n    output_tokens_details: ReceivedOutputTokensDetails\n    total_tokens: int",
+          "class RecordedResponse(TypedDict):\n    id: str | None\n    thread_id: str\n    turn_id: str\n    response_id: str | None\n    usage_source: Literal['received', 'native_normalized']\n    usage: ReceivedTokenUsage | TokenUsage | None\n    status: NotRequired[Literal['completed', 'incomplete', 'failed']]\n    incomplete_reason: NotRequired[Literal['content_filter', 'max_output_tokens', 'interrupted', 'unknown']]",
+          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]\n    responses: NotRequired[list[RecordedResponse]]"
         ],
         "exports": {
           "ModelContext": "agents.history.ModelContext",
+          "ReceivedInputTokensDetails": "agents.history.ReceivedInputTokensDetails",
+          "ReceivedOutputTokensDetails": "agents.history.ReceivedOutputTokensDetails",
+          "ReceivedTokenUsage": "agents.history.ReceivedTokenUsage",
+          "RecordedResponse": "agents.history.RecordedResponse",
           "RecordedTurn": "agents.history.RecordedTurn"
         },
         "imports": [

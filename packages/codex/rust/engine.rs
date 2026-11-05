@@ -2015,6 +2015,10 @@ impl ThreadState {
 }
 
 #[cfg(test)]
+#[path = "response_history_tests.rs"]
+mod response_history_tests;
+
+#[cfg(test)]
 #[path = "turn_settlement_tests.rs"]
 pub(crate) mod settlement_tests;
 
