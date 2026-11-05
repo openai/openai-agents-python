@@ -423,6 +423,7 @@ params!(TurnParams {
     expected_turn_id: Option<String>,
     expected_previous_turn_id: Option<String>,
     #[serde(default)] exact_steering: bool,
+    writable_roots: Option<Vec<PathUri>>,
 });
 
 fn rejection(reason: NotSubmittedReason) -> Value {
@@ -476,7 +477,7 @@ async fn start_turn(thread: &CodexThread, value: Value) -> Result<Value> {
 pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value) -> Result<Value> {
     let mut mutation = Some(state.mutations.lock().await);
     let thread = &state.thread;
-    let p: TurnParams = decode(value)?;
+    let mut p: TurnParams = decode(value)?;
     anyhow::ensure!(
         p.input.is_array()
             && (!matches!(p.mode, Mode::ContinueIfIdle)
@@ -493,7 +494,83 @@ pub async fn submit_replaceable(state: &crate::engine::ThreadState, value: Value
                 .is_some_and(|mode| mode.reasoning_effort() == Some(ReasoningEffort::Persistent)),
         "replaceable tools support ordinary submit/steer only, without persistent execution"
     );
-    start_with_params(thread, p, None, Some((state, &mut mutation))).await
+    let writes = if let Some(roots) = p.writable_roots.take() {
+        ensure!(
+            matches!(p.mode, Mode::StartIfIdle) && p.thread_settings.environments.is_none(),
+            "Writable roots require a new idle native turn"
+        );
+        match prepare_write_selection(state, roots).await {
+            Ok((replacement, writes)) => {
+                p.thread_settings.environments = Some(replacement);
+                Some(writes)
+            }
+            Err(error) => {
+                return Ok(json!({"status": "not_submitted", "reason": {
+                    "type": "writable_roots_refused", "message": error.to_string()
+                }}));
+            }
+        }
+    } else {
+        None
+    };
+    let result = start_with_params(thread, p, None, Some((state, &mut mutation))).await?;
+    if let Some(writes) = writes
+        && result["status"] == "started"
+    {
+        thread.thread_extension_data().insert(writes);
+    }
+    Ok(result)
+}
+
+async fn prepare_write_selection(
+    state: &crate::engine::ThreadState,
+    roots: Vec<PathUri>,
+) -> Result<(
+    TurnEnvironmentSelections,
+    crate::environment::StrictExecutorWrites,
+)> {
+    let thread = &state.thread;
+    let writes = thread
+        .thread_extension_data()
+        .get::<crate::environment::StrictExecutorWrites>()
+        .context("Writable roots require a strict Session Environment")?;
+    let current = thread.environment_selections().await;
+    let [selection] = current.as_slice() else {
+        bail!("Writable roots require one selected native Environment");
+    };
+    let config = thread.config().await;
+    let (replacement, writes) = crate::environment::replace_writable_roots(
+        selection,
+        &config,
+        &state.engine.manager.environment_manager(),
+        &writes,
+        roots,
+        state.engine.native_storage_home(),
+    )
+    .await?;
+    if selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
+        && let Some(store) = &state.engine.local_checklist_store
+    {
+        writes.check_local_rollout_path(&store.live_rollout_path(state.id).await?)?;
+    }
+    if selection != &replacement {
+        ensure!(
+            thread.active_turn_environment_selections().await.is_none()
+                && thread.list_background_terminals().await.is_empty()
+                && !thread
+                    .thread_extension_data()
+                    .get::<crate::native_interception::Control>()
+                    .is_some_and(|control| control.has_unsettled_code_cells()),
+            "Cannot change writable roots while old executor work is still active"
+        );
+    }
+    Ok((
+        TurnEnvironmentSelections::new(
+            thread.config_snapshot().await.cwd().clone(),
+            vec![replacement],
+        ),
+        writes,
+    ))
 }
 
 // The SDK's root input and stop paths share this native admission gate. Once
@@ -565,6 +642,10 @@ async fn start_with_params<'a>(
     ensure!(
         !p.exact_steering || (managed.is_some() && matches!(p.mode, Mode::Steer)),
         "exact steering requires a managed steer"
+    );
+    ensure!(
+        p.writable_roots.is_none(),
+        "Writable roots require a managed Session"
     );
     let input = if p.input.is_array() {
         TurnInput::UserInput {

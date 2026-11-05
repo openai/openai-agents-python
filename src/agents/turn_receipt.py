@@ -156,6 +156,7 @@ def _redact_checkpoint_executor_receipts(payload: dict[str, Any]) -> None:
             if record["type"] == "turn_context":
                 receipt = record["payload"].get("sdk_receipt")
                 if isinstance(receipt, dict):
+                    receipt.pop("strict_executor_writes", None)
                     if receipt.get("executors"):
                         receipt["executors"] = None
     for turn in payload["repair_turns"]:

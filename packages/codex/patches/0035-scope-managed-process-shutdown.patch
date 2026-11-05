@@ -1,0 +1,157 @@
+diff --git a/codex-rs/core/src/agent/control/runtime.rs b/codex-rs/core/src/agent/control/runtime.rs
+index 5fdf62560fdffcc177b8dcb49f73aaf89e6a9733..bf50a59550618f6196d93a6d96b78938b56c0136 100644
+--- a/codex-rs/core/src/agent/control/runtime.rs
++++ b/codex-rs/core/src/agent/control/runtime.rs
+@@ -29,12 +29,15 @@ use tokio_util::task::task_tracker::TaskTrackerToken;
+ pub(crate) struct AgentTreeShutdownState {
+     members: TaskTracker,
+     failed: AtomicBool,
++    managed_process_shutdown_failed: AtomicBool,
+ }
+ 
+ impl AgentTreeShutdownState {
+     pub(crate) async fn wait(&self) -> CodexResult<()> {
+         self.members.wait().await;
+-        if self.failed.load(Ordering::Acquire) {
++        if self.failed.load(Ordering::Acquire)
++            || self.managed_process_shutdown_failed.load(Ordering::Acquire)
++        {
+             return Err(CodexErr::Fatal(
+                 "agent tree shutdown did not complete cleanly".to_owned(),
+             ));
+@@ -42,6 +45,16 @@ impl AgentTreeShutdownState {
+         Ok(())
+     }
+ 
++    pub(crate) async fn wait_for_managed_process_shutdown(&self) -> CodexResult<()> {
++        self.members.wait().await;
++        if self.managed_process_shutdown_failed.load(Ordering::Acquire) {
++            return Err(CodexErr::Fatal(
++                "managed local command shutdown could not be confirmed".to_owned(),
++            ));
++        }
++        Ok(())
++    }
++
+     fn record_failure(&self) {
+         self.failed.store(true, Ordering::Release);
+     }
+@@ -214,6 +227,12 @@ impl LocalAgentRuntime {
+         self.shutdown_state.record_failure();
+     }
+ 
++    pub(crate) fn record_managed_process_shutdown_failure(&self) {
++        self.shutdown_state
++            .managed_process_shutdown_failed
++            .store(true, Ordering::Release);
++    }
++
+     pub(crate) fn generate_thread_id(&self) -> ThreadId {
+         (self.thread_id_generator)()
+     }
+diff --git a/codex-rs/core/src/agent/control/runtime_tests.rs b/codex-rs/core/src/agent/control/runtime_tests.rs
+index ea37e18f22975cf15a84deb4311a784b7ccd49a9..6f035271936b4fec7c9c315ade6e052fd4e2d9e7 100644
+--- a/codex-rs/core/src/agent/control/runtime_tests.rs
++++ b/codex-rs/core/src/agent/control/runtime_tests.rs
+@@ -26,4 +26,31 @@ async fn aborted_teardown_fails_tree_shutdown() {
+         .wait()
+         .await
+         .expect_err("aborted teardown must fail tree shutdown");
++    shutdown
++        .wait_for_managed_process_shutdown()
++        .await
++        .expect("unrelated teardown failure must not become a managed process failure");
++}
++
++#[tokio::test]
++async fn managed_process_shutdown_waits_for_members_and_reports_failure() {
++    let runtime = LocalAgentRuntime::new(
++        Weak::default(),
++        default_thread_id_generator(),
++        /*rollout_budget*/ None,
++    );
++    let member = runtime.admit_start().expect("admit teardown member");
++    let shutdown = runtime.request_shutdown();
++    let result = shutdown.wait_for_managed_process_shutdown();
++    tokio::pin!(result);
++    assert!(futures::poll!(result.as_mut()).is_pending());
++
++    runtime.record_managed_process_shutdown_failure();
++    drop(member);
++
++    result.await.expect_err("managed process shutdown failed");
++    shutdown
++        .wait()
++        .await
++        .expect_err("tree shutdown also failed");
+ }
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index ee172244eb77a126ecc1aceee8ad70e0e4648725..dbaa1091216719e825d6601aa0368401c648e3a7 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -311,7 +311,9 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+         .terminate_all_processes()
+         .await
+     {
+-        sess.services.local_agent_runtime.record_shutdown_failure();
++        sess.services
++            .local_agent_runtime
++            .record_managed_process_shutdown_failure();
+         warn!("failed to confirm managed local command shutdown");
+     }
+     if let Err(err) = sess.services.code_mode_service.shutdown().await {
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 6173a55574a90cdb3e97b4cb9bb141bbb2487394..32a4adbbce586d4f0a0e7a7cb6f92abf3e45553e 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -913,7 +913,9 @@ impl Session {
+             .terminate_all_processes()
+             .await
+         {
+-            self.services.local_agent_runtime.record_shutdown_failure();
++            self.services
++                .local_agent_runtime
++                .record_managed_process_shutdown_failure();
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/thread_manager/shutdown.rs b/codex-rs/core/src/thread_manager/shutdown.rs
+index e02bfec9c220425df65b776b84c9ee76333b186a..9526a48b31f73a23870252d91c6e880dc5a4b633 100644
+--- a/codex-rs/core/src/thread_manager/shutdown.rs
++++ b/codex-rs/core/src/thread_manager/shutdown.rs
+@@ -35,19 +35,26 @@ impl ThreadManager {
+         &self,
+         thread_id: ThreadId,
+     ) -> CodexResult<AgentTreeShutdown> {
+-        Ok(self
+-            .get_thread(thread_id)
+-            .await?
+-            .request_agent_tree_shutdown())
++        let thread = self.get_thread(thread_id).await?;
++        Ok(AgentTreeShutdown {
++            state: thread
++                .session
++                .services
++                .local_agent_runtime
++                .request_shutdown(),
++        })
+     }
+ }
+ 
+ impl CodexThread {
+-    /// Request shutdown of the exact tree owned by this thread handle.
++    /// Shut down this handle's exact tree and report unconfirmed managed process cleanup.
+     #[doc(hidden)]
+-    pub fn request_agent_tree_shutdown(&self) -> AgentTreeShutdown {
+-        AgentTreeShutdown {
+-            state: self.session.services.local_agent_runtime.request_shutdown(),
+-        }
++    pub async fn shutdown_agent_tree_and_check_managed_processes(&self) -> CodexResult<()> {
++        self.session
++            .services
++            .local_agent_runtime
++            .request_shutdown()
++            .wait_for_managed_process_shutdown()
++            .await
+     }
+ }
