@@ -745,7 +745,7 @@ jobs:
   native-macos-sandbox:
     if: ${{ !inputs.native_only }}
     needs: native-macos
-    runs-on: macos-latest
+    runs-on: ${{ github.repository == 'openai/openai-agents-python' && 'macos-15-xlarge' || 'macos-latest' }}
     timeout-minutes: 100
     env:
       OPENAI_API_KEY: fake-for-tests
