@@ -7,7 +7,9 @@ establish that the real bridge creates and exports native spans.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
+import weakref
 from collections.abc import Iterator, Mapping
 from dataclasses import FrozenInstanceError
 from pathlib import Path
@@ -180,7 +182,7 @@ async def test_async_scopes_isolate_and_captured_work_outlives_parent(
     result = await asyncio.gather(run("one"), run("two"))
     assert result[0][0] != result[1][0]
     assert all(parent == captured for parent, captured in result)
-    assert len([value for value in native.released if value.startswith("lease")]) == 2
+    assert set(native.leases).issubset(native.released)
     assert telemetry.current_context() is None
 
 
@@ -190,7 +192,7 @@ def test_options_capture_restores_context_and_session_defaults(native: NativeTra
     assert telemetry.current_context() is None
     operation = telemetry._capture(telemetry.TraceOptions(disabled=True), session.context)
     assert telemetry.current_context() is None
-    assert native.starts[-1]["parent"] == session.context
+    assert native.leases[native.starts[-1]["parent"]] == native.leases[session.context]
     assert native.starts[-1]["disabled"] is True
     operation.close()
     session.close()
@@ -296,10 +298,146 @@ async def test_mcp_notice_restores_its_exact_owner_over_an_unrelated_scope(
             assert not ambient.context.disabled
         assert len(observed) == 1
         assert observed[0].span_id != owner.context.span_id
-        assert native.starts[-1]["parent"] == retained
+        assert native.leases[native.starts[-1]["parent"]] == native.leases[retained]
         assert telemetry.current_context() is None
     finally:
         native.release_trace_context(retained)
+
+
+async def test_copied_context_and_explicit_parent_outlive_recording_scope(
+    native: NativeTracing,
+) -> None:
+    entered = asyncio.Event()
+
+    async def delayed() -> telemetry.SpanContext:
+        await entered.wait()
+        with telemetry.span("late child") as child:
+            assert child.context.disabled
+            return child.context
+
+    with telemetry.trace("parent", options=telemetry.TraceOptions(disabled=True)) as scope:
+        parent = scope.context
+        task = asyncio.create_task(delayed())
+    assert parent._handle not in native.released
+    entered.set()
+    await task
+    assert native.starts[-1]["parent"] == parent._handle
+    with telemetry.span("explicit", options=telemetry.TraceOptions(parent=parent)):
+        pass
+    token = parent._handle
+    reference = weakref.ref(parent)
+    del scope, parent, task
+    await asyncio.sleep(0)
+    gc.collect()
+    assert reference() is None
+    assert token in native.released
+
+
+def test_borrowed_activation_context_owns_a_distinct_lease(native: NativeTracing) -> None:
+    with telemetry.trace("parent") as owner:
+        borrowed = native.retain_trace_context(owner.context._handle)
+    with telemetry._activate(borrowed):
+        context = telemetry.current_context()
+        assert context is not None and context._handle != borrowed
+    owned = context._handle
+    native.release_trace_context(borrowed)
+    with telemetry.span("after native callback", options=telemetry.TraceOptions(parent=context)):
+        pass
+    assert owned not in native.released
+    reference = weakref.ref(context)
+    del context
+    gc.collect()
+    assert reference() is None and owned in native.released
+
+
+@pytest.mark.parametrize("category", ["rate-limit", "é", 1, True, "x" * 257])
+def test_invalid_outcome_category_preserves_the_previous_outcome(
+    native: NativeTracing, category: Any
+) -> None:
+    with telemetry.trace("outcome") as scope:
+        scope.set_outcome(status="error", category="")
+        with pytest.raises(ValueError, match="category"):
+            scope.set_outcome(status="ok", category=category)
+    assert native.ends[-1][1]["status"] == "error"
+    assert native.ends[-1][1]["category"] == ""
+
+
+@pytest.mark.parametrize("boundary", ["credentials", "span"])
+@pytest.mark.parametrize("entry", ["with", "start", "capture", "session"])
+async def test_admission_errors_drop_private_credentials_from_sdk_frames(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, boundary: str, entry: str
+) -> None:
+    from agents import Agent
+
+    secret = "synthetic-private-admission"
+    credentials = telemetry.TraceExportCredentials(headers={"authorization": secret})
+    options = telemetry.TraceOptions(export_credentials=credentials)
+
+    def fail(*args: Any) -> Any:
+        raise RuntimeError("synthetic admission failure")
+
+    monkeypatch.setattr(
+        native,
+        "register_trace_credentials" if boundary == "credentials" else "start_trace_span",
+        fail,
+    )
+
+    def retains(value: Any) -> bool:
+        if isinstance(value, telemetry.TraceScope):
+            value = value._options
+        if isinstance(value, telemetry.TraceOptions):
+            value = value.export_credentials
+        if isinstance(value, telemetry.TraceExportCredentials):
+            value = value.headers
+        return isinstance(value, Mapping) and secret in value.values()
+
+    with pytest.raises(RuntimeError, match="synthetic admission failure") as caught:
+        if entry == "capture":
+            telemetry._capture(options)
+        elif entry == "session":
+            async with Agent(instructions="test").session(trace_options=options):
+                pytest.fail("Failed tracing admission opened a Session")
+        elif entry == "start":
+            telemetry.trace("test", options=options).start()
+        else:
+            with telemetry.trace("test", options=options):
+                pytest.fail("Failed tracing admission entered its scope")
+    error: BaseException | None = caught.value
+    while error is not None:
+        traceback = error.__traceback__
+        while traceback is not None:
+            frame = traceback.tb_frame
+            if Path(frame.f_code.co_filename).is_relative_to(Path(telemetry.__file__).parent):
+                assert not any(retains(value) for value in frame.f_locals.values()), (
+                    frame.f_code.co_name
+                )
+            traceback = traceback.tb_next
+        error = error.__cause__ or error.__context__
+    assert credentials.headers["authorization"] == secret
+    assert options.export_credentials is credentials
+    assert telemetry._processor_task is None
+
+
+async def test_processor_invocation_suppresses_detached_scopes_and_bare_operations(
+    native: NativeTracing,
+) -> None:
+    class Processor:
+        async def on_trace_event(self, event: Any) -> None:
+            await asyncio.sleep(0)
+            with telemetry.trace(
+                "processor instrumentation",
+                options=telemetry.TraceOptions(disabled=False, detached=True),
+            ) as scope:
+                assert scope.context.disabled
+            operation = telemetry._capture()
+            assert operation.scope is not None and operation.scope.context.disabled
+            operation.close()
+            assert telemetry._processor_task is None
+
+    route = telemetry._ProcessorRoute(Processor())
+    await route._invoke({})  # type: ignore[typeddict-item]
+    with telemetry.trace("application") as scope:
+        assert not scope.context.disabled
 
 
 def test_invalid_json_rejected_before_credential_registration(native: NativeTracing) -> None:
@@ -510,7 +648,9 @@ async def test_public_submit_keeps_queued_context_until_cancel(
     try:
         with telemetry.trace("queued workflow"):
             turn = await session.submit("input", if_busy="queue")
-            lease = next(iter(native.leases))
+            pending, _ = session._pending[0]
+            assert pending.tracing is not None
+            lease = pending.tracing.context
         assert lease not in native.released
         await turn.cancel()
         assert lease in native.released
@@ -731,7 +871,7 @@ def test_explicit_start_end_restores_parent_and_ends_once(native: NativeTracing)
         assert telemetry.current_context() == parent.context
         assert native.ends == [
             (
-                child.context._handle,
+                native.leases[child.context._handle],
                 {
                     "status": "error",
                     "category": "tool_error",
@@ -1344,7 +1484,7 @@ async def test_steering_retains_admitted_context_instead_of_callers_ambient(
             request = json.loads(encoded)
             token = request["tracing_context"]
             assert token != owner_token
-            assert native.leases[token] == admitted_span
+            assert native.leases[token] == native.leases[admitted_span]
             captured.close()
             await asyncio.sleep(0)
             assert token not in native.released

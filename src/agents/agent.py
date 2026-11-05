@@ -606,7 +606,10 @@ class Agent(Generic[ContextT, OutputT]):
         from .session import Session, _close_after_error
         from .telemetry import _capture
 
-        captured = _capture(trace_options)
+        try:
+            captured = _capture(trace_options)
+        finally:
+            del trace_options
         trace_error: BaseException | None = None
         try:
             session = await Session[SessionContextT, OutputT]._open(

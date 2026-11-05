@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "2897cc8b22390eee77ffdfb93741441b7c997c35",
+  "baseline_commit": "ff66da85f8dfca3e779c76a1ce8e8f61f643cc82",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -609,7 +609,7 @@
           "async def configure(*, traces: Exporter | None=None, logs: Exporter | None=None, metrics: Exporter | None=None, environment: str='dev', span_attributes: Mapping[str, str] | None=None, log_user_prompt: bool=False, log_agent_responses: bool=False, tool_result_max_bytes: int=0, processors: Sequence[TraceProcessor]=()) -> None:\n    pass",
           "async def shutdown(*, timeout_ms: int | None=None) -> None:\n    pass",
           "@dataclass(frozen=True, kw_only=True)\nclass TraceExportCredentials:\n    headers: Mapping[str, str] = field(repr=False)\n\n    def __init__(self, *, headers: Mapping[str, str]) -> None:\n        pass",
-          "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False, compare=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass TraceOptions:\n    parent: SpanContext | None = None\n    detached: bool = False\n    trace_id: str | None = None\n    group_id: str | None = None\n    metadata: Mapping[str, Any] = field(default_factory=dict)\n    disabled: bool | None = None\n    include_sensitive_data: bool | None = None\n    export_credentials: TraceExportCredentials | None = field(default=None, repr=False)",
           "def current_context() -> SpanContext | None:\n    pass",
           "class TraceScope:\n\n    def __init__(self, name: str, kind: str, options: TraceOptions | Mapping[str, Any] | None, *, _restrictions: tuple[str, ...]=()):\n        pass\n\n    @property\n    def context(self) -> SpanContext:\n        pass\n\n    def start(self) -> TraceScope:\n        pass\n\n    def end(self) -> None:\n        pass\n\n    def __enter__(self) -> TraceScope:\n        pass\n\n    def set_outcome(self, *, status: str, category: str | None=None) -> None:\n        pass\n\n    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass",

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gc
 import json
 import os
 import subprocess
@@ -130,6 +131,7 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "shutdown_budget",
         "mcp_policy",
         "terminal_queue",
+        "host_contexts",
     ],
 )
 def test_native_tracing_contract(case: str) -> None:
@@ -216,11 +218,63 @@ async def _native_case(case: str) -> None:
                     await _manual_restore(fixture, provider, peer)
                 elif case == "mcp_policy":
                     await _mcp_policy(fixture, provider, recorder)
+                elif case == "host_contexts":
+                    await _host_contexts(recorder)
                 else:
                     raise AssertionError(case)
             finally:
                 await provider.aclose()
                 await telemetry.shutdown(timeout_ms=5000)
+
+
+async def _host_contexts(recorder: Recorder) -> None:
+    from agents import _native
+
+    release = asyncio.Event()
+    children: list[tuple[str, bool]] = []
+
+    async def delayed() -> None:
+        await release.wait()
+        with telemetry.span(
+            "late task", options=telemetry.TraceOptions(include_sensitive_data=True)
+        ) as child:
+            children.append((child.context.trace_id, child.context.include_sensitive_data))
+
+    with telemetry.trace("closed parent") as owner:
+        parent = owner.context
+        task = asyncio.create_task(delayed())
+    release.set()
+    await task
+    assert children == [(parent.trace_id, False)]
+    with telemetry.span(
+        "explicit late parent", options=telemetry.TraceOptions(parent=parent)
+    ) as child:
+        assert child.context.parent_span_id == parent.span_id
+    token = parent._handle
+    del owner, parent, task, child
+    await asyncio.sleep(0)
+    gc.collect()
+    with pytest.raises(RuntimeError, match="Unknown or released"):
+        _native.trace_span_context(token)
+    assert (await telemetry.force_flush()).status == "success"
+    seen: list[str] = []
+
+    class Instrumented:
+        async def on_trace_event(self, event: Mapping[str, Any]) -> None:
+            await asyncio.sleep(0)
+            seen.append(event["name"])
+            with telemetry.trace(
+                "processor work", options=telemetry.TraceOptions(disabled=False, detached=True)
+            ) as scope:
+                assert scope.context.disabled
+
+    telemetry.add_trace_processor(Instrumented())
+    with telemetry.trace("recursion seed"):
+        pass
+    flushed = await telemetry.force_flush(timeout_ms=2000)
+    assert flushed.status == "success" and not flushed.failed_deliveries, flushed
+    assert seen == ["recursion seed", "recursion seed"]
+    assert not any(event["name"] == "processor work" for event in recorder.events)
 
 
 async def _shutdown_seals_queued_exports() -> None:
@@ -942,5 +996,40 @@ print(json.dumps({'seen':seen,'shutdown':'complete'}))
             capture_output=True,
             text=True,
             timeout=15,
+        )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_custom_scopes_deliver_on_a_fresh_loop_without_flush() -> None:
+    env = dict(os.environ)
+    env.pop("OPENAI_API_KEY", None)
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
+    script = r"""
+import asyncio,threading,gc,weakref
+from agents import telemetry
+seen=[]; delivered=threading.Event()
+class Processor:
+    def on_trace_event(self,event):
+        seen.append((event['name'],event['lifecycle']))
+        if len(seen)==2: delivered.set()
+async def configure(): await telemetry.configure(processors=[Processor()])
+async def scopes():
+    with telemetry.trace('new loop only') as scope:
+        assert telemetry.current_context() is scope.context
+        reference=weakref.ref(scope.context)
+    del scope
+    assert await asyncio.to_thread(delivered.wait,2), seen
+    assert seen==[('new loop only','start'),('new loop only','end')], seen
+    gc.collect()
+    assert reference() is None, 'processor pump retained application context'
+    await telemetry.shutdown(timeout_ms=2000)
+asyncio.run(configure())
+asyncio.run(scopes())
+"""
+    with tempfile.TemporaryDirectory() as home:
+        env["CODEX_HOME"] = home
+        result = subprocess.run(
+            [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=15
         )
     assert result.returncode == 0, result.stdout + result.stderr

@@ -13,7 +13,7 @@ from collections.abc import Coroutine, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock
 from time import monotonic
@@ -276,14 +276,30 @@ class TraceExportCredentials:
 
 @dataclass(frozen=True, kw_only=True)
 class SpanContext:
-    """Immutable native identity; the private handle is process-local."""
+    """Immutable native identity owning parent context while reachable.
+
+    Lexical scope exit ends recording; this process-local context remains
+    usable by copied tasks and explicit parents until its last reference ends.
+    """
 
     trace_id: str
     span_id: str
     parent_span_id: str | None
     disabled: bool
     include_sensitive_data: bool
-    _handle: str = field(repr=False)
+    _handle: str = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        from weakref import finalize
+
+        native = _native_tracing()
+        retained = native.retain_trace_context(self._handle)
+        try:
+            object.__setattr__(self, "_handle", retained)
+            finalize(self, native.release_trace_context, retained)
+        except BaseException:
+            native.release_trace_context(retained)
+            raise
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -305,6 +321,7 @@ class TraceOptions:
 
 
 _current: ContextVar[SpanContext | None] = ContextVar("agents_trace_context", default=None)
+_in_processor: ContextVar[bool] = ContextVar("agents_trace_processor", default=False)
 
 
 def current_context() -> SpanContext | None:
@@ -360,6 +377,7 @@ class TraceScope:
         self._kind = kind
         self._options = _options(options)
         self._context: SpanContext | None = None
+        self._span_handle: str | None = None
         self._token: Token[SpanContext | None] | None = None
         self._ended = False
         self._outcome: dict[str, Any] | None = None
@@ -390,6 +408,8 @@ class TraceScope:
         parent = value.parent or ambient
         native = _native_tracing()
         credential = None
+        handle = None
+        admitted = False
         try:
             # Validate public JSON before registering any credential or span.
             wire: dict[str, Any] = {
@@ -403,7 +423,7 @@ class TraceScope:
                 "trace_id": value.trace_id,
                 "group_id": value.group_id,
                 "metadata": dict(value.metadata),
-                "disabled": value.disabled,
+                "disabled": True if _in_processor.get() else value.disabled,
                 "include_sensitive_data": value.include_sensitive_data,
                 "credential_ref": None,
             }
@@ -418,15 +438,30 @@ class TraceScope:
             data = json.loads(native.start_trace_span(json.dumps(wire, allow_nan=False)))
             handle = data.pop("handle")
             self._context = SpanContext(_handle=handle, **data)
+            self._span_handle = handle
+            admitted = True
+        except BaseException:
+            self._options = replace(value, export_credentials=None)
+            del self, value
+            raise
         finally:
             if credential is not None:
                 native.release_trace_credentials(credential)
+            if handle is not None and not admitted:
+                native.release_trace_span(handle)
         self._token = _current.set(self._context)
+        _ensure_processor_pump()
         return self
 
     def set_outcome(self, *, status: str, category: str | None = None) -> None:
         if status not in ("ok", "error", "cancelled"):
             raise ValueError("Invalid span outcome status")
+        if category is not None and (
+            not isinstance(category, str)
+            or len(category) > 256
+            or any(not (char.isascii() and (char.isalnum() or char == "_")) for char in category)
+        ):
+            raise ValueError("Invalid span outcome category")
         self._outcome = {"status": status, "category": category, "data": {}}
 
     def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:
@@ -446,9 +481,12 @@ class TraceScope:
         }
         native = _native_tracing()
         try:
-            native.end_trace_span(self._context._handle, json.dumps(outcome))
+            assert self._span_handle is not None
+            native.end_trace_span(self._span_handle, json.dumps(outcome))
         finally:
-            native.release_trace_span(self._context._handle)
+            if self._span_handle is not None:
+                native.release_trace_span(self._span_handle)
+                self._span_handle = None
 
 
 def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None = None) -> TraceScope:
@@ -494,47 +532,56 @@ def _capture(
     options: TraceOptions | Mapping[str, Any] | None = None,
     fallback: str | None = None,
 ) -> _CapturedTrace:
-    _ensure_processor_pump()
-    scope = None
-    native = None
-    context = current_context()
-    handle = context._handle if context else fallback
-    if options is not None or (context is not None and fallback is not None):
-        # Native operation spans own their immutable parent and policy. The
-        # caller's ambient context is restored before any queue or await.
-        scope = TraceScope(
-            "operation",
-            "operation",
-            options,
-            _restrictions=(fallback,) if fallback is not None else (),
-        )
-        if context is None and fallback is not None:
-            # Session defaults contribute policy even when no public scope is active.
-            native = _native_tracing()
-            data = json.loads(native.trace_span_context(fallback))
-            data.pop("handle", None)
-            token = _current.set(SpanContext(_handle=fallback, **data))
-            try:
+    try:
+        scope = None
+        native = None
+        context = current_context()
+        handle = context._handle if context else fallback
+        if (
+            options is not None
+            or (context is not None and fallback is not None)
+            or _in_processor.get()
+        ):
+            # Native operation spans own their immutable parent and policy. The
+            # caller's ambient context is restored before any queue or await.
+            scope = TraceScope(
+                "operation",
+                "operation",
+                options,
+                _restrictions=(fallback,) if fallback is not None else (),
+            )
+            if context is None and fallback is not None:
+                # Session defaults contribute policy even when no public scope is active.
+                native = _native_tracing()
+                data = json.loads(native.trace_span_context(fallback))
+                data.pop("handle", None)
+                token = _current.set(SpanContext(_handle=fallback, **data))
+                try:
+                    scope.__enter__()
+                    assert scope._token is not None
+                    _current.reset(scope._token)
+                    scope._token = None
+                finally:
+                    _current.reset(token)
+            else:
                 scope.__enter__()
-                assert scope._token is not None
+            if scope._token is not None:
                 _current.reset(scope._token)
                 scope._token = None
-            finally:
-                _current.reset(token)
-        else:
-            scope.__enter__()
-        if scope._token is not None:
-            _current.reset(scope._token)
-            scope._token = None
-        handle = scope.context._handle
-    try:
-        return _CapturedTrace(
-            (native or _native_tracing()).retain_trace_context(handle) if handle else None, scope
-        )
-    except BaseException as error:
-        if scope is not None:
-            scope.__exit__(type(error), error, None)
-        raise
+            handle = scope.context._handle
+        try:
+            captured = _CapturedTrace(
+                (native or _native_tracing()).retain_trace_context(handle) if handle else None,
+                scope,
+            )
+            _ensure_processor_pump()
+            return captured
+        except BaseException as error:
+            if scope is not None:
+                scope.__exit__(type(error), error, None)
+            raise
+    finally:
+        del options
 
 
 class TraceLifecycleEvent(TypedDict):
@@ -602,6 +649,8 @@ def _validate_processors(processors: Sequence[TraceProcessor]) -> None:
 
 def _ensure_processor_pump() -> None:
     global _processor_task
+    if _in_processor.get():
+        return
     try:
         asyncio.get_running_loop()
     except RuntimeError:
@@ -609,7 +658,11 @@ def _ensure_processor_pump() -> None:
     if _processors and (
         _processor_task is None or _processor_task.done() or _processor_task.get_loop().is_closed()
     ):
-        _processor_task = asyncio.create_task(_pump_processors())
+        token = _current.set(None)
+        try:
+            _processor_task = asyncio.create_task(_pump_processors())
+        finally:
+            _current.reset(token)
 
 
 def _set_processors(processors: Sequence[TraceProcessor], *, replace: bool) -> None:
@@ -716,6 +769,7 @@ class _ProcessorRoute:
         import inspect
 
         failed = False
+        token = _in_processor.set(True)
         try:
             result = self.processor.on_trace_event(event)
             if inspect.isawaitable(result):
@@ -724,6 +778,8 @@ class _ProcessorRoute:
             # Contain even callback cancellation and BaseException subclasses.
             # Raise outside the handler so raw callback errors are not chained.
             failed = True
+        finally:
+            _in_processor.reset(token)
         if failed:
             raise RuntimeError("Trace processor delivery failed")
 
