@@ -94,6 +94,7 @@ from .observation import (
     TurnStarted,
     UsageUpdated,
     _ObservationBuffer,
+    _request_observation,
 )
 from .rate_limits import ApiRateLimits, _api_rate_limits
 from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall
@@ -2183,6 +2184,7 @@ class Session(Generic[ContextT, OutputT]):
                     session._last_turn = handle
                     session._restored_turn = handle
                     active.handle = handle
+                    session._register_request_observation(active, handle)
                     active.accepted.set_result(handle)
                     session._active = active
                     thread._select_steps(
@@ -2346,6 +2348,9 @@ class Session(Generic[ContextT, OutputT]):
         self._observations = _ObservationBuffer(self.id)
         self._api_rate_limit_snapshot = ApiRateLimits()
         self._rate_limit_parent: Session[Any, Any] | None = None
+        self._request_observation_routes: weakref.WeakValueDictionary[str, _Submission] = (
+            weakref.WeakValueDictionary()
+        )
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
         self._reader = asyncio.create_task(self._read_events())
@@ -3338,13 +3343,18 @@ class Session(Generic[ContextT, OutputT]):
             raise InteractionExpiredError("Manual tool reply is expired or already delivered")
         self._observations.notify()
         if isinstance(state, _Submission) and state.restored_pending:
+            assert state.handle is not None
+            observation_route = state.handle.submission_id
 
             async def continue_restored_turn() -> None:
                 try:
                     # Core may already have queued recovery when this callback
                     # is cancelled. Retain its mutation ownership through the
                     # admission acknowledgement before retirement can pass it.
-                    with _private_task(self._native._continue_manual()) as (admitting, admitted):
+                    with _private_task(self._native._continue_manual(observation_route)) as (
+                        admitting,
+                        admitted,
+                    ):
                         receipt = json.loads(await _join(admitting, outcome=admitted))
                     if receipt["status"] == "pending":
                         return
@@ -4948,6 +4958,10 @@ class Session(Generic[ContextT, OutputT]):
                         "mode": "continue_if_idle" if state.continued_from else "start_if_idle",
                         "input": input,
                     }
+                    if state.issued is None:
+                        state.issued = _root_turn(self, None, uuid4().hex, state.completion)
+                    route_id = self._register_request_observation(state, state.issued)
+                    request["observation_submission_id"] = route_id
                     if state.continued_from is not None:
                         request["expected_previous_turn_id"] = state.continued_from
                     if state.output.mode == "native":
@@ -5409,6 +5423,36 @@ class Session(Generic[ContextT, OutputT]):
             and all(not child.busy for child in self._child_callbacks.values())
         ):
             self._observations.finish("failed")
+
+    def _register_request_observation(self, state: _Submission, handle: Turn[Any]) -> str:
+        """Capture a fresh, nonpersistent route for this exact root handle."""
+        route_id = handle.submission_id
+        self._request_observation_routes[route_id] = state
+        state.completion.add_done_callback(
+            lambda _done: self._request_observation_routes.pop(route_id, None)
+        )
+        return route_id
+
+    def _observe_request_metadata(self, event: dict[str, Any]) -> None:
+        """Route passive metadata only through its original submitted handle."""
+        message = event["msg"]
+        route_id = message.get("submission_id")
+        route = (
+            self._request_observation_routes.get(route_id) if isinstance(route_id, str) else None
+        )
+        if route is not None and not route.completion.done() and not route.stopping:
+            observation = _request_observation(
+                message.get("observation"), session_id=self.id, submission_id=route_id
+            )
+            captured = route.handle or route.issued
+            if (
+                observation is not None
+                and captured is not None
+                and observation.thread_id == self.id
+                and observation.turn_id == event.get("id")
+                and captured.turn_id in (None, observation.turn_id)
+            ):
+                self._observations.append(observation)
 
     def _observe_progress(
         self, event: dict[str, Any], handle: Turn[Any] | ChildInvocation, thread_id: str
@@ -5985,6 +6029,19 @@ class Session(Generic[ContextT, OutputT]):
                         self._api_rate_limit_snapshot = snapshot
                         if self._rate_limit_parent is not None:
                             self._rate_limit_parent._api_rate_limit_snapshot = snapshot
+                if message.get("type") == "_sdk_request_metadata":
+                    route_id = message.get("submission_id")
+                    route = (
+                        self._request_observation_routes.get(route_id)
+                        if isinstance(route_id, str)
+                        else None
+                    )
+                    if route is not None and not route.accepted.done():
+                        # Sampling has reached dispatch; reuse the same admission
+                        # wait as ordinary output without consulting _active.
+                        await asyncio.wait((route.accepted,))
+                    self._observe_request_metadata(event)
+                    continue
                 if message.get("type") == "elicitation_status":
                     key = (message["server_name"], message["request_id"])
                     url_question = self._url_completions.get(key)

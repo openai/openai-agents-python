@@ -650,14 +650,14 @@ async def test_force_retirement_joins_queued_manual_recovery_ack(responses: Resp
                     def __getattr__(self, name):
                         return getattr(native, name)
 
-                    async def _continue_manual(self):
+                    async def _continue_manual(self, observation_submission_id=None):
                         try:
                             async with mutation:
 
                                 async def ordered_recovery():
                                     queued.set()
                                     await acknowledge.wait()
-                                    return await native._continue_manual()
+                                    return await native._continue_manual(observation_submission_id)
 
                                 operation = asyncio.create_task(ordered_recovery())
                                 queued_work.append(operation)
