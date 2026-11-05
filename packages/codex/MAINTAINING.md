@@ -2,11 +2,13 @@
 
 The build produces one wheel for the root `openai-agents` distribution, which provides the `agents` Python package. For prebuilt preview wheels, see the [installation guide](../../docs/sdk/installation.md). For source builds, use the [SDK guides](../../docs/sdk/index.md) from the same commit.
 
-Codex owns every model turn. Python supplies typed declarations, conversion, and callbacks, and manages its asynchronous tasks.
+Codex owns every model turn for the native API. Python supplies typed declarations, conversion, and callbacks, and manages its asynchronous tasks.
 
 ## Runtime ownership
 
-`src/agents/_runtime` owns the Python runtime, including sessions, tools, checkpoints, telemetry, native completion handling, testing helpers, and experimental features. The modules directly under `src/agents` retain existing imports by forwarding to those implementations. The root export map stays lazy. `config.py` retains shared immutable type aliases, and `version.py` retains package metadata.
+The retained v0 API has its own implementation under `agents.classic`; see [the Classic contract](../../CLASSIC.md). Keep it isolated from the Codex runtime described below.
+
+`src/agents/_runtime` owns the native API's Python runtime, including sessions, tools, checkpoints, telemetry, native completion handling, testing helpers, and experimental features. The modules directly under `src/agents` retain existing imports by forwarding to those implementations. The root export map stays lazy. `config.py` retains shared immutable type aliases, and `version.py` retains package metadata.
 
 Runtime code imports its private siblings directly. It may use the shared configuration declarations, version metadata, and native ABI, but must not import through the public facades. Public facades expose the same objects and retain their original literal `__all__` declarations. Explicit import aliases in the runtime let type checkers follow every forwarded binding. The private metadata helper preserves existing class, function, method, and TypeVar module identities for inspection and pickle. Forward references retain their actual implementation namespace so models can resolve annotations during initialization.
 

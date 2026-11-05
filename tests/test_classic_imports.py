@@ -79,7 +79,8 @@ def test_deep_imports_do_not_load_native_runtime(native_first: bool) -> None:
 import importlib.abc, sys
 class BlockNative(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith(('agents._native', 'agents._core', 'agents.session')):
+        blocked = ('agents._native', 'agents._runtime', 'agents._core', 'agents.session')
+        if fullname.startswith(blocked):
             raise AssertionError('classic attempted native import: ' + fullname)
 sys.meta_path.insert(0, BlockNative())
 if {native_first!r}:

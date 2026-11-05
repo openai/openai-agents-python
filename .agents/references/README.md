@@ -4,6 +4,7 @@ Use this map to find the owner of an affected SDK boundary, then inspect the cur
 
 | Boundary | Source and relevant guide |
 | --- | --- |
+| Retained v0 API | `src/agents/classic/`; [Classic contract](../../CLASSIC.md) |
 | Public imports and runtime boundary | `src/agents/__init__.py` and sibling facade modules; [runtime ownership](../../packages/codex/MAINTAINING.md#runtime-ownership) |
 | Agent declarations and native provider settings | `src/agents/_runtime/agent.py`; [configuration](../../docs/sdk/configuration.md) |
 | Prepared model requests | `src/agents/_runtime/prepared_request.py`; [runtime ownership](../../packages/codex/MAINTAINING.md#runtime-ownership) |
@@ -17,6 +18,6 @@ Use this map to find the owner of an affected SDK boundary, then inspect the cur
 | Checkpoints and retained goal/checklist data | `src/agents/_runtime/state.py`, `packages/codex/rust/checkpoint.rs`; [save and restore](../../docs/sdk/state.md#save-and-restore-a-portable-checkpoint) |
 | Embedded Codex and PyO3 bindings | `packages/codex/rust/`; [native maintainer guide](../../packages/codex/MAINTAINING.md) |
 
-Codex owns model requests, execution admission and canonical history. Python supplies declarations, validates callback inputs and results, and owns the Session's async integration. Restore binds current application permissions, callbacks and credentials; passive observations are not authority over work. Use `tests/native_fixtures.py` and the [native test guide](../../tests/README.md) to verify relevant behavior without live provider calls.
+For the native API, Codex owns model requests, execution admission and canonical history. Python supplies declarations, validates callback inputs and results, and owns the Session's async integration. Restore binds current application permissions, callbacks and credentials; passive observations are not authority over work. Use `tests/native_fixtures.py` and the [native test guide](../../tests/README.md) to verify relevant behavior without live provider calls.
 
 During issue and PR reviews, treat this directory as read-only background and validate claims against the reviewed source, tests and release boundary. Update the map during explicit maintenance work when ownership changes.
