@@ -141,8 +141,9 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 ### Repo Structure & Important Files
 
-- `src/agents/`: Public import facades, shared declarations, and package metadata.
-- `src/agents/_runtime/`: Private Python runtime implementation, including experimental features.
+- `src/agents/`: Public Codex API facades, shared declarations, and package metadata.
+- `src/agents/_runtime/`: Private Codex runtime implementation, including experimental features.
+- `src/agents/classic/`: Retained v0 Python runtime, isolated under its explicit namespace.
 - `tests/`: Test suite; see `tests/README.md` for native fixtures, typing checks, and wheel verification.
 - `examples/`: Current Python examples and their [guide](examples/README.md).
 - `docs/sdk/`: Current MkDocs source. Start at [the SDK guide](docs/sdk/index.md) for deployment choices, Sessions, tools, configuration and the API reference.
@@ -155,7 +156,7 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 ### Agents Core Runtime Guidelines
 
-- The root `openai-agents` distribution exposes `agents` and uses Codex as its only engine. Keep typed declarations and application callbacks in Python; native Codex owns model requests, turns, MCP execution and canonical history. Do not recreate a Python model loop, adapter backend or separate SDK distribution.
+- The root `openai-agents` distribution exposes the native SDK through `agents` and the retained v0 Python runtime through `agents.classic`. Native Codex owns model requests, turns, MCP execution and canonical history for the native API. Keep classic implementation and dependencies isolated under its explicit namespace; preserve its released behavior and supported persisted state. Do not add automatic engine switching, cross-runtime object or checkpoint conversion, another adapter backend, or a separate distribution without an explicit requirement. See `CLASSIC.md` for the migration contract.
 - `src/agents/_runtime/agent.py` defines Agent and its one-shot helpers, `Agent.run()` and `Agent.run_sync()`.
 - `src/agents/_runtime/session.py` owns one native thread/event reader, exact submission handles, callback lifetime, tool generation and joined cleanup. Preserve native admission at application-code entry and after awaits; cancellation must not start queued application work after its ownership is invalidated.
 - `src/agents/_runtime/_function_tools.py` and `tools.py` own the typed declaration and single captured function representation. Reuse that schema/validator capture instead of adding a parallel mutable tool executor.
