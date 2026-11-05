@@ -1,5 +1,5 @@
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 4a621198c22f522486601cabd5b65521bbe53dd3..f67389a950a766aa371f2ad264ea775f0fee875d 100644
+index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..640262ac26906c57bdcaa21f4ba08c5c2c6973f0 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
 @@ -151,6 +151,7 @@ use codex_model_provider_info::DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS;
@@ -51,7 +51,73 @@ index 4a621198c22f522486601cabd5b65521bbe53dd3..f67389a950a766aa371f2ad264ea775f
                  }
                  Err(err) => return Err(provider.map_api_error(err)),
              }
-@@ -1948,18 +1959,27 @@ impl ModelClientSession {
+@@ -1669,13 +1680,8 @@ impl ModelClientSession {
+         service_tier: Option<String>,
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
++        auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<ResponseStream> {
+-        let auth_manager = self.client.state.provider.auth_manager();
+-        let mut auth_recovery = auth_manager
+-            .as_ref()
+-            .map(AuthManager::unauthorized_recovery);
+-        let mut provider_auth_recovery_attempted = false;
+-        let mut pending_retry = PendingUnauthorizedRetry::default();
+         loop {
+             let client_setup = self
+                 .client
+@@ -1699,7 +1705,7 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                 client_setup.api_auth.as_ref(),
+                 client_setup.agent_identity_telemetry.clone(),
+-                pending_retry,
++                auth_recovery.pending_retry,
+             );
+             let (request_telemetry, sse_telemetry) = Self::build_streaming_telemetry(
+                 session_telemetry,
+@@ -1812,11 +1818,11 @@ impl ModelClientSession {
+                         response_debug_context.request_id.as_deref(),
+                         /*output_items*/ &[],
+                     );
+-                    pending_retry = PendingUnauthorizedRetry::from_recovery(
++                    auth_recovery.pending_retry = PendingUnauthorizedRetry::from_recovery(
+                         handle_unauthorized(
+                             unauthorized_transport,
+-                            &mut auth_recovery,
+-                            &mut provider_auth_recovery_attempted,
++                            &mut auth_recovery.manager,
++                            &mut auth_recovery.provider_attempted,
+                             session_telemetry,
+                             &self.client.state.provider,
+                             self.client.event_sender.as_ref(),
+@@ -1868,16 +1874,10 @@ impl ModelClientSession {
+         warmup: bool,
+         request_trace: Option<W3cTraceContext>,
+         inference_trace: &InferenceTraceContext,
++        auth_recovery: &mut RequestAuthRecovery,
+     ) -> Result<WebsocketStreamOutcome> {
+         let after_prewarm = !warmup && self.websocket_session.last_response_from_untraced_warmup;
+         let provider = Arc::clone(&self.client.state.provider);
+-        let auth_manager = provider.auth_manager();
+-
+-        let mut auth_recovery = auth_manager
+-            .as_ref()
+-            .map(AuthManager::unauthorized_recovery);
+-        let mut provider_auth_recovery_attempted = false;
+-        let mut pending_retry = PendingUnauthorizedRetry::default();
+         loop {
+             let client_setup = self
+                 .client
+@@ -1896,7 +1896,7 @@ impl ModelClientSession {
+                 client_setup.auth.as_ref().map(CodexAuth::auth_mode),
+                 client_setup.api_auth.as_ref(),
+                 client_setup.agent_identity_telemetry.clone(),
+-                pending_retry,
++                auth_recovery.pending_retry,
+             );
+             let mut request = self.client.build_responses_request(
+                 prompt,
+@@ -1951,18 +1951,28 @@ impl ModelClientSession {
                  Err(ApiError::Transport(unauthorized_transport))
                      if provider.is_recoverable_auth_error(&unauthorized_transport) =>
                  {
@@ -69,8 +135,8 @@ index 4a621198c22f522486601cabd5b65521bbe53dd3..f67389a950a766aa371f2ad264ea775f
 -                    );
 +                    match handle_unauthorized(
 +                        unauthorized_transport,
-+                        &mut auth_recovery,
-+                        &mut provider_auth_recovery_attempted,
++                        &mut auth_recovery.manager,
++                        &mut auth_recovery.provider_attempted,
 +                        session_telemetry,
 +                        &provider,
 +                        self.client.event_sender.as_ref(),
@@ -79,7 +145,8 @@ index 4a621198c22f522486601cabd5b65521bbe53dd3..f67389a950a766aa371f2ad264ea775f
 +                    .await
 +                    {
 +                        Ok(recovery) => {
-+                            pending_retry = PendingUnauthorizedRetry::from_recovery(recovery);
++                            auth_recovery.pending_retry =
++                                PendingUnauthorizedRetry::from_recovery(recovery);
 +                        }
 +                        // No prompt was sent: negotiate HTTP after auth recovery is exhausted.
 +                        Err(error) if matches!(error.details(), CodexErrorDetails::UnexpectedStatus(response) if response.status == StatusCode::UNAUTHORIZED) =>
@@ -91,19 +158,102 @@ index 4a621198c22f522486601cabd5b65521bbe53dd3..f67389a950a766aa371f2ad264ea775f
                      continue;
                  }
                  Err(err) => return Err(provider.map_api_error(err)),
+@@ -2200,6 +2210,7 @@ impl ModelClientSession {
+         }
+ 
+         let disabled_trace = InferenceTraceContext::disabled();
++        let mut auth_recovery = RequestAuthRecovery::new(&self.client.state.provider);
+         match self
+             .stream_responses_websocket(
+                 prompt,
+@@ -2212,6 +2223,7 @@ impl ModelClientSession {
+                 /*warmup*/ true,
+                 current_span_w3c_trace_context(),
+                 &disabled_trace,
++                &mut auth_recovery,
+             )
+             .await
+         {
+@@ -2257,6 +2269,7 @@ impl ModelClientSession {
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+             WireApi::Responses => {
++                let mut auth_recovery = RequestAuthRecovery::new(&self.client.state.provider);
+                 if self.client.responses_websocket_enabled() {
+                     let request_trace = current_span_w3c_trace_context();
+                     match self
+@@ -2271,6 +2284,7 @@ impl ModelClientSession {
+                             /*warmup*/ false,
+                             request_trace,
+                             inference_trace,
++                            &mut auth_recovery,
+                         )
+                         .await?
+                     {
+@@ -2290,6 +2304,7 @@ impl ModelClientSession {
+                     service_tier,
+                     responses_metadata,
+                     inference_trace,
++                    &mut auth_recovery,
+                 )
+                 .await
+             }
+@@ -2572,6 +2587,27 @@ impl PendingUnauthorizedRetry {
+     }
+ }
+ 
++/// Recovery belongs to one model request, including its transport negotiation.
++/// Preconnect, warmup and later requests create independent recovery budgets.
++struct RequestAuthRecovery {
++    manager: Option<UnauthorizedRecovery>,
++    provider_attempted: bool,
++    pending_retry: PendingUnauthorizedRetry,
++}
++
++impl RequestAuthRecovery {
++    fn new(provider: &SharedModelProvider) -> Self {
++        Self {
++            manager: provider
++                .auth_manager()
++                .as_ref()
++                .map(AuthManager::unauthorized_recovery),
++            provider_attempted: false,
++            pending_retry: PendingUnauthorizedRetry::default(),
++        }
++    }
++}
++
+ #[derive(Clone, Debug, Default)]
+ struct AuthRequestTelemetryContext {
+     auth_mode: Option<&'static str>,
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index 779a40ca2be8f8687ca067f6e922d53be852c51c..968f7fa32a5df19a2f271232531b1305675de7ce 100644
+index 779a40ca2be8f8687ca067f6e922d53be852c51c..f4dbf04c9453d1b846e8bc7d9bb3d809a56a9cc0 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -1674,6 +1674,7 @@ struct TestRecoveryProvider {
+@@ -1674,6 +1674,8 @@ struct TestRecoveryProvider {
      inner: SharedModelProvider,
      should_fail: bool,
      attempts: Arc<AtomicUsize>,
 +    recovery_gate: Option<(Arc<Notify>, Arc<Notify>)>,
++    rotate_keys: bool,
  }
-
+ 
  impl ModelProvider for TestRecoveryProvider {
-@@ -1705,6 +1706,10 @@ impl ModelProvider for TestRecoveryProvider {
+@@ -1686,6 +1688,13 @@ impl ModelProvider for TestRecoveryProvider {
+     }
+ 
+     fn auth(&self) -> ModelProviderFuture<'_, Option<CodexAuth>> {
++        if self.rotate_keys {
++            let key = format!(
++                "synthetic-rotation-{}",
++                self.attempts.load(Ordering::Relaxed)
++            );
++            return Box::pin(async move { Some(CodexAuth::from_api_key(&key)) });
++        }
+         self.inner.auth()
+     }
+ 
+@@ -1705,6 +1714,10 @@ impl ModelProvider for TestRecoveryProvider {
      ) -> ModelProviderFuture<'_, codex_protocol::error::Result<ProviderUnauthorizedRecovery>> {
          self.attempts.fetch_add(1, Ordering::Relaxed);
          Box::pin(async move {
@@ -114,15 +264,16 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..968f7fa32a5df19a2f271232531b1305
              if self.should_fail {
                  Err(CodexErr::Io(std::io::Error::other(
                      "provider recovery failed",
-@@ -1732,6 +1737,7 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
+@@ -1732,6 +1745,8 @@ async fn provider_owned_auth_recovery_is_bounded_and_preserves_unauthorized_fail
              inner: test_model_provider(),
              should_fail,
              attempts: Arc::clone(&attempts),
 +            recovery_gate: None,
++            rotate_keys: false,
          });
          assert!(provider.auth_manager().is_none());
-
-@@ -2208,3 +2214,164 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
+ 
+@@ -2208,3 +2223,395 @@ async fn inference_tools_changes_follow_full_specs_across_turns() {
          );
      }
  }
@@ -238,6 +389,7 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..968f7fa32a5df19a2f271232531b1305
 +            should_fail: false,
 +            attempts: Arc::clone(&attempts),
 +            recovery_gate: Some((Arc::clone(&started), Arc::clone(&release))),
++            rotate_keys: false,
 +        });
 +        let mut client = test_model_client(SessionSource::Cli);
 +        Arc::get_mut(&mut client.state)
@@ -285,6 +437,236 @@ index 779a40ca2be8f8687ca067f6e922d53be852c51c..968f7fa32a5df19a2f271232531b1305
 +        assert_eq!(server.received_requests().await.unwrap().len(), 1);
 +        assert_eq!(client.responses_websocket_enabled(), websockets);
 +    }
++    Ok(())
++}
++
++fn auth_recovery_model_client(
++    base_url: String,
++    websockets: bool,
++    rotate_keys: bool,
++) -> (ModelClient, Arc<AtomicUsize>) {
++    let mut info = ModelProviderInfo::create_openai_provider(Some(base_url));
++    info.requires_openai_auth = false;
++    info.supports_websockets = websockets;
++    info.request_max_retries = Some(0);
++    let attempts = Arc::new(AtomicUsize::new(0));
++    let provider: SharedModelProvider = Arc::new(TestRecoveryProvider {
++        inner: create_model_provider(info, /*auth_manager*/ None),
++        should_fail: false,
++        attempts: Arc::clone(&attempts),
++        recovery_gate: None,
++        rotate_keys,
++    });
++    let mut client = test_model_client(SessionSource::Cli);
++    Arc::get_mut(&mut client.state).unwrap().provider = provider;
++    (client, attempts)
++}
++
++async fn auth_recovery_stream(
++    session: &mut super::ModelClientSession,
++) -> codex_protocol::error::Result<crate::client_common::ResponseStream> {
++    let metadata = test_responses_metadata_for_client(
++        &session.client,
++        None,
++        format!("{}:0", session.client.state.thread_id),
++        None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    session
++        .stream(
++            &Prompt::default(),
++            &test_model_info(),
++            &test_session_telemetry(),
++            None,
++            codex_protocol::config_types::ReasoningSummary::None,
++            None,
++            &metadata,
++            &InferenceTraceContext::disabled(),
++        )
++        .await
++}
++
++/// Only the request that attempted the rejected upgrade owns its spent recovery.
++#[tokio::test]
++async fn authentication_recovery_spans_fallback_but_not_preconnect_or_later_requests()
++-> anyhow::Result<()> {
++    for preconnect in [false, true] {
++        for status in [401, 403] {
++            let server = MockServer::start().await;
++            Mock::given(method("GET"))
++                .respond_with(ResponseTemplate::new(401))
++                .expect(2)
++                .mount(&server)
++                .await;
++            let http_attempts = if preconnect && status == 401 { 2 } else { 1 };
++            Mock::given(method("POST"))
++                .respond_with(
++                    ResponseTemplate::new(status)
++                        .insert_header("x-request-id", "final-http-request")
++                        .set_body_string("final HTTP rejection"),
++                )
++                .expect(http_attempts as u64)
++                .mount(&server)
++                .await;
++            let (client, attempts) =
++                auth_recovery_model_client(format!("{}/v1", server.uri()), true, true);
++            let metadata = test_responses_metadata_for_client(
++                &client,
++                None,
++                format!("{}:0", client.state.thread_id),
++                None,
++                TestCodexResponsesRequestKind::Turn,
++            );
++            let mut session = client.new_session();
++            if preconnect {
++                session
++                    .preconnect_websocket(
++                        &test_model_info(),
++                        None,
++                        &test_session_telemetry(),
++                        &metadata,
++                    )
++                    .await?;
++            }
++            let error = auth_recovery_stream(&mut session).await.err().unwrap();
++            let CodexErrorDetails::UnexpectedStatus(details) = error.details() else {
++                panic!("the final HTTP failure must remain structured");
++            };
++            assert_eq!(details.status.as_u16(), status);
++            assert_eq!(details.request_id.as_deref(), Some("final-http-request"));
++            assert!(error.retry_delay(1).is_none());
++            assert_eq!(
++                attempts.load(Ordering::Relaxed),
++                if preconnect && status == 401 { 2 } else { 1 }
++            );
++            assert_eq!(
++                server.received_requests().await.unwrap().len(),
++                2 + http_attempts
++            );
++        }
++    }
++
++    let server = MockServer::start().await;
++    Mock::given(method("GET"))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(2)
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(3)
++        .mount(&server)
++        .await;
++    let (client, attempts) = auth_recovery_model_client(format!("{}/v1", server.uri()), true, true);
++    let mut session = client.new_session();
++    assert!(auth_recovery_stream(&mut session).await.is_err());
++    assert_eq!(attempts.load(Ordering::Relaxed), 1);
++    assert_eq!(server.received_requests().await.unwrap().len(), 3);
++    assert!(auth_recovery_stream(&mut session).await.is_err());
++    assert_eq!(attempts.load(Ordering::Relaxed), 2);
++    assert_eq!(server.received_requests().await.unwrap().len(), 5);
++    Ok(())
++}
++
++/// A fresh bearer can succeed after ordinary HTTP recovery.
++#[tokio::test]
++async fn authentication_recovery_rotates_http_credentials() -> anyhow::Result<()> {
++    let server = MockServer::start().await;
++    Mock::given(method("POST"))
++        .and(wiremock::matchers::header(
++            "authorization",
++            "Bearer synthetic-rotation-0",
++        ))
++        .respond_with(ResponseTemplate::new(401))
++        .expect(1)
++        .mount(&server)
++        .await;
++    Mock::given(method("POST"))
++        .and(wiremock::matchers::header("authorization", "Bearer synthetic-rotation-1"))
++        .respond_with(ResponseTemplate::new(200)
++            .insert_header("content-type", "text/event-stream")
++            .set_body_string(concat!(
++                "data: {\"type\":\"response.created\",\"response\":{\"id\":\"recovered\"}}\n\n",
++                "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"recovered\"}}\n\n",
++            )))
++        .expect(1).mount(&server).await;
++    let (client, attempts) =
++        auth_recovery_model_client(format!("{}/v1", server.uri()), false, true);
++    let mut stream = auth_recovery_stream(&mut client.new_session()).await?;
++    let mut completed = false;
++    while let Some(event) = stream.next().await {
++        completed |= matches!(event?, ResponseEvent::Completed { .. });
++    }
++    assert!(completed);
++    assert_eq!(attempts.load(Ordering::Relaxed), 1);
++    assert_eq!(server.received_requests().await.unwrap().len(), 2);
++    Ok(())
++}
++
++/// A successful rotated WebSocket handshake still dispatches exactly one prompt.
++#[tokio::test]
++async fn authentication_recovery_rotates_websocket_credentials() -> anyhow::Result<()> {
++    use futures::SinkExt;
++    use tokio_tungstenite::tungstenite::Message;
++    use tokio_tungstenite::tungstenite::handshake::server::{Request, Response};
++    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++    let address = listener.local_addr()?;
++    let peer = tokio::spawn(async move {
++        for attempt in 0..2 {
++            let (socket, _) = listener.accept().await.unwrap();
++            let upgraded = tokio_tungstenite::accept_hdr_async(
++                socket,
++                move |request: &Request, response: Response| {
++                    assert_eq!(
++                        request
++                            .headers()
++                            .get("authorization")
++                            .unwrap()
++                            .to_str()
++                            .unwrap(),
++                        format!("Bearer synthetic-rotation-{attempt}")
++                    );
++                    if attempt == 0 {
++                        Err(http::Response::builder()
++                            .status(401)
++                            .body(Some("rejected".to_owned()))
++                            .unwrap())
++                    } else {
++                        Ok(response)
++                    }
++                },
++            )
++            .await;
++            if attempt == 0 {
++                assert!(upgraded.is_err());
++                continue;
++            }
++            let mut websocket = upgraded.unwrap();
++            let request = websocket.next().await.unwrap().unwrap();
++            let request: serde_json::Value =
++                serde_json::from_str(request.to_text().unwrap()).unwrap();
++            assert_eq!(request["type"], "response.create");
++            for event in [
++                json!({"type":"response.created","response":{"id":"recovered"}}),
++                json!({"type":"response.completed","response":{"id":"recovered"}}),
++            ] {
++                websocket
++                    .send(Message::Text(event.to_string().into()))
++                    .await
++                    .unwrap();
++            }
++        }
++    });
++    let (client, attempts) = auth_recovery_model_client(format!("http://{address}/v1"), true, true);
++    let mut stream = auth_recovery_stream(&mut client.new_session()).await?;
++    let mut completed = false;
++    while let Some(event) = stream.next().await {
++        completed |= matches!(event?, ResponseEvent::Completed { .. });
++    }
++    assert!(completed);
++    assert_eq!(attempts.load(Ordering::Relaxed), 1);
++    assert!(client.responses_websocket_enabled());
++    peer.await?;
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/responses_retry_tests.rs b/codex-rs/core/src/responses_retry_tests.rs
@@ -339,17 +721,20 @@ index 65aa29397c5f5524116b0b9f932ab3719e1ed488..7046d163858432e7e7baa4b69da4edb7
 +    assert!(details.body.contains("invalid_api_key"));
 +}
 diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
-index be922daf5cb1514ca6823d1ef55745e5be5749a8..132fa2311b5e1f2f19654b74ea8326c3e2e4abda 100644
+index be922daf5cb1514ca6823d1ef55745e5be5749a8..7127ab14169fb70d2fec1d74437bea0f4aa58766 100644
 --- a/codex-rs/protocol/src/error.rs
 +++ b/codex-rs/protocol/src/error.rs
-@@ -420,6 +420,13 @@ impl CodexErr {
+@@ -420,6 +420,16 @@ impl CodexErr {
              CodexErrorDetails::ServerOverloaded | CodexErrorDetails::RetryLimit(_) => {
                  self.server_retry_delay()
              }
 +            // The client owns its single authentication-recovery opportunity.
 +            // A terminal rejection must not restart sampling with the same key.
 +            CodexErrorDetails::UnexpectedStatus(error)
-+                if error.status == http::StatusCode::UNAUTHORIZED =>
++                if matches!(
++                    error.status,
++                    http::StatusCode::UNAUTHORIZED | http::StatusCode::FORBIDDEN
++                ) =>
 +            {
 +                None
 +            }
@@ -357,7 +742,7 @@ index be922daf5cb1514ca6823d1ef55745e5be5749a8..132fa2311b5e1f2f19654b74ea8326c3
              | CodexErrorDetails::ContentFilter
              | CodexErrorDetails::RateLimitExceeded(_)
 diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
-index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..b141edc9d03bb3b6e38880696e933fb8a53aeec9 100644
+index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..e178133b22882dc801d7c1887b3741d26274e7d0 100644
 --- a/codex-rs/protocol/src/error_tests.rs
 +++ b/codex-rs/protocol/src/error_tests.rs
 @@ -755,3 +755,47 @@ fn usage_limit_reached_with_promo_message() {
@@ -370,7 +755,7 @@ index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..b141edc9d03bb3b6e38880696e933fb8
 +fn terminal_unauthorized_preserves_details_without_retry() {
 +    for (status, expected_retry) in [
 +        (StatusCode::UNAUTHORIZED, false),
-+        (StatusCode::FORBIDDEN, true),
++        (StatusCode::FORBIDDEN, false),
 +        (StatusCode::TOO_MANY_REQUESTS, true),
 +        (StatusCode::INTERNAL_SERVER_ERROR, true),
 +        (StatusCode::SERVICE_UNAVAILABLE, true),

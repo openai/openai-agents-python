@@ -282,10 +282,11 @@ async def test_provider_metadata_does_not_reach_later_turns_or_local_errors(
         await provider.aclose()
 
 
-async def test_terminal_http_auth_failure_stops_after_one_refresh(
-    provider_peer: ProviderErrorPeer,
+@pytest.mark.parametrize("status,expected_requests", [(401, 2), (403, 1)])
+async def test_terminal_http_auth_failure_stops_after_bounded_recovery(
+    provider_peer: ProviderErrorPeer, status: int, expected_requests: int
 ) -> None:
-    provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+    provider_peer.failure = (status, "invalid_api_key", "invalid_request_error")
     async with NativeProvider(
         base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
     ) as provider:
@@ -293,22 +294,23 @@ async def test_terminal_http_auth_failure_stops_after_one_refresh(
             await Agent(instructions="Answer.", model="gpt-5.2", provider=provider).run(
                 "Reject the captured key."
             )
-    assert provider_peer.failed_requests == 2
-    assert caught.value.status_code == 401
+    assert provider_peer.failed_requests == expected_requests
+    assert caught.value.status_code == status
     assert caught.value.code == "invalid_api_key"
     assert caught.value.request_id == "synthetic-provider-request"
     assert caught.value.category == "authentication_error"
 
 
+@pytest.mark.parametrize("status,expected_requests", [(401, 2), (403, 1)])
 async def test_terminal_http_auth_failure_preserves_one_prior_tool_effect(
-    provider_peer: ProviderErrorPeer,
+    provider_peer: ProviderErrorPeer, status: int, expected_requests: int
 ) -> None:
     effects = []
 
     @function_tool
     def write_once() -> str:
         effects.append("committed")
-        provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+        provider_peer.failure = (status, "invalid_api_key", "invalid_request_error")
         return "receipt-1"
 
     provider_peer.respond(function_call("write_once", {}, "write-once-call"))
@@ -324,8 +326,8 @@ async def test_terminal_http_auth_failure_preserves_one_prior_tool_effect(
             ).run("Record one effect.")
     assert effects == ["committed"]
     assert len(provider_peer.requests) == 1
-    assert provider_peer.failed_requests == 2
-    assert caught.value.status_code == 401
+    assert provider_peer.failed_requests == expected_requests
+    assert caught.value.status_code == status
     assert caught.value.code == "invalid_api_key"
     assert caught.value.request_id == "synthetic-provider-request"
     assert caught.value.category == "authentication_error"
@@ -336,14 +338,18 @@ async def test_terminal_http_auth_failure_preserves_one_prior_tool_effect(
         assert outputs[0]["output"] == "receipt-1"
 
 
-@pytest.mark.parametrize("status,expected_http", [(401, 2), (403, 6)])
+@pytest.mark.parametrize(
+    "upgrade_status,status,expected_upgrades,expected_http",
+    [(401, 401, 2, 1), (401, 403, 2, 1), (426, 401, 1, 2), (426, 403, 1, 1)],
+)
 async def test_websocket_auth_fallback_keeps_final_http_failure(
-    status: int, expected_http: int
+    upgrade_status: int, status: int, expected_upgrades: int, expected_http: int
 ) -> None:
     async with (
         timeout(30),
         websocket_peer(
-            upgrade_status=401, http_failure=(status, "final_http_rejection", "final-http-request")
+            upgrade_status=upgrade_status,
+            http_failure=(status, "final_http_rejection", "final-http-request"),
         ) as peer,
     ):
         agent = Agent(
@@ -358,7 +364,7 @@ async def test_websocket_auth_fallback_keeps_final_http_failure(
         assert caught.value.code == "final_http_rejection"
         assert caught.value.request_id == "final-http-request"
         assert caught.value.category == "authentication_error"
-        assert len(peer.upgrades) == 2
+        assert len(peer.upgrades) == expected_upgrades
         assert len(peer.http_requests) == expected_http
         assert all(
             header.get("authorization") == "Bearer synthetic-rejected-key"
@@ -366,8 +372,34 @@ async def test_websocket_auth_fallback_keeps_final_http_failure(
         )
 
 
-async def test_cancel_after_tool_effect_prevents_late_auth_retry(
+async def test_http_auth_recovery_budget_resets_for_each_model_request(
     provider_peer: ProviderErrorPeer,
+) -> None:
+    provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+        ) as provider,
+    ):
+        async with Agent(
+            instructions="Answer.", model="gpt-5.2", provider=provider
+        ).session() as session:
+            for request_index in range(2):
+                with pytest.raises(NativeError) as caught:
+                    await (
+                        await session.submit("Reject this independent model request.")
+                    ).get_result()
+                assert provider_peer.failed_requests == 2 * (request_index + 1)
+                assert caught.value.status_code == 401
+                assert caught.value.code == "invalid_api_key"
+                assert caught.value.request_id == "synthetic-provider-request"
+                assert caught.value.category == "authentication_error"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_cancel_after_tool_effect_prevents_late_auth_retry(
+    provider_peer: ProviderErrorPeer, status: int
 ) -> None:
     effects = []
     provider_peer.failure_started = asyncio.Event()
@@ -376,7 +408,7 @@ async def test_cancel_after_tool_effect_prevents_late_auth_retry(
     @function_tool
     def write_once() -> str:
         effects.append("committed")
-        provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+        provider_peer.failure = (status, "invalid_api_key", "invalid_request_error")
         return "receipt-1"
 
     provider_peer.respond(function_call("write_once", {}, "write-once-call"))
