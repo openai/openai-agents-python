@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "32e1e9ddf7c14b45b99e6f73cd12b6e6cdc3fce3",
+  "baseline_commit": "4d14acc1f6bdefe26adc6423e16dfac04a73e54d",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -874,7 +874,7 @@
     "root_definitions": {
       "agents._events": {
         "declarations": [
-          "class InputTokensDetails(TypedDict):\n    cached_tokens: int",
+          "class InputTokensDetails(TypedDict):\n    cached_tokens: int\n    cache_write_tokens: NotRequired[int]",
           "class OutputTokensDetails(TypedDict):\n    reasoning_tokens: int",
           "class TokenUsage(TypedDict):\n    input_tokens: int\n    input_tokens_details: InputTokensDetails\n    output_tokens: int\n    output_tokens_details: OutputTokensDetails\n    total_tokens: int",
           "class Failure(TypedDict):\n    code: str\n    message: str | None\n    http_status_code: NotRequired[int]",
