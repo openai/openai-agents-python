@@ -12,7 +12,7 @@ jobs:
     runs-on:
       group: codex-runners
       labels: codex-windows-x64-xl
-    timeout-minutes: '180'
+    timeout-minutes: 180
     defaults:
       run:
         shell: bash
