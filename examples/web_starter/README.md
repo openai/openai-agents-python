@@ -1,18 +1,24 @@
-# A local Python service and browser
+# Run a local Python service and browser
 
-This starter runs real native SDK tools behind an HTTP service. Its browser uses `ai@6.0.315`. A Python tool reads 10,000 synthetic rows and returns a bounded summary to the model. The model asks for approval and returns a validated `Final` object. The application publishes validated XML only after the original native request accepts the approval decision. No provider key is required.
+Run native SDK tools behind an HTTP service, approve publication in a browser, and download validated XML. The default mode uses scripted Responses and requires no provider key. A Python tool reads 10,000 synthetic rows and returns a bounded summary to the model. The model asks for approval and returns a validated `Final` object. The application publishes XML only after the original native request accepts the approval decision.
 
-Install the [SDK preview wheel](../../docs/sdk/installation.md) and use the example files from the same release. The example supports a private local POSIX host. It does not supply production authentication or a distributed worker service.
+The browser uses `ai@6.0.315`. This example runs on a private local POSIX host and supplies synthetic identities. Before a shared deployment, replace the login selector with your application's authenticated identity. Anyone with local access can choose either demo user. Keep the service private and bound to loopback.
+
+## Before you start
+
+Install the [SDK preview wheel](../../docs/sdk/installation.md) in a dedicated virtual environment and use example files from the same release. You need:
+
+- Linux or macOS on a platform supported by the SDK wheel. POSIX file locks and directory permissions are required, so Windows is unsupported.
+- A [supported CPython version](../../docs/sdk/installation.md#requirements) and a matching wheel for that Python version and platform.
+- Node 22 or later and npm.
+
+Activate the Python environment and check that `python -c 'import agents._native'` succeeds. Run the commands below from the root of the release's source archive, which contains `examples/`.
+
+Choose a private state directory whose parent already exists and is trusted. The command below uses `/tmp/agents-web-state`. For state that must survive a service restart, choose a private persistent path instead. The service creates its directory with mode `0700`, and a second process cannot open the same directory. The queue runs in memory and does not provide durable execution.
 
 ## Run
 
-Requirements:
-
-- Linux or macOS. POSIX file locks and directory permissions are required, so Windows is unsupported.
-- Python 3.10 or later and an SDK wheel for that Python version and platform.
-- Node 22 or later and npm.
-
-With the SDK installed and your Python environment activated, run these commands from the root of the release's source archive:
+Install the service dependency, build the pinned browser client, and start the service:
 
 ```sh
 python -m pip install -r examples/web_starter/requirements.txt
@@ -21,15 +27,24 @@ npm --prefix examples/web_starter run build
 python -m examples.web_starter --directory /tmp/agents-web-state --port 8080
 ```
 
-### Choose a model mode
+### Approve and download a report
 
-For an optional live model, set `OPENAI_API_KEY` in the server environment and add `--live` to the same command. The server rejects live mode before opening state when the key is missing. Both modes use the same Session, tools, approval, and publication code. The UI labels the mode. Live calls can incur provider charges.
+1. Open `http://127.0.0.1:8080`, select `alice`, and click **Choose user**.
+2. Click **Send** to submit the default request. The browser displays a report card for 10,000 rows and asks whether to publish the report XML.
+3. Click **Approve**. After the Turn settles, the browser shows `completed`, the typed final result, and a **Download validated XML** link.
+4. Open a second browser profile, select `bob`, and click **Choose user**. Try the first profile's download URL in this profile to check that the service denies access to Alice's artifact.
 
-### Try the browser
+The scripted answer checks the integration and application behavior. It does not establish live model quality or model judgment about publication.
 
-Open `http://127.0.0.1:8080`, choose `alice`, and send the request. The service creates the state directory with mode `0700`. Its parent must already exist and be trusted. Choose a private persistent path for state that must survive a service restart. A second process cannot open the same state directory.
+### Choose a live model
 
-Approve publication to get a download link. Open a second browser profile as `bob` to check isolation. Anyone with local access can select either synthetic user. Before a shared deployment, replace the login selector with your application's authenticated identity. Keep this demo private and bound to loopback.
+Live model calls can incur provider charges. To use a live model, set `OPENAI_API_KEY` in the server environment and add `--live` to the service command. The server rejects live mode before opening state if the key is missing. Both modes use the same Session, tools, approval, and publication code. The browser labels the selected mode.
+
+### Stop the service
+
+Send the service process `SIGTERM` to shut it down. aiohttp stops accepting requests, and application cleanup signals admitted work and waits for the workers before closing MCP and SQLite.
+
+Do not kill workers merely to meet the request deadline. Cancellation and cleanup can take longer than the deadline. A crash or forced kill leaves unfinished receipts `unknown` at the next start.
 
 ## Ownership and recovery
 
@@ -41,7 +56,7 @@ A single deadline starts when the service admits a request. Time in the queue, m
 
 ### Retry and restart
 
-The browser serializes login and request submission. It clears the display when identity changes and rejects late responses from an older identity or receipt. The browser saves the request key and payload before sending them. If the HTTP response is lost, Send retries the saved key and payload. The server scopes keys to the authenticated user:
+The browser serializes login and request submission. It clears the display when identity changes and rejects late responses from an older identity or receipt. The browser saves the request key and payload before sending them. If the HTTP response is lost, **Send** retries the saved key and payload. The server scopes keys to the authenticated user:
 
 - The same key and payload return the original receipt. A different payload gets `400`.
 - A browser that knows the receipt can recover it with `GET /api/receipts/{id}`.
@@ -49,9 +64,9 @@ The browser serializes login and request submission. It clears the display when 
 
 A new key starts a new operation. Before retrying an unknown effect with a new key, reconcile the original operation.
 
-### Disconnect and Stop
+### Disconnect, reconnect, or stop work
 
-Disconnect closes only the browser reader. Reconnect or reload reads an authorized application snapshot. Stop asks the owner to cancel and join the original Turn. The UI shows `stopping` until cleanup completes. A caller timeout also stops only that caller's wait. It does not prove cancellation. A committed publication remains after later cancellation or failure.
+**Disconnect reader** closes only the browser reader. **Reconnect** or a page reload reads an authorized application snapshot. **Stop work** asks the owner to cancel and join the original Turn. The UI shows `stopping` until cleanup completes. A caller timeout also stops only that caller's wait. It does not prove cancellation. A committed publication remains after later cancellation or failure.
 
 ### Recover the display
 
@@ -59,7 +74,7 @@ The UI stream contains application snapshots and the settled typed `Final`. It d
 
 Public `Session.items()` returns a filtered history rather than a complete transcript. Observations are bounded and do not form a durable event log. On `EventGap`, the owner marks the application snapshot for resynchronization. The browser can replace its display from that snapshot without replaying observations. An application that needs intermediate text replay must store its own authorized messages.
 
-## Identity, approval and credentials
+## Keep identity and approval on the server
 
 `Identity` and `RunContext` are frozen application dataclasses. `ToolContext` carries that chosen context into `read_report`; the SDK does not make arbitrary context contents immutable. Model arguments never choose an owner, credential, checkpoint path or artifact path.
 
@@ -111,19 +126,7 @@ The UI shows the typed final result only after the Turn settles, and shows pendi
 
 Expiry prevents access. This demo does not run a retention job. Protect the whole directory, including SQLite files and lock files. The service trusts the directory's parent and other processes running as the same OS user. Configure retention, backups, encryption and log handling in the owning application before storing real data. This example uses no real secrets or customer data and disables HTTP access logs.
 
-## Local service and external worker deployment
-
-### Supervise the local service
-
-1. Install the matching SDK wheel and optional dependencies in a dedicated virtual environment on a supported host.
-2. Check that `python -c 'import agents._native'` succeeds on that platform.
-3. Build the pinned browser client and start the [service command](#run) with a persistent private state directory. Bind only to loopback.
-
-To shut down, send the process `SIGTERM`. aiohttp stops accepting requests. Application cleanup signals admitted work and waits for the workers before closing MCP and SQLite.
-
-Do not kill workers merely to meet the request deadline. A crash or forced kill leaves unfinished receipts `unknown` at the next start.
-
-### Use an external worker
+## Use an external worker
 
 For jobs that need work outside this process, use the existing [external-job example](../external_job/README.md). It supplies a separate worker and journal. This starter's in-memory queue does not provide durable execution. From the repository root, with a local Responses endpoint on port 8081 and `THUMBNAIL_STATE_DIR` set to a private absolute POSIX directory:
 
@@ -137,9 +140,9 @@ The worker needs no model credential. The external-job example closes its Sessio
 
 This starter does not launch the external worker or transfer typed pending approvals to it. Neither local example establishes production durability.
 
-## Verify
+## Verify the example
 
-Run focused no-key HTTP and native tests from the repository root:
+For development, use the [contributor setup](../../CONTRIBUTING.md) to install the test dependencies. Run focused no-key HTTP and native tests from the repository root:
 
 ```sh
 python -m pytest -q tests/test_web_starter.py
