@@ -588,7 +588,8 @@ async def test_bad_credentials_fail_without_retaining_private_exception(kind):
         sdk_frames = [
             frame
             for frame in diagnostic.stack
-            if frame.filename.endswith("/agents/a2a/_client.py") and frame.name == "connect_a2a"
+            if frame.filename.replace("\\", "/").endswith("/agents/a2a/_client.py")
+            and frame.name == "connect_a2a"
         ]
         assert sdk_frames
         # Inspect only SDK-owned rejection frames, not caller or callback locals.
