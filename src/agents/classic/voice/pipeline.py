@@ -1,0 +1,233 @@
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
+
+from .._config_coercion import coerce_dataclass_config
+from ..exceptions import UserError
+from ..logger import (
+    log_model_and_tool_action_error,
+    log_model_and_tool_action_warning,
+    logger,
+)
+from ..tracing import TraceCtxManager, get_trace_provider
+from ..tracing.span_data import CustomSpanData
+from .input import AudioInput, StreamedAudioInput
+from .model import STTModel, TTSModel
+from .pipeline_config import VoicePipelineConfig
+from .result import StreamedAudioResult
+from .workflow import VoiceWorkflowBase
+
+
+class VoicePipeline:
+    """An opinionated voice agent pipeline. It works in three steps:
+    1. Transcribe audio input into text.
+    2. Run the provided `workflow`, which produces a sequence of text responses.
+    3. Convert the text responses into streaming audio output.
+    """
+
+    def __init__(
+        self,
+        *,
+        workflow: VoiceWorkflowBase,
+        stt_model: STTModel | str | None = None,
+        tts_model: TTSModel | str | None = None,
+        config: VoicePipelineConfig | dict[str, Any] | None = None,
+    ):
+        """Create a new voice pipeline.
+
+        Args:
+            workflow: The workflow to run. See `VoiceWorkflowBase`.
+            stt_model: The speech-to-text model to use. If not provided, a default OpenAI
+                model will be used.
+            tts_model: The text-to-speech model to use. If not provided, a default OpenAI
+                model will be used.
+            config: The pipeline configuration. If not provided, a default configuration will be
+                used.
+        """
+        self.workflow = workflow
+        self.stt_model = stt_model if isinstance(stt_model, STTModel) else None
+        self.tts_model = tts_model if isinstance(tts_model, TTSModel) else None
+        self._stt_model_name = stt_model if isinstance(stt_model, str) else None
+        self._tts_model_name = tts_model if isinstance(tts_model, str) else None
+        self.config = (
+            coerce_dataclass_config(config, VoicePipelineConfig, parameter_name="voice.pipeline")
+            if config is not None
+            else VoicePipelineConfig()
+        )
+
+    async def run(self, audio_input: AudioInput | StreamedAudioInput) -> StreamedAudioResult:
+        """Run the voice pipeline.
+
+        Args:
+            audio_input: The audio input to process. This can either be an `AudioInput` instance,
+                which is a single static buffer, or a `StreamedAudioInput` instance, which is a
+                stream of audio data that you can append to.
+
+        Returns:
+            A `StreamedAudioResult` instance. You can use this object to stream audio events and
+            play them out.
+        """
+        if isinstance(audio_input, AudioInput):
+            return await self._run_single_turn(audio_input)
+        elif isinstance(audio_input, StreamedAudioInput):
+            return await self._run_multi_turn(audio_input)
+        else:
+            raise UserError(f"Unsupported audio input type: {type(audio_input)}")
+
+    def _get_tts_model(self) -> TTSModel:
+        if not self.tts_model:
+            self.tts_model = self.config.model_provider.get_tts_model(self._tts_model_name)
+        return self.tts_model
+
+    def _get_stt_model(self) -> STTModel:
+        if not self.stt_model:
+            self.stt_model = self.config.model_provider.get_stt_model(self._stt_model_name)
+        return self.stt_model
+
+    async def _process_audio_input(self, audio_input: AudioInput) -> str:
+        model = self._get_stt_model()
+        return await model.transcribe(
+            audio_input,
+            self.config.stt_settings,
+            self.config.trace_include_sensitive_data,
+            self.config.trace_include_sensitive_audio_data,
+        )
+
+    @contextmanager
+    def _trace_context(self) -> Iterator[None]:
+        if self.config.tracing_disabled:
+            # Let the configured provider mask both inherited contexts in the producer task.
+            provider = get_trace_provider()
+            with (
+                provider.create_trace(
+                    name=self.config.workflow_name or "Voice Agent",
+                    group_id=self.config.group_id,
+                    metadata=self.config.trace_metadata,
+                    tracing=self.config.tracing,
+                    disabled=True,
+                ),
+                provider.create_span(CustomSpanData(name="Voice pipeline", data={}), disabled=True),
+            ):
+                yield
+            return
+        with TraceCtxManager(
+            workflow_name=self.config.workflow_name or "Voice Agent",
+            trace_id=None,
+            group_id=self.config.group_id,
+            metadata=self.config.trace_metadata,
+            tracing=self.config.tracing,
+            disabled=False,
+        ):
+            yield
+
+    async def _run_single_turn(self, audio_input: AudioInput) -> StreamedAudioResult:
+        output = StreamedAudioResult(self._get_tts_model(), self.config.tts_settings, self.config)
+
+        async def stream_events():
+            # Keep the trace scope active for the entire async processing lifecycle.
+            with self._trace_context():
+                try:
+                    input_text = await self._process_audio_input(audio_input)
+                    async for text_event in self.workflow.run(input_text):
+                        await output._add_text(text_event)
+                    await output._turn_done()
+                    await output._done()
+                except asyncio.CancelledError:
+                    await output._cancel()
+                    raise
+                except Exception as e:
+                    log_model_and_tool_action_error(logger, "Error processing single voice turn", e)
+                    await output._add_error(e)
+                    raise
+
+        output._set_task(asyncio.create_task(stream_events()))
+        return output
+
+    async def _run_multi_turn(self, audio_input: StreamedAudioInput) -> StreamedAudioResult:
+        output = StreamedAudioResult(self._get_tts_model(), self.config.tts_settings, self.config)
+
+        async def process_turns():
+            # Keep the trace scope active for the full streamed session.
+            with self._trace_context():
+                transcription_session = None
+                try:
+                    primary_exception: BaseException | None = None
+                    try:
+                        try:
+                            emitted_intro = False
+                            try:
+                                async for intro_text in self.workflow.on_start():
+                                    await output._add_text(intro_text)
+                                    emitted_intro = True
+                            except Exception as e:
+                                log_model_and_tool_action_warning(
+                                    logger, "Voice workflow on_start failed", e
+                                )
+
+                            if emitted_intro:
+                                # Finalize the intro turn as part of startup. Leaving it open would
+                                # hold a greeting with no sentence-final punctuation until the
+                                # session ends, or merge it into the first user turn.
+                                await output._turn_done()
+
+                            transcription_session = await self._get_stt_model().create_session(
+                                audio_input,
+                                self.config.stt_settings,
+                                self.config.trace_include_sensitive_data,
+                                self.config.trace_include_sensitive_audio_data,
+                            )
+
+                            async for input_text in transcription_session.transcribe_turns():
+                                result = self.workflow.run(input_text)
+                                async for text_event in result:
+                                    await output._add_text(text_event)
+                                await output._turn_done()
+                        except asyncio.CancelledError as e:
+                            primary_exception = e
+                        except Exception as e:
+                            # Report before closing the session below. A close failure must not
+                            # replace this primary turn error.
+                            log_model_and_tool_action_error(
+                                logger, "Error processing voice turns", e
+                            )
+                            await output._add_error(e)
+                            primary_exception = e
+                    finally:
+                        if transcription_session is not None:
+                            close_future = asyncio.gather(
+                                transcription_session.close(), return_exceptions=True
+                            )
+                            while True:
+                                try:
+                                    close_result = (await asyncio.shield(close_future))[0]
+                                    break
+                                except asyncio.CancelledError as e:
+                                    if primary_exception is None:
+                                        primary_exception = e
+
+                            if isinstance(close_result, asyncio.CancelledError):
+                                if primary_exception is None:
+                                    primary_exception = close_result
+                            elif isinstance(close_result, Exception):
+                                log_model_and_tool_action_error(
+                                    logger,
+                                    "Error closing voice transcription session",
+                                    close_result,
+                                )
+                                if primary_exception is None:
+                                    await output._add_error(close_result)
+                                    primary_exception = close_result
+
+                    if primary_exception is not None:
+                        raise primary_exception
+
+                    await output._done()
+                except asyncio.CancelledError:
+                    await output._cancel()
+                    raise
+
+        output._set_task(asyncio.create_task(process_turns()))
+        return output

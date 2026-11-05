@@ -29,8 +29,129 @@ classifiers = [
 Homepage = "https://github.com/openai/openai-agents-python/tree/feat/codex-harness"
 Repository = "https://github.com/openai/openai-agents-python"
 
+[project.optional-dependencies]
+# Classic retains the established Python runtime and its patched dependency floors.
+classic = [
+    "openai>=3.0.0,<4",
+    "pydantic>=2.12.2, <3",
+    "griffelib>=2, <3",
+    "typing-extensions>=4.12.2, <5",
+    "requests>=2.0, <3",
+    "websockets>=15.0, <17",
+    "mcp>=1.30.0, <3, !=2.0.*, !=2.1.*; python_version >= '3.10'",
+    "certifi>=2026.10.19",
+    "httpx2>=2.12.0",
+    "pyjwt>=2.15.0",
+    "python-multipart>=0.0.31",
+    "starlette>=1.3.1",
+    "urllib3>=2.8.0",
+]
+classic-voice = [
+    "openai-agents[classic]",
+    "numpy>=2.2.0, <3; python_version>='3.10'",
+    "websockets>=15.0, <17",
+]
+classic-viz = [
+    "openai-agents[classic]",
+    "graphviz>=0.17",
+]
+classic-litellm = [
+    "openai-agents[classic]",
+    "litellm>=1.83.0",
+    "aiohttp>=3.14.3,<4",
+    "filelock>=3.20.3",
+]
+classic-any-llm = [
+    "openai-agents[classic]",
+    "any-llm-sdk>=1.11.0, <2; python_version >= '3.11'",
+    "pygments>=2.20.0; python_version >= '3.11'",
+]
+classic-realtime = [
+    "openai-agents[classic]",
+    "websockets>=15.0, <17",
+]
+classic-sqlalchemy = [
+    "openai-agents[classic]",
+    "SQLAlchemy[asyncio]>=2.0",
+    "asyncpg>=0.29.0",
+]
+classic-encrypt = [
+    "openai-agents[classic]",
+    "cryptography>=45.0,<51",
+]
+classic-redis = [
+    "openai-agents[classic]",
+    "redis>=7",
+]
+classic-dapr = [
+    "openai-agents[classic]",
+    "dapr>=1.16.0",
+    "grpcio>=1.60.0",
+    "aiohttp>=3.14.3,<4",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+]
+classic-mongodb = [
+    "openai-agents[classic]",
+    "pymongo>=4.18.3",
+]
+classic-docker = [
+    "openai-agents[classic]",
+    "docker>=6.1",
+]
+classic-blaxel = [
+    "openai-agents[classic]",
+    "blaxel>=0.2.50",
+    "aiohttp>=3.14.3,<4",
+]
+classic-daytona = [
+    "openai-agents[classic]",
+    "daytona>=0.155.0",
+    "aiohttp>=3.14.3,<4",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+]
+classic-cloudflare = [
+    "openai-agents[classic]",
+    "aiohttp>=3.14.3,<4",
+]
+classic-e2b = [
+    "openai-agents[classic]",
+    "e2b==2.31.0",
+    "e2b-code-interpreter==2.8.1",
+    "h2>=4.4.1",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+    "pygments>=2.20.0",
+]
+classic-modal = [
+    "openai-agents[classic]",
+    "modal==1.4.3",
+    "aiohttp>=3.14.3,<4",
+    "cbor2>=5.9.0",
+    "h2>=4.4.1",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+    "pygments>=2.20.0",
+]
+classic-vercel = [
+    "openai-agents[classic]",
+    "vercel-sandbox>=0.7.0,<0.9",
+    "cbor2>=5.9.0",
+]
+classic-s3 = [
+    "openai-agents[classic]",
+    "boto3>=1.34",
+]
+classic-temporal = [
+    "openai-agents[classic]",
+    "temporalio==1.34.0",
+    "textual>=8.2.3,<8.3",
+    "protobuf>=5.29.6,!=6.30.*,!=6.31.*,!=6.32.*,!=6.33.0.*,!=6.33.1.*,!=6.33.2.*,!=6.33.3.*,!=6.33.4.*",
+    "pygments>=2.20.0",
+]
+
 [dependency-groups]
 dev = [
+    "openai-agents[classic,classic-voice,classic-viz,classic-litellm,classic-any-llm,classic-realtime,classic-sqlalchemy,classic-encrypt,classic-redis,classic-dapr,classic-mongodb,classic-docker,classic-blaxel,classic-daytona,classic-cloudflare,classic-e2b,classic-modal,classic-vercel,classic-s3,classic-temporal]",
+    "aiosqlite>=0.21.0",
+    "exceptiongroup>=1.2.0",
     "mypy>=2.2,<3",
     "types-jsonschema>=4.25,<5",
     "ruff==0.16.8",
@@ -69,6 +190,7 @@ exclude = [
 skip-excluded-dirs = true
 only-include = [
     "src/agents",
+    "CLASSIC.md",
     "packages/codex/README.md",
     "packages/codex/Cargo.toml",
     "packages/codex/Cargo.lock",
@@ -139,6 +261,30 @@ strict = true
 disallow_incomplete_defs = false
 disallow_untyped_defs = false
 disallow_untyped_calls = false
+
+[[tool.mypy.overrides]]
+module = "sounddevice.*"
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["modal", "modal.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["e2b", "e2b.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["daytona", "daytona.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["blaxel", "blaxel.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["vercel", "vercel.*"]
+ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["src/agents"]
