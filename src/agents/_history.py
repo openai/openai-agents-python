@@ -6,7 +6,7 @@ from typing import Any, cast
 from ._events import FunctionCallItem, SessionItem
 from ._projection import EventProjector, _execution_item, _usage, project_execution_completion
 from ._web_projection import project_web_search_item
-from .history import RecordedTurn
+from .history import ReceivedTokenUsage, RecordedResponse, RecordedTurn
 from .recovery import UncertainCall, _uncertain_call
 from .turn_receipt import _project_turn_receipt
 
@@ -110,6 +110,29 @@ def _response_item(raw: dict[str, Any], turn_id: str) -> dict[str, Any] | None:
     return None
 
 
+def _received_usage(raw: dict[str, Any] | None) -> ReceivedTokenUsage | None:
+    if raw is None:
+        return None
+    usage: dict[str, Any] = {
+        key: raw[key]
+        for key in ("input_tokens", "output_tokens", "total_tokens")
+        if raw.get(key) is not None
+    }
+    input_details = {
+        public: raw[native]
+        for native, public in (
+            ("cached_input_tokens", "cached_tokens"),
+            ("cache_write_input_tokens", "cache_write_tokens"),
+        )
+        if raw.get(native) is not None
+    }
+    if input_details:
+        usage["input_tokens_details"] = input_details
+    if raw.get("reasoning_output_tokens") is not None:
+        usage["output_tokens_details"] = {"reasoning_tokens": raw["reasoning_output_tokens"]}
+    return cast(ReceivedTokenUsage, usage)
+
+
 def project_history(
     history: list[dict[str, Any]],
     session_id: str,
@@ -124,6 +147,7 @@ def project_history(
     identities: dict[tuple[str, str, str], _HistoryItem] = {}
     latest_calls: dict[tuple[str, str], _HistoryItem] = {}
     usage: dict[str, Any] = {}
+    responses: list[tuple[str, RecordedResponse]] = []
     current_turn: str | None = None
     aborted_turn: str | None = None
     turn_order: list[str] = []
@@ -208,8 +232,35 @@ def project_history(
                 receipt_turn_id = payload.get("turn_id")
                 if isinstance(receipt_turn_id, str) and receipt_turn_id in turns:
                     turns[receipt_turn_id].pop("receipt", None)
+        elif kind == "response_observation_record":
+            response: RecordedResponse = {
+                "id": payload["id"],
+                "thread_id": payload["thread_id"],
+                "turn_id": payload["turn_id"],
+                "response_id": payload.get("response_id"),
+                "status": payload["status"],
+                "usage_source": "received",
+                "usage": _received_usage(payload.get("usage")),
+            }
+            if payload.get("incomplete_reason") is not None:
+                response["incomplete_reason"] = payload["incomplete_reason"]
+            responses.append((kind, response))
         elif kind == "token_usage_record":
             usage[payload["turn_id"]] = _usage(payload["turn_token_usage"])
+            if payload.get("thread_id") is not None:
+                responses.append(
+                    (
+                        kind,
+                        {
+                            "id": payload.get("response_observation_id"),
+                            "thread_id": payload["thread_id"],
+                            "turn_id": payload["turn_id"],
+                            "response_id": payload.get("response_id"),
+                            "usage_source": "native_normalized",
+                            "usage": _usage(payload["usage"]),
+                        },
+                    )
+                )
         elif kind == "response_item":
             turn_id = current_turn
             reconciliation = None
@@ -261,6 +312,7 @@ def project_history(
                     for old in removed:
                         turns.pop(old, None)
                         usage.pop(old, None)
+                    responses = [entry for entry in responses if entry[1]["turn_id"] not in removed]
                     items = [item for item in items if item.value["turn_id"] not in removed]
                     identities = {
                         key: item for key, item in identities.items() if key[0] not in removed
@@ -333,6 +385,21 @@ def project_history(
     for turn_id, turn in turns.items():
         if turn_id in usage:
             turn["usage"] = usage[turn_id]
+    observed_ids = {
+        response["id"] for kind, response in responses if kind == "response_observation_record"
+    }
+    projected_ids: set[str] = set()
+    for kind, response in responses:
+        observation_id = response["id"]
+        if observation_id is not None:
+            if kind == "token_usage_record" and observation_id in observed_ids:
+                continue
+            if observation_id in projected_ids:
+                continue
+            projected_ids.add(observation_id)
+        response_turn = turns.get(response["turn_id"])
+        if response_turn is not None:
+            response_turn.setdefault("responses", []).append(response)
     # Reserve recorded model IDs first. An execution row keeps its native ID in call_id
     # when that ID is already used by another row in this snapshot.
     cursor_ids = {

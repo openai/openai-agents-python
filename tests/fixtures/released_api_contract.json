@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "83d5b8d67bca6b2787917ea54ed33d70bd5965a7",
+  "baseline_commit": "d16cd3fb7c43673d4009c8148359873f623d2396",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -134,10 +134,18 @@
       "agents.history": {
         "declarations": [
           "@dataclass(frozen=True)\nclass ModelContext:\n    revision: str\n    items: tuple[dict[str, Any], ...]",
-          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]"
+          "class ReceivedInputTokensDetails(TypedDict, total=False):\n    cached_tokens: int\n    cache_write_tokens: int",
+          "class ReceivedOutputTokensDetails(TypedDict, total=False):\n    reasoning_tokens: int",
+          "class ReceivedTokenUsage(TypedDict, total=False):\n    input_tokens: int\n    input_tokens_details: ReceivedInputTokensDetails\n    output_tokens: int\n    output_tokens_details: ReceivedOutputTokensDetails\n    total_tokens: int",
+          "class RecordedResponse(TypedDict):\n    id: str | None\n    thread_id: str\n    turn_id: str\n    response_id: str | None\n    usage_source: Literal['received', 'native_normalized']\n    usage: ReceivedTokenUsage | TokenUsage | None\n    status: NotRequired[Literal['completed', 'incomplete', 'failed']]\n    incomplete_reason: NotRequired[Literal['content_filter', 'max_output_tokens', 'interrupted', 'unknown']]",
+          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]\n    responses: NotRequired[list[RecordedResponse]]"
         ],
         "exports": {
           "ModelContext": "agents.history.ModelContext",
+          "ReceivedInputTokensDetails": "agents.history.ReceivedInputTokensDetails",
+          "ReceivedOutputTokensDetails": "agents.history.ReceivedOutputTokensDetails",
+          "ReceivedTokenUsage": "agents.history.ReceivedTokenUsage",
+          "RecordedResponse": "agents.history.RecordedResponse",
           "RecordedTurn": "agents.history.RecordedTurn"
         },
         "imports": [
@@ -318,6 +326,8 @@
         "declarations": [
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass _Event:\n    session_id: str\n    sequence: int = 0",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass _SubmissionEvent(_Event):\n    submission_id: str\n    turn_id: str\n    parent_submission_id: str | None = None",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelRequestDispatching(_SubmissionEvent):\n    request_id: str\n    thread_id: str\n    model: str\n    reasoning_effort: str | int | None\n    reasoning_summary: str | None\n    service_tier: str | None\n    wire: Literal['responses', 'responses_lite']\n    transport: Literal['http_sse', 'websocket']\n    type: Literal['model_request_dispatching'] = field(default='model_request_dispatching', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelResponseLinked(_SubmissionEvent):\n    request_id: str\n    thread_id: str\n    response_observation_id: str\n    type: Literal['model_response_linked'] = field(default='model_response_linked', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnStarted(_SubmissionEvent):\n    type: Literal['turn_started'] = field(default='turn_started', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnFinished(_SubmissionEvent):\n    status: Literal['completed', 'failed', 'cancelled']\n    error_type: str | None = None\n    type: Literal['turn_finished'] = field(default='turn_finished', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass OutputTextDelta(_SubmissionEvent):\n    item_id: str\n    delta: str\n    type: Literal['output_text_delta'] = field(default='output_text_delta', init=False)",
@@ -331,7 +341,7 @@
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SubagentLifecycle(_Event):\n    subagent_id: str\n    parent_agent_id: str\n    status: str\n    kind: Literal['created', 'active', 'closed', 'snapshot'] = 'snapshot'\n    type: Literal['subagent_lifecycle'] = field(default='subagent_lifecycle', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SessionEnded(_Event):\n    reason: Literal['closed', 'failed']\n    type: Literal['session_ended'] = field(default='session_ended', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass EventGap(_Event):\n    first_sequence: int\n    type: Literal['gap'] = field(default='gap', init=False)",
-          "Observation: TypeAlias = TurnStarted | TurnFinished | SubagentLifecycle | OutputTextDelta | UsageUpdated | ApiRateLimitsUpdated | ContextCompacted | ToolStarted | ToolFinished | ExecutionItemCompleted | SessionEnded | EventGap",
+          "Observation: TypeAlias = TurnStarted | ModelRequestDispatching | ModelResponseLinked | TurnFinished | SubagentLifecycle | OutputTextDelta | UsageUpdated | ApiRateLimitsUpdated | ContextCompacted | ToolStarted | ToolFinished | ExecutionItemCompleted | SessionEnded | EventGap",
           "_ObservationT = TypeVar('_ObservationT', bound=Observation)",
           "class _ObservationBuffer:\n\n    def __init__(self, session_id: str) -> None:\n        pass\n\n    def notify(self) -> None:\n        pass\n\n    def turn_started(self, turn_id: str) -> TurnStarted | None:\n        pass\n\n    def append(self, event: _ObservationT) -> _ObservationT | None:\n        pass\n\n    def finish(self, reason: Literal['closed', 'failed']) -> None:\n        pass",
           "class EventStream(AsyncIterator[Observation]):\n\n    def __init__(self, buffer: _ObservationBuffer, *, after: int, _turn: Turn[Any] | None=None, _include_execution_details: bool=False) -> None:\n        pass\n\n    def __aiter__(self) -> EventStream:\n        pass\n\n    async def __anext__(self) -> Observation:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
@@ -342,6 +352,8 @@
           "EventGap": "agents.observation.EventGap",
           "EventStream": "agents.observation.EventStream",
           "ExecutionItemCompleted": "agents.observation.ExecutionItemCompleted",
+          "ModelRequestDispatching": "agents.observation.ModelRequestDispatching",
+          "ModelResponseLinked": "agents.observation.ModelResponseLinked",
           "Observation": "Observation",
           "OutputTextDelta": "agents.observation.OutputTextDelta",
           "SessionEnded": "agents.observation.SessionEnded",

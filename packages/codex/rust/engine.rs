@@ -670,6 +670,7 @@ impl EngineState {
         // Subscribe before inspecting descendants so a concurrent spawn cannot be missed.
         let created = self.manager.subscribe_thread_created();
         let state = Arc::new(ThreadState {
+            request_metadata: Arc::new(crate::request_metadata::Queue::default()),
             id: new.thread_id,
             thread: new.thread.clone(),
             engine: self.clone(),
@@ -1403,6 +1404,7 @@ pub enum ForkSelection {
 }
 
 pub struct ThreadState {
+    pub(crate) request_metadata: Arc<crate::request_metadata::Queue>,
     pub id: ThreadId,
     pub thread: Arc<CodexThread>,
     pub engine: Arc<EngineState>,
@@ -1705,6 +1707,9 @@ impl ThreadState {
             return native_event(None, event, admission_ready);
         }
         loop {
+            if let Some(metadata) = self.request_metadata.try_next() {
+                return Ok(metadata);
+            }
             if let Some(terminal) = events.session_terminal.as_mut() {
                 let result = tokio::select! {
                     _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
@@ -1745,6 +1750,7 @@ impl ThreadState {
             } = &mut *events;
             tokio::select! {
                 _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
+                metadata = self.request_metadata.next() => return Ok(metadata),
                 request = async {
                     python_tools.as_ref().expect("guarded Python channel").next_request().await
                 }, if python_tools.is_some() => return Ok(request),
@@ -2098,6 +2104,10 @@ impl ThreadState {
         self.closed.store(true, Ordering::Release);
     }
 }
+
+#[cfg(test)]
+#[path = "response_history_tests.rs"]
+mod response_history_tests;
 
 #[cfg(test)]
 #[path = "turn_settlement_tests.rs"]

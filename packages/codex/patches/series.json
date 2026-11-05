@@ -181,6 +181,14 @@
       "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
     },
     {
+      "path": "0018-native-response-observations.patch",
+      "sha256": "2ba277adb749a1b874debb21d8ad6a0e77b372d1d2a177f29d0e381bb1bb9b8b"
+    },
+    {
+      "path": "0024-native-request-metadata.patch",
+      "sha256": "e4b910cb9e9c649d04d63fedc46c21cd75ae7da921511c19a943d82fd13f6f02"
+    },
+    {
       "path": "0045-native-context-metadata.patch",
       "sha256": "683be0fcf2399f37362ac6e0bcc0212e719ef145308fc8174c363957b015fa6b"
     },
@@ -189,5 +197,5 @@
       "sha256": "e03f4c67d22f559ac9ba3056c91c5731c7a66975022603a0d571a8acdc34fc34"
     }
   ],
-  "result_tree": "a873bb2159fef7f716fcb073d68c4632ecd3543e"
+  "result_tree": "419f91bf72a6a77bde5ea3427ad3e8c28cf874ac"
 }
