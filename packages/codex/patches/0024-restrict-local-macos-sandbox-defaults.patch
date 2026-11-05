@@ -1,0 +1,92 @@
+diff --git a/codex-rs/core/src/tools/orchestrator.rs b/codex-rs/core/src/tools/orchestrator.rs
+index 3d7e2b62c5227910980c56fc6be5f426d35e20c1..c312c4560fc687601af4694b6e467a6e1c662140 100644
+--- a/codex-rs/core/src/tools/orchestrator.rs
++++ b/codex-rs/core/src/tools/orchestrator.rs
+@@ -143,12 +143,12 @@ impl ToolOrchestrator {
+         let environment = tool.turn_environment(req);
+         let sandbox_manager = SandboxManager::new();
+         #[cfg(target_os = "macos")]
+-        let sandbox_manager = sandbox_manager.with_allowed_symlinked_codex_home(
+-            environment
+-                .environment
+-                .local_runtime_paths()
+-                .and_then(|paths| paths.allowed_symlinked_codex_home.clone()),
+-        );
++        let sandbox_manager = match environment.environment.local_runtime_paths() {
++            Some(paths) => sandbox_manager
++                .with_restricted_macos_process_sandbox(paths.restricted_macos_process_sandbox)
++                .with_allowed_symlinked_codex_home(paths.allowed_symlinked_codex_home.clone()),
++            None => sandbox_manager,
++        };
+         let sandbox_config = environment.config();
+         let owner_network_policy = sandbox_config.network_policy.is_some();
+         let workspace_roots = environment.workspace_roots();
+diff --git a/codex-rs/exec-server/src/process_sandbox.rs b/codex-rs/exec-server/src/process_sandbox.rs
+index fd2c89ee16b88be00a8640dd541b6efce2839a62..541f61915ddf1cab83f072cc122242099ac8e005 100644
+--- a/codex-rs/exec-server/src/process_sandbox.rs
++++ b/codex-rs/exec-server/src/process_sandbox.rs
+@@ -213,6 +213,7 @@ pub(crate) async fn prepare_exec_request_with_telemetry(
+         .with_linux_sandbox_pid_namespace(runtime_paths.linux_sandbox_pid_namespace);
+     #[cfg(target_os = "macos")]
+     let sandbox_manager = sandbox_manager
++        .with_restricted_macos_process_sandbox(runtime_paths.restricted_macos_process_sandbox)
+         .with_allowed_symlinked_codex_home(runtime_paths.allowed_symlinked_codex_home.clone());
+     let (sandbox, windows_sandbox_level) = select_sandbox(
+         &sandbox_manager,
+diff --git a/codex-rs/exec-server/src/runtime_options.rs b/codex-rs/exec-server/src/runtime_options.rs
+index 812e09553f2ea9b8ed6915589937e1be3d50009b..9e3d66addb353fe83e7dcbd7d9b8fa6a3095b45c 100644
+--- a/codex-rs/exec-server/src/runtime_options.rs
++++ b/codex-rs/exec-server/src/runtime_options.rs
+@@ -17,6 +17,9 @@ pub struct ExecServerRuntimeOptions {
+     pub linux_sandbox_pid_namespace: LinuxSandboxPidNamespace,
+     /// Trusted startup routing; request policy still controls destination access.
+     pub proxy_private_ips_via_upstream: bool,
++    /// Use the platform runtime paths without implicit scratch and application access.
++    #[cfg(target_os = "macos")]
++    pub restricted_macos_process_sandbox: bool,
+     /// User-config opt-out of writable-root symlink checks beneath this host's home.
+     #[cfg(target_os = "macos")]
+     pub allowed_symlinked_codex_home: Option<AbsolutePathBuf>,
+@@ -46,6 +49,8 @@ impl ExecServerRuntimeOptions {
+             codex_self_exe: absolute_path(codex_self_exe)?,
+             codex_linux_sandbox_exe: codex_linux_sandbox_exe.map(absolute_path).transpose()?,
+             #[cfg(target_os = "macos")]
++            restricted_macos_process_sandbox: false,
++            #[cfg(target_os = "macos")]
+             allowed_symlinked_codex_home: None,
+         })
+     }
+@@ -62,6 +67,13 @@ impl ExecServerRuntimeOptions {
+         self
+     }
+ 
++    /// Restricts the platform defaults to runtime access for an SDK-owned local executor.
++    #[cfg(target_os = "macos")]
++    pub fn with_restricted_macos_process_sandbox(mut self) -> Self {
++        self.restricted_macos_process_sandbox = true;
++        self
++    }
++
+     /// Applies the symlink opt-in resolved by the execution host's config loader.
+     #[cfg(target_os = "macos")]
+     pub fn with_allowed_symlinked_codex_home(
+diff --git a/codex-rs/sandboxing/src/manager.rs b/codex-rs/sandboxing/src/manager.rs
+index 2bdcecfc525b19ebcd5b438d44e29741bbe9a939..5449a7cc3bf3ea547c21d24bfc31a61094228f49 100644
+--- a/codex-rs/sandboxing/src/manager.rs
++++ b/codex-rs/sandboxing/src/manager.rs
+@@ -296,6 +296,15 @@ impl SandboxManager {
+         self
+     }
+ 
++    /// Use the narrow Seatbelt defaults without additional application or scratch grants.
++    #[cfg(target_os = "macos")]
++    pub fn with_restricted_macos_process_sandbox(mut self, restricted: bool) -> Self {
++        if restricted {
++            self.seatbelt_profile = MacosSeatbeltProfile::FileSystemHelper;
++        }
++        self
++    }
++
+     /// Allows otherwise-authorized writable roots beneath the opted-in user home
+     /// to follow symlinks, including targets outside that home.
+     #[cfg(target_os = "macos")]

@@ -1,0 +1,58 @@
+diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
+index ef2ed3ad924bfb95d245ed155215c919859b8480..f3e6d4018a1ad40a96e75e2234eda6c3e6f71df2 100644
+--- a/codex-rs/core/src/session/step_context.rs
++++ b/codex-rs/core/src/session/step_context.rs
+@@ -119,11 +119,26 @@ impl StepContext {
+         let reasoning_effort = effort
+             .or(model.default_reasoning_level.as_ref())
+             .map(|effort| model.resolve_reasoning_effort(effort.clone()));
++        let local_network = if seed.strict_executor_writes && self.turn.network.is_some() {
++            self.turn
++                .config
++                .permissions
++                .network
++                .as_ref()
++                .map(crate::config::NetworkProxySpec::environment_policy)
++                .filter(|policy| policy.requires_proxy)
++        } else {
++            None
++        };
+         let executors = self
+             .environments
+             .turn_environments()
+             .filter_map(|env| {
+-                sdk_executor_policy_receipt(&env.selection, env.environment.is_remote())
++                sdk_executor_policy_receipt(
++                    &env.selection,
++                    env.environment.is_remote(),
++                    local_network.as_ref(),
++                )
+             })
+             .collect::<Vec<_>>();
+         let user_config_applied = self
+diff --git a/codex-rs/protocol/src/environment.rs b/codex-rs/protocol/src/environment.rs
+index 93443249595270ed0c5509eee3b2eb14134a66bd..37687bfed91cdf6a6ea27b2df68a57dabf09d95a 100644
+--- a/codex-rs/protocol/src/environment.rs
++++ b/codex-rs/protocol/src/environment.rs
+@@ -106,6 +106,7 @@ impl std::fmt::Debug for EnvironmentConfig {
+ pub fn sdk_executor_policy_receipt(
+     selection: &TurnEnvironmentSelection,
+     remote: bool,
++    local_session_policy: Option<&EnvironmentNetworkPolicy>,
+ ) -> Option<serde_json::Value> {
+     let EnvironmentConfigState::Ready(config) = &selection.config else {
+         return None;
+@@ -120,7 +121,12 @@ pub fn sdk_executor_policy_receipt(
+             _ => None,
+         })
+         .collect::<Vec<_>>();
+-    let network_policy = config.network_policy.as_ref().map(|policy| {
++    let network_policy = if remote {
++        config.network_policy.as_ref()
++    } else {
++        local_session_policy
++    };
++    let network_policy = network_policy.map(|policy| {
+         serde_json::json!({
+             "requires_proxy": policy.requires_proxy,
+             "domains": policy.domains,

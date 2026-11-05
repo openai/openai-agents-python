@@ -1,0 +1,27 @@
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main.rs b/codex-rs/linux-sandbox/src/linux_run_main.rs
+index 8ef516589c06847b4dfbdcc8ef326269ea8c5bd7..fd0b8a3052be13bc08753ba9a48aa26923096db5 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -40,6 +40,7 @@ use codex_protocol::protocol::FileSystemSandboxPolicy;
+ use codex_protocol::protocol::FileSystemSpecialPath;
+ use codex_protocol::protocol::NetworkSandboxPolicy;
+ use codex_sandboxing::landlock::CODEX_LINUX_SANDBOX_ARG0;
++use codex_utils_absolute_path::AbsolutePathBuf;
+ 
+ static BWRAP_CHILD_PID: AtomicI32 = AtomicI32::new(0);
+ static PENDING_FORWARDED_SIGNAL: AtomicI32 = AtomicI32::new(0);
+@@ -337,6 +338,14 @@ pub fn run_main() -> ! {
+             proxy_route_spec,
+             command,
+         });
++        // The inner executable is this trusted helper. With restricted reads,
++        // expose only that file so bubblewrap can re-enter it to apply seccomp.
++        let helper = AbsolutePathBuf::from_absolute_path(Path::new(&inner[0]))
++            .unwrap_or_else(|err| panic!("invalid sandbox helper path: {err}"));
++        let file_system_sandbox_policy = file_system_sandbox_policy.with_additional_readable_roots(
++            &sandbox_policy_cwd,
++            &[helper],
++        );
+         run_bwrap_with_proc_fallback(
+             &sandbox_policy_cwd,
+             command_cwd.as_deref(),

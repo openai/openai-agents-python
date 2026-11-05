@@ -1,0 +1,117 @@
+diff --git a/codex-rs/sandboxing/src/local_write_roots.rs b/codex-rs/sandboxing/src/local_write_roots.rs
+index c823db8a7a4d2588ec5763049fa36a78469a9d72..c14243236326fe38da7c143d21153f7ff74346f7 100644
+--- a/codex-rs/sandboxing/src/local_write_roots.rs
++++ b/codex-rs/sandboxing/src/local_write_roots.rs
+@@ -5,9 +5,13 @@ use std::collections::HashSet;
+ use std::fs;
+ use std::io;
+ #[cfg(target_os = "linux")]
++use std::os::fd::AsRawFd;
++#[cfg(target_os = "linux")]
+ use std::os::unix::ffi::OsStringExt;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ use std::os::unix::fs::MetadataExt;
++#[cfg(target_os = "linux")]
++use std::os::unix::fs::OpenOptionsExt;
+ use std::path::Path;
+ use std::path::PathBuf;
+ 
+@@ -79,15 +83,19 @@ impl<'a> LocalWriteRoots<'a> {
+                 .iter()
+                 .any(|other| root != other && root.as_path().starts_with(other.as_path()))
+             {
+-                directories.push(root.as_path().to_path_buf());
++                directories.push((root.as_path(), root.as_path().to_path_buf()));
+             }
+         }
+-        while let Some(directory) = directories.pop() {
+-            for entry in fs::read_dir(directory)? {
++        while let Some((root, directory)) = directories.pop() {
++            #[cfg(target_os = "linux")]
++            let (_directory_fd, entries) = read_helper_directory(root, &directory)?;
++            #[cfg(not(target_os = "linux"))]
++            let entries = fs::read_dir(&directory)?;
++            for entry in entries {
+                 let entry = entry?;
+                 let kind = entry.file_type()?;
+                 if kind.is_dir() {
+-                    directories.push(entry.path());
++                    directories.push((root, directory.join(entry.file_name())));
+                 } else if kind.is_file() {
+                     let metadata = entry.metadata()?;
+                     if linked_helpers.contains(&(metadata.dev(), metadata.ino())) {
+@@ -124,6 +132,36 @@ impl<'a> LocalWriteRoots<'a> {
+     }
+ }
+ 
++// A finite bind view can exceed PATH_MAX even when its original tree does not.
++// Keep the ordinary path walk fast; reopen only overlong paths one component at
++// a time. Retain the final descriptor until its ReadDir entries have been used.
++#[cfg(target_os = "linux")]
++fn read_helper_directory(
++    root: &Path,
++    directory: &Path,
++) -> io::Result<(Option<fs::File>, fs::ReadDir)> {
++    match fs::read_dir(directory) {
++        Ok(entries) => Ok((None, entries)),
++        Err(error) if error.raw_os_error() == Some(libc::ENAMETOOLONG) => {
++            let relative = directory.strip_prefix(root).map_err(io::Error::other)?;
++            // Preserve the existing grant-root lookup, including an explicit
++            // root alias. Descendants are still never followed through symlinks.
++            let mut opened = fs::File::open(root)?;
++            for component in relative {
++                let path =
++                    PathBuf::from(format!("/proc/self/fd/{}", opened.as_raw_fd())).join(component);
++                opened = fs::OpenOptions::new()
++                    .read(true)
++                    .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
++                    .open(path)?;
++            }
++            let entries = fs::read_dir(format!("/proc/self/fd/{}", opened.as_raw_fd()))?;
++            Ok((Some(opened), entries))
++        }
++        Err(error) => Err(error),
++    }
++}
++
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ type EntryIdentity = (u64, u64);
+ 
+@@ -421,6 +459,37 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[cfg(target_os = "linux")]
++    #[test]
++    fn hard_link_scan_handles_deep_directories_without_skipping_helpers() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let helper = temp.path().join("helper");
++        fs::write(&helper, "synthetic helper")?;
++        let store = temp.path().join("store");
++        fs::create_dir(&store)?;
++        fs::hard_link(&helper, store.join("store-entry"))?;
++        for (name, depth, width) in [("ordinary", 600, 1), ("overlong", 19, 240)] {
++            let workspace = temp.path().join(name);
++            fs::create_dir(&workspace)?;
++            let mut directory = fs::File::open(&workspace)?;
++            for _ in 0..depth {
++                let path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()))
++                    .join("d".repeat(width));
++                fs::create_dir(&path)?;
++                directory = fs::File::open(path)?;
++            }
++            let deepest = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
++            std::os::unix::fs::symlink(&store, deepest.join("outside-store"))?;
++            let roots = [AbsolutePathBuf::from_absolute_path(&workspace)?];
++            let grants = LocalWriteRoots::new(&roots)?;
++            let helpers = [helper.clone()];
++            assert!(!grants.contains_hard_link_to_any(&helpers)?, "{name}");
++            fs::hard_link(&helper, deepest.join("helper-alias"))?;
++            assert!(grants.contains_hard_link_to_any(&helpers)?, "{name}");
++        }
++        Ok(())
++    }
++
+     #[test]
+     fn ordinary_hard_link_to_a_helper_must_be_inside_a_grant() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;

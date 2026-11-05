@@ -1,0 +1,2044 @@
+diff --git a/codex-rs/arg0/src/lib.rs b/codex-rs/arg0/src/lib.rs
+index d653f62..042ecb9 100644
+--- a/codex-rs/arg0/src/lib.rs
++++ b/codex-rs/arg0/src/lib.rs
+@@ -102,6 +102,20 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+     }
+
+     let argv1 = args.next().unwrap_or_default();
++    #[cfg(target_os = "macos")]
++    if argv1 == codex_exec_server::darwin_command::WRAPPER_ARG
++        || argv1 == codex_exec_server::darwin_command::JOB_ARG
++    {
++        let result = if argv1 == codex_exec_server::darwin_command::WRAPPER_ARG {
++            codex_exec_server::darwin_command::wrapper_main(args)
++        } else {
++            codex_exec_server::darwin_command::job_main(args)
++        };
++        std::process::exit(result.unwrap_or_else(|error| {
++            eprintln!("Managed local command failed: {error}");
++            125
++        }));
++    }
+     if argv1 == codex_sandboxing::CODEX_WINDOWS_MXC_ARG1 {
+         codex_sandboxing::run_windows_mxc_main();
+     }
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index 32f1a7a..ee17224 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -305,10 +305,15 @@ pub(super) async fn shutdown_session_runtime(sess: &Arc<Session>) {
+     sess.hooks().shutdown().await;
+     sess.async_hook_results.close();
+     while sess.async_hook_results.try_recv().is_ok() {}
+-    sess.services
++    if !sess
++        .services
+         .unified_exec_manager
+         .terminate_all_processes()
+-        .await;
++        .await
++    {
++        sess.services.local_agent_runtime.record_shutdown_failure();
++        warn!("failed to confirm managed local command shutdown");
++    }
+     if let Err(err) = sess.services.code_mode_service.shutdown().await {
+         sess.services.local_agent_runtime.record_shutdown_failure();
+         warn!("failed to shutdown code mode session: {err}");
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index bc39a14..6173a55 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -907,10 +907,14 @@ impl Session {
+     }
+
+     pub(crate) async fn close_unified_exec_processes(&self) {
+-        self.services
++        if !self
++            .services
+             .unified_exec_manager
+             .terminate_all_processes()
+-            .await;
++            .await
++        {
++            self.services.local_agent_runtime.record_shutdown_failure();
++        }
+     }
+
+     pub(crate) async fn list_background_terminals(&self) -> Vec<BackgroundTerminalInfo> {
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 9711ce8..901c81c 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -156,15 +156,17 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+ #[derive(Default)]
+ pub(crate) struct ProcessStore {
+     processes: HashMap<i32, ProcessEntry>,
+-    #[cfg(target_os = "linux")]
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
+     starting_processes: HashMap<i32, StartingManagedProcess>,
++    #[cfg(target_os = "macos")]
++    retiring_darwin_processes: Vec<Arc<UnifiedExecProcess>>,
+     reserved_process_ids: HashMap<i32, ProcessIdReservation>,
+     next_deterministic_process_id: i32,
+ }
+
+ struct ProcessIdReservation {
+     generation: Arc<()>,
+-    #[cfg(target_os = "linux")]
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
+     turn: std::sync::Weak<codex_extension_api::ExtensionData>,
+ }
+
+@@ -202,7 +204,7 @@ impl Default for UnifiedExecProcessManager {
+     }
+ }
+
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ struct StartingManagedProcess {
+     turn: Arc<codex_extension_api::ExtensionData>,
+     process: Arc<UnifiedExecProcess>,
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 759feb8..502334d 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -120,6 +120,8 @@ pub(crate) struct UnifiedExecProcess {
+     process_handle: ProcessHandle,
+     #[cfg(target_os = "linux")]
+     sandbox_cancel: Option<LinuxSandboxCancellation>,
++    #[cfg(target_os = "macos")]
++    darwin_control: Option<Arc<codex_exec_server::darwin_command::CommandControl>>,
+     output_tx: broadcast::Sender<Vec<u8>>,
+     output: OutputHandles,
+     output_drained: Arc<Notify>,
+@@ -166,6 +168,8 @@ impl UnifiedExecProcess {
+             process_handle,
+             #[cfg(target_os = "linux")]
+             sandbox_cancel: None,
++            #[cfg(target_os = "macos")]
++            darwin_control: None,
+             output_tx,
+             output,
+             output_drained,
+@@ -228,6 +232,11 @@ impl UnifiedExecProcess {
+
+     pub(super) fn has_exited(&self) -> bool {
+         let state = self.state_rx.borrow().clone();
++        #[cfg(target_os = "macos")]
++        if self.darwin_control.is_some() {
++            return state.has_exited
++                && matches!(&self.process_handle, ProcessHandle::Local(process) if process.has_exited());
++        }
+         match &self.process_handle {
+             ProcessHandle::Local(process_handle) => state.has_exited || process_handle.has_exited(),
+             ProcessHandle::ExecServer(_) => state.has_exited,
+@@ -286,7 +295,7 @@ impl UnifiedExecProcess {
+     }
+
+     pub(super) async fn terminate_confirmed(&self) -> Result<(), UnifiedExecError> {
+-        if self.uses_managed_linux_sandbox() {
++        if self.uses_managed_local_sandbox() {
+             if !self.terminate_and_join().await {
+                 return Err(UnifiedExecError::process_failed(
+                     "could not join the local sandbox command".to_string(),
+@@ -309,10 +318,27 @@ impl UnifiedExecProcess {
+         Ok(())
+     }
+
+-    pub(super) fn uses_managed_linux_sandbox(&self) -> bool {
++    pub(super) fn uses_managed_local_sandbox(&self) -> bool {
+         #[cfg(target_os = "linux")]
+         return self.sandbox_cancel.is_some();
+         #[cfg(not(target_os = "linux"))]
++        self.uses_darwin_supervisor()
++    }
++
++    pub(super) fn uses_darwin_supervisor(&self) -> bool {
++        #[cfg(target_os = "macos")]
++        return self.darwin_control.is_some();
++        #[cfg(not(target_os = "macos"))]
++        false
++    }
++
++    pub(super) fn needs_darwin_cleanup(&self) -> bool {
++        #[cfg(target_os = "macos")]
++        return self
++            .darwin_control
++            .as_ref()
++            .is_some_and(|control| !control.is_drained());
++        #[cfg(not(target_os = "macos"))]
+         false
+     }
+
+@@ -322,11 +348,16 @@ impl UnifiedExecProcess {
+         }
+     }
+
+-    #[cfg(target_os = "linux")]
+-    pub(super) fn start_managed_linux_sandbox(&self) -> std::io::Result<()> {
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    pub(super) fn start_managed_local_sandbox(&self) -> std::io::Result<()> {
++        #[cfg(target_os = "linux")]
+         if let Some(cancel) = &self.sandbox_cancel {
+             (&cancel.socket).write_all(&[1])?;
+         }
++        #[cfg(target_os = "macos")]
++        if let Some(control) = &self.darwin_control {
++            control.start()?;
++        }
+         Ok(())
+     }
+
+@@ -365,10 +396,23 @@ impl UnifiedExecProcess {
+                     }
+                 }
+             }
++            #[cfg(target_os = "macos")]
++            if let Some(control) = &self.darwin_control
++                && !control.wait_drained().await
++            {
++                return false;
++            }
+             state
+-                .wait_for(|state| match &self.process_handle {
+-                    ProcessHandle::Local(process) => process.has_exited(),
+-                    ProcessHandle::ExecServer(_) => state.has_exited,
++                .wait_for(|state| {
++                    #[cfg(target_os = "macos")]
++                    if self.darwin_control.is_some() {
++                        return state.has_exited
++                            && matches!(&self.process_handle, ProcessHandle::Local(process) if process.has_exited());
++                    }
++                    match &self.process_handle {
++                        ProcessHandle::Local(process) => process.has_exited(),
++                        ProcessHandle::ExecServer(_) => state.has_exited,
++                    }
+                 })
+                 .await
+                 .is_ok()
+@@ -387,6 +431,12 @@ impl UnifiedExecProcess {
+     }
+
+     pub(super) async fn interrupt(&self) -> Result<(), UnifiedExecError> {
++        #[cfg(target_os = "macos")]
++        if let Some(control) = &self.darwin_control {
++            return control
++                .interrupt()
++                .map_err(|error| UnifiedExecError::process_failed(error.to_string()));
++        }
+         match &self.process_handle {
+             ProcessHandle::Local(process_handle) => process_handle
+                 .signal(PtyProcessSignal::Interrupt)
+@@ -483,6 +533,8 @@ impl UnifiedExecProcess {
+             false,
+             #[cfg(target_os = "linux")]
+             None,
++            #[cfg(target_os = "macos")]
++            None,
+         );
+         process.check_early_exit().await?;
+         Ok(process)
+@@ -494,6 +546,9 @@ impl UnifiedExecProcess {
+         spawn_lifecycle: SpawnLifecycleHandle,
+         controlled: bool,
+         #[cfg(target_os = "linux")] sandbox_cancel: Option<UnixStream>,
++        #[cfg(target_os = "macos")] darwin_control: Option<
++            Arc<codex_exec_server::darwin_command::CommandControl>,
++        >,
+     ) -> Self {
+         let SpawnedPty {
+             session: process_handle,
+@@ -523,6 +578,27 @@ impl UnifiedExecProcess {
+             managed.output_tx.clone(),
+         ));
+
++        #[cfg(target_os = "macos")]
++        if let Some(control) = darwin_control {
++            managed.darwin_control = Some(Arc::clone(&control));
++            let state_tx = managed.state_tx.clone();
++            let cancellation_token = managed.output.cancellation_token.clone();
++            tokio::spawn(async move {
++                let exit_code = exit_rx.await.ok();
++                let drained = control.wait_drained().await;
++                state_tx.send_modify(|state| {
++                    *state = state.clone().exited(exit_code);
++                    if !drained {
++                        *state = state
++                            .clone()
++                            .failed("could not confirm managed local command cleanup".to_string());
++                    }
++                });
++                cancellation_token.cancel();
++            });
++            return managed;
++        }
++
+         match exit_rx.try_recv() {
+             Ok(exit_code) => managed.signal_exit(Some(exit_code)),
+             Err(TryRecvError::Closed) => managed.signal_exit(/*exit_code*/ None),
+@@ -544,6 +620,13 @@ impl UnifiedExecProcess {
+     }
+
+     pub(super) async fn check_early_exit(&self) -> Result<(), UnifiedExecError> {
++        #[cfg(target_os = "macos")]
++        if let Some(control) = &self.darwin_control {
++            control
++                .wait_started()
++                .await
++                .map_err(|error| UnifiedExecError::create_process(error.to_string()))?;
++        }
+         let mut state = self.state_rx.clone();
+         let exited = tokio::time::timeout(
+             EARLY_EXIT_GRACE_PERIOD,
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 660af27..6fbac2a 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -52,7 +52,7 @@ use crate::unified_exec::MIN_YIELD_TIME_MS;
+ use crate::unified_exec::ProcessEntry;
+ use crate::unified_exec::ProcessIdReservation;
+ use crate::unified_exec::ProcessStore;
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ use crate::unified_exec::StartingManagedProcess;
+ use crate::unified_exec::UnifiedExecContext;
+ use crate::unified_exec::UnifiedExecError;
+@@ -112,10 +112,10 @@ const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+ const MAX_STDIN_APPROVAL_BYTES: usize = 8_000;
+ const INTERRUPT: &str = "\u{3}";
+
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ struct ManagedLocalExecStopped;
+
+-#[cfg(target_os = "linux")]
++#[cfg(any(target_os = "linux", target_os = "macos"))]
+ impl ProcessStore {
+     fn start_managed_process(
+         &mut self,
+@@ -147,7 +147,7 @@ impl ProcessStore {
+         });
+         // Hold the same lock used by interrupt and store promotion. A command
+         // can start only after the interrupt barrier has a process to join.
+-        if let Err(err) = process.start_managed_linux_sandbox() {
++        if let Err(err) = process.start_managed_local_sandbox() {
+             self.starting_processes.remove(&process_id);
+             return Err(UnifiedExecError::create_process(err.to_string()));
+         }
+@@ -535,11 +535,11 @@ impl UnifiedExecProcessManager {
+         &self,
+         turn: &Arc<codex_extension_api::ExtensionData>,
+     ) -> Option<(i32, Arc<()>)> {
+-        #[cfg(not(target_os = "linux"))]
++        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+         let _ = turn;
+         loop {
+             let mut store = self.process_store.lock().await;
+-            #[cfg(target_os = "linux")]
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if turn.get::<ManagedLocalExecStopped>().is_some() {
+                 return None;
+             }
+@@ -558,7 +558,7 @@ impl UnifiedExecProcessManager {
+                 let generation = Arc::new(());
+                 reservation.insert(ProcessIdReservation {
+                     generation: Arc::clone(&generation),
+-                    #[cfg(target_os = "linux")]
++                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                     turn: Arc::downgrade(turn),
+                 });
+                 return Some((process_id, generation));
+@@ -572,7 +572,14 @@ impl UnifiedExecProcessManager {
+             if !store.owns_reservation(process_id, generation) {
+                 return;
+             }
+-            #[cfg(target_os = "linux")]
++            if store
++                .processes
++                .get(&process_id)
++                .is_some_and(|entry| entry.process.needs_darwin_cleanup())
++            {
++                return;
++            }
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if let Some(starting) = store
+                 .starting_processes
+                 .get(&process_id)
+@@ -605,11 +612,9 @@ impl UnifiedExecProcessManager {
+     ) {
+         let removed = {
+             let mut store = self.process_store.lock().await;
+-            if !store
+-                .processes
+-                .get(&process_id)
+-                .is_some_and(|entry| Arc::ptr_eq(&entry.process, process))
+-            {
++            if !store.processes.get(&process_id).is_some_and(|entry| {
++                Arc::ptr_eq(&entry.process, process) && !process.needs_darwin_cleanup()
++            }) {
+                 return;
+             }
+             store.remove(process_id)
+@@ -1407,9 +1412,9 @@ impl UnifiedExecProcessManager {
+         let (pruned_entry, stored) = {
+             let mut store = self.process_store.lock().await;
+             let owns_reservation = store.owns_reservation(process_id, process_id_generation);
+-            #[cfg(target_os = "linux")]
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let can_store = owns_reservation
+-                && (!process.uses_managed_linux_sandbox()
++                && (!process.uses_managed_local_sandbox()
+                     || (context
+                         .step_context
+                         .turn
+@@ -1417,7 +1422,7 @@ impl UnifiedExecProcessManager {
+                         .get::<ManagedLocalExecStopped>()
+                         .is_none()
+                         && store.remove_starting_process(process_id, &process)));
+-            #[cfg(not(target_os = "linux"))]
++            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+             let can_store = owns_reservation;
+             if !can_store {
+                 drop(store);
+@@ -1426,6 +1431,15 @@ impl UnifiedExecProcessManager {
+                 (None, false)
+             } else {
+                 let pruned_entry = Self::prune_processes_if_needed(&mut store);
++                #[cfg(target_os = "macos")]
++                if let Some(pruned) = &pruned_entry
++                    && pruned.process.uses_darwin_supervisor()
++                {
++                    pruned.process.request_terminate();
++                    store
++                        .retiring_darwin_processes
++                        .push(Arc::clone(&pruned.process));
++                }
+                 store.processes.insert(process_id, entry);
+                 (pruned_entry, true)
+             }
+@@ -1434,7 +1448,18 @@ impl UnifiedExecProcessManager {
+         // network-approval cleanup only after dropping that lock.
+         if let Some(pruned_entry) = pruned_entry {
+             unregister_network_approval_for_entry(&pruned_entry).await;
+-            pruned_entry.process.terminate();
++            if pruned_entry.process.uses_darwin_supervisor() {
++                #[cfg(target_os = "macos")]
++                if pruned_entry.process.terminate_and_join().await {
++                    self.process_store
++                        .lock()
++                        .await
++                        .retiring_darwin_processes
++                        .retain(|process| !Arc::ptr_eq(process, &pruned_entry.process));
++                }
++            } else {
++                pruned_entry.process.terminate();
++            }
+         }
+
+         spawn_exit_watcher(
+@@ -1523,7 +1548,7 @@ impl UnifiedExecProcessManager {
+         mut spawn_lifecycle: SpawnLifecycleHandle,
+         environment: &codex_exec_server::Environment,
+     ) -> Result<Arc<UnifiedExecProcess>, UnifiedExecError> {
+-        #[cfg(not(target_os = "linux"))]
++        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+         let _ = process_id_generation;
+         let controlled = tool_ctx.is_some_and(|ctx| {
+             crate::tools::builtin_result_policy::controlled(
+@@ -1533,6 +1558,20 @@ impl UnifiedExecProcessManager {
+         });
+         let inherited_fds = spawn_lifecycle.inherited_fds();
+
++        #[cfg(target_os = "macos")]
++        let darwin_runtime = environment.local_runtime_paths().filter(|paths| {
++            paths.join_unreturned_local_exec_on_interrupt && paths.restricted_macos_process_sandbox
++        });
++        #[cfg(target_os = "macos")]
++        if darwin_runtime.is_some()
++            && (request.exec_server_shell_snapshot.is_some()
++                || request.sandbox != codex_sandboxing::SandboxType::MacosSeatbelt
++                || tool_ctx.is_none())
++        {
++            return Err(UnifiedExecError::create_process(
++                "managed local commands require direct Seatbelt execution".to_string(),
++            ));
++        }
+         if environment.is_remote() || request.exec_server_shell_snapshot.is_some() {
+             if !inherited_fds.is_empty() {
+                 return Err(UnifiedExecError::create_process(
+@@ -1672,23 +1711,46 @@ impl UnifiedExecProcessManager {
+         });
+         #[cfg(target_os = "linux")]
+         let command = sandbox_command.as_deref().unwrap_or(command);
+-        let spawn_result = codex_sandboxing::spawn_process(codex_sandboxing::SpawnRequest {
+-            command,
+-            cwd: native_cwd.as_path(),
+-            env: &request.env,
+-            arg0: &request.arg0,
+-            sandbox: request.sandbox,
+-            windows_sandbox,
+-            tty,
+-            stdin_open: tty,
+-            inherited_fds: codex_utils_pty::ChildFds::Inherited(&inherited_fds),
+-        })
+-        .await;
++        let spawn_direct = || {
++            codex_sandboxing::spawn_process(codex_sandboxing::SpawnRequest {
++                command,
++                cwd: native_cwd.as_path(),
++                env: &request.env,
++                arg0: &request.arg0,
++                sandbox: request.sandbox,
++                windows_sandbox,
++                tty,
++                stdin_open: tty,
++                inherited_fds: codex_utils_pty::ChildFds::Inherited(&inherited_fds),
++            })
++        };
++        #[cfg(target_os = "macos")]
++        let spawn_result = if let Some(runtime) = darwin_runtime {
++            codex_exec_server::darwin_command::spawn(
++                runtime.codex_self_exe.as_path(),
++                command,
++                native_cwd.as_path(),
++                &request.env,
++                &request.arg0,
++                tty,
++                /*stdin_open*/ tty,
++                &inherited_fds,
++            )
++            .await
++            .map(|(process, control)| (process, Some(control)))
++            .map_err(anyhow::Error::from)
++        } else {
++            spawn_direct().await.map(|process| (process, None))
++        };
++        #[cfg(not(target_os = "macos"))]
++        let spawn_result = spawn_direct().await;
+         #[cfg(target_os = "linux")]
+         drop(cancel_reader);
+         spawn_lifecycle.after_spawn();
+         let spawned =
+             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
++        #[cfg(target_os = "macos")]
++        let (spawned, darwin_control) = spawned;
+         let process = Arc::new(UnifiedExecProcess::from_spawned_with_output_policy(
+             spawned,
+             request.sandbox,
+@@ -1696,9 +1758,11 @@ impl UnifiedExecProcessManager {
+             controlled,
+             #[cfg(target_os = "linux")]
+             cancel_writer,
++            #[cfg(target_os = "macos")]
++            darwin_control,
+         ));
+-        #[cfg(target_os = "linux")]
+-        if process.uses_managed_linux_sandbox()
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
++        if process.uses_managed_local_sandbox()
+             && let Some(tool_ctx) = tool_ctx
+         {
+             let mut store = self.process_store.lock().await;
+@@ -1722,8 +1786,8 @@ impl UnifiedExecProcessManager {
+             }
+         }
+         if let Err(err) = process.check_early_exit().await {
+-            #[cfg(target_os = "linux")]
+-            if process.uses_managed_linux_sandbox() && process.terminate_and_join().await {
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            if process.uses_managed_local_sandbox() && process.terminate_and_join().await {
+                 self.process_store
+                     .lock()
+                     .await
+@@ -2100,16 +2164,16 @@ impl UnifiedExecProcessManager {
+             .map(|(process_id, _, _)| process_id)
+     }
+
+-    pub(crate) async fn terminate_all_processes(&self) {
+-        let (entries, starting) = {
++    pub(crate) async fn terminate_all_processes(&self) -> bool {
++        let (entries, mut starting) = {
+             let mut store = self.process_store.lock().await;
+             let entries = store
+                 .processes
+                 .drain()
+                 .map(|(_, entry)| entry)
+                 .collect::<Vec<_>>();
+-            #[cfg(target_os = "linux")]
+-            let starting = {
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
++            let starting: Vec<_> = {
+                 let ProcessStore {
+                     starting_processes,
+                     reserved_process_ids,
+@@ -2121,7 +2185,17 @@ impl UnifiedExecProcessManager {
+                     .map(|(&id, entry)| (Some(id), Arc::clone(&entry.process)))
+                     .collect()
+             };
+-            #[cfg(not(target_os = "linux"))]
++            #[cfg(target_os = "macos")]
++            let starting = starting
++                .into_iter()
++                .chain(
++                    store
++                        .retiring_darwin_processes
++                        .drain(..)
++                        .map(|process| (None, process)),
++                )
++                .collect::<Vec<_>>();
++            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+             let starting = {
+                 store.reserved_process_ids.clear();
+                 Vec::new()
+@@ -2131,9 +2205,13 @@ impl UnifiedExecProcessManager {
+
+         for entry in entries {
+             unregister_network_approval_for_entry(&entry).await;
+-            entry.process.terminate();
++            if entry.process.uses_darwin_supervisor() {
++                starting.push((None, entry.process));
++            } else {
++                entry.process.terminate();
++            }
+         }
+-        self.join_owned_processes(starting).await;
++        self.join_owned_processes(starting).await
+     }
+
+     pub(crate) async fn pending_local_exec(
+@@ -2163,7 +2241,7 @@ impl UnifiedExecProcessManager {
+     ) -> bool {
+         let processes = {
+             let store = self.process_store.lock().await;
+-            #[cfg(target_os = "linux")]
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let mut store = store;
+             let processes = store
+                 .processes
+@@ -2178,7 +2256,7 @@ impl UnifiedExecProcessManager {
+                 })
+                 .map(|entry| (None, Arc::clone(&entry.process)))
+                 .collect::<Vec<_>>();
+-            #[cfg(target_os = "linux")]
++            #[cfg(any(target_os = "linux", target_os = "macos"))]
+             let processes = {
+                 // A detached tool may still be waiting for spawn acknowledgement.
+                 // Fence the turn while holding the lock that permits launch.
+@@ -2222,7 +2300,7 @@ impl UnifiedExecProcessManager {
+                 .map(|(_, process)| process.terminate_and_join()),
+         )
+         .await;
+-        #[cfg(target_os = "linux")]
++        #[cfg(any(target_os = "linux", target_os = "macos"))]
+         {
+             let mut store = self.process_store.lock().await;
+             for ((id, process), stopped) in processes.iter().zip(&stopped) {
+@@ -2253,7 +2331,7 @@ impl UnifiedExecProcessManager {
+         let mut entries = store
+             .processes
+             .values()
+-            .filter(|entry| !entry.process.has_exited())
++            .filter(|entry| !entry.process.has_exited() || entry.process.needs_darwin_cleanup())
+             .collect::<Vec<_>>();
+         entries.sort_by_key(|entry| entry.process_id);
+         entries
+@@ -2276,7 +2354,7 @@ impl UnifiedExecProcessManager {
+             (Arc::clone(&entry.process), entry.process.has_exited())
+         };
+
+-        if (process.uses_managed_linux_sandbox() || !already_exited)
++        if (process.uses_managed_local_sandbox() || !already_exited)
+             && process.terminate_confirmed().await.is_err()
+         {
+             return false;
+diff --git a/codex-rs/exec-server/src/darwin_coalition.rs b/codex-rs/exec-server/src/darwin_coalition.rs
+new file mode 100644
+index 0000000..ae2572f
+--- /dev/null
++++ b/codex-rs/exec-server/src/darwin_coalition.rs
+@@ -0,0 +1,426 @@
++use std::ffi::CStr;
++use std::io;
++use std::mem::MaybeUninit;
++use std::os::fd::AsFd;
++use std::os::fd::AsRawFd;
++use std::sync::OnceLock;
++use std::thread;
++use std::time::Duration;
++use std::time::Instant;
++
++use libc::c_int;
++use libc::c_void;
++use libc::mach_port_t;
++use libc::pid_t;
++
++// XNU bsd/sys/proc_info_private.h and osfmk/mach/task_info.h.
++const PROC_PIDUNIQIDENTIFIERINFO: c_int = 17;
++const PROC_PIDCOALITIONINFO: c_int = 20;
++const TASK_AUDIT_TOKEN: libc::task_flavor_t = 15;
++const RESCAN_INTERVAL: Duration = Duration::from_millis(20);
++
++#[repr(C)]
++struct ProcUniqueIdentifierInfo {
++    uuid: [u8; 16],
++    unique_id: u64,
++    parent_unique_id: u64,
++    pid_version: u32,
++    original_parent_pid_version: u32,
++    reserved: [u64; 2],
++}
++
++const _: () = assert!(size_of::<ProcUniqueIdentifierInfo>() == 56);
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++struct ProcessIdentity {
++    unique_id: u64,
++    pid_version: u32,
++}
++
++#[repr(transparent)]
++struct AuditToken([u32; 8]);
++
++impl AuditToken {
++    fn pid(&self) -> pid_t {
++        self.0[5] as pid_t
++    }
++
++    fn pid_version(&self) -> u32 {
++        self.0[7]
++    }
++}
++
++type Signal = unsafe extern "C" fn(*mut AuditToken, c_int) -> c_int;
++type ResourceUsage = unsafe extern "C" fn(u64, *mut c_void, usize) -> c_int;
++type TaskNameForPid = unsafe extern "C" fn(mach_port_t, pid_t, *mut mach_port_t) -> c_int;
++
++unsafe extern "C" {
++    fn mach_port_deallocate(task: mach_port_t, port: mach_port_t) -> c_int;
++}
++
++struct KernelApi {
++    signal: Signal,
++    resource_usage: ResourceUsage,
++    task_name_for_pid: TaskNameForPid,
++}
++
++fn kernel_api() -> io::Result<&'static KernelApi> {
++    static API: OnceLock<Result<KernelApi, String>> = OnceLock::new();
++    API.get_or_init(|| {
++        let libproc = c"/usr/lib/libproc.dylib";
++        let libsystem = c"/usr/lib/libSystem.B.dylib";
++        let signal = system_symbol(libproc, c"proc_signal_with_audittoken")?;
++        let resource_usage = system_symbol(libsystem, c"coalition_info_resource_usage")?;
++        let task_name_for_pid = system_symbol(libsystem, c"task_name_for_pid")?;
++        // SAFETY: These are the exported functions with the signatures above.
++        Ok(unsafe {
++            KernelApi {
++                signal: std::mem::transmute::<*mut c_void, Signal>(signal),
++                resource_usage: std::mem::transmute::<*mut c_void, ResourceUsage>(resource_usage),
++                task_name_for_pid: std::mem::transmute::<*mut c_void, TaskNameForPid>(
++                    task_name_for_pid,
++                ),
++            }
++        })
++    })
++    .as_ref()
++    .map_err(|error| io::Error::new(io::ErrorKind::Unsupported, error.clone()))
++}
++
++fn system_symbol(library: &CStr, name: &CStr) -> Result<*mut c_void, String> {
++    // SAFETY: Both inputs are NUL-terminated and name system library exports.
++    let handle = unsafe { libc::dlopen(library.as_ptr(), libc::RTLD_LOCAL | libc::RTLD_NOW) };
++    if !handle.is_null() {
++        // SAFETY: dlopen returned a valid handle.
++        let address = unsafe { libc::dlsym(handle, name.as_ptr()) };
++        if !address.is_null() {
++            // Retain the handle for the lifetime of the cached function pointer.
++            return Ok(address);
++        }
++        // SAFETY: No pointer from this handle is retained.
++        unsafe { libc::dlclose(handle) };
++    }
++    Err(format!(
++        "managed local execution requires macOS support for {}",
++        name.to_string_lossy()
++    ))
++}
++
++/// Ownership of a dedicated resource coalition created by launchd.
++///
++/// The caller authenticates the registered job and keeps the helper from
++/// spawning work until acquisition succeeds. Once draining begins, the caller
++/// must fence dispatch and keep the helper parked or let it exit.
++pub(crate) struct CoalitionOwner {
++    id: u64,
++    helper_pid: pid_t,
++    helper_identity: ProcessIdentity,
++}
++
++impl CoalitionOwner {
++    pub(crate) fn check_supported() -> io::Result<()> {
++        kernel_api().map(|_| ())
++    }
++
++    pub(crate) fn acquire(peer: &impl AsFd) -> io::Result<Self> {
++        let api = kernel_api()?;
++        let token = peer_audit_token(peer)?;
++        // SAFETY: These process identity getters do not require arguments.
++        let (uid, euid, self_pid) = unsafe { (libc::getuid(), libc::geteuid(), libc::getpid()) };
++        if token.0[1] != euid || token.0[3] != uid || token.pid() == self_pid {
++            return Err(io::Error::new(
++                io::ErrorKind::PermissionDenied,
++                "launchd helper peer identity does not match the managed caller",
++            ));
++        }
++        let (helper_identity, id) = verified_membership(&token)?;
++        if id == process_coalition(self_pid)? {
++            return Err(io::Error::other(
++                "launchd helper shares the caller's resource coalition",
++            ));
++        }
++        let owner = Self {
++            id,
++            helper_pid: token.pid(),
++            helper_identity,
++        };
++        if owner.live_tasks()? != 1 {
++            return Err(io::Error::other(
++                "launchd helper must be alone in its coalition before dispatch",
++            ));
++        }
++        // Check that this host permits the read-only task-name lookup before
++        // dispatching any payload.
++        let helper_token = task_audit_token(api, owner.helper_pid)?;
++        if helper_token.0 != token.0 {
++            return Err(io::Error::other("launchd helper audit token changed"));
++        }
++        owner.require_helper()?;
++        Ok(owner)
++    }
++
++    /// Used by the helper after the wrapper has authorized this coalition ID.
++    pub(crate) fn current(expected_id: u64) -> io::Result<Self> {
++        let api = kernel_api()?;
++        // SAFETY: getpid does not require arguments.
++        let pid = unsafe { libc::getpid() };
++        let token = task_audit_token(api, pid)?;
++        let (helper_identity, id) = verified_membership(&token)?;
++        if token.pid() != pid || id != expected_id {
++            return Err(io::Error::other(
++                "helper is outside the authorized resource coalition",
++            ));
++        }
++        Ok(Self {
++            id,
++            helper_pid: pid,
++            helper_identity,
++        })
++    }
++
++    pub(crate) fn id(&self) -> u64 {
++        self.id
++    }
++
++    pub(crate) fn helper_pid(&self) -> pid_t {
++        self.helper_pid
++    }
++
++    pub(crate) fn live_tasks(&self) -> io::Result<u64> {
++        let api = kernel_api()?;
++        // XNU copies only the requested prefix of coalition_resource_usage.
++        // The first two u64s are tasks_started and tasks_exited, read together
++        // under the coalition lock.
++        let mut counts = [0_u64; 2];
++        // SAFETY: counts is writable for the exact size supplied.
++        let result = unsafe {
++            (api.resource_usage)(self.id, counts.as_mut_ptr().cast(), size_of_val(&counts))
++        };
++        if result != 0 {
++            return Err(io::Error::last_os_error());
++        }
++        counts[0]
++            .checked_sub(counts[1])
++            .ok_or_else(|| io::Error::other("invalid resource coalition task counts"))
++    }
++
++    /// Keep the helper alive while it reports the command outcome. The wrapper
++    /// can then let it exit and perform a second drain for zero live tasks.
++    pub(crate) fn drain(&self, timeout: Duration, keep_helper: bool) -> io::Result<()> {
++        let api = kernel_api()?;
++        // SAFETY: getpid does not require arguments.
++        if !keep_helper && self.helper_pid == unsafe { libc::getpid() } {
++            return Err(io::Error::other("a coalition helper must preserve itself"));
++        }
++        let started = Instant::now();
++        let mut last_failure = None;
++        loop {
++            let live = match self.live_tasks() {
++                Ok(live) => live,
++                // XNU can reap a previously observed coalition only after its
++                // last task has left. The ID is never reused during this boot.
++                Err(err) if !keep_helper && is_gone(&err) => return Ok(()),
++                Err(err) => return Err(err),
++            };
++            if keep_helper {
++                self.require_helper()?;
++            }
++            if live == u64::from(keep_helper) {
++                return Ok(());
++            }
++            if started.elapsed() >= timeout {
++                let detail = last_failure.unwrap_or_default();
++                return Err(io::Error::new(
++                    io::ErrorKind::TimedOut,
++                    format!(
++                        "resource coalition {} still has {live} live tasks{detail}",
++                        self.id
++                    ),
++                ));
++            }
++
++            // Enumeration can race fork, exit, and exec. It locates targets,
++            // while the kernel's task counts above establish completion.
++            for pid in list_pids()? {
++                if started.elapsed() >= timeout {
++                    break;
++                }
++                if pid <= 1 || process_coalition(pid).ok() != Some(self.id) {
++                    continue;
++                }
++                match self.kill_member(api, pid, keep_helper) {
++                    Ok(()) => {}
++                    Err(err) if is_gone(&err) => {}
++                    Err(err) => {
++                        last_failure = Some(format!(" (last target error for PID {pid}: {err})"))
++                    }
++                }
++            }
++            thread::sleep(RESCAN_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
++        }
++    }
++
++    fn require_helper(&self) -> io::Result<()> {
++        if process_identity(self.helper_pid)? == self.helper_identity {
++            Ok(())
++        } else {
++            Err(io::Error::other("launchd helper identity changed"))
++        }
++    }
++
++    fn kill_member(&self, api: &KernelApi, pid: pid_t, keep_helper: bool) -> io::Result<()> {
++        let mut token = task_audit_token(api, pid)?;
++        if token.pid() != pid {
++            return Err(io::Error::from_raw_os_error(libc::ESRCH));
++        }
++        let (identity, id) = verified_membership(&token)?;
++        if id == self.id
++            && !(keep_helper && pid == self.helper_pid && identity == self.helper_identity)
++        {
++            // SAFETY: token is the complete audit token returned by the
++            // kernel. XNU validates its PID and version at signal delivery.
++            let error = unsafe { (api.signal)(&mut token, libc::SIGKILL) };
++            if error != 0 {
++                return Err(io::Error::from_raw_os_error(error));
++            }
++        }
++        Ok(())
++    }
++}
++
++fn is_gone(error: &io::Error) -> bool {
++    error.raw_os_error() == Some(libc::ESRCH)
++}
++
++fn list_pids() -> io::Result<Vec<pid_t>> {
++    // SAFETY: A null buffer asks libproc for the current capacity estimate.
++    let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
++    if count <= 0 {
++        return Err(io::Error::last_os_error());
++    }
++    let capacity = count as usize;
++    let bytes = c_int::try_from(capacity * size_of::<pid_t>())
++        .map_err(|_| io::Error::other("process list size exceeds libproc capacity"))?;
++    let mut pids = vec![0; capacity];
++    // SAFETY: pids has writable space for bytes bytes.
++    let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
++    if count <= 0 {
++        return Err(io::Error::last_os_error());
++    }
++    pids.truncate(count as usize);
++    Ok(pids)
++}
++
++fn peer_audit_token(peer: &impl AsFd) -> io::Result<AuditToken> {
++    let mut token = AuditToken([0; 8]);
++    let expected = size_of::<AuditToken>() as libc::socklen_t;
++    let mut size = expected;
++    // SAFETY: The socket is borrowed and token and size are writable buffers.
++    let result = unsafe {
++        libc::getsockopt(
++            peer.as_fd().as_raw_fd(),
++            libc::SOL_LOCAL,
++            libc::LOCAL_PEERTOKEN,
++            (&raw mut token).cast(),
++            &mut size,
++        )
++    };
++    if result != 0 {
++        return Err(io::Error::last_os_error());
++    }
++    if size != expected {
++        return Err(io::Error::other("invalid launchd helper peer audit token"));
++    }
++    Ok(token)
++}
++
++fn task_audit_token(api: &KernelApi, pid: pid_t) -> io::Result<AuditToken> {
++    #[allow(deprecated)]
++    // SAFETY: The Mach task self port is initialized by libSystem at startup.
++    let self_port = unsafe { libc::mach_task_self_ };
++    let mut port = 0;
++    // SAFETY: port is writable. This requests only a read-only task name right.
++    let result = unsafe { (api.task_name_for_pid)(self_port, pid, &mut port) };
++    if result != 0 || port == 0 {
++        return Err(io::Error::other(format!(
++            "read-only task name lookup for PID {pid} failed (Mach {result})"
++        )));
++    }
++    let mut token = AuditToken([0; 8]);
++    let mut count = token.0.len() as u32;
++    // SAFETY: The live send right from task_name_for_pid is ours. TASK_AUDIT_TOKEN
++    // writes at most count 32-bit words, and the port is released on either path.
++    let result = unsafe {
++        let result = libc::task_info(
++            port,
++            TASK_AUDIT_TOKEN,
++            token.0.as_mut_ptr().cast(),
++            &mut count,
++        );
++        mach_port_deallocate(self_port, port);
++        result
++    };
++    if result != 0 || count as usize != token.0.len() {
++        return Err(io::Error::other(format!(
++            "task audit token lookup for PID {pid} failed (Mach {result}, {count} words)"
++        )));
++    }
++    Ok(token)
++}
++
++fn verified_membership(token: &AuditToken) -> io::Result<(ProcessIdentity, u64)> {
++    let pid = token.pid();
++    if pid <= 1 {
++        return Err(io::Error::other("invalid managed process audit token"));
++    }
++    let before = process_identity(pid)?;
++    if before.pid_version != token.pid_version() {
++        return Err(io::Error::from_raw_os_error(libc::ESRCH));
++    }
++    // The two identity reads bind the numeric PID membership lookup to the
++    // incarnation in the token. Coalition membership is fixed for that task.
++    let id = process_coalition(pid)?;
++    if before != process_identity(pid)? {
++        return Err(io::Error::from_raw_os_error(libc::ESRCH));
++    }
++    Ok((before, id))
++}
++
++fn process_coalition(pid: pid_t) -> io::Result<u64> {
++    // SAFETY: PROC_PIDCOALITIONINFO writes five u64s. Entry zero is the
++    // resource coalition ID. The other entries are unused here.
++    let info: [u64; 5] = unsafe { read_pid_info(pid, PROC_PIDCOALITIONINFO)? };
++    if info[0] == 0 {
++        Err(io::Error::other("process has no resource coalition"))
++    } else {
++        Ok(info[0])
++    }
++}
++
++fn process_identity(pid: pid_t) -> io::Result<ProcessIdentity> {
++    // SAFETY: ProcUniqueIdentifierInfo matches the XNU layout for this flavor.
++    let info: ProcUniqueIdentifierInfo = unsafe { read_pid_info(pid, PROC_PIDUNIQIDENTIFIERINFO)? };
++    Ok(ProcessIdentity {
++        unique_id: info.unique_id,
++        pid_version: info.pid_version,
++    })
++}
++
++// SAFETY: T must match the kernel ABI for flavor and accept any bit pattern.
++unsafe fn read_pid_info<T>(pid: pid_t, flavor: c_int) -> io::Result<T> {
++    let mut info = MaybeUninit::<T>::uninit();
++    let size = size_of::<T>() as c_int;
++    // SAFETY: The buffer is writable for size bytes and the caller provides
++    // the expected layout. An argument of zero excludes zombies.
++    let count = unsafe { libc::proc_pidinfo(pid, flavor, 0, info.as_mut_ptr().cast(), size) };
++    if count <= 0 {
++        return Err(io::Error::last_os_error());
++    }
++    if count != size {
++        return Err(io::Error::other(format!(
++            "proc_pidinfo for PID {pid}, flavor {flavor} returned {count} of {size} bytes"
++        )));
++    }
++    // SAFETY: A full successful read initialized the expected ABI buffer.
++    Ok(unsafe { info.assume_init() })
++}
+diff --git a/codex-rs/exec-server/src/darwin_command.rs b/codex-rs/exec-server/src/darwin_command.rs
+new file mode 100644
+index 0000000..e1cd44b
+--- /dev/null
++++ b/codex-rs/exec-server/src/darwin_command.rs
+@@ -0,0 +1,805 @@
++//! Own each managed local command in a dedicated launchd resource coalition.
++
++use std::collections::HashMap;
++use std::fs::File;
++use std::io::{self, Read, Seek, Write};
++use std::net::Shutdown;
++use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
++use std::os::unix::net::{UnixListener, UnixStream};
++use std::os::unix::process::{CommandExt, ExitStatusExt};
++use std::path::{Path, PathBuf};
++use std::process::{Command, Stdio};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++use tokio::io::AsyncReadExt;
++use tokio::sync::watch;
++
++use crate::darwin_coalition::CoalitionOwner;
++use crate::sandboxed_file_open::{receive_file_descriptor, send_file_descriptor};
++
++pub const WRAPPER_ARG: &str = "--codex-sdk-darwin-command";
++pub const JOB_ARG: &str = "--codex-sdk-darwin-job";
++const START: u8 = 1;
++const STARTED: u8 = 2;
++const DRAINED: u8 = 3;
++const INTERRUPT: u8 = 4;
++const EXITED: u8 = 5;
++const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
++const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
++const POLL_INTERVAL: Duration = Duration::from_millis(10);
++const MAX_REQUEST_SIZE: usize = 16 * 1024 * 1024;
++
++#[derive(serde::Serialize, serde::Deserialize)]
++struct JobRequest {
++    command: Vec<String>,
++    cwd: PathBuf,
++    env: HashMap<String, String>,
++    arg0: Option<String>,
++    tty: bool,
++    inherited_fds: Vec<RawFd>,
++}
++
++struct DarwinCommand {
++    argv: Vec<String>,
++    inherited_fds: Vec<RawFd>,
++    control: UnixStream,
++    _wrapper_control: UnixStream,
++    _request_file: File,
++}
++
++/// Keep the target environment out of the unsandboxed wrapper and launchd job.
++fn prepare(
++    helper: &Path,
++    command: &[String],
++    cwd: &Path,
++    env: &HashMap<String, String>,
++    arg0: &Option<String>,
++    tty: bool,
++    inherited_fds: &[RawFd],
++) -> io::Result<DarwinCommand> {
++    let request = JobRequest {
++        command: command.to_vec(),
++        cwd: cwd.to_owned(),
++        env: env.clone(),
++        arg0: arg0.clone(),
++        tty,
++        inherited_fds: inherited_fds.to_vec(),
++    };
++    let directory = codex_uds::prepare_shared_daemon_socket_directory()?;
++    let mut file = tempfile::tempfile_in(directory)?;
++    serde_json::to_writer(&mut file, &request)?;
++    file.rewind()?;
++    let (control, wrapper_control) = UnixStream::pair()?;
++    let mut wrapper_fds = inherited_fds.to_vec();
++    wrapper_fds.extend([wrapper_control.as_raw_fd(), file.as_raw_fd()]);
++    Ok(DarwinCommand {
++        argv: vec![
++            helper.to_str().ok_or_else(invalid_message)?.to_owned(),
++            WRAPPER_ARG.to_owned(),
++            wrapper_control.as_raw_fd().to_string(),
++            file.as_raw_fd().to_string(),
++        ],
++        inherited_fds: wrapper_fds,
++        control,
++        _wrapper_control: wrapper_control,
++        _request_file: file,
++    })
++}
++
++/// Launch the trusted wrapper. The target waits for `start`, which the
++/// caller sends after recording the process in its cancellation scope.
++#[allow(clippy::too_many_arguments)]
++pub async fn spawn(
++    helper: &Path,
++    command: &[String],
++    cwd: &Path,
++    env: &HashMap<String, String>,
++    arg0: &Option<String>,
++    tty: bool,
++    stdin_open: bool,
++    inherited_fds: &[RawFd],
++) -> io::Result<(codex_utils_pty::SpawnedProcess, Arc<CommandControl>)> {
++    let launch = prepare(helper, command, cwd, env, arg0, tty, inherited_fds)?;
++    let mut spawned = codex_sandboxing::spawn_process(codex_sandboxing::SpawnRequest {
++        command: &launch.argv,
++        cwd: Path::new("/"),
++        env: &HashMap::new(),
++        arg0: &None,
++        sandbox: codex_sandboxing::SandboxType::None,
++        windows_sandbox: None,
++        tty,
++        stdin_open,
++        inherited_fds: codex_utils_pty::ChildFds::Launchd(
++            &launch.inherited_fds,
++            inherited_fds.is_empty(),
++        ),
++    })
++    .await
++    .map_err(|error| io::Error::other(error.to_string()))?;
++    let control = Arc::new(CommandControl::new(launch.control)?);
++    spawned.session.set_stop_action({
++        let control = Arc::clone(&control);
++        move || control.stop()
++    });
++    Ok((spawned, control))
++}
++
++/// Check the complete ownership path before an SDK-managed local session
++/// can accept model work. Seatbelt enforcement has its own launch probe.
++pub async fn check_supported(helper: &Path) -> io::Result<()> {
++    CoalitionOwner::check_supported()?;
++    let (process, control) = spawn(
++        helper,
++        &["/usr/bin/true".to_owned()],
++        Path::new("/"),
++        &HashMap::new(),
++        &None,
++        /*tty*/ false,
++        /*stdin_open*/ false,
++        &[],
++    )
++    .await?;
++    control.start()?;
++    let verified = tokio::time::timeout(SETUP_TIMEOUT, async {
++        control.wait_started().await?;
++        if process.exit_rx.await.ok() != Some(0) || !control.wait_drained().await {
++            return Err(io::Error::other(
++                "managed local launchd readiness command did not finish",
++            ));
++        }
++        Ok(())
++    })
++    .await;
++    verified.unwrap_or_else(|_| {
++        Err(io::Error::new(
++            io::ErrorKind::TimedOut,
++            "managed local launchd readiness timed out",
++        ))
++    })
++}
++
++#[derive(Clone, Copy, Default)]
++struct ControlState {
++    started: bool,
++    drained: bool,
++    closed: bool,
++}
++
++pub struct CommandControl {
++    socket: UnixStream,
++    state: watch::Receiver<ControlState>,
++}
++
++impl CommandControl {
++    fn new(socket: UnixStream) -> io::Result<Self> {
++        socket.set_nonblocking(true)?;
++        let mut reader = tokio::net::UnixStream::from_std(socket.try_clone()?)?;
++        let (updates, state) = watch::channel(ControlState::default());
++        tokio::spawn(async move {
++            loop {
++                match reader.read_u8().await {
++                    Ok(STARTED) => updates.send_modify(|state| state.started = true),
++                    Ok(DRAINED) => updates.send_modify(|state| state.drained = true),
++                    _ => break,
++                }
++            }
++            updates.send_modify(|state| state.closed = true);
++        });
++        Ok(Self { socket, state })
++    }
++
++    pub fn start(&self) -> io::Result<()> {
++        (&self.socket).write_all(&[START])
++    }
++
++    pub fn interrupt(&self) -> io::Result<()> {
++        (&self.socket).write_all(&[INTERRUPT])
++    }
++
++    pub fn stop(&self) {
++        let _ = self.socket.shutdown(Shutdown::Write);
++    }
++
++    pub async fn wait_started(&self) -> io::Result<()> {
++        let mut state = self.state.clone();
++        match state.wait_for(|state| state.started || state.closed).await {
++            Ok(state) if state.started => Ok(()),
++            _ => Err(io::Error::other(
++                "managed local launchd command did not start",
++            )),
++        }
++    }
++
++    pub async fn wait_drained(&self) -> bool {
++        let mut state = self.state.clone();
++        state
++            .wait_for(|state| state.drained || state.closed)
++            .await
++            .is_ok_and(|state| state.drained)
++    }
++
++    pub fn is_drained(&self) -> bool {
++        self.state.borrow().drained
++    }
++}
++
++impl Drop for CommandControl {
++    fn drop(&mut self) {
++        self.stop();
++    }
++}
++
++pub fn wrapper_main(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
++    let mut args = args;
++    let control_fd = fd_arg(args.next())?;
++    let request_fd = fd_arg(args.next())?;
++    if control_fd == request_fd || args.next().is_some() {
++        return Err(invalid_message());
++    }
++    for fd in [control_fd, request_fd] {
++        // SAFETY: F_GETFD only checks whether the descriptor exists.
++        if unsafe { libc::fcntl(fd, libc::F_GETFD) } == -1 {
++            return Err(io::Error::last_os_error());
++        }
++    }
++    // SAFETY: The private wrapper owns the descriptors from the native spawn.
++    let mut control = unsafe { UnixStream::from_raw_fd(control_fd) };
++    let request_file = unsafe { File::from_raw_fd(request_fd) };
++    cloexec(&control)?;
++    cloexec(&request_file)?;
++    let mut request: JobRequest =
++        serde_json::from_reader(request_file.take(MAX_REQUEST_SIZE as u64))?;
++    if request.tty
++        && !request.env.contains_key("SHELL")
++        && let Ok(shell) = std::env::var("SHELL")
++    {
++        request.env.insert("SHELL".to_owned(), shell);
++    }
++    for fd in &request.inherited_fds {
++        if *fd < 3 || *fd == control_fd || *fd == request_fd {
++            return Err(invalid_message());
++        }
++        // SAFETY: The parent explicitly kept each of these descriptors open.
++        cloexec(unsafe { BorrowedFd::borrow_raw(*fd) })?;
++    }
++
++    match read_byte(&mut control)? {
++        Some(START) => {}
++        None => {
++            control.write_all(&[DRAINED])?;
++            return Ok(128 + libc::SIGKILL);
++        }
++        Some(_) => return Err(invalid_message()),
++    }
++
++    let (mut job, mut worker) = LaunchdJob::connect()?;
++    let owner = CoalitionOwner::acquire(&worker)?;
++    if job.registered_pid()? != owner.helper_pid() {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "socket peer is not the registered launchd command worker",
++        ));
++    }
++    // A disconnected core may still have queued START. Once we send the
++    // request, this exact coalition owns any resulting command.
++    let result = run_managed(&mut control, &mut worker, &owner, &request);
++    let _ = worker.shutdown(Shutdown::Write);
++    owner.drain(DRAIN_TIMEOUT, /*keep_helper*/ false)?;
++    job.finish()?;
++    control.write_all(&[DRAINED])?;
++    result
++}
++
++fn run_managed(
++    control: &mut UnixStream,
++    worker: &mut UnixStream,
++    owner: &CoalitionOwner,
++    request: &JobRequest,
++) -> io::Result<i32> {
++    worker.write_all(&owner.id().to_le_bytes())?;
++    let bytes = serde_json::to_vec(request)?;
++    if bytes.len() > MAX_REQUEST_SIZE {
++        return Err(invalid_message());
++    }
++    let len = u32::try_from(bytes.len()).map_err(|_| invalid_message())?;
++    worker.write_all(&len.to_le_bytes())?;
++    worker.write_all(&bytes)?;
++    for fd in [0, 1, 2].iter().chain(&request.inherited_fds) {
++        // SAFETY: The wrapper holds the stdio and explicitly inherited fds.
++        send_file_descriptor(&*worker, unsafe { BorrowedFd::borrow_raw(*fd) })?;
++    }
++
++    loop {
++        let [core_ready, worker_ready] = readable([control, worker], None)?;
++        if core_ready {
++            match read_byte(control)? {
++                Some(INTERRUPT) => worker.write_all(&[INTERRUPT])?,
++                None => return Ok(128 + libc::SIGKILL),
++                Some(_) => return Err(invalid_message()),
++            }
++        }
++        if worker_ready {
++            match read_byte(worker)? {
++                Some(STARTED) => control.write_all(&[STARTED])?,
++                Some(EXITED) => {
++                    let mut status = [0; 4];
++                    worker.read_exact(&mut status)?;
++                    return Ok(i32::from_le_bytes(status));
++                }
++                Some(_) => return Err(invalid_message()),
++                None => {
++                    return Err(io::Error::other(
++                        "launchd command worker exited before reporting status",
++                    ));
++                }
++            }
++        }
++    }
++}
++
++pub fn job_main(args: impl Iterator<Item = std::ffi::OsString>) -> io::Result<i32> {
++    let mut args = args;
++    let directory = PathBuf::from(args.next().ok_or_else(invalid_message)?);
++    let wrapper_pid = args
++        .next()
++        .and_then(|pid| pid.to_str()?.parse::<libc::pid_t>().ok())
++        .filter(|pid| *pid > 1)
++        .ok_or_else(invalid_message)?;
++    if args.next().is_some() {
++        return Err(invalid_message());
++    }
++    let mut wrapper = UnixStream::connect(directory.join("s"))?;
++    if peer_pid(&wrapper)? != wrapper_pid {
++        return Err(io::Error::new(
++            io::ErrorKind::PermissionDenied,
++            "invalid Darwin command wrapper",
++        ));
++    }
++    wrapper.set_read_timeout(Some(SETUP_TIMEOUT))?;
++    wrapper.set_write_timeout(Some(SETUP_TIMEOUT))?;
++    // The nonce is in the protected directory and never in a job argument.
++    wrapper.write_all(&std::fs::read(directory.join("n"))?)?;
++
++    let mut id = [0; 8];
++    wrapper.read_exact(&mut id)?;
++    let owner = CoalitionOwner::current(u64::from_le_bytes(id))?;
++    let result = run_job(&mut wrapper);
++    // If the wrapper dies, EOF transfers responsibility to this worker.
++    // It has no further dispatch path and can drain while excluding itself.
++    owner.drain(DRAIN_TIMEOUT, /*keep_helper*/ true)?;
++    result
++}
++
++fn run_job(wrapper: &mut UnixStream) -> io::Result<i32> {
++    let mut size = [0; 4];
++    wrapper.read_exact(&mut size)?;
++    let size = u32::from_le_bytes(size) as usize;
++    if size > MAX_REQUEST_SIZE {
++        return Err(invalid_message());
++    }
++    let mut bytes = vec![0; size];
++    wrapper.read_exact(&mut bytes)?;
++    let request: JobRequest = serde_json::from_slice(&bytes)?;
++    let stdin = receive_file_descriptor(wrapper)?;
++    let stdout = receive_file_descriptor(wrapper)?;
++    let stderr = receive_file_descriptor(wrapper)?;
++    let uses_portable_status = request.tty && request.inherited_fds.is_empty();
++    let min_fd = request
++        .inherited_fds
++        .iter()
++        .copied()
++        .max()
++        .unwrap_or(2)
++        .checked_add(1)
++        .ok_or_else(invalid_message)?;
++    let mut inherited = Vec::<(OwnedFd, RawFd)>::new();
++    for fd in request.inherited_fds {
++        let descriptor = receive_file_descriptor(wrapper)?;
++        let descriptor = rustix::io::fcntl_dupfd_cloexec(&descriptor, min_fd)?;
++        inherited.push((descriptor, fd));
++    }
++    // Keep target numbers occupied before std spawns, so dup2 in the
++    // pre-exec callback cannot overwrite its child-error reporting pipe.
++    let mut reserved = Vec::new();
++    for (source, target) in &inherited {
++        // SAFETY: This trusted launchd worker is single-threaded. The source
++        // is owned, and an unused target is reserved until spawn returns.
++        unsafe {
++            if libc::fcntl(*target, libc::F_GETFD) == -1 {
++                if libc::dup2(source.as_raw_fd(), *target) == -1 {
++                    return Err(io::Error::last_os_error());
++                }
++                let fd = OwnedFd::from_raw_fd(*target);
++                cloexec(&fd)?;
++                reserved.push(fd);
++            }
++        }
++    }
++
++    let (program, args) = request.command.split_first().ok_or_else(invalid_message)?;
++    let mut command = Command::new(program);
++    command
++        .args(args)
++        .current_dir(request.cwd)
++        .env_clear()
++        .envs(request.env);
++    command.stdin(stdin).stdout(stdout).stderr(stderr);
++    if let Some(arg0) = request.arg0 {
++        command.arg0(arg0);
++    }
++    let tty = request.tty;
++    // SAFETY: This callback only makes descriptor, session, and task-port calls.
++    unsafe {
++        command.pre_exec(move || {
++            clear_launchd_ports()?;
++            if tty {
++                codex_utils_pty::pty::configure_child_terminal()?;
++            } else if libc::setsid() == -1 {
++                return Err(io::Error::last_os_error());
++            }
++            for (source, target) in &inherited {
++                if libc::dup2(source.as_raw_fd(), *target) == -1 {
++                    return Err(io::Error::last_os_error());
++                }
++            }
++            Ok(())
++        });
++    }
++    let mut child = command.spawn()?;
++    drop(command);
++    drop(reserved);
++    wrapper.write_all(&[STARTED])?;
++    while let None = child.try_wait()? {
++        if readable([wrapper], Some(POLL_INTERVAL))?[0] {
++            match read_byte(wrapper)? {
++                Some(INTERRUPT) => {
++                    // The worker owns this unreaped child. The process group
++                    // started with the same ID, which cannot yet be recycled.
++                    unsafe { libc::killpg(child.id() as libc::pid_t, libc::SIGINT) };
++                }
++                None => return Ok(0),
++                Some(_) => return Err(invalid_message()),
++            }
++        }
++    }
++    let status = child.wait()?;
++    let status = if uses_portable_status {
++        status.code().unwrap_or(1)
++    } else {
++        status
++            .code()
++            .or_else(|| status.signal().map(|signal| 128 + signal))
++            .unwrap_or(-1)
++    };
++    wrapper.write_all(&[EXITED])?;
++    wrapper.write_all(&status.to_le_bytes())?;
++    Ok(0)
++}
++
++// The worker needs its launchd domain, but the payload must not inherit
++// authority to start unrelated jobs. exec inherits these task port slots.
++fn clear_launchd_ports() -> io::Result<()> {
++    const TASK_BOOTSTRAP_PORT: libc::c_int = 4;
++    const MACH_PORT_NULL: libc::mach_port_t = 0;
++    unsafe extern "C" {
++        fn mach_ports_register(
++            task: libc::mach_port_t,
++            ports: *const libc::mach_port_t,
++            count: libc::mach_msg_type_number_t,
++        ) -> libc::kern_return_t;
++        fn task_set_special_port(
++            task: libc::mach_port_t,
++            which: libc::c_int,
++            port: libc::mach_port_t,
++        ) -> libc::kern_return_t;
++    }
++
++    let registered_ports = [MACH_PORT_NULL; 3];
++    #[allow(deprecated)]
++    // SAFETY: The forked child's libSystem has initialized its own task port.
++    let task = unsafe { libc::mach_task_self_ };
++    // SAFETY: These Mach calls clear the current task's port slots. The
++    // registered port array is valid for the duration of the call.
++    let cleared = unsafe {
++        mach_ports_register(task, registered_ports.as_ptr(), 3) == libc::KERN_SUCCESS
++            && task_set_special_port(task, TASK_BOOTSTRAP_PORT, MACH_PORT_NULL)
++                == libc::KERN_SUCCESS
++    };
++    if cleared {
++        Ok(())
++    } else {
++        Err(io::Error::from_raw_os_error(libc::EPERM))
++    }
++}
++
++struct LaunchdJob {
++    _directory: tempfile::TempDir,
++    service: Option<String>,
++}
++
++impl LaunchdJob {
++    fn connect() -> io::Result<(Self, UnixStream)> {
++        let directory = tempfile::Builder::new()
++            .prefix("j-")
++            .tempdir_in(codex_uds::prepare_shared_daemon_socket_directory()?)?;
++        let socket = directory.path().join("s");
++        let listener = UnixListener::bind(socket)?;
++        listener.set_nonblocking(true)?;
++        let nonce = uuid::Uuid::new_v4().simple().to_string();
++        std::fs::write(directory.path().join("n"), &nonce)?;
++        let label = format!("com.openai.codex.sdk-command.{}", uuid::Uuid::new_v4());
++        let plist = directory.path().join("job.plist");
++        let program = std::env::current_exe()?;
++        std::fs::write(
++            &plist,
++            format!(
++                r#"<?xml version="1.0" encoding="UTF-8"?>
++<plist version="1.0"><dict>
++<key>Label</key><string>{label}</string>
++<key>ProgramArguments</key><array><string>{}</string><string>{JOB_ARG}</string><string>{}</string><string>{}</string></array>
++<key>RunAtLoad</key><true/>
++<key>LaunchOnlyOnce</key><true/>
++</dict></plist>"#,
++                xml_path(&program)?,
++                xml_path(directory.path())?,
++                std::process::id(),
++            ),
++        )?;
++
++        // Select a single domain before any bootstrap side effect. Own its
++        // service label even if launchctl times out after registering it.
++        let uid = unsafe { libc::geteuid() };
++        let deadline = Instant::now() + SETUP_TIMEOUT;
++        let gui = format!("gui/{uid}");
++        let domain = if launchctl(&["print".as_ref(), gui.as_ref()], deadline, false)?.success {
++            gui
++        } else {
++            format!("user/{uid}")
++        };
++        let job = Self {
++            _directory: directory,
++            service: Some(format!("{domain}/{label}")),
++        };
++        if !launchctl(
++            &["bootstrap".as_ref(), domain.as_ref(), plist.as_os_str()],
++            deadline,
++            false,
++        )?
++        .success
++        {
++            return Err(io::Error::other(
++                "could not register a managed local launchd command",
++            ));
++        }
++
++        loop {
++            match listener.accept() {
++                Ok((mut stream, _)) => {
++                    // Darwin's accept inherits the listener's nonblocking mode.
++                    // The worker protocol uses blocking I/O with timeouts.
++                    stream.set_nonblocking(false)?;
++                    stream.set_read_timeout(Some(
++                        deadline
++                            .saturating_duration_since(Instant::now())
++                            .max(POLL_INTERVAL),
++                    ))?;
++                    stream.set_write_timeout(Some(SETUP_TIMEOUT))?;
++                    let mut proof = [0; 32];
++                    stream.read_exact(&mut proof)?;
++                    if proof != nonce.as_bytes() {
++                        return Err(io::Error::new(
++                            io::ErrorKind::PermissionDenied,
++                            "invalid launchd worker proof",
++                        ));
++                    }
++                    return Ok((job, stream));
++                }
++                Err(err)
++                    if err.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline =>
++                {
++                    std::thread::sleep(POLL_INTERVAL);
++                }
++                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
++                    return Err(io::Error::new(
++                        io::ErrorKind::TimedOut,
++                        "launchd command worker did not connect",
++                    ));
++                }
++                Err(err) => return Err(err),
++            }
++        }
++    }
++
++    fn registered_pid(&self) -> io::Result<libc::pid_t> {
++        let service = self.service.as_ref().ok_or_else(invalid_message)?;
++        let result = launchctl(
++            &["print".as_ref(), service.as_ref()],
++            Instant::now() + SETUP_TIMEOUT,
++            true,
++        )?;
++        let mut lines = result.stdout.lines();
++        if !result.success
++            || lines.next().and_then(|line| line.strip_suffix(" = {")) != Some(service.as_str())
++        {
++            return Err(io::Error::other(
++                "could not inspect managed local launchd service",
++            ));
++        }
++        let mut pids = lines
++            .filter_map(|line| line.trim().strip_prefix("pid = "))
++            .filter_map(|pid| pid.parse::<libc::pid_t>().ok());
++        let pid = pids
++            .next()
++            .filter(|pid| *pid > 1)
++            .ok_or_else(invalid_message)?;
++        if pids.next().is_some() {
++            return Err(invalid_message());
++        }
++        Ok(pid)
++    }
++
++    fn finish(&mut self) -> io::Result<()> {
++        let Some(service) = &self.service else {
++            return Ok(());
++        };
++        let deadline = Instant::now() + Duration::from_secs(1);
++        let result = launchctl(&["bootout".as_ref(), service.as_ref()], deadline, false)?;
++        if !result.success {
++            let inspection = launchctl(&["print".as_ref(), service.as_ref()], deadline, true)?;
++            let label = service.rsplit('/').next().ok_or_else(invalid_message)?;
++            if inspection.success
++                || !inspection.stderr.contains("Could not find service")
++                || !inspection.stderr.contains(&format!("\"{label}\""))
++            {
++                return Err(io::Error::other(
++                    "could not remove managed local launchd service",
++                ));
++            }
++        }
++        self.service = None;
++        Ok(())
++    }
++}
++
++impl Drop for LaunchdJob {
++    fn drop(&mut self) {
++        let _ = self.finish();
++    }
++}
++
++struct LaunchctlOutput {
++    success: bool,
++    stdout: String,
++    stderr: String,
++}
++
++fn launchctl(
++    args: &[&std::ffi::OsStr],
++    deadline: Instant,
++    capture: bool,
++) -> io::Result<LaunchctlOutput> {
++    let mut command = Command::new("/bin/launchctl");
++    command.args(args).env_clear().stdin(Stdio::null());
++    // Avoid waiting for a child whose output pipe is full.
++    let mut output = None;
++    if capture {
++        let directory = codex_uds::prepare_shared_daemon_socket_directory()?;
++        let stdout = tempfile::tempfile_in(&directory)?;
++        let stderr = tempfile::tempfile_in(directory)?;
++        command
++            .stdout(stdout.try_clone()?)
++            .stderr(stderr.try_clone()?);
++        output = Some((stdout, stderr));
++    } else {
++        command.stdout(Stdio::null()).stderr(Stdio::null());
++    }
++    let mut child = command.spawn()?;
++    loop {
++        if let Some(status) = child.try_wait()? {
++            let (mut stdout, mut stderr) = (String::new(), String::new());
++            if let Some((mut out, mut err)) = output {
++                out.rewind()?;
++                err.rewind()?;
++                out.take(64 * 1024).read_to_string(&mut stdout)?;
++                err.take(64 * 1024).read_to_string(&mut stderr)?;
++            }
++            return Ok(LaunchctlOutput {
++                success: status.success(),
++                stdout,
++                stderr,
++            });
++        }
++        if Instant::now() >= deadline {
++            let _ = child.kill();
++            let _ = child.wait();
++            return Err(io::Error::new(
++                io::ErrorKind::TimedOut,
++                "launchctl did not finish",
++            ));
++        }
++        std::thread::sleep(POLL_INTERVAL);
++    }
++}
++
++fn peer_pid(socket: &UnixStream) -> io::Result<libc::pid_t> {
++    let mut pid = 0;
++    let mut len = std::mem::size_of::<libc::pid_t>() as libc::socklen_t;
++    // Darwin's SOL_LOCAL=0, LOCAL_PEERPID=2. The kernel supplies the PID.
++    let status = unsafe {
++        libc::getsockopt(
++            socket.as_raw_fd(),
++            0,
++            2,
++            (&mut pid as *mut libc::pid_t).cast(),
++            &mut len,
++        )
++    };
++    if status == -1 {
++        return Err(io::Error::last_os_error());
++    }
++    if len as usize != std::mem::size_of::<libc::pid_t>() {
++        return Err(invalid_message());
++    }
++    Ok(pid)
++}
++
++fn readable<const N: usize>(
++    sockets: [&UnixStream; N],
++    timeout: Option<Duration>,
++) -> io::Result<[bool; N]> {
++    let mut fds = sockets.map(|socket| libc::pollfd {
++        fd: socket.as_raw_fd(),
++        events: libc::POLLIN,
++        revents: 0,
++    });
++    let millis = timeout.map_or(-1, |duration| duration.as_millis() as libc::c_int);
++    loop {
++        // SAFETY: fds supplies all N mutable poll descriptors.
++        if unsafe { libc::poll(fds.as_mut_ptr(), N as libc::nfds_t, millis) } >= 0 {
++            return Ok(fds.map(|fd| fd.revents != 0));
++        }
++        let err = io::Error::last_os_error();
++        if err.kind() != io::ErrorKind::Interrupted {
++            return Err(err);
++        }
++    }
++}
++
++fn read_byte(stream: &mut UnixStream) -> io::Result<Option<u8>> {
++    let mut byte = [0];
++    loop {
++        match stream.read(&mut byte) {
++            Ok(0) => return Ok(None),
++            Ok(_) => return Ok(Some(byte[0])),
++            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
++            Err(err) => return Err(err),
++        }
++    }
++}
++
++fn fd_arg(arg: Option<std::ffi::OsString>) -> io::Result<RawFd> {
++    arg.and_then(|arg| arg.to_str()?.parse().ok())
++        .filter(|fd| *fd > 2)
++        .ok_or_else(invalid_message)
++}
++
++fn cloexec(fd: impl std::os::fd::AsFd) -> io::Result<()> {
++    rustix::io::fcntl_setfd(fd, rustix::io::FdFlags::CLOEXEC)?;
++    Ok(())
++}
++
++fn xml_path(path: &Path) -> io::Result<String> {
++    Ok(path
++        .to_str()
++        .ok_or_else(invalid_message)?
++        .replace('&', "&amp;")
++        .replace('<', "&lt;")
++        .replace('>', "&gt;"))
++}
++
++fn invalid_message() -> io::Error {
++    io::Error::new(
++        io::ErrorKind::InvalidData,
++        "invalid managed local Darwin command request",
++    )
++}
+diff --git a/codex-rs/exec-server/src/lib.rs b/codex-rs/exec-server/src/lib.rs
+index 1a7c5c2..e2af0c8 100644
+--- a/codex-rs/exec-server/src/lib.rs
++++ b/codex-rs/exec-server/src/lib.rs
+@@ -7,6 +7,10 @@ mod client_error;
+ mod client_telemetry;
+ mod client_transport;
+ mod connection;
++#[cfg(target_os = "macos")]
++mod darwin_coalition;
++#[cfg(target_os = "macos")]
++pub mod darwin_command;
+ #[path = "discoverV2/mod.rs"]
+ mod discover_v2;
+ mod environment;
+diff --git a/codex-rs/exec-server/src/sandboxed_file_open.rs b/codex-rs/exec-server/src/sandboxed_file_open.rs
+index bf21a06..cb47f0f 100644
+--- a/codex-rs/exec-server/src/sandboxed_file_open.rs
++++ b/codex-rs/exec-server/src/sandboxed_file_open.rs
+@@ -104,20 +104,29 @@ async fn open_platform(
+ // SCM_RIGHTS is Unix-only.
+ #[cfg(unix)]
+ pub(crate) fn transfer_file(file: &tokio::fs::File) -> io::Result<()> {
++    use std::os::fd::AsFd;
++
++    send_file_descriptor(std::io::stdin(), file.as_fd())
++}
++
++#[cfg(unix)]
++pub(crate) fn send_file_descriptor(
++    socket: impl std::os::fd::AsFd,
++    file: std::os::fd::BorrowedFd<'_>,
++) -> io::Result<()> {
+     use rustix::net::SendAncillaryBuffer;
+     use rustix::net::SendAncillaryMessage;
+     use rustix::net::SendFlags;
+     use std::io::IoSlice;
+-    use std::os::fd::AsFd;
+
+-    let descriptors = [file.as_fd()];
++    let descriptors = [file];
+     let mut space = [std::mem::MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+     let mut control = SendAncillaryBuffer::new(&mut space);
+     if !control.push(SendAncillaryMessage::ScmRights(&descriptors)) {
+         return Err(io::Error::other("missing file-descriptor control header"));
+     }
+     if rustix::net::sendmsg(
+-        std::io::stdin(),
++        socket,
+         &[IoSlice::new(&[0])],
+         &mut control,
+         SendFlags::empty(),
+@@ -132,7 +141,7 @@ pub(crate) fn transfer_file(file: &tokio::fs::File) -> io::Result<()> {
+
+ // File-descriptor passing is only available on Unix.
+ #[cfg(unix)]
+-fn receive_file_descriptor(
++pub(crate) fn receive_file_descriptor(
+     socket: &std::os::unix::net::UnixStream,
+ ) -> io::Result<std::os::fd::OwnedFd> {
+     use rustix::net::RecvAncillaryBuffer;
+diff --git a/codex-rs/utils/pty/src/process.rs b/codex-rs/utils/pty/src/process.rs
+index 5593450..3a6f64e 100644
+--- a/codex-rs/utils/pty/src/process.rs
++++ b/codex-rs/utils/pty/src/process.rs
+@@ -132,6 +132,16 @@ impl fmt::Debug for ProcessHandle {
+ }
+
+ impl ProcessHandle {
++    /// Stop through a trusted supervisor while keeping its waiter alive.
++    #[cfg(target_os = "macos")]
++    pub fn set_stop_action(&mut self, stop: impl FnMut() + Send + Sync + 'static) {
++        if let Ok(killer) = self.killer.get_mut() {
++            *killer = Some(Box::new(ClosureTerminator {
++                inner: Some(Box::new(stop)),
++            }));
++        }
++    }
++
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) fn new(
+         writer_tx: mpsc::Sender<Vec<u8>>,
+diff --git a/codex-rs/utils/pty/src/pty.rs b/codex-rs/utils/pty/src/pty.rs
+index 035fad8..35d31f5 100644
+--- a/codex-rs/utils/pty/src/pty.rs
++++ b/codex-rs/utils/pty/src/pty.rs
+@@ -48,12 +48,17 @@ pub enum ChildFds<'a> {
+     Inherited(&'a [i32]),
+     /// Launch attachments, including CLOEXEC files, with ordinary PTY behavior.
+     Attached(&'a [i32]),
++    /// Give the launchd worker the PTY slave before its child claims the terminal.
++    #[cfg(target_os = "macos")]
++    Launchd(&'a [i32], bool),
+ }
+
+ impl<'a> ChildFds<'a> {
+     pub fn as_slice(self) -> &'a [i32] {
+         match self {
+             Self::Inherited(fds) | Self::Attached(fds) => fds,
++            #[cfg(target_os = "macos")]
++            Self::Launchd(fds, _) => fds,
+         }
+     }
+ }
+@@ -333,6 +338,8 @@ async fn spawn_process_preserving_fds(
+     let uses_portable_status = match descriptors {
+         ChildFds::Inherited(fds) => fds.is_empty(),
+         ChildFds::Attached(_) => true,
++        #[cfg(target_os = "macos")]
++        ChildFds::Launchd(_, uses_portable_status) => uses_portable_status,
+     };
+     let inherited_fds = descriptors.as_slice();
+     let stdin_close_behavior = if uses_portable_status {
+@@ -396,6 +403,8 @@ async fn spawn_process_preserving_fds(
+             command.env("SHELL", shell);
+         }
+         let inherited_fds = inherited_fds.to_vec();
++        #[cfg(target_os = "macos")]
++        let launchd = matches!(descriptors, ChildFds::Launchd(..));
+         // The child sees the same terminal on stdin, stdout, and stderr.
+         unsafe {
+             command
+@@ -403,6 +412,15 @@ async fn spawn_process_preserving_fds(
+                 .stdout(Stdio::from(slave.try_clone()?))
+                 .stderr(Stdio::from(slave.try_clone()?))
+                 .pre_exec(move || {
++                    #[cfg(target_os = "macos")]
++                    if launchd {
++                        if libc::setsid() == -1 {
++                            return Err(std::io::Error::last_os_error());
++                        }
++                    } else {
++                        configure_child_terminal()?;
++                    }
++                    #[cfg(not(target_os = "macos"))]
+                     configure_child_terminal()?;
+                     close_inherited_fds_except(&inherited_fds);
+                     make_fds_inheritable(&inherited_fds)?;
+@@ -642,7 +660,7 @@ pub(crate) fn close_inherited_fds_except(preserved_fds: &[RawFd]) {
+ /// Establish the controlling terminal and signal state before a PTY target exec.
+ /// This also runs in the legacy pre-exec callback, so it must stay async-signal-safe.
+ #[cfg(unix)]
+-pub(crate) fn configure_child_terminal() -> std::io::Result<()> {
++pub fn configure_child_terminal() -> std::io::Result<()> {
+     // SAFETY: These operations only change the calling child's signal/session state.
+     unsafe {
+         for signo in &[

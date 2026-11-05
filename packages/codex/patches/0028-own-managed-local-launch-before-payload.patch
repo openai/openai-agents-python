@@ -1,0 +1,1371 @@
+diff --git a/codex-rs/core/src/tasks/mod.rs b/codex-rs/core/src/tasks/mod.rs
+index 97ea422f0a98d423cdf43787b68ec7377a317605..bc39a14368abfb3ed32e2cc8a0a544e9101813ce 100644
+--- a/codex-rs/core/src/tasks/mod.rs
++++ b/codex-rs/core/src/tasks/mod.rs
+@@ -1061,9 +1061,8 @@ impl Session {
+         task: AbortOnDropHandle<()>,
+         turn: &TurnContext,
+     ) {
+-        // A cancelled initial call can still be returning its process from spawn.
+-        // Stop the task before reading the process store so it cannot add entries
+-        // after this cleanup. Previously returned terminal handles remain live.
++        // Stop the root task before fencing new managed launches and joining
++        // unreturned commands. A detached tool may still be finishing its spawn.
+         task.abort();
+         let task_joined = match tokio::time::timeout(Duration::from_secs(5), task).await {
+             Ok(Ok(())) => true,
+diff --git a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+index faf8b90848eee08a570d4e2dd8a0009083730f8c..33deee58edf35b9ae5fd33f5115fd52ef19664d2 100644
+--- a/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
++++ b/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs
+@@ -409,12 +409,20 @@ impl ExecCommandHandler {
+         )
+         .await;
+         // Preparation can be cancelled. Reserve a process only once it is done.
+-        let process_id = manager.allocate_process_id().await;
++        let Some((process_id, process_id_generation)) = manager
++            .allocate_process_id(&context.step_context.turn.extension_data)
++            .await
++        else {
++            return Err(FunctionCallError::RespondToModel(
++                "command cancelled".into(),
++            ));
++        };
+         let request = ExecCommandRequest {
+             command,
+             shell: resolved_command.shell,
+             hook_command: hook_command.clone(),
+             process_id,
++            process_id_generation,
+             yield_time_ms,
+             max_output_tokens,
+             cwd,
+diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+index 82a76ded4c244abb6f9c12a728d0c4c6def866e0..df39d11375fdcbde6598fef5a959dcfec9b98380 100644
+--- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
++++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+@@ -60,6 +60,7 @@ use codex_tools::UnifiedExecShellMode;
+ use codex_utils_path_uri::PathUri;
+ use std::collections::HashMap;
+ use std::io;
++use std::sync::Arc;
+ use std::time::Duration;
+ use tokio_util::sync::CancellationToken;
+ 
+@@ -78,6 +79,7 @@ pub struct UnifiedExecRequest {
+     pub(crate) shell: ShellInvocation,
+     pub hook_command: String,
+     pub process_id: i32,
++    pub(crate) process_id_generation: Arc<()>,
+     pub cwd: PathUri,
+     pub sandbox_cwd: PathUri,
+     pub turn_environment: TurnEnvironment,
+@@ -116,7 +118,7 @@ pub struct UnifiedExecRuntime<'a> {
+ }
+ 
+ pub(crate) struct UnifiedExecAttempt {
+-    pub(crate) process: UnifiedExecProcess,
++    pub(crate) process: Arc<UnifiedExecProcess>,
+     pub(crate) metrics_sidecar: Option<PluginMetricsSidecar>,
+     pub(crate) permissions: TerminalPermissions,
+ }
+@@ -686,6 +688,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                         .manager
+                         .open_session_with_prepared_exec_env(
+                             req.process_id,
++                            &req.process_id_generation,
+                             &prepared.exec_request,
+                             Some(ctx),
+                             windows_sandbox_proxy_settings_mode,
+@@ -704,8 +707,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                             }
+                             other => ToolError::Rejected(other.to_string()),
+                         });
+-                    let mut process = with_launch_failure_events(process, req, ctx).await?;
+-                    process._shell_snapshot = shell_snapshot;
++                    let process = with_launch_failure_events(process, req, ctx).await?;
++                    process.retain_shell_snapshot(shell_snapshot);
+                     return Ok(UnifiedExecAttempt {
+                         process,
+                         metrics_sidecar,
+@@ -737,6 +740,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+             .manager
+             .open_session_with_exec_env(
+                 req.process_id,
++                &req.process_id_generation,
+                 ctx,
+                 command,
+                 options,
+@@ -752,8 +756,8 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                 req.turn_environment.environment.as_ref(),
+             )
+             .await;
+-        let mut process = with_launch_failure_events(process, req, ctx).await?;
+-        process._shell_snapshot = shell_snapshot;
++        let process = with_launch_failure_events(process, req, ctx).await?;
++        process.retain_shell_snapshot(shell_snapshot);
+         Ok(UnifiedExecAttempt {
+             process,
+             metrics_sidecar,
+@@ -881,6 +885,7 @@ mod tests {
+             },
+             hook_command: "pwd".to_string(),
+             process_id: 1000,
++            process_id_generation: Arc::new(()),
+             cwd: cwd.into(),
+             sandbox_cwd: sandbox_cwd.clone().into(),
+             turn_environment: test_turn_environment(sandbox_cwd.clone().into()),
+@@ -990,6 +995,7 @@ mod tests {
+             },
+             hook_command: "echo hi".to_string(),
+             process_id: 1000,
++            process_id_generation: Arc::new(()),
+             cwd: cwd.clone().into(),
+             sandbox_cwd: cwd.clone().into(),
+             turn_environment: test_turn_environment(cwd.into()),
+diff --git a/codex-rs/core/src/tools/runtimes/unified_exec/launch.rs b/codex-rs/core/src/tools/runtimes/unified_exec/launch.rs
+index 0e292ffd5487295c89d380bf43ccdfc9023ed3d4..2b7752e4ebe16899f6a285c567ecf9e9b32f2727 100644
+--- a/codex-rs/core/src/tools/runtimes/unified_exec/launch.rs
++++ b/codex-rs/core/src/tools/runtimes/unified_exec/launch.rs
+@@ -15,10 +15,10 @@ use std::sync::Arc;
+ use tracing::Instrument;
+ 
+ pub(super) async fn with_launch_failure_events(
+-    result: Result<UnifiedExecProcess, ToolError>,
++    result: Result<Arc<UnifiedExecProcess>, ToolError>,
+     req: &UnifiedExecRequest,
+     ctx: &ToolCtx,
+-) -> Result<UnifiedExecProcess, ToolError> {
++) -> Result<Arc<UnifiedExecProcess>, ToolError> {
+     let Err(ToolError::Rejected(message)) = &result else {
+         return result;
+     };
+diff --git a/codex-rs/core/src/unified_exec/mod.rs b/codex-rs/core/src/unified_exec/mod.rs
+index 4a24c77005a041019171b809cd3ed10981e901e7..9711ce8777fbafa4873c76f8db248bb4ec83a904 100644
+--- a/codex-rs/core/src/unified_exec/mod.rs
++++ b/codex-rs/core/src/unified_exec/mod.rs
+@@ -24,7 +24,6 @@
+ //! - `process_manager.rs`: orchestration (approvals, sandboxing, reuse) and request handling.
+ 
+ use std::collections::HashMap;
+-use std::collections::HashSet;
+ use std::sync::Arc;
+ use std::sync::Weak;
+ 
+@@ -117,6 +116,7 @@ pub(crate) struct ExecCommandRequest {
+     pub shell: ShellInvocation,
+     pub hook_command: String,
+     pub process_id: i32,
++    pub process_id_generation: Arc<()>,
+     pub yield_time_ms: u64,
+     pub max_output_tokens: Option<usize>,
+     pub cwd: PathUri,
+@@ -156,14 +156,27 @@ impl std::fmt::Debug for WriteStdinInteractionEvent<'_> {
+ #[derive(Default)]
+ pub(crate) struct ProcessStore {
+     processes: HashMap<i32, ProcessEntry>,
+-    reserved_process_ids: HashSet<i32>,
++    #[cfg(target_os = "linux")]
++    starting_processes: HashMap<i32, StartingManagedProcess>,
++    reserved_process_ids: HashMap<i32, ProcessIdReservation>,
++    next_deterministic_process_id: i32,
++}
++
++struct ProcessIdReservation {
++    generation: Arc<()>,
++    #[cfg(target_os = "linux")]
++    turn: std::sync::Weak<codex_extension_api::ExtensionData>,
+ }
+ 
+ impl ProcessStore {
++    fn owns_reservation(&self, process_id: i32, generation: &Arc<()>) -> bool {
++        self.reserved_process_ids
++            .get(&process_id)
++            .is_some_and(|current| Arc::ptr_eq(&current.generation, generation))
++    }
++
+     fn remove(&mut self, process_id: i32) -> Option<ProcessEntry> {
+-        if !process_manager::should_use_deterministic_process_ids() {
+-            self.reserved_process_ids.remove(&process_id);
+-        }
++        self.reserved_process_ids.remove(&process_id);
+         self.processes.remove(&process_id)
+     }
+ }
+@@ -189,6 +202,12 @@ impl Default for UnifiedExecProcessManager {
+     }
+ }
+ 
++#[cfg(target_os = "linux")]
++struct StartingManagedProcess {
++    turn: Arc<codex_extension_api::ExtensionData>,
++    process: Arc<UnifiedExecProcess>,
++}
++
+ struct ProcessEntry {
+     output_policy_store: Option<Arc<codex_extension_api::ExtensionData>>,
+     process: Arc<UnifiedExecProcess>,
+diff --git a/codex-rs/core/src/unified_exec/mod_tests.rs b/codex-rs/core/src/unified_exec/mod_tests.rs
+index e9cd20b29b7fd382ccb6bedad6a26200dd0bb415..52291d2f44b927284391e6c1dcb4f93c3ddce90b 100644
+--- a/codex-rs/core/src/unified_exec/mod_tests.rs
++++ b/codex-rs/core/src/unified_exec/mod_tests.rs
+@@ -101,7 +101,10 @@ async fn exec_command_with_tty(
+     tty: bool,
+ ) -> Result<ExecCommandToolOutput, UnifiedExecError> {
+     let manager = &session.services.unified_exec_manager;
+-    let process_id = manager.allocate_process_id().await;
++    let (process_id, generation) = manager
++        .allocate_process_id(&turn.extension_data)
++        .await
++        .expect("reserve process id");
+     #[allow(deprecated)]
+     let cwd = workdir
+         .as_ref()
+@@ -109,24 +112,23 @@ async fn exec_command_with_tty(
+     let command = vec!["bash".to_string(), "-lc".to_string(), cmd.to_string()];
+     let request = test_exec_request(turn, command.clone(), cwd.clone(), shell_env());
+ 
+-    let process = Arc::new(
+-        manager
+-            .open_session_with_prepared_exec_env(
+-                process_id,
+-                &request,
+-                /*tool_ctx*/ None,
+-                codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+-                /*network_policy_decider*/ None,
+-                tty,
+-                Box::new(NoopSpawnLifecycle),
+-                turn.initial_environments
+-                    .primary()
+-                    .expect("turn environment")
+-                    .environment
+-                    .as_ref(),
+-            )
+-            .await?,
+-    );
++    let process = manager
++        .open_session_with_prepared_exec_env(
++            process_id,
++            &generation,
++            &request,
++            /*tool_ctx*/ None,
++            codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
++            /*network_policy_decider*/ None,
++            tty,
++            Box::new(NoopSpawnLifecycle),
++            turn.initial_environments
++                .primary()
++                .expect("turn environment")
++                .environment
++                .as_ref(),
++        )
++        .await?;
+     let context = UnifiedExecContext::new(
+         Arc::clone(session),
+         crate::session::step_context::StepContext::for_test(Arc::clone(turn)),
+@@ -189,7 +191,9 @@ async fn exec_command_with_tty(
+     let response_process_id = if process_started_alive && !has_exited {
+         Some(process_id)
+     } else {
+-        manager.release_process_id(process_id).await;
++        manager
++            .release_initial_process_id(process_id, &generation)
++            .await;
+         None
+     };
+     if response_process_id.is_some()
+@@ -601,7 +605,10 @@ async fn reusing_completed_process_returns_unknown_process() -> anyhow::Result<(
+ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> anyhow::Result<()> {
+     let (session, turn) = test_session_and_turn().await;
+     let manager = &session.services.unified_exec_manager;
+-    let process_id = manager.allocate_process_id().await;
++    let (process_id, _generation) = manager
++        .allocate_process_id(&turn.extension_data)
++        .await
++        .expect("reserve process id");
+     let (terminate_started_tx, mut terminate_started_rx) = watch::channel(false);
+     let allow_terminate = Arc::new(Notify::new());
+     let process = blocking_terminate_unified_process(
+@@ -688,7 +695,10 @@ async fn terminating_initial_exec_command_rechecks_initial_response_state() -> a
+ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Result<()> {
+     let (session, turn) = test_session_and_turn().await;
+     let manager = &session.services.unified_exec_manager;
+-    let process_id = manager.allocate_process_id().await;
++    let (process_id, _generation) = manager
++        .allocate_process_id(&turn.extension_data)
++        .await
++        .expect("reserve process id");
+     let (terminate_started_tx, _terminate_started_rx) = watch::channel(false);
+     let allow_terminate = Arc::new(Notify::new());
+     let process = blocking_terminate_unified_process(
+@@ -758,7 +768,7 @@ async fn terminating_during_stdin_poll_returns_exited_response() -> anyhow::Resu
+     .await
+     .expect("poll should clone process handles");
+ 
+-    manager.release_process_id(process_id).await;
++    manager.release_process_id(process_id, &process).await;
+     allow_terminate.notify_one();
+     process.terminate_confirmed().await?;
+ 
+@@ -788,6 +798,7 @@ async fn completed_pipe_commands_preserve_exit_code() -> anyhow::Result<()> {
+     let process = UnifiedExecProcessManager::default()
+         .open_session_with_prepared_exec_env(
+             /*process_id*/ 1234,
++            &Arc::new(()),
+             &request,
+             /*tool_ctx*/ None,
+             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+@@ -831,6 +842,7 @@ async fn unified_exec_uses_remote_exec_server_when_configured() -> anyhow::Resul
+     let process = manager
+         .open_session_with_prepared_exec_env(
+             /*process_id*/ 1234,
++            &Arc::new(()),
+             &request,
+             /*tool_ctx*/ None,
+             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+@@ -882,6 +894,7 @@ async fn remote_exec_server_rejects_inherited_fd_launches() -> anyhow::Result<()
+     let err = manager
+         .open_session_with_prepared_exec_env(
+             /*process_id*/ 1234,
++            &Arc::new(()),
+             &request,
+             /*tool_ctx*/ None,
+             codex_sandboxing::WindowsSandboxProxySettingsMode::Reconcile,
+diff --git a/codex-rs/core/src/unified_exec/oneshot.rs b/codex-rs/core/src/unified_exec/oneshot.rs
+index 460aaeb462391824a608befbe3757ca7cb0068c2..3b3c21d4e056d4b8b1e49a68dac5645bd463029b 100644
+--- a/codex-rs/core/src/unified_exec/oneshot.rs
++++ b/codex-rs/core/src/unified_exec/oneshot.rs
+@@ -53,8 +53,11 @@ impl UnifiedExecProcessManager {
+         let task = async move {
+             let manager = &context.session.services.unified_exec_manager;
+             let process_id = request.process_id;
++            let generation = Arc::clone(&request.process_id_generation);
+             if Instant::now().checked_add(timeout).is_none() {
+-                manager.release_process_id(process_id).await;
++                manager
++                    .release_initial_process_id(process_id, &generation)
++                    .await;
+                 return (
+                     Err(UnifiedExecError::process_failed(
+                         "timeout_ms is too large".into(),
+@@ -84,7 +87,7 @@ impl UnifiedExecProcessManager {
+                             let _ = execution.await;
+                         } else {
+                             drop(execution);
+-                            manager.release_process_id(process_id).await;
++                            manager.release_initial_process_id(process_id, &generation).await;
+                         }
+                         return (
+                             Err(UnifiedExecError::process_failed("command cancelled".into())),
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 279771ce849ab666ba3591d827ae7aef9ca90e9c..759feb8f0a1131a4b241aaea919642a51730ff10 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -1,10 +1,13 @@
+ #![allow(clippy::module_inception)]
+ 
++#[cfg(target_os = "linux")]
++use std::io::Write;
+ #[cfg(target_os = "linux")]
+ use std::net::Shutdown;
+ #[cfg(target_os = "linux")]
+ use std::os::unix::net::UnixStream;
+ use std::sync::Arc;
++use std::sync::OnceLock;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ use tokio::sync::Mutex;
+@@ -129,7 +132,7 @@ pub(crate) struct UnifiedExecProcess {
+     suppress_output_diagnostics: AtomicBool,
+     _spawn_lifecycle: Option<SpawnLifecycleHandle>,
+     // The shell may still need to replay this file after process startup returns.
+-    pub(crate) _shell_snapshot: Option<Arc<ShellSnapshotFile>>,
++    _shell_snapshot: OnceLock<Arc<ShellSnapshotFile>>,
+ }
+ 
+ impl std::fmt::Debug for UnifiedExecProcess {
+@@ -174,7 +177,7 @@ impl UnifiedExecProcess {
+             timed_out: AtomicBool::new(false),
+             suppress_output_diagnostics: AtomicBool::new(false),
+             _spawn_lifecycle: spawn_lifecycle,
+-            _shell_snapshot: None,
++            _shell_snapshot: OnceLock::new(),
+         }
+     }
+ 
+@@ -313,6 +316,20 @@ impl UnifiedExecProcess {
+         false
+     }
+ 
++    pub(crate) fn retain_shell_snapshot(&self, snapshot: Option<Arc<ShellSnapshotFile>>) {
++        if let Some(snapshot) = snapshot {
++            let _ = self._shell_snapshot.set(snapshot);
++        }
++    }
++
++    #[cfg(target_os = "linux")]
++    pub(super) fn start_managed_linux_sandbox(&self) -> std::io::Result<()> {
++        if let Some(cancel) = &self.sandbox_cancel {
++            (&cancel.socket).write_all(&[1])?;
++        }
++        Ok(())
++    }
++
+     fn request_local_termination(&self, process: &ExecCommandSession) {
+         #[cfg(target_os = "linux")]
+         if let Some(cancel) = &self.sandbox_cancel {
+@@ -459,24 +476,25 @@ impl UnifiedExecProcess {
+         sandbox_type: SandboxType,
+         spawn_lifecycle: SpawnLifecycleHandle,
+     ) -> Result<Self, UnifiedExecError> {
+-        Self::from_spawned_with_output_policy(
++        let process = Self::from_spawned_with_output_policy(
+             spawned,
+             sandbox_type,
+             spawn_lifecycle,
+             false,
+             #[cfg(target_os = "linux")]
+             None,
+-        )
+-        .await
++        );
++        process.check_early_exit().await?;
++        Ok(process)
+     }
+ 
+-    pub(super) async fn from_spawned_with_output_policy(
++    pub(super) fn from_spawned_with_output_policy(
+         spawned: SpawnedPty,
+         sandbox_type: SandboxType,
+         spawn_lifecycle: SpawnLifecycleHandle,
+         controlled: bool,
+         #[cfg(target_os = "linux")] sandbox_cancel: Option<UnixStream>,
+-    ) -> Result<Self, UnifiedExecError> {
++    ) -> Self {
+         let SpawnedPty {
+             session: process_handle,
+             stdout_rx,
+@@ -506,37 +524,37 @@ impl UnifiedExecProcess {
+         ));
+ 
+         match exit_rx.try_recv() {
+-            Ok(exit_code) => {
+-                managed.signal_exit(Some(exit_code));
+-                managed.check_for_sandbox_denial().await?;
+-                return Ok(managed);
+-            }
+-            Err(TryRecvError::Closed) => {
+-                managed.signal_exit(/*exit_code*/ None);
+-                managed.check_for_sandbox_denial().await?;
+-                return Ok(managed);
++            Ok(exit_code) => managed.signal_exit(Some(exit_code)),
++            Err(TryRecvError::Closed) => managed.signal_exit(/*exit_code*/ None),
++            Err(TryRecvError::Empty) => {
++                tokio::spawn({
++                    let state_tx = managed.state_tx.clone();
++                    let cancellation_token = managed.output.cancellation_token.clone();
++                    async move {
++                        let exit_code = exit_rx.await.ok();
++                        let state = state_tx.borrow().clone();
++                        let _ = state_tx.send_replace(state.exited(exit_code));
++                        cancellation_token.cancel();
++                    }
++                });
+             }
+-            Err(TryRecvError::Empty) => {}
+         }
+ 
+-        if let Ok(exit_result) = tokio::time::timeout(EARLY_EXIT_GRACE_PERIOD, &mut exit_rx).await {
+-            managed.signal_exit(exit_result.ok());
+-            managed.check_for_sandbox_denial().await?;
+-            return Ok(managed);
+-        }
+-
+-        tokio::spawn({
+-            let state_tx = managed.state_tx.clone();
+-            let cancellation_token = managed.output.cancellation_token.clone();
+-            async move {
+-                let exit_code = exit_rx.await.ok();
+-                let state = state_tx.borrow().clone();
+-                let _ = state_tx.send_replace(state.exited(exit_code));
+-                cancellation_token.cancel();
+-            }
+-        });
++        managed
++    }
+ 
+-        Ok(managed)
++    pub(super) async fn check_early_exit(&self) -> Result<(), UnifiedExecError> {
++        let mut state = self.state_rx.clone();
++        let exited = tokio::time::timeout(
++            EARLY_EXIT_GRACE_PERIOD,
++            state.wait_for(|state| state.has_exited),
++        )
++        .await
++        .is_ok();
++        if exited || self.has_exited() {
++            self.check_for_sandbox_denial().await?;
++        }
++        Ok(())
+     }
+ 
+     #[cfg(test)]
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index bdd2eb02f501be307492395a1ebadebf9792282e..660af270d59d37eb3295a04c1b78c22a20390de4 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -50,7 +50,10 @@ use crate::unified_exec::MAX_YIELD_TIME_MS;
+ use crate::unified_exec::MIN_EMPTY_YIELD_TIME_MS;
+ use crate::unified_exec::MIN_YIELD_TIME_MS;
+ use crate::unified_exec::ProcessEntry;
++use crate::unified_exec::ProcessIdReservation;
+ use crate::unified_exec::ProcessStore;
++#[cfg(target_os = "linux")]
++use crate::unified_exec::StartingManagedProcess;
+ use crate::unified_exec::UnifiedExecContext;
+ use crate::unified_exec::UnifiedExecError;
+ use crate::unified_exec::UnifiedExecProcessManager;
+@@ -109,6 +112,66 @@ const LATE_NETWORK_DENIAL_GRACE_PERIOD: Duration = Duration::from_millis(100);
+ const MAX_STDIN_APPROVAL_BYTES: usize = 8_000;
+ const INTERRUPT: &str = "\u{3}";
+ 
++#[cfg(target_os = "linux")]
++struct ManagedLocalExecStopped;
++
++#[cfg(target_os = "linux")]
++impl ProcessStore {
++    fn start_managed_process(
++        &mut self,
++        process_id: i32,
++        generation: &Arc<()>,
++        turn: &Arc<codex_extension_api::ExtensionData>,
++        process: &Arc<UnifiedExecProcess>,
++    ) -> Result<(), UnifiedExecError> {
++        if !self.owns_reservation(process_id, generation)
++            || turn.get::<ManagedLocalExecStopped>().is_some()
++        {
++            return Err(UnifiedExecError::process_failed("command cancelled".into()));
++        }
++        if self.processes.contains_key(&process_id) {
++            return Err(UnifiedExecError::create_process(
++                "a command already owns this process id".into(),
++            ));
++        }
++        let std::collections::hash_map::Entry::Vacant(starting) =
++            self.starting_processes.entry(process_id)
++        else {
++            return Err(UnifiedExecError::create_process(
++                "a command already owns this process id".into(),
++            ));
++        };
++        starting.insert(StartingManagedProcess {
++            turn: Arc::clone(turn),
++            process: Arc::clone(process),
++        });
++        // Hold the same lock used by interrupt and store promotion. A command
++        // can start only after the interrupt barrier has a process to join.
++        if let Err(err) = process.start_managed_linux_sandbox() {
++            self.starting_processes.remove(&process_id);
++            return Err(UnifiedExecError::create_process(err.to_string()));
++        }
++        Ok(())
++    }
++
++    fn remove_starting_process(
++        &mut self,
++        process_id: i32,
++        process: &Arc<UnifiedExecProcess>,
++    ) -> bool {
++        let std::collections::hash_map::Entry::Occupied(starting) =
++            self.starting_processes.entry(process_id)
++        else {
++            return false;
++        };
++        if !Arc::ptr_eq(&starting.get().process, process) {
++            return false;
++        }
++        starting.remove();
++        true
++    }
++}
++
+ /// Test-only override for deterministic unified exec process IDs.
+ ///
+ /// In production builds this value should remain at its default (`false`) and
+@@ -468,41 +531,88 @@ fn terminate_process_on_network_denial(
+ }
+ 
+ impl UnifiedExecProcessManager {
+-    pub(crate) async fn allocate_process_id(&self) -> i32 {
++    pub(crate) async fn allocate_process_id(
++        &self,
++        turn: &Arc<codex_extension_api::ExtensionData>,
++    ) -> Option<(i32, Arc<()>)> {
++        #[cfg(not(target_os = "linux"))]
++        let _ = turn;
+         loop {
+             let mut store = self.process_store.lock().await;
+-
++            #[cfg(target_os = "linux")]
++            if turn.get::<ManagedLocalExecStopped>().is_some() {
++                return None;
++            }
+             let process_id = if should_use_deterministic_process_ids() {
+-                // test or deterministic mode
+-                store
+-                    .reserved_process_ids
+-                    .iter()
+-                    .copied()
+-                    .max()
+-                    .map(|m| std::cmp::max(m, 999) + 1)
+-                    .unwrap_or(1000)
++                let next = store.next_deterministic_process_id.max(1000);
++                store.next_deterministic_process_id = next + 1;
++                next
+             } else {
+                 // production mode → random
+                 rand::rng().random_range(1_000..100_000)
+             };
+ 
+-            if store.reserved_process_ids.contains(&process_id) {
+-                continue;
++            if let std::collections::hash_map::Entry::Vacant(reservation) =
++                store.reserved_process_ids.entry(process_id)
++            {
++                let generation = Arc::new(());
++                reservation.insert(ProcessIdReservation {
++                    generation: Arc::clone(&generation),
++                    #[cfg(target_os = "linux")]
++                    turn: Arc::downgrade(turn),
++                });
++                return Some((process_id, generation));
+             }
++        }
++    }
+ 
+-            store.reserved_process_ids.insert(process_id);
+-            return process_id;
++    pub(super) async fn release_initial_process_id(&self, process_id: i32, generation: &Arc<()>) {
++        let removed = {
++            let mut store = self.process_store.lock().await;
++            if !store.owns_reservation(process_id, generation) {
++                return;
++            }
++            #[cfg(target_os = "linux")]
++            if let Some(starting) = store
++                .starting_processes
++                .get(&process_id)
++                .map(|entry| Arc::clone(&entry.process))
++            {
++                // Retain ownership until exit so a concurrent interrupt can join
++                // the same process even if its initial call has already ended.
++                drop(store);
++                if !starting.terminate_and_join().await {
++                    return;
++                }
++                store = self.process_store.lock().await;
++                if !store.owns_reservation(process_id, generation)
++                    || !store.remove_starting_process(process_id, &starting)
++                {
++                    return;
++                }
++            }
++            store.remove(process_id)
++        };
++        if let Some(entry) = removed {
++            unregister_network_approval_for_entry(&entry).await;
+         }
+     }
+ 
+-    pub(crate) async fn release_process_id(&self, process_id: i32) {
++    pub(super) async fn release_process_id(
++        &self,
++        process_id: i32,
++        process: &Arc<UnifiedExecProcess>,
++    ) {
+         let removed = {
+             let mut store = self.process_store.lock().await;
+-            let entry = store.processes.remove(&process_id);
+-            if !should_use_deterministic_process_ids() {
+-                store.reserved_process_ids.remove(&process_id);
++            if !store
++                .processes
++                .get(&process_id)
++                .is_some_and(|entry| Arc::ptr_eq(&entry.process, process))
++            {
++                return;
+             }
+-            entry
++            store.remove(process_id)
+         };
+         if let Some(entry) = removed {
+             unregister_network_approval_for_entry(&entry).await;
+@@ -554,7 +664,8 @@ impl UnifiedExecProcessManager {
+         let (attempt, mut deferred_network_approval) = match process {
+             Ok((attempt, deferred_network_approval)) => (attempt, deferred_network_approval),
+             Err(err) => {
+-                self.release_process_id(request.process_id).await;
++                self.release_initial_process_id(request.process_id, &request.process_id_generation)
++                    .await;
+                 // A process denied during the early-exit check returns before Begin.
+                 // Record the final denial only after the sandbox orchestrator has
+                 // decided whether to retry, using the original process output.
+@@ -589,7 +700,6 @@ impl UnifiedExecProcessManager {
+             metrics_sidecar,
+             permissions,
+         } = attempt;
+-        let process = Arc::new(process);
+         if let Some(completion) = completion.as_ref() {
+             let _ = completion.process.set(Arc::clone(&process));
+         }
+@@ -647,26 +757,31 @@ impl UnifiedExecProcessManager {
+         let mut initial_exec_command_guard = if process_started_alive {
+             let initial_exec_command_active = Arc::new(AtomicBool::new(true));
+             let initial_exec_command_returned = Arc::new(AtomicBool::new(false));
+-            self.store_process(
+-                Arc::clone(&process),
+-                context,
+-                &request.command,
+-                request.hook_command.clone(),
+-                cwd.clone(),
+-                request.turn_environment.selection.environment_id.clone(),
+-                permissions,
+-                plugin_attribution.clone(),
+-                start,
+-                request.process_id,
+-                request.tty,
+-                deferred_network_approval.clone(),
+-                network_denial_monitor,
+-                metrics_sidecar,
+-                Arc::clone(&output_buffer),
+-                Arc::clone(&initial_exec_command_active),
+-                initial_exec_command_returned,
+-            )
+-            .await;
++            let stored = self
++                .store_process(
++                    Arc::clone(&process),
++                    context,
++                    &request.command,
++                    request.hook_command.clone(),
++                    cwd.clone(),
++                    request.turn_environment.selection.environment_id.clone(),
++                    permissions,
++                    plugin_attribution.clone(),
++                    start,
++                    request.process_id,
++                    &request.process_id_generation,
++                    request.tty,
++                    deferred_network_approval.clone(),
++                    network_denial_monitor,
++                    metrics_sidecar,
++                    Arc::clone(&output_buffer),
++                    Arc::clone(&initial_exec_command_active),
++                    initial_exec_command_returned,
++                )
++                .await;
++            if !stored {
++                return Err(UnifiedExecError::process_failed("command cancelled".into()));
++            }
+             InitialExecCommandGuard {
+                 active: Some(initial_exec_command_active),
+                 metrics_sidecar: None,
+@@ -736,7 +851,8 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process_id(request.process_id, &request.process_id_generation)
++                .await;
+             return Err(fail_process_with_message(process.as_ref(), message));
+         }
+         if let Some(message) = process.failure_message() {
+@@ -758,7 +874,8 @@ impl UnifiedExecProcessManager {
+                 wall_time,
+             )
+             .await;
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process_id(request.process_id, &request.process_id_generation)
++                .await;
+             if let Err(message) = finish_result {
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+@@ -837,7 +954,8 @@ impl UnifiedExecProcessManager {
+                     wall_time,
+                 )
+                 .await;
+-                self.release_process_id(request.process_id).await;
++                self.release_initial_process_id(request.process_id, &request.process_id_generation)
++                    .await;
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+             let exit_code = process.exit_code();
+@@ -863,7 +981,8 @@ impl UnifiedExecProcessManager {
+             )
+             .await;
+ 
+-            self.release_process_id(request.process_id).await;
++            self.release_initial_process_id(request.process_id, &request.process_id_generation)
++                .await;
+             process
+                 .check_for_sandbox_denial_with_text(&text)
+                 .await
+@@ -1059,7 +1178,7 @@ impl UnifiedExecProcessManager {
+                             status_after_write = Some(status);
+                         } else if matches!(err, UnifiedExecError::ProcessFailed { .. }) {
+                             process.terminate();
+-                            self.release_process_id(process_id).await;
++                            self.release_process_id(process_id, &process).await;
+                             return Err(err);
+                         } else {
+                             return Err(err);
+@@ -1099,7 +1218,7 @@ impl UnifiedExecProcessManager {
+             let message =
+                 network_denial_message_for_session(session.as_ref(), network_approval.clone())
+                     .await;
+-            self.release_process_id(process_id).await;
++            self.release_process_id(process_id, &process).await;
+             return Err(fail_process_with_message(process.as_ref(), message));
+         }
+         if let Some(message) = process.failure_message() {
+@@ -1108,7 +1227,7 @@ impl UnifiedExecProcessManager {
+                 network_approval.clone(),
+             )
+             .await;
+-            self.release_process_id(process_id).await;
++            self.release_process_id(process_id, &process).await;
+             if let Err(message) = finish_result {
+                 return Err(fail_process_with_message(process.as_ref(), message));
+             }
+@@ -1257,6 +1376,7 @@ impl UnifiedExecProcessManager {
+         plugin_attribution: Option<PluginCommandAttribution>,
+         started_at: Instant,
+         process_id: i32,
++        process_id_generation: &Arc<()>,
+         tty: bool,
+         network_approval: Option<DeferredNetworkApproval>,
+         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+@@ -1264,7 +1384,7 @@ impl UnifiedExecProcessManager {
+         output_buffer: Arc<tokio::sync::Mutex<OutputBuffers>>,
+         initial_exec_command_active: Arc<AtomicBool>,
+         initial_exec_command_returned: Arc<AtomicBool>,
+-    ) {
++    ) -> bool {
+         let plugin_metrics_sidecar =
+             metrics_sidecar.map(|sidecar| Arc::new(std::sync::Mutex::new(Some(sidecar))));
+         let entry = ProcessEntry {
+@@ -1284,11 +1404,31 @@ impl UnifiedExecProcessManager {
+             session: Arc::downgrade(&context.session),
+             last_used: started_at,
+         };
+-        let pruned_entry = {
++        let (pruned_entry, stored) = {
+             let mut store = self.process_store.lock().await;
+-            let pruned_entry = Self::prune_processes_if_needed(&mut store);
+-            store.processes.insert(process_id, entry);
+-            pruned_entry
++            let owns_reservation = store.owns_reservation(process_id, process_id_generation);
++            #[cfg(target_os = "linux")]
++            let can_store = owns_reservation
++                && (!process.uses_managed_linux_sandbox()
++                    || (context
++                        .step_context
++                        .turn
++                        .extension_data
++                        .get::<ManagedLocalExecStopped>()
++                        .is_none()
++                        && store.remove_starting_process(process_id, &process)));
++            #[cfg(not(target_os = "linux"))]
++            let can_store = owns_reservation;
++            if !can_store {
++                drop(store);
++                process.request_terminate();
++                unregister_network_approval_for_entry(&entry).await;
++                (None, false)
++            } else {
++                let pruned_entry = Self::prune_processes_if_needed(&mut store);
++                store.processes.insert(process_id, entry);
++                (pruned_entry, true)
++            }
+         };
+         // prune_processes_if_needed runs while holding process_store; do async
+         // network-approval cleanup only after dropping that lock.
+@@ -1309,12 +1449,14 @@ impl UnifiedExecProcessManager {
+             network_denial_monitor,
+             plugin_metrics_sidecar,
+         );
++        stored
+     }
+ 
+     #[allow(clippy::too_many_arguments)]
+     pub(crate) async fn open_session_with_exec_env(
+         &self,
+         process_id: i32,
++        process_id_generation: &Arc<()>,
+         tool_ctx: &ToolCtx,
+         command: SandboxCommand,
+         options: ExecOptions,
+@@ -1328,7 +1470,7 @@ impl UnifiedExecProcessManager {
+         tty: bool,
+         spawn_lifecycle: SpawnLifecycleHandle,
+         environment: &codex_exec_server::Environment,
+-    ) -> Result<UnifiedExecProcess, ToolError> {
++    ) -> Result<Arc<UnifiedExecProcess>, ToolError> {
+         let mut request = if environment.is_remote() || shell_snapshot.is_some() {
+             attempt.env_for_exec_server(command, options)
+         } else {
+@@ -1347,6 +1489,7 @@ impl UnifiedExecProcessManager {
+         request.exec_server_shell_snapshot = shell_snapshot;
+         self.open_session_with_prepared_exec_env(
+             process_id,
++            process_id_generation,
+             &request,
+             Some(tool_ctx),
+             windows_sandbox_proxy_settings_mode,
+@@ -1371,6 +1514,7 @@ impl UnifiedExecProcessManager {
+     pub(crate) async fn open_session_with_prepared_exec_env(
+         &self,
+         process_id: i32,
++        process_id_generation: &Arc<()>,
+         request: &ExecRequest,
+         tool_ctx: Option<&ToolCtx>,
+         windows_sandbox_proxy_settings_mode: codex_sandboxing::WindowsSandboxProxySettingsMode,
+@@ -1378,7 +1522,9 @@ impl UnifiedExecProcessManager {
+         tty: bool,
+         mut spawn_lifecycle: SpawnLifecycleHandle,
+         environment: &codex_exec_server::Environment,
+-    ) -> Result<UnifiedExecProcess, UnifiedExecError> {
++    ) -> Result<Arc<UnifiedExecProcess>, UnifiedExecError> {
++        #[cfg(not(target_os = "linux"))]
++        let _ = process_id_generation;
+         let controlled = tool_ctx.is_some_and(|ctx| {
+             crate::tools::builtin_result_policy::controlled(
+                 &ctx.step_context.turn.extension_data,
+@@ -1424,7 +1570,8 @@ impl UnifiedExecProcessManager {
+             return UnifiedExecProcess::from_exec_server_started_with_output_policy(
+                 started, controlled,
+             )
+-            .await;
++            .await
++            .map(Arc::new);
+         }
+ 
+         // TODO(anp): Keep PathUri through the local PTY/process launch boundary.
+@@ -1492,6 +1639,7 @@ impl UnifiedExecProcessManager {
+                 .is_some_and(|paths| paths.join_unreturned_local_exec_on_interrupt);
+             if request.sandbox == codex_sandboxing::SandboxType::LinuxSeccomp
+                 && joins_local_commands
++                && tool_ctx.is_some()
+                 && !flags.clone().any(|arg| {
+                     matches!(
+                         arg.as_str(),
+@@ -1541,15 +1689,49 @@ impl UnifiedExecProcessManager {
+         spawn_lifecycle.after_spawn();
+         let spawned =
+             spawn_result.map_err(|err| UnifiedExecError::create_process(err.to_string()))?;
+-        UnifiedExecProcess::from_spawned_with_output_policy(
++        let process = Arc::new(UnifiedExecProcess::from_spawned_with_output_policy(
+             spawned,
+             request.sandbox,
+             spawn_lifecycle,
+             controlled,
+             #[cfg(target_os = "linux")]
+             cancel_writer,
+-        )
+-        .await
++        ));
++        #[cfg(target_os = "linux")]
++        if process.uses_managed_linux_sandbox()
++            && let Some(tool_ctx) = tool_ctx
++        {
++            let mut store = self.process_store.lock().await;
++            if tool_ctx.cancellation_token.is_cancelled() {
++                return Err(UnifiedExecError::process_failed("command cancelled".into()));
++            }
++            let start = store.start_managed_process(
++                process_id,
++                process_id_generation,
++                &tool_ctx.step_context.turn.extension_data,
++                &process,
++            );
++            drop(store);
++            if let Err(err) = start {
++                if matches!(err, UnifiedExecError::CreateProcess { .. }) {
++                    // A wrapper that already exited may have closed the socket
++                    // before START. Preserve its early sandbox-denial result.
++                    process.check_early_exit().await?;
++                }
++                return Err(err);
++            }
++        }
++        if let Err(err) = process.check_early_exit().await {
++            #[cfg(target_os = "linux")]
++            if process.uses_managed_linux_sandbox() && process.terminate_and_join().await {
++                self.process_store
++                    .lock()
++                    .await
++                    .remove_starting_process(process_id, &process);
++            }
++            return Err(err);
++        }
++        Ok(process)
+     }
+ 
+     #[tracing::instrument(
+@@ -1632,6 +1814,7 @@ impl UnifiedExecProcessManager {
+             shell: request.shell.clone(),
+             hook_command: request.hook_command.clone(),
+             process_id: request.process_id,
++            process_id_generation: Arc::clone(&request.process_id_generation),
+             cwd,
+             sandbox_cwd: request.sandbox_cwd.clone(),
+             turn_environment: request.turn_environment.clone(),
+@@ -1918,21 +2101,39 @@ impl UnifiedExecProcessManager {
+     }
+ 
+     pub(crate) async fn terminate_all_processes(&self) {
+-        let entries: Vec<ProcessEntry> = {
+-            let mut processes = self.process_store.lock().await;
+-            let entries: Vec<ProcessEntry> = processes
++        let (entries, starting) = {
++            let mut store = self.process_store.lock().await;
++            let entries = store
+                 .processes
+                 .drain()
+                 .map(|(_, entry)| entry)
+-                .collect();
+-            processes.reserved_process_ids.clear();
+-            entries
++                .collect::<Vec<_>>();
++            #[cfg(target_os = "linux")]
++            let starting = {
++                let ProcessStore {
++                    starting_processes,
++                    reserved_process_ids,
++                    ..
++                } = &mut *store;
++                reserved_process_ids.retain(|id, _| starting_processes.contains_key(id));
++                starting_processes
++                    .iter()
++                    .map(|(&id, entry)| (Some(id), Arc::clone(&entry.process)))
++                    .collect()
++            };
++            #[cfg(not(target_os = "linux"))]
++            let starting = {
++                store.reserved_process_ids.clear();
++                Vec::new()
++            };
++            (entries, starting)
+         };
+ 
+         for entry in entries {
+             unregister_network_approval_for_entry(&entry).await;
+             entry.process.terminate();
+         }
++        self.join_owned_processes(starting).await;
+     }
+ 
+     pub(crate) async fn pending_local_exec(
+@@ -1962,7 +2163,9 @@ impl UnifiedExecProcessManager {
+     ) -> bool {
+         let processes = {
+             let store = self.process_store.lock().await;
+-            store
++            #[cfg(target_os = "linux")]
++            let mut store = store;
++            let processes = store
+                 .processes
+                 .values()
+                 .filter(|entry| {
+@@ -1973,14 +2176,66 @@ impl UnifiedExecProcessManager {
+                             .as_ref()
+                             .is_some_and(|owner| Arc::ptr_eq(owner, turn))
+                 })
+-                .map(|entry| Arc::clone(&entry.process))
+-                .collect::<Vec<_>>()
++                .map(|entry| (None, Arc::clone(&entry.process)))
++                .collect::<Vec<_>>();
++            #[cfg(target_os = "linux")]
++            let processes = {
++                // A detached tool may still be waiting for spawn acknowledgement.
++                // Fence the turn while holding the lock that permits launch.
++                turn.insert(ManagedLocalExecStopped);
++                let ProcessStore {
++                    processes: published,
++                    starting_processes,
++                    reserved_process_ids,
++                    ..
++                } = &mut *store;
++                // A detached dispatch can be dropped before it releases an
++                // ID whose gated process has yet to acknowledge its spawn.
++                let interrupted_turn = Arc::downgrade(turn);
++                reserved_process_ids.retain(|id, reservation| {
++                    !reservation.turn.ptr_eq(&interrupted_turn)
++                        || starting_processes.contains_key(id)
++                        || published.contains_key(id)
++                });
++                let mut processes = processes;
++                processes.extend(
++                    starting_processes
++                        .iter()
++                        .filter(|(_, entry)| Arc::ptr_eq(&entry.turn, turn))
++                        .map(|(&id, entry)| (Some(id), Arc::clone(&entry.process))),
++                );
++                processes
++            };
++            processes
+         };
++        self.join_owned_processes(processes).await
++    }
++
++    async fn join_owned_processes(
++        &self,
++        processes: Vec<(Option<i32>, Arc<UnifiedExecProcess>)>,
++    ) -> bool {
+         // Send every stop request before waiting for an exit.
+-        futures::future::join_all(processes.iter().map(|process| process.terminate_and_join()))
+-            .await
+-            .into_iter()
+-            .all(|exited| exited)
++        let stopped = futures::future::join_all(
++            processes
++                .iter()
++                .map(|(_, process)| process.terminate_and_join()),
++        )
++        .await;
++        #[cfg(target_os = "linux")]
++        {
++            let mut store = self.process_store.lock().await;
++            for ((id, process), stopped) in processes.iter().zip(&stopped) {
++                if *stopped
++                    && let Some(id) = id
++                    && store.remove_starting_process(*id, process)
++                {
++                    // Keep the ID reserved until this exact command settles.
++                    store.reserved_process_ids.remove(id);
++                }
++            }
++        }
++        stopped.into_iter().all(|exited| exited)
+     }
+ 
+     /// Resolves stdin's target from the host-owned terminal, not model-supplied metadata.
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index cf802f05fdc0b6974dc9ca810a5d7c5ef6963102..ba2667ea4c2b5eecfa5d147a1a1b1519d5ccea65 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -44,9 +44,16 @@ fn unified_exec_env_overrides_existing_values() {
+ #[tokio::test]
+ async fn deterministic_process_ids_are_not_reused_after_release() {
+     let manager = UnifiedExecProcessManager::default();
+-    let first = manager.allocate_process_id().await;
+-    manager.release_process_id(first).await;
+-    let second = manager.allocate_process_id().await;
++    let turn = Arc::new(codex_extension_api::ExtensionData::new("turn"));
++    let (first, generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve process id");
++    manager.release_initial_process_id(first, &generation).await;
++    let (second, _generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve process id");
+ 
+     assert_eq!((first, second), (1000, 1001));
+ }
+@@ -54,9 +61,16 @@ async fn deterministic_process_ids_are_not_reused_after_release() {
+ #[tokio::test]
+ async fn deterministic_process_ids_are_not_reused_after_removal() {
+     let manager = UnifiedExecProcessManager::default();
+-    let first = manager.allocate_process_id().await;
++    let turn = Arc::new(codex_extension_api::ExtensionData::new("turn"));
++    let (first, _generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve process id");
+     let _removed = manager.process_store.lock().await.remove(first);
+-    let second = manager.allocate_process_id().await;
++    let (second, _generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve process id");
+ 
+     assert_eq!((first, second), (1000, 1001));
+ }
+@@ -471,6 +485,7 @@ async fn failed_initial_end_for_unstored_process_uses_fallback_output() {
+         },
+         hook_command: "echo before".to_string(),
+         process_id: 123,
++        process_id_generation: Arc::new(()),
+         yield_time_ms: 1000,
+         max_output_tokens: None,
+         #[allow(deprecated)]
+@@ -680,3 +695,143 @@ async fn pruning_does_not_evict_live_process_while_exited_process_is_finalizing(
+         (None, MAX_UNIFIED_EXEC_PROCESSES)
+     );
+ }
++
++#[cfg(target_os = "linux")]
++#[tokio::test]
++async fn interrupt_joins_owned_start_and_fences_late_acknowledgement() {
++    use std::io::Read;
++    use std::os::unix::net::UnixStream;
++
++    async fn managed_launch() -> (Arc<UnifiedExecProcess>, UnixStream) {
++        let (host, child) = UnixStream::pair().expect("create sandbox control socket");
++        child.set_nonblocking(true).expect("set nonblocking");
++        let spawned = codex_utils_pty::spawn_pipe_process_no_stdin(
++            "/bin/true",
++            &[],
++            std::path::Path::new("/"),
++            &HashMap::new(),
++            &None,
++            &[],
++        )
++        .await
++        .expect("spawn wrapper");
++        let process = Arc::new(UnifiedExecProcess::from_spawned_with_output_policy(
++            spawned,
++            codex_sandboxing::SandboxType::LinuxSeccomp,
++            Box::new(crate::unified_exec::NoopSpawnLifecycle),
++            /*controlled*/ false,
++            Some(host),
++        ));
++        (process, child)
++    }
++
++    let manager = UnifiedExecProcessManager::default();
++    let turn = Arc::new(codex_extension_api::ExtensionData::new("interrupted"));
++    let other = Arc::new(codex_extension_api::ExtensionData::new("other"));
++    let (owned_id, owned_generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve process id");
++    let (late_id, late_generation) = manager
++        .allocate_process_id(&turn)
++        .await
++        .expect("reserve process id");
++    let (other_id, other_generation) = manager
++        .allocate_process_id(&other)
++        .await
++        .expect("reserve process id");
++    let (owned, mut owned_socket) = managed_launch().await;
++    let (late, mut late_socket) = managed_launch().await;
++    let (unrelated, mut unrelated_socket) = managed_launch().await;
++    {
++        let mut store = manager.process_store.lock().await;
++        store
++            .start_managed_process(owned_id, &owned_generation, &turn, &owned)
++            .expect("start owned");
++        store
++            .start_managed_process(other_id, &other_generation, &other, &unrelated)
++            .expect("start unrelated");
++    }
++    let mut start = [0];
++    owned_socket.read_exact(&mut start).expect("owned START");
++    assert_eq!(start, [1]);
++    unrelated_socket
++        .read_exact(&mut start)
++        .expect("unrelated START");
++    assert_eq!(start, [1]);
++
++    assert!(manager.join_unreturned_local_commands(&turn).await);
++    assert!(manager.allocate_process_id(&turn).await.is_none());
++    assert_eq!(owned_socket.read(&mut start).expect("owned EOF"), 0);
++    let mut store = manager.process_store.lock().await;
++    assert!(!store.starting_processes.contains_key(&owned_id));
++    assert!(!store.reserved_process_ids.contains_key(&owned_id));
++    assert!(!store.reserved_process_ids.contains_key(&late_id));
++    assert!(store.owns_reservation(other_id, &other_generation));
++    assert!(
++        store
++            .start_managed_process(late_id, &late_generation, &turn, &late)
++            .is_err()
++    );
++    drop(store);
++    assert_eq!(
++        late_socket
++            .read(&mut start)
++            .expect_err("late payload remains gated")
++            .kind(),
++        std::io::ErrorKind::WouldBlock
++    );
++    assert_eq!(
++        unrelated_socket
++            .read(&mut start)
++            .expect_err("unrelated launch stays live")
++            .kind(),
++        std::io::ErrorKind::WouldBlock
++    );
++
++    manager
++        .release_initial_process_id(other_id, &other_generation)
++        .await;
++    assert_eq!(
++        unrelated_socket
++            .read(&mut start)
++            .expect("abandoned startup EOF"),
++        0
++    );
++
++    let mut store = manager.process_store.lock().await;
++    let replacement_generation = Arc::new(());
++    store.reserved_process_ids.insert(
++        owned_id,
++        ProcessIdReservation {
++            generation: Arc::clone(&replacement_generation),
++            turn: Arc::downgrade(&other),
++        },
++    );
++    store
++        .start_managed_process(owned_id, &replacement_generation, &other, &late)
++        .expect("replace retired owner");
++    assert!(!store.remove_starting_process(owned_id, &owned));
++    drop(store);
++    late_socket
++        .read_exact(&mut start)
++        .expect("replacement START");
++    assert_eq!(start, [1]);
++    manager
++        .release_initial_process_id(owned_id, &owned_generation)
++        .await;
++    assert_eq!(
++        late_socket
++            .read(&mut start)
++            .expect_err("old reservation leaves replacement live")
++            .kind(),
++        std::io::ErrorKind::WouldBlock,
++    );
++    manager
++        .release_initial_process_id(owned_id, &replacement_generation)
++        .await;
++    assert_eq!(late_socket.read(&mut start).expect("replacement EOF"), 0);
++    let store = manager.process_store.lock().await;
++    assert!(!store.starting_processes.contains_key(&owned_id));
++    assert!(!store.reserved_process_ids.contains_key(&owned_id));
++}
+diff --git a/codex-rs/linux-sandbox/src/linux_run_main.rs b/codex-rs/linux-sandbox/src/linux_run_main.rs
+index e74a5ecee3c5bba05830de337d5b4395384265ba..1e4844535b15e0978ff71c5f2a3109ae317a19f1 100644
+--- a/codex-rs/linux-sandbox/src/linux_run_main.rs
++++ b/codex-rs/linux-sandbox/src/linux_run_main.rs
+@@ -262,8 +262,17 @@ pub fn run_main() -> ! {
+             panic!("error applying Linux sandbox restrictions: {e:?}");
+         }
+ 
+-        if cancel.is_some() && unsafe { libc::getpid() } != 1 {
+-            panic!("sandbox cancellation requires an isolated PID namespace");
++        let mut cancel = cancel;
++        if let Some(cancel) = cancel.as_mut() {
++            if unsafe { libc::getpid() } != 1 {
++                panic!("sandbox cancellation requires an isolated PID namespace");
++            }
++            // The host registers ownership before it allows the payload to start.
++            // EOF here means the turn stopped before it could own the command.
++            let mut start = [0];
++            if cancel.read_exact(&mut start).is_err() || start != [1] {
++                std::process::exit(128 + libc::SIGKILL);
++            }
+         }
+         let signal_mask = ForwardedSignalMask::block();
+         let command_pid = unsafe { libc::fork() };

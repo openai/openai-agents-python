@@ -28,6 +28,7 @@ use codex_thread_store::{
 };
 use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock as AsyncRwLock, broadcast, mpsc, watch};
 
+use crate::environment::LocalStorageHome;
 use crate::{NativeThread, config, extensions, goals, options, telemetry};
 
 pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -171,6 +172,18 @@ impl EngineState {
             );
         }
         let goals_enabled = config::native_goal_store_enabled(&runtime_json)?;
+        let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
+            path: config.sqlite_config().home(),
+            persistent_rollouts: local_home.is_some(),
+        });
+        let environment_options = config::environment(&runtime_json)?;
+        // A local executor must pass its storage check before the profile opens.
+        let local_environment = match (&environment_options, storage_home) {
+            (Some(environment), Some(home)) if environment.is_local() => {
+                Some(environment.connect(&config, Some(home)).await?)
+            }
+            _ => None,
+        };
         let state_db = if goals_enabled || local_home.is_some() {
             // StateRuntime supplies the exact goal store used by the extension.
             // Avoid rollout::try_init's unrelated host rollout backfill.
@@ -285,13 +298,17 @@ impl EngineState {
             models
         };
         let deferred_environment = config::deferred_environment(&runtime_json)?.is_some();
-        let (environment, local_environment_error) = match config::environment(&runtime_json)? {
-            Some(environment) => (environment.connect(&config).await?, None),
-            None if deferred_environment => (
+        let (environment, local_environment_error) = match (local_environment, environment_options)
+        {
+            (Some(environment), _) => (environment, None),
+            (None, Some(environment)) => (environment.connect(&config, None).await?, None),
+            (None, None) if deferred_environment => (
                 EnvironmentManager::without_environments(config.http_client_factory()),
                 None,
             ),
-            None => crate::environment::for_unattached_threads(&config).await?,
+            (None, None) => {
+                crate::environment::for_unattached_threads(&config, /*sdk_local*/ false).await?
+            }
         };
         let environment = Arc::new(environment);
         let installation_id = ThreadId::new().to_string();
@@ -471,6 +488,25 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let id = match &startup.initial_history {
             InitialHistory::Resumed(history) => {
+                if let Some(home) = self.native_storage_home()
+                    && home.persistent_rollouts
+                    && let Some(path) = history.rollout_path.as_deref()
+                    && startup
+                        .environments
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|selection| {
+                            selection.environment_id == codex_exec_server::LOCAL_ENVIRONMENT_ID
+                        })
+                    && let Some(writes) = startup
+                        .thread_extension_init
+                        .get::<crate::environment::StrictExecutorWrites>()
+                {
+                    writes
+                        .check_local_resume_rollout_path(home.path, path)
+                        .await?;
+                }
                 crate::checkpoint::validate_imported_history(&history.history)?;
                 Some(history.conversation_id)
             }
@@ -1047,6 +1083,13 @@ impl EngineState {
         }
     }
 
+    pub(crate) fn native_storage_home(&self) -> Option<LocalStorageHome<'_>> {
+        (self.goals.is_some() || self.local_checklist_store.is_some()).then(|| LocalStorageHome {
+            path: self.service_config.sqlite_config().home(),
+            persistent_rollouts: self.local_checklist_store.is_some(),
+        })
+    }
+
     pub(crate) async fn build_startup(
         &self,
         options: options::ThreadOptions,
@@ -1065,6 +1108,7 @@ impl EngineState {
                 self.cloud_config.clone(),
                 initial_config,
                 &self.manager.environment_manager(),
+                self.native_storage_home(),
             )
             .await?;
         self.apply_deferred_environment(&mut startup)?;
@@ -1890,6 +1934,7 @@ impl ThreadState {
             events.children.clear();
             events.graph.close();
         }
+        let mut process_shutdown_error = None;
         tokio::time::timeout(CLOSE_TIMEOUT, async {
             self.thread.shutdown_and_wait().await?;
             // Shut down parents before rediscovering children created during shutdown.
@@ -1916,6 +1961,13 @@ impl ThreadState {
                     break;
                 }
             }
+            // Core's per-thread join waits for loop exit. Check managed process
+            // cleanup across the exact tree before releasing its ownership.
+            process_shutdown_error = self
+                .thread
+                .shutdown_agent_tree_and_check_managed_processes()
+                .await
+                .err();
             // Retain ancestors until every descendant has stopped, even without a graph store.
             for (id, thread) in stopped {
                 self.engine
@@ -1938,6 +1990,9 @@ impl ThreadState {
             .retain(|_, owner| *owner != self.id);
         self.child_questions.lock().await.clear();
         self.closed.store(true, Ordering::Release);
+        if let Some(error) = process_shutdown_error {
+            return Err(error.into());
+        }
         Ok(())
     }
 
