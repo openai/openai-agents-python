@@ -107,6 +107,14 @@ from .observation import (
     _ObservationBuffer,
     _request_observation,
 )
+from .prepared_request import (
+    PreparedRequest,
+    _capturing_callback,
+    _check_output,
+    _check_profile,
+    _check_tools,
+    _PrepareRequest,
+)
 from .rate_limits import ApiRateLimits, _api_rate_limits
 from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
@@ -571,6 +579,8 @@ class _Submission:
     policy_stop: Literal["requested", "expired"] | None = None
     repairing: bool = False
     before_step: _BeforeStep[Any] | None = None
+    prepare_request: _PrepareRequest | None = None
+    preparation_index: int = 0
     step_index: int = 0
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
@@ -2909,6 +2919,7 @@ class Session(Generic[ContextT, OutputT]):
         writable_roots: Sequence[str | PathLike[str]] | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2924,6 +2935,7 @@ class Session(Generic[ContextT, OutputT]):
         writable_roots: Sequence[str | PathLike[str]] | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2938,6 +2950,7 @@ class Session(Generic[ContextT, OutputT]):
         writable_roots: None = None,
         parent_trace: None = None,
         trace_options: None = None,
+        prepare_request: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -2952,6 +2965,7 @@ class Session(Generic[ContextT, OutputT]):
         writable_roots: Sequence[str | PathLike[str]] | None = None,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -2967,6 +2981,16 @@ class Session(Generic[ContextT, OutputT]):
         if_busy="steer" disallows overrides and awaits native acceptance for
         the captured active root. Use Turn.steer_exact to target one native root turn.
         New work returns before native admission; await Turn.get_result() for completion.
+        prepare_request(turn, request, *, preparation_index, recovery_attempt)
+        receives detached native sampling JSON and returns a complete replacement
+        or None. Eager ordinary function/MCP tools and Responses HTTP are required;
+        use NativeProvider(supports_websockets=False). Edits do not change canonical
+        history, routing, validators or approval policies. Avoid callback business
+        effects: stream recovery can prepare again, while HTTP retries reuse one
+        captured edit. Automatic compaction refuses before its hidden request.
+        Separate output correction attempts are unsupported; use max_retries=0
+        or NativeOutput. Callback operations cannot export active state; cancellation joins callback
+        settlement before later work starts.
         before_step(turn, *, step_index) may narrow admitted tools before
         sampling. Return None to use the captured operation default, or a
         sequence of admitted declarations and ToolRefs.
@@ -3008,6 +3032,7 @@ class Session(Generic[ContextT, OutputT]):
                 or tools is not None
                 or before_step is not None
                 or writable_roots is not None
+                or prepare_request is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -3047,6 +3072,7 @@ class Session(Generic[ContextT, OutputT]):
                 before_step=before_step,
                 enqueue=if_busy != "reject",
                 writable_roots=roots,
+                prepare_request=prepare_request,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -4061,6 +4087,7 @@ class Session(Generic[ContextT, OutputT]):
         writable_roots: tuple[str, ...] | None = None,
         parent_trace: TraceContext | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:
@@ -4077,10 +4104,25 @@ class Session(Generic[ContextT, OutputT]):
                 raise SessionBusyError("Session already has an active submission or mutation")
             if self._checkpoint_task is not None:
                 raise RuntimeError("Session is saving a checkpoint")
+            if prepare_request is not None:
+                _check_output(output)
             if output.max_retries and self._storage is not None:
                 raise CapabilityError(
                     "LocalStorage cannot retain prompted-output repair receipts; "
                     "use a separate ephemeral Session or max_retries=0"
+                )
+            if prepare_request is not None:
+                if not callable(prepare_request):
+                    raise TypeError("prepare_request must be callable")
+                assert self._opening_agent is not None
+                if self._hosted_verification is not None:
+                    raise ValueError(
+                        "prepare_request cannot edit requests for a fixed hosted MCP registration"
+                    )
+                _check_profile(
+                    self._opening_agent,
+                    websockets=self._websockets_enabled,
+                    environment=self._executor,
                 )
             if before_step is not None and not callable(before_step):
                 raise TypeError("before_step must be callable")
@@ -4109,6 +4151,8 @@ class Session(Generic[ContextT, OutputT]):
                         environment=self._executor,
                         native_agents=self._native_agents,
                     )
+                if prepare_request is not None and before_step is None:
+                    _check_tools(opening if tools is None else (*python, *mcp), operation_refs)
                 for selected_tool in python:
                     selected_tool._check_context(self._context)
                 for server in mcp:
@@ -4133,12 +4177,13 @@ class Session(Generic[ContextT, OutputT]):
             state = _Submission(
                 output,
                 before_step=before_step,
+                prepare_request=prepare_request,
+                tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
                 operation_refs=operation_refs,
                 writable_roots=writable_roots,
                 parent_trace=parent_trace if parent_trace is not None else self._parent_trace,
-                tracing=_capture(trace_options, self._trace_context),
             )
             if input is not None:
                 issued = _root_turn(self, None, uuid4().hex, state.completion)
@@ -5252,6 +5297,8 @@ class Session(Generic[ContextT, OutputT]):
                             raise
                     if self._native_agents is not None and state.operation_slots is not None:
                         state.operation_slots = tuple(range(len(selected)))
+                if state.prepare_request is not None:
+                    self._native._prepare_requests(True)
                 self._native._select_steps(
                     input is not None
                     and (state.before_step is not None or state.operation_slots is not None),
@@ -5554,6 +5601,8 @@ class Session(Generic[ContextT, OutputT]):
                     state.output,
                     continued_from=state.handle.turn_id,
                     before_step=state.before_step,
+                    prepare_request=state.prepare_request,
+                    preparation_index=state.preparation_index,
                     step_index=state.step_index,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
@@ -5585,6 +5634,8 @@ class Session(Generic[ContextT, OutputT]):
             # futures with the original error before releasing its slot.
             if not self._broken:
                 self._native._select_steps(False)
+                if state.prepare_request is not None:
+                    self._native._prepare_requests(False)
             self._active = None
         # Issued roots also own their unreceived continuations.
         # A raw CancelledError as a shared result loses its cleanup
@@ -6263,6 +6314,67 @@ class Session(Generic[ContextT, OutputT]):
         ):
             state.failure.set_result(InteractionRequired("Native child requires interaction"))
 
+    async def _prepare_sampling_request(self, state: _Submission, message: dict[str, Any]) -> None:
+        request_id = message["request_id"]
+        guard = _Invocation(self)
+        token = _invocation.set(guard)
+        reply: str | None = None
+        failed = True
+
+        def active() -> bool:
+            if self._active is not state or state.stopping or state.failure.done():
+                return False
+            if message["generation"] != self._catalog.generation:
+                return False
+            try:
+                return bool(self._native._check_prepared_request(request_id))
+            except RuntimeError:
+                return False
+
+        try:
+            if not active():
+                return
+            if state.prepare_request is None or state.handle is None:
+                raise NativeError("Prepared request has no issuing operation callback")
+            index = state.preparation_index
+            state.preparation_index += 1
+            # The event reader already owns decoded JSON; detach once more before
+            # application entry and capture the return on its actual executor.
+            snapshot = cast(PreparedRequest, deepcopy(message["data"]))
+            context = state.tracing.context if state.tracing is not None else None
+            with _activate(context):
+                reply = await _call_callback(
+                    _capturing_callback(
+                        state.prepare_request,
+                        lambda: (
+                            self._active is state
+                            and not state.stopping
+                            and not state.failure.done()
+                        ),
+                    ),
+                    active,
+                    self.active_turn or state.handle,
+                    snapshot,
+                    preparation_index=index,
+                    recovery_attempt=message["recovery_attempt"],
+                )
+            if not active():
+                return
+            failed = False
+        except BaseException as error:
+            if not state.failure.done():
+                state.failure.set_result(error)
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            try:
+                accepted = self._native._reply_prepared_request(request_id, reply, error=failed)
+                if not accepted and not state.stopping and not state.failure.done():
+                    state.failure.set_result(NativeError("Prepared request expired"))
+            except RuntimeError:
+                if not state.stopping and not state.failure.done():
+                    state.failure.set_result(NativeError("Prepared request expired"))
+
     async def _select_step(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("step callback", "callback", message.get("tracing_context")) as tracing:
             await self._select_step_body(state, message)
@@ -6363,6 +6475,22 @@ class Session(Generic[ContextT, OutputT]):
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]
             }
+            if (
+                self._fail_unhandled_questions
+                and isinstance(state, _Submission)
+                and state.prepare_request is not None
+                and any(
+                    isinstance(tool, FunctionTool)
+                    and tool._bind is None
+                    and ToolRef(tool.name, "functions") in refs
+                    and ToolRef(tool.name, "functions") in candidates
+                    for tool in self._bindings
+                )
+            ):
+                raise InteractionRequired(
+                    "Running manual tools with prepare_request requires on_interaction. "
+                    "Use Agent.session() to reply to requests directly."
+                )
             # Search is an existing discovery helper over selected leaves. It
             # cannot restore an excluded runtime or a cached leaf from another step.
             search = ToolRef("tool_search", "functions")
@@ -6653,6 +6781,9 @@ class Session(Generic[ContextT, OutputT]):
                             "expired" if message.get("policy_stop") is True else None
                         )
                         state.failure.set_result(_model_failure_error(message))
+                elif kind == "_sdk_prepare_request":
+                    task = asyncio.create_task(self._prepare_sampling_request(state, message))
+                    state.add_callback(task)
                 elif kind == "_sdk_select_step":
                     task = asyncio.create_task(self._select_step(state, message))
                     state.add_callback(task)
@@ -7626,6 +7757,11 @@ class Session(Generic[ContextT, OutputT]):
         return await self._checkpoint(active, before_seal=before_seal)
 
     def _check_portable_capture(self) -> None:
+        if self._active is not None and self._active.prepare_request is not None:
+            raise CapabilityError(
+                "Cannot checkpoint an operation with prepare_request: "
+                "portable restore cannot recover its callback"
+            )
         if self._pending:
             raise RuntimeError("Cannot checkpoint a Session with queued work")
         if self._storage is not None:
