@@ -1334,6 +1334,7 @@ pub struct ThreadState {
 
 #[derive(Clone)]
 struct OwnedChildQuestion {
+    _tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     child: ThreadId,
     instance: u64,
     grant: codex_core::OwnedQuestion,
@@ -1562,10 +1563,15 @@ impl ThreadState {
         };
         let mut event = native_event(Some((source.0, source.1)), event, session_reader)?;
         if let Some(grant) = question {
+            let tracing = grant.tracing_context();
+            if let Some(tracing) = &tracing {
+                event["msg"]["tracing_context"] = serde_json::json!(tracing.token());
+            }
             let id = ThreadId::new().to_string();
             self.child_questions.lock().await.insert(
                 id.clone(),
                 OwnedChildQuestion {
+                    _tracing: tracing,
                     child: source.0,
                     instance: source.1,
                     grant,

@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "e5404de0b850d56f2d2f78eed3caa859447b721b",
+  "baseline_commit": "8d2857850b359e1b79e6232f50c7d031381a3d6e",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -177,7 +177,7 @@
           "ResultT = TypeVar('ResultT')",
           "@dataclass(frozen=True, slots=True, init=False)\nclass ActionReply(Generic[ResultT]):\n    _request: Interaction = field(repr=False)\n    _value: ResultT = field(repr=False)\n\n    def __new__(cls) -> ActionReply[ResultT]:\n        pass",
           "@dataclass(frozen=True, slots=True, init=False)\nclass ActionRequested(Generic[InputT, ResultT]):\n    session_id: str\n    subagent_id: str | None\n    submission_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    namespace: str | None\n    arguments: InputT = field(repr=False)\n    type: Literal['action_requested'] = field(default='action_requested', init=False)\n    _declaration: object = field(repr=False)\n    _grant: Any = field(repr=False)\n    _invocation: int = field(repr=False)\n    _slot: int = field(repr=False)\n    _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)\n    call: ToolCallInfo\n    _tracing_context: str | None = field(default=None, init=False, repr=False, compare=False)\n\n    def __new__(cls) -> ActionRequested[InputT, ResultT]:\n        pass\n\n    def reply(self, value: ResultT) -> ActionReply[ResultT]:\n        pass\n\n    async def respond(self, value: ResultT) -> None:\n        pass",
-          "@dataclass(frozen=True, slots=True, init=False)\nclass _NativeQuestion:\n    session_id: str\n    subagent_id: str | None\n    submission_id: str | None\n    turn_id: str | None\n    description: str = field(repr=False)\n    _message: dict[str, Any] = field(repr=False)\n    _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)\n\n    def __new__(cls) -> _NativeQuestion:\n        pass\n\n    @property\n    def call(self) -> ToolCallInfo | None:\n        pass",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass _NativeQuestion:\n    session_id: str\n    subagent_id: str | None\n    submission_id: str | None\n    turn_id: str | None\n    description: str = field(repr=False)\n    _message: dict[str, Any] = field(repr=False)\n    _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)\n    _tracing: SpanContext | None = field(default=None, init=False, repr=False, compare=False)\n\n    def __new__(cls) -> _NativeQuestion:\n        pass\n\n    @property\n    def call(self) -> ToolCallInfo | None:\n        pass",
           "@dataclass(frozen=True, slots=True, init=False)\nclass ApprovalRequest(_NativeQuestion):\n    submission_id: str\n    turn_id: str\n    type: Literal['approval_request'] = field(default='approval_request', init=False)\n\n    def reply(self, decision: Literal['allow_once', 'deny']) -> ActionReply[Literal['allow_once', 'deny']]:\n        pass\n\n    async def respond(self, decision: Literal['allow_once', 'deny']) -> None:\n        pass",
           "@dataclass(frozen=True, slots=True, init=False)\nclass ElicitationRequest(_NativeQuestion):\n    type: Literal['elicitation_request'] = field(default='elicitation_request', init=False)\n    _validator: Draft202012Validator | None = field(default=None, repr=False, compare=False)\n    _url_completion: asyncio.Future[bool] | None = field(default=None, repr=False, compare=False)\n\n    @property\n    def url(self) -> str | None:\n        pass\n\n    @property\n    def elicitation_id(self) -> str | None:\n        pass\n\n    def reply_url_accept(self) -> ActionReply[object]:\n        pass\n\n    async def accept_url(self) -> None:\n        pass\n\n    async def wait_url_completion(self, *, timeout: float) -> None:\n        pass\n\n    def reply(self, value: Mapping[str, Any] | None) -> ActionReply[Mapping[str, Any] | None]:\n        pass\n\n    @property\n    def schema(self) -> Mapping[str, Any]:\n        pass\n\n    async def respond(self, value: Mapping[str, Any]) -> None:\n        pass\n\n    async def decline(self) -> None:\n        pass",
           "@dataclass(frozen=True, slots=True)\nclass VerificationProof:\n    credential_id: str = field(repr=False)\n    signature: str = field(repr=False)",
@@ -206,6 +206,7 @@
           "from .mcp import ChatGPTAppsMCP, HostedVerificationMCP",
           "from .native_agents import ChildInvocation",
           "from .session import Session",
+          "from .telemetry import SpanContext",
           "from .tools import ToolCallInfo",
           "from .turn import Turn"
         ],
@@ -215,6 +216,7 @@
           "FunctionTool": "agents._function_tools.FunctionTool",
           "HostedVerificationMCP": "agents.mcp.HostedVerificationMCP",
           "Session": "agents.session.Session",
+          "SpanContext": "agents.telemetry.SpanContext",
           "ToolCallInfo": "agents.tools.ToolCallInfo",
           "Turn": "agents.turn.Turn"
         }

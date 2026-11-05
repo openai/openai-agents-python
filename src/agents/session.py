@@ -101,6 +101,7 @@ from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedO
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
 from .telemetry import (
+    SpanContext,
     TraceOptions,
     TraceScope,
     _activate,
@@ -2528,6 +2529,7 @@ class Session(Generic[ContextT, OutputT]):
             )
 
     def _settle_url_completion(self, question: ElicitationRequest, completed: bool) -> None:
+        question._release_tracing()
         key = (question._message["server_name"], question._message["id"])
         if self._url_completions.get(key) is question:
             del self._url_completions[key]
@@ -2630,6 +2632,7 @@ class Session(Generic[ContextT, OutputT]):
         # Consume only after encoding/validation and before the enqueue await.
         # Do not restore on uncertain cancellation: native may already have it.
         del state.questions[id(question)]
+        question._release_tracing()
         self._observations.notify()
 
         async def enqueue() -> None:
@@ -3620,7 +3623,9 @@ class Session(Generic[ContextT, OutputT]):
         callbacks: list[asyncio.Task[None]] = []
         stopping = False
 
-        async def answer(event: Interaction, owner: _CallbackState) -> None:
+        async def answer(
+            event: Interaction, owner: _CallbackState, tracing_owner: SpanContext | None
+        ) -> None:
             skipped = False
 
             def admitted() -> bool:
@@ -3732,11 +3737,16 @@ class Session(Generic[ContextT, OutputT]):
                 context = (
                     event._tracing_context
                     if isinstance(event, ActionRequested)
-                    else event._message.get("tracing_context")
+                    else tracing_owner._handle
+                    if tracing_owner is not None
+                    else None
                 )
                 if context is None and isinstance(owner, _Submission) and owner.tracing is not None:
                     context = owner.tracing.context
-                with _owned_span("interaction callback", "callback", context) as tracing:
+                with (
+                    _clear_current(),
+                    _owned_span("interaction callback", "callback", context) as tracing,
+                ):
                     await invoke_body()
                     if tracing is not None and owner.failure.done():
                         tracing.set_outcome(status="error", category="callback_error")
@@ -3821,7 +3831,8 @@ class Session(Generic[ContextT, OutputT]):
                             raise
                         continue
                     return
-                task = asyncio.create_task(answer(event, owner))
+                tracing_owner = event._tracing if isinstance(event, _NativeQuestion) else None
+                task = asyncio.create_task(answer(event, owner, tracing_owner))
                 callbacks.append(task)
                 owner.add_callback(task)
 
@@ -5283,6 +5294,12 @@ class Session(Generic[ContextT, OutputT]):
                 else:
                     self._settle_submission(state, input is not None, error, outcome)
 
+    @staticmethod
+    def _retire_questions(state: _CallbackState) -> None:
+        for question in state.questions.values():
+            question._release_tracing()
+        state.questions.clear()
+
     def _settle_submission(
         self,
         state: _Submission,
@@ -5335,6 +5352,7 @@ class Session(Generic[ContextT, OutputT]):
                 else None,
             )
             state.tracing = None
+        self._retire_questions(state)
         state.manual_inputs.clear()
         if self._active is state:
             # Failed admission/publication may have retired the native
@@ -5744,7 +5762,7 @@ class Session(Generic[ContextT, OutputT]):
     async def _settle_child_callbacks(self, state: _ChildCallbacks) -> None:
         try:
             await asyncio.wait((state.terminal, state.failure), return_when=asyncio.FIRST_COMPLETED)
-            state.questions.clear()
+            self._retire_questions(state)
             self._observations.notify()
             if state.failure.done():
                 await self._stop_child_callback_owner(state)
@@ -5849,6 +5867,7 @@ class Session(Generic[ContextT, OutputT]):
                 state.failure.set_result(error)
         finally:
             state.questions.pop(id(question), None)
+            question._release_tracing()
             if completion is not None and not completion.done():
                 assert isinstance(question, ElicitationRequest)
                 await self._probe_child_url_completion(question, retire=True)
@@ -5947,11 +5966,13 @@ class Session(Generic[ContextT, OutputT]):
             and not state.failure.done()
         ):
             try:
-                question = _question(self, message, state.handle)
+                if not message.get("_sdk_question_id"):
+                    raise InteractionExpiredError("Native child request expired before delivery")
                 if self._fail_unhandled_questions:
                     raise InteractionRequired(
                         "Native interaction needs on_interaction or Agent.session()"
                     )
+                question = _question(self, message, state.handle)
                 state.questions[id(question)] = question
                 self._observations.notify()
                 state.add_callback(
@@ -5962,6 +5983,15 @@ class Session(Generic[ContextT, OutputT]):
                 pass
             except InteractionRequired as error:
                 state.failure.set_result(error)
+            except RuntimeError:
+                if (
+                    self._closing
+                    or state.stopping
+                    or state.terminal.done()
+                    or not await self._native._child_question_pending(message["_sdk_question_id"])
+                ):
+                    return
+                raise
         elif (
             kind
             in {
@@ -6323,6 +6353,7 @@ class Session(Generic[ContextT, OutputT]):
                     ]
                     for pending_url in unanswered:
                         del state.questions[id(pending_url)]
+                        pending_url._release_tracing()
                     for pending_url in unanswered:
                         await self._native.call(
                             "resolve_elicitation",

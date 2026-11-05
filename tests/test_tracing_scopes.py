@@ -2091,3 +2091,110 @@ async def test_steering_rejects_trace_and_write_policy_overrides(
     finally:
         session._reader.cancel()
         await asyncio.gather(session._reader, return_exceptions=True)
+
+
+async def test_question_context_retires_registration_but_survives_queued_callback(
+    native: NativeTracing,
+) -> None:
+    from agents.manual import _question
+    from agents.session import Session
+
+    class Issuer:
+        id = "session"
+
+    issuer = Issuer()
+    with telemetry.trace("origin", options=telemetry.TraceOptions(disabled=True)) as origin:
+        message = {
+            "type": "exec_approval_request",
+            "turn_id": "turn",
+            "command": ["synthetic"],
+            "tracing_context": origin.context._handle,
+        }
+        question = _question(issuer, message, SimpleNamespace(turn_id="turn", submission_id="s"))
+    owner = question._tracing
+    assert owner is not None
+    owned_token = owner._handle
+    reference = weakref.ref(owner)
+    entered = []
+
+    async def callback(context: telemetry.SpanContext) -> None:
+        with telemetry._owned_span("queued callback", "callback", context._handle):
+            current = telemetry.current_context()
+            assert current is not None and current.disabled
+            entered.append(current.trace_id)
+
+    task = asyncio.create_task(callback(owner))
+    del owner
+    state = SimpleNamespace(questions={id(question): question})
+    Session._retire_questions(state)
+    assert state.questions == {}
+    assert question._tracing is None
+    assert "tracing_context" not in question._message
+    assert message["tracing_context"] == origin.context._handle
+    assert reference() is not None and owned_token not in native.released
+    await task
+    gc.collect()
+    assert entered == [origin.context.trace_id]
+    assert reference() is None and owned_token in native.released
+    # Retaining the resolved public question must not retain its credential lease.
+    assert question.turn_id == "turn"
+
+
+@pytest.mark.parametrize(("pending", "unsupported"), [(False, False), (True, False), (True, True)])
+async def test_child_question_context_failure_discards_only_expired_grant(
+    monkeypatch: pytest.MonkeyPatch, pending: bool, unsupported: bool
+) -> None:
+    import agents.session as sessions
+
+    loop = asyncio.get_running_loop()
+    state = SimpleNamespace(
+        completion=loop.create_future(),
+        observed=loop.create_future(),
+        terminal=loop.create_future(),
+        failure=loop.create_future(),
+        stopping=False,
+        handle=SimpleNamespace(submission_id="submission"),
+    )
+    failure = (
+        sessions.InteractionRequired("unsupported question")
+        if unsupported
+        else RuntimeError("original context is unavailable")
+    )
+
+    def capture(*args: Any) -> None:
+        raise failure
+
+    async def is_pending(question_id: str) -> bool:
+        assert question_id == "exact-original-grant"
+        return pending
+
+    monkeypatch.setattr(sessions, "_question", capture)
+    issuer = SimpleNamespace(
+        _closing=False,
+        _fail_unhandled_questions=False,
+        _child_callback_state=lambda *args: state,
+        _observe_mcp=lambda *args: None,
+        _observe_progress=lambda *args: None,
+        _native=SimpleNamespace(_child_question_pending=is_pending),
+    )
+    event = {
+        "subagent_id": "child",
+        "subagent_incarnation": 1,
+        "subagent_instance_id": 1,
+        "msg": {
+            "type": "exec_approval_request",
+            "turn_id": "turn",
+            "_sdk_question_id": "exact-original-grant",
+        },
+    }
+    if unsupported:
+        await sessions.Session._read_child_event(issuer, event)
+        assert state.failure.result() is failure
+        return
+    if pending:
+        with pytest.raises(RuntimeError) as raised:
+            await sessions.Session._read_child_event(issuer, event)
+        assert raised.value is failure
+    else:
+        await sessions.Session._read_child_event(issuer, event)
+    assert not state.failure.done() and not state.terminal.done()

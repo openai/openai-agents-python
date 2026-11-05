@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from .mcp import ChatGPTAppsMCP, HostedVerificationMCP
     from .native_agents import ChildInvocation
     from .session import Session
+    from .telemetry import SpanContext
     from .tools import ToolCallInfo
     from .turn import Turn
 
@@ -289,6 +290,11 @@ class _NativeQuestion:
     description: str = field(repr=False)
     _message: dict[str, Any] = field(repr=False)
     _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)
+    _tracing: SpanContext | None = field(default=None, init=False, repr=False, compare=False)
+
+    def _release_tracing(self) -> None:
+        object.__setattr__(self, "_tracing", None)
+        self._message.pop("tracing_context", None)
 
     def __new__(cls) -> _NativeQuestion:
         raise TypeError("Native requests are issued by a live Session")
@@ -784,6 +790,7 @@ def _question(
         "description": description,
         "_message": deepcopy(message),
         "_session": ref(session),
+        "_tracing": None,
         "type": "approval_request"
         if cls is ApprovalRequest
         else "verification_request"
@@ -791,6 +798,12 @@ def _question(
         else "elicitation_request",
     }.items():
         object.__setattr__(result, key, item)
+    if context := message.get("tracing_context"):
+        from .telemetry import _retain_context
+
+        tracing = _retain_context(context)
+        object.__setattr__(result, "_tracing", tracing)
+        result._message["tracing_context"] = tracing._handle
     if isinstance(handle, ChildInvocation):
         result._message["_sdk_child_incarnation"] = handle.instance_id
     if cls is VerificationRequest:

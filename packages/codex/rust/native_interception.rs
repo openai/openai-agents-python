@@ -504,6 +504,7 @@ pub struct Control {
     native_depth: usize,
     native_ancestor: Option<(String, String)>,
     stopped: CancellationToken,
+    creation_tracing: OnceLock<Option<Arc<codex_otel::sdk_trace::ContextLease>>>,
     direct_turn: Mutex<Option<Arc<DirectTurn>>>,
     // Only links to wrapper sessions this exact thread has used; never a host-wide
     // cell index. The sessions own cells, so this direction must stay weak.
@@ -535,6 +536,10 @@ struct PendingCodeImport {
 }
 
 impl Control {
+    pub(crate) fn creation_tracing(&self) -> Option<Arc<codex_otel::sdk_trace::ContextLease>> {
+        self.creation_tracing.get().cloned().flatten()
+    }
+
     // Lifecycle callbacks retain the unpublished receiver if its opening future
     // is cancelled. Cleanup always joins this exact native session.
     async fn close_pending_code_import(&self, turn: Option<&Arc<DirectTurn>>) -> Result<()> {
@@ -588,6 +593,7 @@ impl Control {
             native_depth: if root { 0 } else { usize::MAX },
             native_ancestor: None,
             stopped: CancellationToken::new(),
+            creation_tracing: OnceLock::new(),
             direct_turn: Mutex::new(None),
             code_mode_sessions: Mutex::default(),
             pending_code_import: Mutex::default(),
@@ -624,6 +630,7 @@ impl Control {
             native_depth: parent.native_depth.saturating_add(1),
             native_ancestor: Some((parent.id.clone(), parent.incarnation.clone())),
             stopped,
+            creation_tracing: OnceLock::new(),
             direct_turn: Mutex::new(None),
             code_mode_sessions: Mutex::default(),
             pending_code_import: Mutex::default(),
@@ -1835,6 +1842,7 @@ impl ThreadLifecycleContributor<Config> for Boundary {
         input: ThreadStartInput<'a, Config>,
     ) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            let creation_tracing = codex_otel::sdk_trace::CapturedContext::capture().context;
             let root = !matches!(
                 input.session_source,
                 SessionSource::Internal(_) | SessionSource::SubAgent(_)
@@ -1862,6 +1870,7 @@ impl ThreadLifecycleContributor<Config> for Boundary {
                     None => Control::new(id, root),
                 }
             });
+            let _ = control.creation_tracing.set(creation_tracing);
             if input.thread_store.get::<StrictExecutorWrites>().is_some() {
                 let _ = control.strict_executor_writes.set(());
             }
@@ -4010,6 +4019,9 @@ pub(crate) mod tests {
 
     pub(crate) fn bind_owner(thread: &ExtensionData, turn: &ExtensionData) -> Arc<Control> {
         let control = thread.get_or_init(|| Control::new(thread.level_id().to_owned(), true));
+        let _ = control
+            .creation_tracing
+            .set(codex_otel::sdk_trace::CapturedContext::capture().context);
         turn.get_or_init(|| DirectTurn {
             sdk_admission: OnceLock::new(),
             id: turn.level_id().to_owned(),

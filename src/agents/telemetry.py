@@ -363,6 +363,17 @@ def _native_tracing() -> Any:
     return importlib.import_module("agents._native")
 
 
+def _retain_context(context: str) -> SpanContext:
+    native = _native_tracing()
+    retained = native.retain_trace_context(context)
+    try:
+        data = json.loads(native.trace_span_context(retained))
+        data.pop("handle", None)
+        return SpanContext(_handle=retained, **data)
+    finally:
+        native.release_trace_context(retained)
+
+
 def _options(value: TraceOptions | Mapping[str, Any] | None) -> TraceOptions:
     flag: Any = None
     try:

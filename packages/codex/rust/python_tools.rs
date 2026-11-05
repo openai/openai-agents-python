@@ -204,6 +204,7 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 // Core emits TurnComplete before releasing its active-turn slot. This receipt
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
+    pub(crate) tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
@@ -2200,6 +2201,9 @@ impl TurnLifecycleContributor for PythonContributor {
     // The default BeforeTaskRegistration phase includes compaction tasks.
     fn on_turn_start<'a>(&'a self, input: TurnStartInput<'a>) -> ExtensionFuture<'a, ()> {
         Box::pin(async move {
+            let tracing = input
+                .turn_store
+                .get_or_init(codex_otel::sdk_trace::CapturedContext::capture);
             #[cfg(test)]
             if let Some(hold) = input.thread_store.get::<admission_order_tests::StartHold>() {
                 hold.entered.add_permits(1);
@@ -2226,6 +2230,7 @@ impl TurnLifecycleContributor for PythonContributor {
                 };
                 let graph = tools.family.graph.lock().expect("Python graph poisoned");
                 let receipt = Arc::new(TurnAdmission {
+                    tracing: tracing.context.clone(),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,
@@ -3153,6 +3158,50 @@ pub(crate) mod managed_tests {
         };
         thread.insert(tools);
         thread
+    }
+
+    #[tokio::test]
+    async fn child_receipt_retains_original_tracing_after_origin_scope_ends() {
+        const CHILD: &str = "AGENTS_CHILD_RECEIPT_TRACE_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "python_tools::managed_tests::child_receipt_retains_original_tracing_after_origin_scope_ends"]).env(CHILD, "1").status().unwrap();
+            assert!(status.success());
+            return;
+        }
+        codex_otel::sdk_trace::configure_pipeline(false);
+        let original: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
+            r#"{"name":"origin","kind":"workflow","trace_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disabled":true,"include_sensitive_data":false}"#,
+        ).unwrap()).unwrap();
+        let handle = original["handle"].as_str().unwrap();
+        let attached = codex_otel::sdk_trace::context(handle).unwrap().attach();
+        let thread = admission_thread();
+        let turn = ExtensionData::new("fixture");
+        let control = crate::native_interception::tests::bind_owner(&thread, &turn);
+        let turn = start_admission(&thread, "original").await;
+        let receipt = turn.get::<Arc<TurnAdmission>>().unwrap();
+        let creation = control.creation_tracing().unwrap();
+        let tracing = receipt.tracing.as_ref().unwrap().clone();
+        drop(attached);
+        codex_otel::sdk_trace::end_trace_span(handle, r#"{"status":"ok"}"#).unwrap();
+        codex_otel::sdk_trace::release_trace_span(handle);
+        let unrelated: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
+            r#"{"name":"unrelated","kind":"workflow","trace_id":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","include_sensitive_data":true}"#,
+        ).unwrap()).unwrap();
+        let unrelated_handle = unrelated["handle"].as_str().unwrap();
+        let _unrelated = codex_otel::sdk_trace::context(unrelated_handle)
+            .unwrap()
+            .attach();
+        for owner in [creation, tracing] {
+            let snapshot: serde_json::Value = serde_json::from_str(
+                &codex_otel::sdk_trace::trace_span_context(owner.token()).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(snapshot["trace_id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+            assert_eq!(snapshot["disabled"], true);
+            assert_eq!(snapshot["include_sensitive_data"], false);
+        }
+        codex_otel::sdk_trace::release_trace_span(unrelated_handle);
     }
 
     // Seed the real registered SDK contributors in their Core registration

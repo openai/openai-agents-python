@@ -81,6 +81,77 @@ index bd9df090ff431c253cbed84dd6fc36cd01c3480b..6e294102162b2bf257051daaefc58d2b
          metrics_exporter,
          runtime_metrics,
          span_attributes: config.otel.span_attributes.clone(),
+diff --git a/codex-rs/core/src/owned_question.rs b/codex-rs/core/src/owned_question.rs
+index 40377ec076192c31019326213625bf997ba9aa43..f5db1f4182dea4260229332a4a8b4165c0e7dba5 100644
+--- a/codex-rs/core/src/owned_question.rs
++++ b/codex-rs/core/src/owned_question.rs
+@@ -22,6 +22,13 @@ pub struct OwnedQuestion {
+     url_receipt: Option<tokio::sync::watch::Receiver<Option<bool>>>,
+ }
+ impl OwnedQuestion {
++    /// Private tracing follows this grant's original turn, never its successor.
++    pub fn tracing_context(&self) -> Option<Arc<codex_otel::sdk_trace::ContextLease>> {
++        self.turn
++            .extension_data
++            .get::<codex_otel::sdk_trace::CapturedContext>()
++            .and_then(|captured| captured.context.clone())
++    }
+     pub(crate) async fn capture(session: Arc<Session>, event: &Event) -> Option<Self> {
+         let (turn_id, key) = match &event.msg {
+             EventMsg::ExecApprovalRequest(request) => (
+@@ -321,3 +328,52 @@ pub(crate) async fn event_identity(
+     }?;
+     Some(format!("sdk-question:{}", identity.as_str()))
+ }
++
++#[cfg(test)]
++mod tracing_tests {
++    use super::*;
++
++    #[tokio::test]
++    async fn question_tracing_keeps_original_turn_policy_after_origin_ends() {
++        const CHILD: &str = "CODEX_OWNED_QUESTION_TRACE_TEST";
++        if std::env::var_os(CHILD).is_none() {
++            let status = std::process::Command::new(std::env::current_exe().unwrap())
++                .args(["--exact", "owned_question::tracing_tests::question_tracing_keeps_original_turn_policy_after_origin_ends"])
++                .env(CHILD, "1").status().unwrap();
++            assert!(status.success());
++            return;
++        }
++        let (session, turn) = crate::session::tests::make_session_and_context().await;
++        codex_otel::sdk_trace::configure_pipeline(false);
++        let origin: serde_json::Value = serde_json::from_str(&codex_otel::sdk_trace::start_trace_span(
++            r#"{"name":"question origin","kind":"workflow","trace_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","disabled":true,"include_sensitive_data":false}"#,
++        ).unwrap()).unwrap();
++        let handle = origin["handle"].as_str().unwrap();
++        let attached = codex_otel::sdk_trace::context(handle).unwrap().attach();
++        turn.extension_data
++            .insert(codex_otel::sdk_trace::CapturedContext::capture());
++        drop(attached);
++        let question = OwnedQuestion {
++            session: Arc::new(session),
++            turn: Arc::new(turn),
++            state: Arc::new(Mutex::new(TurnState::default())),
++            key: QuestionKey::Approval("fixture".into()),
++            identity: None,
++            url_receipt: None,
++        };
++        codex_otel::sdk_trace::end_trace_span(handle, r#"{"status":"ok"}"#).unwrap();
++        codex_otel::sdk_trace::release_trace_span(handle);
++        let retained = question.tracing_context().unwrap();
++        let token = retained.token().to_owned();
++        let context: serde_json::Value =
++            serde_json::from_str(&codex_otel::sdk_trace::trace_span_context(&token).unwrap())
++                .unwrap();
++        assert_eq!(context["trace_id"], "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
++        assert_eq!(context["disabled"], true);
++        assert_eq!(context["include_sensitive_data"], false);
++        drop(question);
++        assert!(codex_otel::sdk_trace::context(&token).is_ok());
++        drop(retained);
++        assert!(codex_otel::sdk_trace::context(&token).is_err());
++    }
++}
 diff --git a/codex-rs/core/tests/suite/skills_extension.rs b/codex-rs/core/tests/suite/skills_extension.rs
 index 5b3bea22364a67a0d145c21460c2bba17e20cfc9..ced988a4e0d64f5ef326b40ad8d9428706bfad8c 100644
 --- a/codex-rs/core/tests/suite/skills_extension.rs
@@ -890,10 +961,10 @@ index 768aa0f473c2e0c4a905cd159dc603bca0d9be8a..d5ad46eb98cdb9f44b1237d98054f9e6
          },
 diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..2b1ed5123d67a1b6bcf9e3f7317521bb8748e2ee
+index 0000000000000000000000000000000000000000..7a21831acb52b0ab8d5b9c9757adf44ef78480b9
 --- /dev/null
 +++ b/codex-rs/otel/src/sdk_trace.rs
-@@ -0,0 +1,869 @@
+@@ -0,0 +1,887 @@
 +//! SDK-owned native spans and immutable, process-local tracing context leases.
 +use std::borrow::Cow;
 +use std::collections::HashMap;
@@ -1411,7 +1482,12 @@ index 0000000000000000000000000000000000000000..2b1ed5123d67a1b6bcf9e3f7317521bb
 +    Ok(resolve(key)?.context.clone())
 +}
 +pub fn current_context_token() -> Option<String> {
-+    let context = restore_policy(Context::current());
++    // Native lifecycle hooks may run in an instrumented tracing span without
++    // an attached OpenTelemetry Context. Prefer that exact span's carrier.
++    let context = crate::trace_context::current_span_w3c_trace_context()
++        .and_then(|trace| crate::trace_context::context_from_w3c_trace_context(&trace))
++        .filter(|context| policy_for_context(context).is_some())
++        .unwrap_or_else(|| restore_policy(Context::current()));
 +    policy_for_context(&context)?;
 +    let handle = Arc::new(Handle {
 +        context,
@@ -1468,6 +1544,19 @@ index 0000000000000000000000000000000000000000..2b1ed5123d67a1b6bcf9e3f7317521bb
 +            &[],
 +        );
 +        assert_eq!(sample.decision, SamplingDecision::Drop);
++    }
++}
++
++/// Private SDK context stored on an existing native turn owner. Questions and
++/// admission receipts share the lease; reading events never captures ambient state.
++pub struct CapturedContext {
++    pub context: Option<Arc<ContextLease>>,
++}
++impl CapturedContext {
++    pub fn capture() -> Self {
++        Self {
++            context: ContextLease::capture().map(Arc::new),
++        }
 +    }
 +}
 +

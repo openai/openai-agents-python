@@ -178,8 +178,8 @@
     },
     {
       "path": "0045-sdk-native-tracing.patch",
-      "sha256": "2324b54958b3cc18b3ffe7226e30b8618e8278b64f0d9d74c2165af2d269b934"
+      "sha256": "a6ea57be2d022a630184b3eed7d27c6897dc8b707b40b71144a9d688e0cc65fa"
     }
   ],
-  "result_tree": "e39733ce9b9592802c95f6c4d133bf37c858b07e"
+  "result_tree": "30021138fb181306dd57ae18e3415411dcc4ccfa"
 }

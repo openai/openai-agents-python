@@ -134,6 +134,8 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "host_contexts",
         "manual_validation_context",
         "closed_session_context",
+        "child_turn_policy",
+        "child_interaction_policy",
     ],
 )
 def test_native_tracing_contract(case: str) -> None:
@@ -187,7 +189,7 @@ async def _native_case(case: str) -> None:
                 await telemetry.configure(
                     traces=export,
                     logs=telemetry.OtlpHttp(endpoint=f"{peer.endpoint}/v1/logs")
-                    if case in ("policies", "ancestry_queue")
+                    if case in ("policies", "ancestry_queue", "child_turn_policy")
                     else None,
                     processors=[recorder],
                     log_user_prompt=True,
@@ -226,6 +228,10 @@ async def _native_case(case: str) -> None:
                     await _manual_validation_context(fixture, provider)
                 elif case == "closed_session_context":
                     await _closed_session_context(fixture, provider)
+                elif case == "child_turn_policy":
+                    await _child_turn_policy(recorder, peer, Path(directory))
+                elif case == "child_interaction_policy":
+                    await _child_interaction_policy(Path(directory))
                 else:
                     raise AssertionError(case)
             finally:
@@ -1133,3 +1139,235 @@ asyncio.run(scopes())
             [sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=15
         )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directory: Path) -> None:
+    from dataclasses import replace
+
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import agent_for, child_peer, handles, metadata, trust
+    from tests.test_native_executor_tools import declaration
+
+    seen = []
+    for index, mode in enumerate(("disabled", "metadata", "origin_disabled"), 1):
+        root = directory / mode
+        root.mkdir()
+        with pytest.MonkeyPatch.context() as patch:
+            async with (
+                child_peer(("default",)) as model,
+                ExecutorPeer(root / "remote").serve() as executor,
+            ):
+                trust(executor, root, patch)
+                seen.clear()
+                origin_id = str(index) * 32
+                disabled = mode != "metadata"
+
+                @function_tool
+                def inspect_child_policy(label: str) -> str:
+                    context = telemetry.current_context()
+                    assert context is not None
+                    seen.append(
+                        (label, context.trace_id, context.disabled, context.include_sensitive_data)
+                    )
+                    return "observed"
+
+                original = model.response
+                fresh, steer = "FRESH_CHILD_PAYLOAD_" + mode, "STEER_CHILD_PAYLOAD_" + mode
+
+                def response(original=original, fresh=fresh, steer=steer):
+                    body = model.requests[-1]
+                    if metadata(body, model.request_headers[-1])["agent_name"] == "/root":
+                        return original()
+                    encoded = json.dumps(body["input"])
+                    label = (
+                        "fresh" if fresh in encoded else "steer" if steer in encoded else "initial"
+                    )
+                    call_id = "policy-" + label
+                    if not any(
+                        item.get("type") == "function_call_output"
+                        and item.get("call_id") == call_id
+                        for item in body["input"]
+                    ):
+                        return [function_call("inspect_child_policy", {"label": label}, call_id)]
+                    answer = assistant_output("alpha complete")
+                    answer["item"]["id"] = "done-alpha"
+                    return [answer]
+
+                model.response = response
+                agent = agent_for(model, executor)
+                agent = replace(agent, tools=[*agent.tools, inspect_child_policy])
+                async with agent.session(
+                    environment=declaration(executor),
+                    trace_options=telemetry.TraceOptions(
+                        disabled=mode == "disabled", include_sensitive_data=mode != "metadata"
+                    ),
+                ) as session:
+                    with telemetry.trace(
+                        "child creation",
+                        options=telemetry.TraceOptions(
+                            trace_id=origin_id,
+                            disabled=mode == "origin_disabled",
+                            include_sensitive_data=True,
+                        ),
+                    ):
+                        initial = await session.submit("Create child")
+                    assert (await initial.get_result()).final_output == "root complete"
+                    await model.entered["alpha"].wait()
+                    [first] = await handles(session, 1)
+                    with telemetry.trace(
+                        "unrelated child caller",
+                        options=telemetry.TraceOptions(
+                            trace_id="f" * 32, include_sensitive_data=True
+                        ),
+                    ):
+                        await first.steer(steer)
+                        model.release["alpha"].set()
+                        assert (await first.get_result()).final_output == "alpha complete"
+                        [child] = [child async for child in session.subagents()]
+                        later = await child.start(fresh)
+                        assert later.turn_id != first.turn_id
+                        assert (await later.get_result()).final_output == "alpha complete"
+                    assert {row[0] for row in seen} == {"initial", "steer", "fresh"}, seen
+                    assert all(
+                        row[1:] == (origin_id, disabled, mode != "metadata") for row in seen
+                    ), seen
+                assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+                if disabled:
+                    assert not any(event["trace_id"] == origin_id for event in recorder.events)
+                else:
+                    assert any(event["trace_id"] == origin_id for event in recorder.events)
+                    assert fresh not in json.dumps(peer.records)
+                    assert steer not in json.dumps(peer.records)
+
+
+async def _child_interaction_policy(directory: Path) -> None:
+    from dataclasses import replace
+
+    from agents import ApprovalRequest, ElicitationRequest
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import agent_for, child_peer, handles, metadata, trust
+    from tests.test_native_executor_tools import declaration
+    from tests.test_native_mcp_tools import mcp_call
+    from tests.test_native_owned_child_prompts import interactive
+    from tests.test_native_scoped_policies import AskingPeer
+
+    for index, (mode, route) in enumerate(
+        (("disabled", "exec"), ("metadata", "form"), ("origin_disabled", "exec")), 4
+    ):
+        root = directory / mode
+        root.mkdir()
+        vault = AskingPeer()
+        vault.annotations = None
+        with pytest.MonkeyPatch.context() as patch:
+            async with (
+                child_peer(("default",)) as model,
+                ExecutorPeer(root / "remote").serve() as executor,
+                vault.serve() as url,
+            ):
+                trust(executor, root, patch)
+                model.command = "printf never-approved"
+                model.extra_arguments = {
+                    "sandbox_permissions": "require_escalated",
+                    "justification": "Synthetic denial",
+                }
+                model.release["alpha"].set()
+                original = model.response
+
+                def response(original=original, route=route):
+                    body = model.requests[-1]
+                    if (
+                        route == "exec"
+                        or metadata(body, model.request_headers[-1])["agent_name"] == "/root"
+                    ):
+                        return original()
+                    if not any(
+                        item.get("type") == "function_call_output"
+                        and item.get("call_id") == "form-call"
+                        for item in body["input"]
+                    ):
+                        return [mcp_call("search", "mcp__vault", "form-call")]
+                    return [assistant_output("alpha complete")]
+
+                model.response = response
+                agent = interactive(agent_for(model, executor))
+                if route == "form":
+                    agent = replace(
+                        agent,
+                        tools=[
+                            *agent.tools,
+                            HttpMCP(name="vault", url=url, tools=["search"], approval_mode="auto"),
+                        ],
+                    )
+                origin_id = str(index) * 32
+                observed = []
+                retained_questions = []
+                async with agent.session(
+                    environment=declaration(executor),
+                    trace_options=telemetry.TraceOptions(
+                        disabled=mode == "disabled", include_sensitive_data=mode != "metadata"
+                    ),
+                ) as session:
+                    with telemetry.trace(
+                        "question origin",
+                        options=telemetry.TraceOptions(
+                            trace_id=origin_id,
+                            disabled=mode == "origin_disabled",
+                            include_sensitive_data=True,
+                        ),
+                    ):
+                        initial = await session.submit("Create child question")
+                    assert (await initial.get_result()).final_output == "root complete"
+                    [child_turn] = await handles(session, 1)
+
+                    async def handler(
+                        question,
+                        child_turn=child_turn,
+                        origin_id=origin_id,
+                        mode=mode,
+                        observed=observed,
+                        retained_questions=retained_questions,
+                    ):
+                        assert question.subagent_id == child_turn.child_id
+                        assert question.turn_id == child_turn.turn_id
+                        current = telemetry.current_context()
+                        assert current is not None and current.trace_id == origin_id
+                        assert current.disabled == (mode != "metadata")
+                        assert current.include_sensitive_data == (mode != "metadata")
+                        with telemetry.trace(
+                            "nested question work",
+                            options=telemetry.TraceOptions(
+                                disabled=False, include_sensitive_data=True, detached=True
+                            ),
+                        ) as nested:
+                            assert nested.context.disabled == current.disabled
+                            assert (
+                                nested.context.include_sensitive_data
+                                == current.include_sensitive_data
+                            )
+                        observed.append(question.type)
+                        retained_questions.append(question)
+                        if isinstance(question, ApprovalRequest):
+                            return question.reply("deny")
+                        assert isinstance(question, ElicitationRequest)
+                        return question.reply({"answer": "accepted"})
+
+                    # The public one-shot path delegates here. Use the live child
+                    # as waiter so callbacks run after the root has completed.
+                    with telemetry.trace(
+                        "unrelated question caller",
+                        options=telemetry.TraceOptions(
+                            trace_id="f" * 32, include_sensitive_data=True
+                        ),
+                    ) as unrelated:
+                        answer = await session._run_with_interactions(child_turn, handler)
+                        assert telemetry.current_context() is unrelated.context
+                    assert answer.final_output == "alpha complete"
+                    assert observed == [
+                        "approval_request" if route == "exec" else "elicitation_request"
+                    ]
+                    assert all(
+                        question._tracing is None and "tracing_context" not in question._message
+                        for question in retained_questions
+                    )
+                    if route == "form":
+                        assert vault.answers[0]["result"]["content"] == {"answer": "accepted"}
