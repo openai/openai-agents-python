@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+import anyio
 import httpx
 from a2a.client import Client, ClientConfig, ClientFactory
 from a2a.client.card_resolver import A2ACardResolver
@@ -127,6 +128,26 @@ class _BoundedTransport(httpx.AsyncBaseTransport):
         await self._transport.aclose()
 
 
+class _BoundedClient(httpx.AsyncClient):
+    def __init__(self, limits: A2ALimits, headers: Mapping[str, str] | None = None) -> None:
+        super().__init__(
+            transport=_BoundedTransport(limits.response_bytes),
+            timeout=limits.timeout,
+            headers=headers,
+            follow_redirects=False,
+            trust_env=False,
+        )
+        self._request_deadline = limits.timeout
+
+    async def send(self, request: httpx.Request, **options: Any) -> httpx.Response:
+        # HTTPX reads an ordinary response here. A streaming send returns at the headers.
+        try:
+            with anyio.fail_after(self._request_deadline):
+                return await super().send(request, **options)
+        except TimeoutError as exc:
+            raise httpx.TimeoutException("A2A request deadline exceeded", request=request) from exc
+
+
 @asynccontextmanager
 async def connect_a2a(
     endpoint: A2AEndpoint | Mapping[str, Any],
@@ -139,7 +160,9 @@ async def connect_a2a(
     """Admit a configured card before acquiring credentials; yield the official client.
 
     Discovery and RPC request uncompressed HTTP bodies. The adapter rejects
-    other encodings before reading the body.
+    other encodings before reading the body. The timeout bounds each ordinary
+    request, including its body. Explicit event streams use an inactivity
+    timeout after the response headers arrive.
     The resolver returns a current bearer token for this configured endpoint.
     It must not select authority from peer content. Closing a connection does not
     cancel remote work. Use explicit CancelTask for that separate mutation.
@@ -148,12 +171,7 @@ async def connect_a2a(
     parent = _trace_context(parent_trace)
     carrier = parent.to_headers() if parent is not None else {}
     card: AgentCard | None = None
-    async with httpx.AsyncClient(
-        transport=_BoundedTransport(limits.response_bytes),
-        timeout=limits.timeout,
-        follow_redirects=False,
-        trust_env=False,
-    ) as discovery:
+    async with _BoundedClient(limits) as discovery:
         try:
             parts = urlsplit(endpoint.card_url)
             origin = f"{parts.scheme}://{parts.netloc}"
@@ -193,12 +211,8 @@ async def connect_a2a(
     candidate = ""
     if token is None:
         raise PermissionError("A2A credentials are unavailable")
-    async with httpx.AsyncClient(
-        transport=_BoundedTransport(limits.response_bytes),
-        headers={"Authorization": f"Bearer {token}", "A2A-Version": "1.0", **carrier},
-        timeout=limits.timeout,
-        follow_redirects=False,
-        trust_env=False,
+    async with _BoundedClient(
+        limits, headers={"Authorization": f"Bearer {token}", "A2A-Version": "1.0", **carrier}
     ) as http:
         client = ClientFactory(
             ClientConfig(

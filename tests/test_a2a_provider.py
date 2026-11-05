@@ -15,7 +15,7 @@ from a2a.types import a2a_pb2 as p
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
 from starlette.applications import Starlette
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
 from agents import FunctionTool
@@ -83,6 +83,42 @@ def claim(provider, update=None, action="start"):
     return JobClaim(
         binding=binding, key="host-owned-key", generation=1, action=action, update=update
     )
+
+
+async def test_creation_shares_one_deadline_across_discovery_and_rpc(tmp_path):
+    calls = []
+
+    def app(url):
+        async def discovery(request):
+            await asyncio.sleep(0.35)
+            return JSONResponse(MessageToDict(card(url)))
+
+        async def rpc(request):
+            body = await request.json()
+            calls.append(body["method"])
+            await asyncio.sleep(0.35)
+            task = {
+                "id": "task",
+                "contextId": "context",
+                "status": {"state": "TASK_STATE_SUBMITTED"},
+            }
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": {"task": task}})
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+        provider = make_provider(
+            endpoint(url), tmp_path / "journal.db", limits=A2ALimits(timeout=0.55)
+        )
+        current = claim(provider)
+        assert (await provider.start(current, Query(text="create"))).status == "unknown"
+        assert (await provider.start(current, Query(text="retry"))).status == "unknown"
+    assert calls == ["SendMessage"]
 
 
 async def test_known_receipt_observes_without_another_creation(tmp_path, responses):

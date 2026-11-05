@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import gzip
+import json
 import traceback
 
 import pytest
 
 pytest.importorskip("a2a")
 
+from a2a.client.errors import A2AClientTimeoutError
 from a2a.helpers.proto_helpers import new_data_message, new_text_message
 from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import TaskNotFoundError
@@ -198,6 +200,88 @@ async def test_rejects_encoded_responses_before_reading_the_body(route):
 
     assert seen == (["identity"] if route == "card" else ["identity", "identity"])
     assert acquired == ([] if route == "card" else [True])
+
+
+def drip_response(payload, *, heartbeat=b" ", media_type="application/json"):
+    async def body():
+        for _ in range(16):
+            yield heartbeat
+            await asyncio.sleep(0.05)
+        yield payload
+
+    return StreamingResponse(body(), media_type=media_type)
+
+
+@pytest.mark.parametrize("route", ["card", "rpc"])
+async def test_nonstreaming_response_has_a_total_deadline(route):
+    acquired = []
+
+    async def credentials():
+        acquired.append(True)
+        return "alice-token"
+
+    def app(url):
+        async def discovery(request):
+            value = MessageToDict(card(url))
+            if route == "card":
+                return drip_response(json.dumps(value).encode())
+            return JSONResponse(value)
+
+        async def rpc(request):
+            body = await request.json()
+            task = {"id": "task", "contextId": "context", "status": {"state": "TASK_STATE_WORKING"}}
+            return drip_response(
+                json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": task}).encode()
+            )
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+        with pytest.raises(ValueError if route == "card" else A2AClientTimeoutError):
+            async with connect_a2a(
+                endpoint(url), authorization=credentials, limits=A2ALimits(timeout=0.4)
+            ) as client:
+                if route == "rpc":
+                    await client.get_task(p.GetTaskRequest(id="task"))
+    assert acquired == ([] if route == "card" else [True])
+
+
+async def test_explicit_stream_can_stay_open_past_the_request_deadline():
+    def app(url):
+        async def discovery(request):
+            return JSONResponse(MessageToDict(card(url)))
+
+        async def rpc(request):
+            body = await request.json()
+            result = MessageToDict(
+                p.StreamResponse(message=new_text_message("stream finished", role=p.ROLE_AGENT))
+            )
+            event = json.dumps({"jsonrpc": "2.0", "id": body["id"], "result": result})
+            return drip_response(
+                f"data: {event}\n\n".encode(),
+                heartbeat=b": heartbeat\n\n",
+                media_type="text/event-stream",
+            )
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+        async with connect_a2a(
+            endpoint(url), authorization=token, limits=A2ALimits(timeout=0.4), streaming=True
+        ) as client:
+            request = p.SendMessageRequest(message=new_text_message("stream", role=p.ROLE_USER))
+            messages = [event.message.parts[0].text async for event in client.send_message(request)]
+    assert messages == ["stream finished"]
 
 
 async def test_native_orchestrator_discovers_and_dispatches_two_specialists(tmp_path, responses):

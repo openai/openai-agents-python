@@ -5,10 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Generic, Literal, TypeVar
 
+import anyio
+from a2a.client import Client
 from a2a.helpers.proto_helpers import new_data_message
 from a2a.types import a2a_pb2 as p
 from google.protobuf.json_format import MessageToDict
@@ -65,6 +68,15 @@ class A2AJobProvider(Generic[_Input]):
         self._encode, self._project = encode, project
         identity = _json([endpoint.name, endpoint.rpc_url, "1.0"], limits.message_bytes)
         self.id = "a2a/" + hashlib.sha256(identity.encode()).hexdigest()
+
+    @asynccontextmanager
+    async def _connect(self) -> AsyncIterator[Client]:
+        # Discovery, admission and all RPCs in one job operation share a deadline.
+        with anyio.fail_after(self.limits.timeout):
+            async with connect_a2a(
+                self.endpoint, authorization=self._authorization, limits=self.limits
+            ) as client:
+                yield client
 
     async def _check(self, claim: JobClaim, operation: Operation) -> None:
         allowed = False
@@ -156,9 +168,7 @@ class A2AJobProvider(Generic[_Input]):
         _json(MessageToDict(message), self.limits.message_bytes)
         result = None
         try:
-            async with connect_a2a(
-                self.endpoint, authorization=self._authorization, limits=self.limits
-            ) as client:
+            async with self._connect() as client:
                 request = p.SendMessageRequest(
                     message=message,
                     configuration=p.SendMessageConfiguration(return_immediately=True),
@@ -179,9 +189,7 @@ class A2AJobProvider(Generic[_Input]):
         receipt = self._receipt(claim)
         result = None
         try:
-            async with connect_a2a(
-                self.endpoint, authorization=self._authorization, limits=self.limits
-            ) as client:
+            async with self._connect() as client:
                 await self._check(claim, "observe")
                 result = self._update(
                     await client.get_task(p.GetTaskRequest(id=receipt["task_id"])), receipt
@@ -230,9 +238,7 @@ class A2AJobProvider(Generic[_Input]):
         result = None
         invalid = False
         try:
-            async with connect_a2a(
-                self.endpoint, authorization=self._authorization, limits=self.limits
-            ) as client:
+            async with self._connect() as client:
                 await self._check(claim, operation)
                 task = await client.get_task(p.GetTaskRequest(id=receipt["task_id"]))
                 current = self._update(task, receipt)
