@@ -1238,7 +1238,10 @@ async def test_fresh_public_wire_failures_expose_their_originating_reason(
     async with timeout(30), peer() as server:
         full_envelopes(server)
         if reason == "undecodable_output_item":
-            server.respond(*refusal(added_with_refusal=True))
+            invalid = refusal(added_with_refusal=True)
+            if websocket:
+                server.expected_disconnect_event = invalid[0]
+            server.respond(*invalid)
         elif reason == "provider_owned_tool_receipt":
             server.respond(
                 {
