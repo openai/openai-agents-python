@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -463,6 +464,7 @@ async def test_provider_receipt_after_canonical_text_fails_before_history_is_rec
         with pytest.raises(NativeError, match=ERROR) as caught:
             await turn.get_result()
         assert str(caught.value) == ERROR
+        assert caught.value.response_integrity_reason == "provider_owned_tool_receipt"
         events = [event async for event in turn.events()]
         assert isinstance(events[-1], TurnFinished)
         assert events[-1].status == "failed"
@@ -655,6 +657,7 @@ async def test_terminal_response_without_an_assistant_text_part_fails_and_recove
         with pytest.raises(NativeError, match=ERROR) as caught:
             await turn.get_result()
         assert item["id"] not in str(caught.value)
+        assert caught.value.response_integrity_reason == "missing_supported_terminal_output"
         assert "synthetic non-answer summary" not in repr(caught.value)
         events = [event async for event in turn.events()]
         assert isinstance(events[-1], TurnFinished)
@@ -790,6 +793,7 @@ async def test_undecodable_item_fails_exact_turn_without_retry_or_effect_replay(
             with pytest.raises(NativeError, match=ERROR) as caught:
                 await failed.get_result()
             assert str(caught.value) == ERROR
+            assert caught.value.response_integrity_reason == "undecodable_output_item"
             assert effects == ["recorded"]
             assert len(server.requests) == 2
             events = [event async for event in failed.events()]
@@ -815,8 +819,9 @@ async def test_undecodable_item_fails_exact_turn_without_retry_or_effect_replay(
 
 
 @pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("consume_events", [False, True])
 async def test_undecodable_native_child_output_keeps_sibling_root_and_successor_usable(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, consume_events
 ) -> None:
     from tests.native_executor_fixtures import ExecutorPeer
     from tests.test_native_child_agents import agent_for, child_peer, handles, trust
@@ -855,13 +860,19 @@ async def test_undecodable_native_child_output_keeps_sibling_root_and_successor_
             alpha_id = server.child_metadata["alpha"][0]["thread_id"]
             beta_id = server.child_metadata["beta"][0]["thread_id"]
             alpha, beta = turns[alpha_id], turns[beta_id]
+
+            async def collect_child():
+                return [event async for event in alpha.events()]
+
+            consumed = asyncio.create_task(collect_child()) if consume_events else None
             with pytest.raises(NativeError) as caught:
                 await alpha.get_result()
             # Native child handles retain a sanitized terminal receipt.
             assert str(caught.value) in {ERROR, "Native child turn failed"}
+            assert caught.value.response_integrity_reason in {None, "undecodable_output_item"}
             beta_result = await beta.get_result()
             assert beta_result.turn is beta and beta_result.final_output == "beta complete"
-            events = [event async for event in alpha.events()]
+            events = await consumed if consumed is not None else await collect_child()
             assert isinstance(events[-1], TurnFinished)
             assert (events[-1].turn_id, events[-1].status) == (alpha.turn_id, "failed")
             assert len(server.child_requests["alpha"]) == 2
@@ -883,3 +894,383 @@ async def test_undecodable_native_child_output_keeps_sibling_root_and_successor_
             assert (await (await session.submit("continue root")).get_result()).final_output == (
                 "root complete"
             )
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("consume_events", [False, True])
+async def test_owned_native_child_parser_reason_after_public_admission(
+    tmp_path, monkeypatch, consume_events
+) -> None:
+    from agents.observation import TurnStarted
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_native_child_agents import agent_for, child_peer, trust
+    from tests.test_native_executor_tools import declaration
+
+    async with (
+        timeout(30),
+        child_peer(("default",)) as server,
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+    ):
+        trust(executor, tmp_path, monkeypatch)
+        original = server.response
+
+        def response():
+            events = original()
+            if events[0].get("item", {}).get("id") == "done-alpha":
+                events[0]["item"]["phase"] = "commentary"
+                return [events[0], *refusal(output_index=1, added_with_refusal=True)]
+            return events
+
+        server.response = response
+        async with agent_for(server, executor).session(
+            environment=declaration(executor)
+        ) as session:
+            root = await session.submit("start alpha and beta")
+            assert (await root.get_result()).final_output == "root complete"
+            await server.entered["alpha"].wait()
+            alpha_id = server.child_metadata["alpha"][0]["thread_id"]
+            # Provider entry alone does not prove the Session reader has captured
+            # the child. Match a public started observation to its live handle
+            # while the final response remains held behind the existing gate.
+            alpha = None
+            async for event in session.events():
+                if not isinstance(event, TurnStarted):
+                    continue
+                children = {child.id: child async for child in session.subagents()}
+                candidate = children[alpha_id].turn
+                if candidate is not None and event.submission_id == candidate.submission_id:
+                    assert event.turn_id == candidate.turn_id
+                    alpha = candidate
+                    break
+            assert alpha is not None
+            assert not server.release["alpha"].is_set()
+            waiting = asyncio.Event()
+            observing = asyncio.Event()
+
+            async def wait_child():
+                waiting.set()
+                return await alpha.get_result()
+
+            async def collect_child():
+                observing.set()
+                return [event async for event in alpha.events()]
+
+            result = asyncio.create_task(wait_child())
+            await waiting.wait()
+            consumed = asyncio.create_task(collect_child()) if consume_events else None
+            if consumed is not None:
+                await observing.wait()
+            assert not result.done()
+            server.release["alpha"].set()
+            with pytest.raises(NativeError) as caught:
+                await result
+            assert str(caught.value) in {ERROR, "Native child turn failed"}
+            assert caught.value.response_integrity_reason == "undecodable_output_item"
+            events = await consumed if consumed is not None else await collect_child()
+            assert isinstance(events[-1], TurnFinished)
+            assert (events[-1].turn_id, events[-1].status) == (alpha.turn_id, "failed")
+            assert len(server.child_requests["alpha"]) == 2
+            assert (executor.root / "alpha.txt").read_text() == "alpha"
+            assert REFUSAL not in repr(caught.value)
+            assert REFUSAL not in repr(events)
+
+
+def terminal_reason_for_test(reason: str) -> str:
+    return (
+        "missing_supported_terminal_output"
+        if reason != "missing_supported_terminal_output"
+        else "unfinished_assistant_item"
+    )
+
+
+@pytest.mark.parametrize("notice_first", [False, True], ids=["terminal-first", "notice-first"])
+@pytest.mark.parametrize("consume_events", [False, True])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "undecodable_output_item",
+        "provider_owned_tool_receipt",
+        "unfinished_assistant_item",
+        "missing_supported_terminal_output",
+    ],
+)
+async def test_public_integrity_reason_follows_selected_notice_without_terminal_enrichment(
+    responses: ResponsesFixture,
+    monkeypatch,
+    reason: str,
+    notice_first: bool,
+    consume_events: bool,
+) -> None:
+    """Control trusted notice delivery while real native work supplies the terminal.
+
+    Native queue ownership is covered by Rust receipt tests. This boundary test
+    fixes delivery order rather than assuming a tokio select scheduling order.
+    Parser errors do not emit notices; their normal path is passive terminal conversion.
+    """
+    from agents import _native
+
+    original_next = _native.NativeThread._next_session_event
+    pending: list[str] = []
+    release_late = asyncio.Event()
+    selected = False
+
+    async def ordered_next(native):
+        nonlocal selected
+        if pending:
+            if not notice_first:
+                await release_late.wait()
+            return pending.pop(0)
+        while True:
+            raw = await original_next(native)
+            event = json.loads(raw)
+            if event is None:
+                return raw
+            message = event.get("msg", {})
+            if message.get("type") == "_sdk_model_generation_failed":
+                continue
+            if (
+                not selected
+                and message.get("type") in {"task_complete", "turn_complete"}
+                and message.get("error")
+            ):
+                selected = True
+                terminal_reason = (
+                    "missing_supported_terminal_output"
+                    if reason != "missing_supported_terminal_output"
+                    else "unfinished_assistant_item"
+                )
+                message["error"]["_sdk_response_integrity_reason"] = terminal_reason
+                raw = json.dumps(event)
+                notice = json.dumps(
+                    {
+                        "id": event["id"],
+                        "msg": {
+                            "type": "_sdk_model_generation_failed",
+                            "turn_id": event["id"],
+                            "message": ERROR,
+                            "response_integrity_reason": reason,
+                            "policy_stop": False,
+                        },
+                    }
+                )
+                pending.append(raw if notice_first else notice)
+                return notice if notice_first else raw
+            return raw
+
+    monkeypatch.setattr(_native.NativeThread, "_next_session_event", ordered_next)
+    full_envelopes(responses)
+    if reason == "undecodable_output_item":
+        responses.respond(*refusal(added_with_refusal=True))
+    elif reason == "provider_owned_tool_receipt":
+        responses.respond(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": "provider-only",
+                    "output": "synthetic",
+                },
+            }
+        )
+    elif reason == "unfinished_assistant_item":
+        responses.respond(
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "message", "id": "unfinished", "role": "assistant", "content": []},
+            }
+        )
+    else:
+        responses.respond()
+    responses.respond(assistant_output("fresh successor"))
+    try:
+        async with (
+            timeout(30),
+            Agent(
+                model="gpt-5.2", instructions="Answer.", provider=provider(responses)
+            ).session() as session,
+        ):
+            turn = await session.submit("fail then recover")
+
+            async def collect():
+                return [event async for event in turn.events()]
+
+            stream = asyncio.create_task(collect()) if consume_events else None
+            with pytest.raises(NativeError) as caught:
+                await turn.get_result()
+            error = caught.value
+            assert error.response_integrity_reason == (
+                reason if notice_first else terminal_reason_for_test(reason)
+            )
+            assert ERROR in str(error)
+            assert error.effects == "unknown"
+            release_late.set()
+            with pytest.raises(NativeError) as repeated:
+                await turn.get_result()
+            assert repeated.value is error
+            assert repeated.value.response_integrity_reason == (
+                reason if notice_first else terminal_reason_for_test(reason)
+            )
+            if stream is not None:
+                assert isinstance((await stream)[-1], TurnFinished)
+            assert (
+                await (await session.submit("successor")).get_result()
+            ).final_output == "fresh successor"
+            assert len(responses.requests) == 2
+            assert error.response_integrity_reason == (
+                reason if notice_first else terminal_reason_for_test(reason)
+            )
+    finally:
+        release_late.set()
+
+
+async def test_same_id_manual_recovery_does_not_decorate_the_original_public_failure(
+    responses: ResponsesFixture,
+) -> None:
+    from agents import FunctionTool, InteractionRequired
+    from agents.state import SessionState
+    from tests.test_native_manual_tools import LookupArgs, next_request
+
+    lookup = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    full_envelopes(responses)
+    responses.respond(function_call("lookup", {"key": "A"}, "manual-A"))
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Use lookup then answer.",
+        provider=provider(responses),
+        tools=[lookup],
+    )
+    async with timeout(30):
+        async with agent.session() as original_session:
+            original_turn = await original_session.submit("look up A")
+            original_request = await next_request(original_session.interactions(), lookup)
+            saved = await original_session.suspend()
+            with pytest.raises(InteractionRequired) as original_error:
+                await original_turn.get_result()
+            assert original_error.value.response_integrity_reason is None
+        async with agent.session(state=SessionState.from_json(saved.to_json())) as restored:
+            current = await next_request(restored.interactions(), lookup)
+            assert current.turn_id == original_request.turn_id == original_turn.turn_id
+            with pytest.raises((ValueError, RuntimeError), match="foreign|expired|closed"):
+                await original_request.respond("stale")
+            responses.respond(*refusal(added_with_refusal=True))
+            await current.respond("answer-A")
+            assert restored.restored_turn is not None
+            with pytest.raises(NativeError) as current_error:
+                await restored.restored_turn.get_result()
+            assert current_error.value.response_integrity_reason in {
+                None,
+                "undecodable_output_item",
+            }
+            assert original_error.value.response_integrity_reason is None
+            assert len(responses.requests) == 2
+
+
+async def test_parser_failure_settles_an_already_running_tool_without_new_early_cancellation(
+    responses: ResponsesFixture,
+) -> None:
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    effects: list[str] = []
+
+    @function_tool
+    async def settle_once() -> str:
+        """Finish the already-started synthetic effect."""
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+        effects.append("settled")
+        return "settled"
+
+    full_envelopes(responses)
+    responses.respond(
+        function_call("settle_once", {}, "owned-effect"),
+        *refusal(output_index=1, added_with_refusal=True),
+    )
+    async with (
+        timeout(30),
+        Agent(
+            model="gpt-5.2",
+            instructions="Use settle_once then answer.",
+            provider=provider(responses),
+            tools=[settle_once],
+        ).session() as session,
+    ):
+        turn = await session.submit("settle the started effect")
+        outcome = asyncio.create_task(turn.get_result())
+        await entered.wait()
+        try:
+            # Core must drain its in-flight tool before publishing the parser error.
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(asyncio.shield(outcome), 0.1)
+            assert not cancelled.is_set()
+        finally:
+            release.set()
+        with pytest.raises(NativeError) as caught:
+            await outcome
+        assert str(caught.value) == ERROR
+        assert caught.value.category == "internal_error"
+        assert caught.value.response_integrity_reason == "undecodable_output_item"
+        assert effects == ["settled"]
+        assert not cancelled.is_set()
+        assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("websocket", [False, True], ids=["http", "websocket"])
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "undecodable_output_item",
+        "provider_owned_tool_receipt",
+        "unfinished_assistant_item",
+        "missing_supported_terminal_output",
+    ],
+)
+async def test_fresh_public_wire_failures_expose_their_originating_reason(
+    websocket: bool,
+    reason: str,
+) -> None:
+    from tests.test_native_provider_websockets import peer
+
+    async with timeout(30), peer() as server:
+        full_envelopes(server)
+        if reason == "undecodable_output_item":
+            server.respond(*refusal(added_with_refusal=True))
+        elif reason == "provider_owned_tool_receipt":
+            server.respond(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "function_call_output",
+                        "call_id": "provider-only",
+                        "output": "synthetic",
+                    },
+                }
+            )
+        elif reason == "unfinished_assistant_item":
+            server.respond(
+                {
+                    "type": "response.output_item.added",
+                    "item": {
+                        "type": "message",
+                        "id": "pending",
+                        "role": "assistant",
+                        "content": [],
+                    },
+                }
+            )
+        else:
+            server.respond()
+        async with Agent(
+            model="gpt-5.2", instructions="Answer.", provider=server.provider(websocket=websocket)
+        ).session() as session:
+            turn = await session.submit("answer with supported output")
+            with pytest.raises(NativeError, match=ERROR) as caught:
+                await turn.get_result()
+            assert caught.value.response_integrity_reason == reason
+            assert str(caught.value) == ERROR
+            assert caught.value.effects == "unknown"
+            assert len(server.requests) == 1

@@ -264,3 +264,79 @@ async def test_provider_metadata_does_not_reach_later_turns_or_local_errors(
             assert last.value.category is None
     finally:
         await provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "undecodable_output_item",
+        "provider_owned_tool_receipt",
+        "unfinished_assistant_item",
+        "missing_supported_terminal_output",
+    ],
+)
+def test_captured_integrity_reason_is_readonly_and_does_not_change_error_metadata(
+    reason: str,
+) -> None:
+    from agents.session import _model_failure_error, _native_error
+
+    error = _model_failure_error(
+        {"message": "fixed safe message", "response_integrity_reason": reason}
+    )
+    assert error.response_integrity_reason == reason
+    assert str(error) == "fixed safe message"
+    assert (error.status_code, error.code, error.request_id, error.category) == (
+        None,
+        None,
+        None,
+        None,
+    )
+    assert error.effects == "unknown"
+    with pytest.raises(AttributeError):
+        error.response_integrity_reason = None  # type: ignore[misc]
+    assert copy.copy(error).response_integrity_reason == reason
+    assert pickle.loads(pickle.dumps(error)).response_integrity_reason == reason
+    # A terminal or provider body is not a captured ModelFailure notice.
+    assert (
+        _native_error(
+            {"message": "same category", "response_integrity_reason": reason}
+        ).response_integrity_reason
+        is None
+    )
+    assert NativeError("application error").response_integrity_reason is None
+
+
+@pytest.mark.parametrize("value", [None, True, 7, {}, [], "", "unknown", "x" * 10000])
+def test_unrecognized_captured_integrity_reason_remains_unknown(value: Any) -> None:
+    from agents.session import _model_failure_error
+
+    assert (
+        _model_failure_error(
+            {"message": "safe", "response_integrity_reason": value}
+        ).response_integrity_reason
+        is None
+    )
+
+
+def test_passive_reason_conversion_preserves_its_originating_category_and_provider_fields() -> None:
+    from agents.session import _native_error
+
+    error = _native_error(
+        {
+            "message": "safe",
+            "codex_error_info": "Other",
+            "_sdk_response_integrity_reason": "undecodable_output_item",
+            "_sdk_provider_error": {
+                "status_code": 401,
+                "code": "synthetic_code",
+                "request_id": "synthetic-id",
+            },
+        }
+    )
+    assert error.response_integrity_reason == "undecodable_output_item"
+    assert error.category == "internal_error"
+    assert (error.status_code, error.code, error.request_id) == (
+        401,
+        "synthetic_code",
+        "synthetic-id",
+    )

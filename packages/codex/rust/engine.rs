@@ -1409,6 +1409,7 @@ fn native_event(
     source: Option<(ThreadId, u64)>,
     mut event: Event,
     session_reader: bool,
+    project_integrity_reason: bool,
 ) -> anyhow::Result<serde_json::Value> {
     // Session observations and stored items use Core's same retention limit.
     // Keep the full native event for callers of the low-level raw reader.
@@ -1420,6 +1421,26 @@ fn native_event(
         event.msg = retained;
     }
     let mut value = serde_json::to_value(&event)?;
+    if project_integrity_reason {
+        match &event.msg {
+            EventMsg::Error(error) => {
+                if let Some(reason) = error.response_integrity_reason {
+                    value["msg"]["_sdk_response_integrity_reason"] = serde_json::json!(reason);
+                }
+            }
+            EventMsg::TurnComplete(done) => {
+                if let Some(reason) = done
+                    .error
+                    .as_ref()
+                    .and_then(|error| error.response_integrity_reason)
+                {
+                    value["msg"]["error"]["_sdk_response_integrity_reason"] =
+                        serde_json::json!(reason);
+                }
+            }
+            _ => {}
+        }
+    }
     if let Some((id, instance)) = source {
         value["subagent_id"] = serde_json::json!(id);
         value["subagent_instance_id"] = serde_json::json!(instance);
@@ -1560,7 +1581,21 @@ impl ThreadState {
         } else {
             None
         };
-        let mut event = native_event(Some((source.0, source.1)), event, session_reader)?;
+        let project_reason = thread
+            .as_ref()
+            .and_then(|thread| {
+                thread
+                    .thread_extension_data()
+                    .get::<crate::python_tools::PythonTools>()
+            })
+            .and_then(|tools| tools.observed_admission(&event.id))
+            .is_some();
+        let mut event = native_event(
+            Some((source.0, source.1)),
+            event,
+            session_reader,
+            project_reason,
+        )?;
         if let Some(grant) = question {
             let id = ThreadId::new().to_string();
             self.child_questions.lock().await.insert(
@@ -1617,7 +1652,7 @@ impl ThreadState {
         let mut events = self.events.lock().await;
         ensure!(!*closing.borrow(), "Codex thread is closed");
         if let Some(event) = events.initial.take() {
-            return native_event(None, event, admission_ready);
+            return native_event(None, event, admission_ready, false);
         }
         loop {
             if let Some(terminal) = events.session_terminal.as_mut() {
@@ -1634,7 +1669,12 @@ impl ThreadState {
                 {
                     settlement.delivered(&event.msg);
                 }
-                let mut value = native_event(None, event, admission_ready)?;
+                let mut value = native_event(
+                    None,
+                    event,
+                    admission_ready,
+                    receipt.permits_integrity_reason(),
+                )?;
                 receipt.attach_provider_error(&mut value);
                 if !value["msg"]["error"].is_null() {
                     receipt.attach_policy_failure(&mut value);
@@ -1682,7 +1722,9 @@ impl ThreadState {
                         .get::<crate::turn_settlement::Settlement>() {
                         settlement.delivered(&event.msg);
                     }
-                    return native_event(None, event, admission_ready);
+                    let project_reason = python_tools.as_ref()
+                        .and_then(|tools| tools.observed_admission(&event.id)).is_some();
+                    return native_event(None, event, admission_ready, project_reason);
                 },
                 (source, event) = read_child(children) => return self.child_event(source, event, admission_ready).await,
                 Some(event) = graph.recv() => {
@@ -1700,7 +1742,7 @@ impl ThreadState {
                 event = extensions.recv() => {
                     let (target, event) = event?;
                     if target.is_empty() || target == self.id.to_string() {
-                        return native_event(None, event, admission_ready);
+                        return native_event(None, event, admission_ready, false);
                     }
                     if let Ok(id) = ThreadId::from_string(&target) {
                         if !events.children.iter().any(|(child_id, _)| *child_id == id) {

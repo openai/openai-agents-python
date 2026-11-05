@@ -175,7 +175,11 @@
     {
       "path": "0044-scan-deep-helper-hard-links.patch",
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
+    },
+    {
+      "path": "0045-native-response-integrity-reasons.patch",
+      "sha256": "6bb9bd9bf732bb8f721b67f66f9d5859e1049eec586d73cff276e9083572a377"
     }
   ],
-  "result_tree": "fc1ed1b5c1649e5ca265af011f4748f9af391744"
+  "result_tree": "39fba29c076c098ab5deb934b0cb2d7ee11c068e"
 }

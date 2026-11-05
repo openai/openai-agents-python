@@ -395,6 +395,14 @@ class Capabilities:
             raise CapabilityError(f"{feature}: {support.reason}. Scope: {support.scope}")
 
 
+ResponseIntegrityReason: TypeAlias = Literal[
+    "undecodable_output_item",
+    "provider_owned_tool_receipt",
+    "unfinished_assistant_item",
+    "missing_supported_terminal_output",
+]
+
+
 class NativeError(RuntimeError):
     """The native conversation could not complete the submitted operation.
 
@@ -422,6 +430,16 @@ class NativeError(RuntimeError):
         self.code = code
         self.request_id = request_id
         self.category = category
+        self._response_integrity_reason: ResponseIntegrityReason | None = None
+
+    @property
+    def response_integrity_reason(self) -> ResponseIntegrityReason | None:
+        """Captured model-output cause, when available for this selected failure.
+
+        Restored or ambiguously owned errors can leave this unknown.
+        A reason does not establish that earlier operations had no effects.
+        """
+        return self._response_integrity_reason
 
     @property
     def effects(self) -> Literal["not_started", "unknown", "recorded"]:
@@ -429,15 +447,28 @@ class NativeError(RuntimeError):
         return self._effects
 
 
+def _model_failure_error(message: dict[str, Any]) -> NativeError:
+    """Construct once from the captured native notice, never a later terminal."""
+    error = NativeError(message["message"])
+    reason = message.get("response_integrity_reason")
+    if isinstance(reason, str) and reason in get_args(ResponseIntegrityReason):
+        error._response_integrity_reason = cast(ResponseIntegrityReason, reason)
+    return error
+
+
 def _native_error(error: dict[str, Any], message: str | None = None) -> NativeError:
     metadata = error.get("_sdk_provider_error") or {}
-    return NativeError(
+    result = NativeError(
         error["message"] if message is None else message,
         status_code=metadata.get("status_code"),
         code=metadata.get("code"),
         request_id=metadata.get("request_id"),
         category=_error_code(error),
     )
+    reason = error.get("_sdk_response_integrity_reason")
+    if isinstance(reason, str) and reason in get_args(ResponseIntegrityReason):
+        result._response_integrity_reason = cast(ResponseIntegrityReason, reason)
+    return result
 
 
 class InteractionRequired(NativeError):
@@ -6023,7 +6054,7 @@ class Session(Generic[ContextT, OutputT]):
                             child.policy_stop = (
                                 "expired" if message.get("policy_stop") is True else None
                             )
-                            child.failure.set_result(NativeError(message["message"]))
+                            child.failure.set_result(_model_failure_error(message))
                     continue
                 if message.get("type") == "_sdk_select_step" and message["thread"] != self.id:
                     try:
@@ -6219,7 +6250,7 @@ class Session(Generic[ContextT, OutputT]):
                         state.policy_stop = (
                             "expired" if message.get("policy_stop") is True else None
                         )
-                        state.failure.set_result(NativeError(message["message"]))
+                        state.failure.set_result(_model_failure_error(message))
                 elif kind == "_sdk_select_step":
                     task = asyncio.create_task(self._select_step(state, message))
                     state.add_callback(task)
