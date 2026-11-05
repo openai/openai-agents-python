@@ -177,21 +177,25 @@
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
     },
     {
-      "path": "0045-native-history-durability.patch",
+      "path": "0045-saved-codex-login.patch",
+      "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
+    },
+    {
+      "path": "0046-native-history-durability.patch",
       "sha256": "2d34645a3030982a41fed43d7a31aa4a8933bd6be604c737cc79ce4293134288"
     },
     {
-      "path": "0046-native-history-write-reconciliation.patch",
+      "path": "0047-native-history-write-reconciliation.patch",
       "sha256": "e8da877bf23d570c3cde2bc5a776e7cf5945b854245288137ab765376baa6647"
     },
     {
-      "path": "0047-native-tree-finalization-before-store-close.patch",
+      "path": "0048-native-tree-finalization-before-store-close.patch",
       "sha256": "637dc7d1c29d6f98bba7cf43c885a0d3830e267c6524d675baa2b9d0d192823f"
     },
     {
-      "path": "0048-native-metadata-durability.patch",
+      "path": "0049-native-metadata-durability.patch",
       "sha256": "10136a8852249737dbf7974c579cb84faf0d36fc495fcbaeeafe66a3dfa7e3d6"
     }
   ],
-  "result_tree": "79cfc815a99ac6c67d1e6a7b5cd7bdabe5744bd6"
+  "result_tree": "42cd8b68debfba34e9086edaaa41e4009d6467f8"
 }

@@ -13,6 +13,7 @@ import stat
 import sys
 import threading
 import uuid
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -20,6 +21,44 @@ from pathlib import Path
 from typing import Protocol, runtime_checkable
 
 from .tools import ToolOutput
+
+# Register one hook without retaining adapters after their application lifetime.
+# Serializing registration and ownership changes with fork prevents a child
+# inheriting a descriptor before it is recorded in an adapter's owner map.
+_stores: weakref.WeakSet[SQLiteSessionStore] = weakref.WeakSet()
+_stores_mutex = threading.RLock()
+_forking_stores: list[SQLiteSessionStore] = []
+
+
+def _before_fork() -> None:
+    _stores_mutex.acquire()
+    _forking_stores.extend(_stores)
+    for store in _forking_stores:
+        store._mutex.acquire()
+
+
+def _after_fork_parent() -> None:
+    for store in reversed(_forking_stores):
+        store._mutex.release()
+    _forking_stores.clear()
+    _stores_mutex.release()
+
+
+def _after_fork_child() -> None:
+    for store in _forking_stores:
+        # Close only: LOCK_UN would also unlock the parent's shared flock.
+        for _, descriptor, _ in store._owners.values():
+            os.close(descriptor)
+        store._owners.clear()
+        store._mutex = threading.RLock()
+    _forking_stores.clear()
+    _stores_mutex.release()
+
+
+if os.name == "posix":
+    os.register_at_fork(
+        before=_before_fork, after_in_parent=_after_fork_parent, after_in_child=_after_fork_child
+    )
 
 
 @runtime_checkable
@@ -120,6 +159,8 @@ class SQLiteSessionStore:
                 "write_id TEXT, payload TEXT)"
             )
             connection.execute("PRAGMA user_version=1")
+        with _stores_mutex:
+            _stores.add(self)
 
     def _check_database(self, *, create: bool = False) -> None:
         if sys.platform == "win32":
@@ -279,4 +320,9 @@ class SQLiteSessionStore:
                         (session_id, token),
                     )
             finally:
-                os.close(descriptor)
+                import fcntl
+
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)

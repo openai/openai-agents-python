@@ -136,7 +136,9 @@ The script prints text deltas as they arrive, then prints the final answer after
 
 Use `session.events()` to observe the whole Session until it ends. Session-wide lifecycle and gap records do not identify a submission.
 
-Observations are passive, and the SDK retains a limited number. A slow reader can receive `EventGap` after the SDK drops records. Text deltas can differ from final output. Use the completed result and canonical history as the source of truth, and `Turn.get_result()` to detect completion despite dropped observations.
+Observations are passive, and the SDK retains a limited number. A slow reader can receive `EventGap` after the SDK drops records. Text deltas can differ from final output. Use the completed result and canonical history as the source of truth.
+
+`TurnFinished` marks the end of one native step. Accepted steering can start a continuation after that step. Use `await turn.get_result()` to wait for the captured root and its continuations, including when observations have been dropped.
 
 ## Interrupt work
 

@@ -4,6 +4,8 @@ Publish SDK previews from `feat/codex-harness` as GitHub prereleases in `openai/
 
 Use `X.Y.Z-alpha.N` in source metadata and `vX.Y.Z-alpha.N` for the Git tag. Wheel filenames use the equivalent PEP 440 spelling, `X.Y.ZaN`. Never move a published tag or replace released assets. Publish a new version instead.
 
+Run the commands below from the repository root with Git, Python, and an authenticated GitHub CLI (`gh`) on `PATH`. Your GitHub account needs access to the Actions artifacts and permission to create the release. Python 3.10 also requires `tomli==2.2.1` for the release verifier; Python 3.11 and later need no extra TOML package.
+
 ## Prepare the candidate
 
 1. Start from the current `feat/codex-harness` head. Confirm the proposed tag and GitHub release do not already exist. Review the changes since the previous preview, including the release notes in `CHANGELOG-alpha.md`.
@@ -24,10 +26,10 @@ The distribution qualifier requires the latest Tests push run for the exact comm
 
 ### Collect the distributions
 
-From the checked-out candidate, set the release tag and create a fresh staging directory:
+From the checked-out candidate, derive the tag from its release manifest and create a fresh staging directory. This uses the candidate version you prepared above rather than a previously published tag:
 
 ```sh
-export RELEASE_TAG=v0.24.0-alpha.6
+export RELEASE_TAG="v$(python -c 'import json; print(json.load(open(".release-please-manifest.json"))["."])')"
 export RELEASE_SHA=$(git rev-parse HEAD)
 export GITHUB_REPOSITORY=openai/openai-agents-python
 export RELEASE_STAGE=$(mktemp -d)

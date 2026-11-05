@@ -6,7 +6,9 @@ Build an agent that calls a Python function and returns a greeting. You define i
 
 Follow the [installation guide](installation.md) to install a preview wheel and activate your Python environment.
 
-The example below needs an OpenAI API key and makes live model requests. To test with scripted responses and no API key, use the [testing guide](testing.md).
+These branch guides include APIs added after the published preview. If you installed a published wheel, use the [guides for that release](versions.md).
+
+The example below needs an OpenAI API key and makes live model requests that can incur charges. To test with scripted responses and no API key, use the [testing guide](testing.md).
 
 ## Run your first agent
 

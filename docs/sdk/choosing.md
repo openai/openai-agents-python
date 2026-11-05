@@ -34,15 +34,16 @@ Start with the smallest configuration that meets your needs. Check the limits be
 
 ### Combine approvals, generated code, and delegation
 
-To pause for human approval across worker lifetimes, the root must have a pending manual request with plain text or matching prompted output. Policy and preparation work must finish before capture.
+To pause for human approval across worker lifetimes, suspend the root at a settled pending manual request. Plain text, native strict output, and supported prompted output require a matching output declaration on restore. Policy and preparation work must finish before capture.
 
 Keep the Session open instead when any of these limits applies:
 
-- Native strict output is active.
 - The pending request belongs to a child thread.
-- The root or a child has executed a code cell, even if the cell has finished.
+- The root or a child still has active code or background processes.
+- A native approval or MCP question still needs a reply.
+- The root operation uses `before_step`.
 
-Set `programmatic_tool_calling=True` to aggregate tool results with generated JavaScript in V8. It cannot run arbitrary Python this way. Idle checkpoints preserve conversation history but not the JavaScript runtime state. Manual suspension requires history proving that neither the root nor a child has executed a code cell. See [capture limits](state.md#save-a-settled-manual-request). Use direct function tools for simple calls.
+Set `programmatic_tool_calling=True` to aggregate tool results with generated JavaScript in V8. It cannot run arbitrary Python this way. Checkpoints retain settled native stored values and terminal code-cell observations, without replaying completed cells. They do not preserve active continuations or the arbitrary JavaScript heap. See [capture limits](state.md#save-a-settled-manual-request). Use direct function tools for simple calls.
 
 Declare `NativeAgents` to delegate with the same permissions. Children share selected tools, context, and policies and return text. Model metadata and nesting depth limit which children can start. Use separately configured Agents when tasks need different tool access.
 

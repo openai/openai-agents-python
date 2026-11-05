@@ -2,6 +2,8 @@
 
 Save a conversation when it must survive closing its Session. Use a portable `SessionState` checkpoint or keep the native conversation in a `LocalStorage` profile. Both require your current application configuration when you reopen the conversation.
 
+Complete the [SDK setup](index.md#before-you-begin), including model credentials, before running these examples.
+
 The complete local-storage script below includes its setup. Other examples are fragments for an async function and reuse an `agent` configured by your application. See [run a conversation](sessions.md) for the Session lifecycle.
 
 ## Choose how to store a conversation
@@ -11,12 +13,13 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 | Need | Use | What the application retains |
 | --- | --- | --- |
 | Continue talking while the Session stays open | `async with agent.session()` | The live Session, which owns the conversation until it closes. |
-| Save a portable snapshot and restore it in a new Session | `SessionState` from `await session.save_state()` | The checkpoint in trusted storage, serialized with `state.to_json()` when needed. |
+| Save an idle conversation and restore it in a new Session | `SessionState` from `await session.save_state()` | The checkpoint in trusted storage, serialized with `state.to_json()` when needed. |
+| Save [supported pending manual requests](#save-a-settled-manual-request) for later replies | `SessionState` from `await session.suspend()` | The checkpoint. Successful suspension retires the original Session and expires its live requests. |
 | Reopen a native conversation from a local profile directory | [`LocalStorage`](reference.md#localstorage) | The profile directory and `session.id`; reopen with the same profile and `resume=saved_id`. |
 
 The storage choices have these limits:
 
-- Portable checkpoints do not copy workspace files or live processes.
+- Portable checkpoints can retain settled native stored values and terminal code-cell observations. They do not copy workspace files, live processes, or arbitrary JavaScript heap state.
 - A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`.
 - Do not combine `storage` or `resume` with portable `state`.
 - Both restore methods require current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
@@ -27,7 +30,7 @@ The SDK rejects a local working directory or writable root that overlaps the ses
 
 ## Reopen a conversation from local storage
 
-First complete the [SDK setup](index.md#before-you-begin), including model credentials. Save this complete script as `local_conversation.py`:
+Save this complete script as `local_conversation.py`:
 
 ```python
 import asyncio
@@ -114,7 +117,7 @@ async with agent.session(state=state) as restored:
 
 `save_state()` requires an idle Session and preserves native history and turn identity. Use [`suspend()`](#save-a-settled-manual-request) for supported pending manual requests.
 
-Open each restore with a fresh Agent and isolated storage. Supply configuration as follows:
+Supply a current Agent and application configuration as follows:
 
 - Match the saved Python and manual tool definitions, latest accepted application instructions, and typed output type when present.
 - Supply current callbacks and provider credentials. Pass application context through `agent.session(state=state, context=...)`. Saved text never selects credentials, callbacks, or permissions.
@@ -186,7 +189,7 @@ To run a Windows named-pipe command after restore, supply the current `Environme
 
 ### Store and trust checkpoint data
 
-To store a checkpoint across processes, serialize it with `state.to_json()` and load it with `SessionState.from_json()` from `agents.state`. Construct a fresh Agent for each restore so one conversation cannot change a declaration shared by others.
+To store a checkpoint across processes, serialize it with `state.to_json()` and load it with `SessionState.from_json()` from `agents.state`.
 
 The read-only `state.instructions` accessor returns the latest accepted instructions and validates stored history. Use it only when your application trusts checkpoint storage as its instruction source:
 
@@ -322,7 +325,7 @@ Use `save_state()` only for an idle Session. For requests you can answer while t
 
 ### Check manual checkpoint support
 
-Manual checkpoints support HTTP and WebSocket inference with plain-text or supported `PromptedOutput` Agent output. An explicit Session can also declare MCP tools, executor tools, and native agents. Completed tool results survive restore, including typed data, inline images, and file patch results.
+Manual checkpoints support HTTP and WebSocket inference with plain-text, native strict, or supported `PromptedOutput` Agent output. An explicit Session can also declare MCP tools, executor tools, and native agents. Completed tool results survive restore, including typed data, inline images, and file patch results.
 
 Before suspending, check these limits:
 
@@ -330,13 +333,15 @@ Before suspending, check these limits:
 - Children must have finished their turns, with no live processes or pending decisions.
 - An operation with `before_step` cannot be suspended.
 - An output repair still in progress prevents saving.
-- Programmatic tool calling may remain enabled only if complete history proves that no code cell has run in the root or any child. Otherwise, saving fails before retiring the Session because a checkpoint cannot restore retained JavaScript state.
+- Programmatic tool calling can retain settled native stored values and terminal code-cell observations in the root and children. Active code cells and their continuations cannot be captured. A checkpoint does not preserve arbitrary JavaScript heap state.
 
 For typed output, apply these additional rules:
 
-- `PromptedOutput(Model)` requires the same mode, schema, and retry setting on restore. For a per-turn output override, use `agent.with_output_type(...)` with the saved turn's output type. Old checkpoints without an output fingerprint cannot restore prompted output.
-- A pending `NativeOutput(Model)` turn, including a bare structured type such as `output_type=Model`, cannot be suspended or restored. The pinned runtime cannot resume its native schema. Keep the Session open and reply there, or save after completion. Idle restore and live typed manual replies remain supported.
+- `PromptedOutput(Model)` requires the same mode, schema, and retry setting on restore. Old checkpoints without an output fingerprint cannot restore prompted output.
+- A settled pending `NativeOutput(Model)` turn, including a bare structured type such as `output_type=Model`, can be suspended. Restore with the same output mode and schema. The checkpoint must contain the captured native schema; a changed or missing contract is rejected before inference.
 - The Agent's final output limit does not prohibit typed manual tool results.
+
+For a per-turn output override, use `agent.with_output_type(...)` with the saved turn's output type when restoring.
 
 ### Suspend and restore
 
@@ -352,15 +357,15 @@ To find the restored root, use `restored.restored_turn`. It keeps returning that
 
 ### Resume children and one-shot runs
 
-Saving stops idle child runtimes but retains their histories, planning data, and active or closed status. Restore leaves the runtimes unloaded and requires current `NativeAgents` when descendants are present. The model can resume children through `followup_task` without replaying completed work.
+Saving stops idle child runtimes but retains their histories, planning data, and lifecycle status. A saved `"active"` status means the child remains open for future work. Its turn must have finished before suspension. Restore leaves the runtimes unloaded and requires current `NativeAgents` when descendants are present. The model can resume children through `followup_task` without replaying completed work.
 
-An ordinary one-shot run with only Python or manual tools and plain-text output can raise `InteractionRequired` with a saved manual checkpoint when no handler is present. This automatic save supports fewer combinations than an explicit Session. See the [one-shot continuation example](approvals.md#continue-a-one-shot-manual-request) for the handler and calling code.
+Without a handler, an ordinary one-shot run can raise `InteractionRequired` with a saved manual checkpoint. This automatic save supports Python or manual tools with plain-text or native strict output. It supports fewer combinations than an explicit Session. See the [one-shot continuation example](approvals.md#continue-a-one-shot-manual-request) for the handler and calling code.
 
 ### Automatic checkpoint limits
 
 Without `before_step`, selected manual tools without a handler cannot save automatically with any of these features:
 
-- Programmatic tool calling or non-plain Agent output, including `PromptedOutput`.
+- Programmatic tool calling or `PromptedOutput` Agent output.
 - Selected MCP tools, local storage, an Environment, or `NativeAgents`.
 - A `WebSearch` declaration on the opening Agent.
 

@@ -33,7 +33,7 @@ This preview is distributed through GitHub Releases. The `openai-agents` package
 
 ## Run your first agent
 
-Save this as `agent.py` in your project directory:
+This example makes live model requests and can incur charges. Save it as `agent.py` in your project directory:
 
 ```python
 import asyncio

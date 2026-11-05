@@ -67,7 +67,7 @@ export OPENAI_API_KEY="your-key"
 
 ## Use a qualified wheel for Python edits
 
-When a trusted v1 Tests run provides a `native-<OS>-<ARCH>` artifact for the same source inputs, you can reuse that artifact in a fresh editable checkout. Otherwise build from source. Choose the artifact for your platform. Keep its wheel and adjacent `.whl.pristine.json` receipt together. The build hook checks the wheel hash, platform, both pinned source identities, both patch series and native build inputs before it installs the extension and helpers.
+When a trusted **Tests** run provides a `native-<OS>-<ARCH>` artifact for the same source inputs, you can reuse that artifact in a fresh editable checkout. Otherwise build from source. Choose the artifact for your platform. Keep its wheel and adjacent `.whl.pristine.json` receipt together. The build hook checks the wheel hash, platform, both pinned source identities, both patch series and native build inputs before it installs the extension and helpers.
 
 Replace the wheel path in this Linux example with the absolute path to your downloaded wheel. Run the commands from the SDK checkout.
 

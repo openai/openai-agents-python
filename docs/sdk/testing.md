@@ -2,7 +2,7 @@
 
 Use deterministic tests to check Python tools, application state and the requests your agent sends. Test model quality separately with a live model and representative inputs.
 
-`agents.testing.ScriptedResponses` starts a local HTTP server with scripted responses. The native Session and Python tools still run. Configure a direct connection or proxy bypass for `127.0.0.1`, including applicable operating-system proxy settings, while both run. The server follows proxy configuration and does not isolate network access.
+`agents.testing.ScriptedResponses` starts a local HTTP server with scripted responses. The native Session and Python tools still run. The native provider follows process and operating-system proxy settings, so keep a direct connection or proxy bypass for `127.0.0.1` while the server and its Sessions run. The server does not isolate network access.
 
 ## Write a tool test
 

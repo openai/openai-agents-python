@@ -52,7 +52,7 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 | --- | --- |
 | `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
-| `session.events(*, after=0)` | Observe the Session until it ends, using the retained global observation sequence. See [streaming](sessions.md#stream-observations). |
+| `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
 | `await session.pending_interactions()` | Snapshot tuple of pending live requests. Inspection leaves them available for reply. |
 | `await session.cancel_all(*, mode="force")` | Stop and join roots, descendants and queued work. See [interruption](sessions.md#interrupt-work). |
@@ -99,12 +99,12 @@ A root Turn's `get_result()` follows accepted continuations. A captured child Tu
 | Call | Result |
 | --- | --- |
 | `await turn.get_result()` | Stable result, unchanged by later submissions or Session closure. Cancelling the wait leaves work running. |
-| `turn.events(*, after=0)` | Observations for this Turn. |
-| `await turn.wait_for_request_or_result()` | `Completed` or `PendingRequests`. Its `requests` tuple contains this Turn's live requests without claiming ownership. See the [reply loop](sessions.md#observation-details). |
+| `turn.events(*, after=0, include_execution_details=False)` | Observations for this Turn. Execution arguments and results require `include_execution_details=True` for a trusted reader. |
+| `await turn.wait_for_request_or_result()` | `Completed` or `PendingRequests`. Its `requests` tuple contains this Turn's live requests without claiming ownership. See the [reply loop](approvals.md#wait-for-a-request-or-result). |
 | `await turn.wait_for_attention()` | `Completed`, `PendingRequests`, or `TurnNeedsAttention`. See [supervisory waits](sessions.md#wait-for-a-decision-or-a-result). |
-| `await turn.steer(prompt)` | Steer the captured active root or child turn. It cannot target another turn or revive a closed child. |
-| `await turn.steer_exact(prompt, expected_turn_id=...)` | Steer the exact native root turn and return a `SteeringReceipt` upon acceptance. See [strict steering](sessions.md#steer-one-exact-root-turn). |
-| `await turn.cancel(*, mode="force")` | Stop the root or withdraw it from the queue. Children use `Subagent.try_cancel`. See [interruption](sessions.md#interrupt-work) for its boolean result and cleanup limits. |
+| `await turn.steer(input)` | Steer the captured active root or child turn. It cannot target another turn or revive a closed child. |
+| `await turn.steer_exact(input, *, expected_turn_id)` | Steer the exact native root turn and return a `SteeringReceipt` upon acceptance. See [strict steering](sessions.md#steer-one-exact-root-turn). |
+| `await turn.cancel(*, mode="force")` | Stop the root or withdraw it from the queue. Return `None` after cleanup. Children use `Subagent.try_cancel`, which returns a boolean; see [interruption](sessions.md#interrupt-work) for its confirmation and cleanup limits. |
 
 Turn calls use the Session's opening event loop. After `run_sync()`, that loop has closed, so use `Completed` directly. IDs alone grant no control. See [Turn lifetime](sessions.md).
 

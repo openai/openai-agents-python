@@ -29,6 +29,8 @@ Install standard CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and the [platform-
 
 ### Prepare the checkout and build
 
+On Windows, use `py -3` instead of `python3`. If you use Python 3.10, install `tomli==2.2.1` in that interpreter's environment before preparing the native sources.
+
 Clone the development branch and record the source commit:
 
 ```sh
@@ -39,7 +41,7 @@ python3 packages/codex/scripts/prepare_codex.py
 uv build --wheel
 ```
 
-On Windows, use `py -3` instead of `python3`. For source preparation with Python 3.10, install `tomli==2.2.1` in that interpreter's environment first. The wheel build installs its declared Python build dependencies in an isolated environment.
+The wheel build installs its declared Python build dependencies in an isolated environment.
 
 Preparation verifies the pinned native sources. The wheel build compiles the native extension and matching execution helpers, then writes a wheel under `dist/`. Keep the wheel and its build records with the source commit. See the [maintenance guide](packages/codex/MAINTAINING.md) for native build details and troubleshooting.
 

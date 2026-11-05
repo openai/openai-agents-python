@@ -5,6 +5,7 @@ import multiprocessing
 import os
 from collections.abc import Iterator
 from contextlib import contextmanager
+from multiprocessing.connection import Connection
 from pathlib import Path
 
 import pytest
@@ -71,6 +72,83 @@ def test_sqlite_excludes_competing_process_and_releases_writer(tmp_path: Path, a
     assert successor.exitcode == 0
     assert result.get(timeout=5) == "acquired"
     result.close()
+
+
+def _forked_worker(store: SQLiteSessionStore, token: str, connection: Connection) -> None:
+    try:
+        store.read("thread", token)
+    except RuntimeError:
+        connection.send("stale")
+    else:
+        connection.send("inherited writer accepted")
+    while connection.recv() != "finish":
+        connection.send("alive")
+    connection.send("finished")
+
+
+def _owner_with_forked_worker(
+    path: str, owner_connection: Connection, worker_connection: Connection
+) -> None:
+    store = SQLiteSessionStore(Path(path))
+    token = store.acquire("thread")
+    worker = multiprocessing.get_context("fork").Process(
+        target=_forked_worker, args=(store, token, worker_connection)
+    )
+    worker.start()
+    owner_connection.send(worker.pid)
+    if owner_connection.recv() == "exit":
+        os._exit(0)
+    store.release("thread", token)
+    owner_connection.send("released")
+    worker.join(10)
+
+
+@pytest.mark.parametrize("owner_end", ["release", "exit"])
+def test_sqlite_releases_writer_while_forked_worker_lives(tmp_path: Path, owner_end: str) -> None:
+    path = tmp_path / "history.sqlite"
+    context = multiprocessing.get_context("spawn")
+    owner_connection, owner_remote = context.Pipe()
+    worker_connection, worker_remote = context.Pipe()
+    owner = context.Process(
+        target=_owner_with_forked_worker, args=(str(path), owner_remote, worker_remote)
+    )
+    owner.start()
+    try:
+        assert owner_connection.poll(10)
+        owner_connection.recv()
+        assert worker_connection.poll(10)
+        assert worker_connection.recv() == "stale"
+        successor = SQLiteSessionStore(path)
+        # Child cleanup must not unlock the parent's shared flock.
+        with pytest.raises(BlockingIOError):
+            successor.acquire("thread")
+        owner_connection.send(owner_end)
+        if owner_end == "release":
+            assert owner_connection.poll(10)
+            assert owner_connection.recv() == "released"
+        else:
+            owner.join(10)
+            assert owner.exitcode == 0
+        token = successor.acquire("thread")
+        try:
+            assert successor.read("thread", token) is None
+            worker_connection.send("ping")
+            assert worker_connection.poll(10)
+            assert worker_connection.recv() == "alive"
+        finally:
+            successor.release("thread", token)
+    finally:
+        worker_connection.send("finish")
+        if worker_connection.poll(10):
+            worker_connection.recv()
+        owner.join(10)
+        if owner.is_alive():
+            owner.terminate()
+            owner.join(10)
+        owner_connection.close()
+        owner_remote.close()
+        worker_connection.close()
+        worker_remote.close()
 
 
 def test_canonical_storage_rejects_incomplete_backend() -> None:
