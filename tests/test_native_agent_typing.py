@@ -38,6 +38,7 @@ from agents import (
     ToolContext,
     ToolOutput,
     ToolRef,
+    TraceContext,
     Turn,
     UserInput,
     function_tool,
@@ -597,6 +598,7 @@ async def before_step_types(session: Session[Application, Answer]) -> None:
         await agent.run("select", context=Application("a"), before_step=select_step_awaitable),
         Completed[Answer],
     )
+
     assert_type(
         agent.run_sync("select", context=Application("a"), before_step=select_step),
         Completed[Answer],
@@ -624,3 +626,24 @@ async def prepared_request_types(agent: Agent[None, str], session: Session[None,
     assert_type(await agent.run("prepare", prepare_request=edit), Completed[str])
     assert_type(await session.submit("prepare", prepare_request=edit), Turn[str])
     assert_type(agent.run_sync("prepare", prepare_request=edit), Completed[str])
+
+
+async def trace_context_types(agent: Agent[None, str], ctx: ToolContext[None]) -> None:
+    parent = TraceContext(traceparent="00-11111111111111111111111111111111-2222222222222222-01")
+    headers: dict[str, str | None] = {"traceparent": parent.traceparent, "tracestate": None}
+    assert_type(ctx.trace_context, TraceContext | None)
+    assert_type(parent.to_headers(), dict[str, str])
+    async with agent.session(
+        instruction_files=(), reconciled_calls=(), parent_trace=parent
+    ) as session:
+        assert_type(session, Session[None, str])
+        assert_type(
+            await session.submit("Read", writable_roots=[], parent_trace=headers), Turn[str]
+        )
+        assert_type(await session.submit("Read", output_type=int, parent_trace=parent), Turn[int])
+        assert_type(
+            await session.submit("Steer", if_busy="steer", writable_roots=None, parent_trace=None),
+            Turn[Any],
+        )
+    assert_type(await agent.run("Read", parent_trace=headers), Completed[str])
+    assert_type(agent.run_sync("Read", parent_trace=parent), Completed[str])

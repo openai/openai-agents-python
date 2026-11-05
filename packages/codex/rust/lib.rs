@@ -1382,24 +1382,39 @@ impl NativeThread {
 
     fn _submit<'py>(&self, py: Python<'py>, params_json: &str) -> PyResult<Bound<'py, PyAny>> {
         let params: Value = serde_json::from_str(params_json).map_err(py_error)?;
+        let context = params
+            .get("tracing_context")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                let token = value
+                    .as_str()
+                    .ok_or_else(|| py_error("Invalid tracing context token"))?;
+                codex_otel::sdk_trace::context(token).map_err(py_error)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
-            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            if inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .is_none()
-            {
-                return Err(py_error(
-                    "managed submit requires a replaceable tool session",
-                ));
+        async_bridge::future_into_py(
+            py,
+            async move {
+                let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+                if inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+                    .is_none()
+                {
+                    return Err(py_error(
+                        "managed submit requires a replaceable tool session",
+                    ));
+                }
+                let result = ops::submit_replaceable(&inner, params)
+                    .await
+                    .map_err(py_error)?;
+                serde_json::to_string(&result).map_err(py_error)
             }
-            let result = ops::submit_replaceable(&inner, params)
-                .await
-                .map_err(py_error)?;
-            serde_json::to_string(&result).map_err(py_error)
-        })
+            .with_context(codex_otel::sdk_trace::explicit_submission_context(context)),
+        )
     }
 
     fn _reconcile_local_calls<'py>(
@@ -1433,17 +1448,23 @@ impl NativeThread {
 
     // Managed ingress: the SDK holds its single active owner until terminal
     // settlement. Keep raw Compact blocked because it replaces active work.
-    #[pyo3(signature = (tracing_context=None))]
+    #[pyo3(signature = (tracing_context=None, trace_json=None))]
     fn _compact<'py>(
         &self,
         py: Python<'py>,
         tracing_context: Option<&str>,
+        trace_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context = tracing_context
             .map(codex_otel::sdk_trace::context)
             .transpose()
             .map_err(py_error)?
             .unwrap_or_default();
+        let trace = trace_json
+            .as_deref()
+            .map(serde_json::from_str::<codex_protocol::protocol::W3cTraceContext>)
+            .transpose()
+            .map_err(|_| PyValueError::new_err("Invalid trace carrier"))?;
         let inner = self.current()?;
         async_bridge::future_into_py(
             py,
@@ -1463,14 +1484,14 @@ impl NativeThread {
                 } else {
                     let turn_id = inner
                         .thread
-                        .submit(codex_protocol::protocol::Op::Compact)
+                        .submit_with_trace(codex_protocol::protocol::Op::Compact, trace)
                         .await
                         .map_err(py_error)?;
                     serde_json::json!({"status": "started", "turn_id": turn_id})
                 };
                 serde_json::to_string(&receipt).map_err(py_error)
             }
-            .with_context(context),
+            .with_context(codex_otel::sdk_trace::explicit_submission_context(context)),
         )
     }
 
@@ -1746,18 +1767,24 @@ impl NativeThread {
         manual_checkpoint::prepare(&inner, &self.manual).map_err(py_error)
     }
 
-    #[pyo3(signature = (observation_submission_id=None, tracing_context=None))]
+    #[pyo3(signature = (observation_submission_id=None, tracing_context=None, trace_json=None))]
     fn _continue_manual<'py>(
         &self,
         py: Python<'py>,
         observation_submission_id: Option<String>,
         tracing_context: Option<&str>,
+        trace_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let context = tracing_context
             .map(codex_otel::sdk_trace::context)
             .transpose()
             .map_err(py_error)?
             .unwrap_or_default();
+        let trace = trace_json
+            .as_deref()
+            .map(serde_json::from_str::<codex_protocol::protocol::W3cTraceContext>)
+            .transpose()
+            .map_err(|_| PyValueError::new_err("Invalid trace carrier"))?;
         let inner = self.current()?;
         let manual = self.manual.clone();
         async_bridge::future_into_py(
@@ -1766,13 +1793,14 @@ impl NativeThread {
                 let receipt = manual_checkpoint::continue_if_ready(
                     &inner,
                     &manual,
+                    trace,
                     observation_submission_id,
                 )
                 .await
                 .map_err(py_error)?;
                 serde_json::to_string(&receipt).map_err(py_error)
             }
-            .with_context(context),
+            .with_context(codex_otel::sdk_trace::explicit_submission_context(context)),
         )
     }
 

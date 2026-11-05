@@ -209,9 +209,13 @@
       "sha256": "0e45e726652f4df20626a7f21be11a7eb1cdc81f65f9d3c4030470962e7cb6b1"
     },
     {
+      "path": "0051-w3c-defined-trace-flags.patch",
+      "sha256": "b138e7672a1f3d2e20255598bab467d8b7d08f4b8f2415091f41474b8778d21c"
+    },
+    {
       "path": "0045-native-request-preparation.patch",
       "sha256": "37dec3307b8d2c5d584e98ba044a6132c8da57c736581c513d26451bd4e6c26f"
     }
   ],
-  "result_tree": "6b27be0e6376cd2fd85ab69bbc3e7270c8aacdd6"
+  "result_tree": "323f54abeceb24b4cf9b70fe45116e50d6b327f8"
 }
