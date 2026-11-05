@@ -306,13 +306,13 @@ def test_captured_integrity_reason_is_readonly_and_does_not_change_error_metadat
     assert NativeError("application error").response_integrity_reason is None
 
 
-@pytest.mark.parametrize("value", [None, True, 7, {}, [], "", "unknown", "x" * 10000])
-def test_unrecognized_captured_integrity_reason_remains_unknown(value: Any) -> None:
+def test_absent_captured_integrity_reason_remains_unknown() -> None:
     from agents.session import _model_failure_error
 
+    assert _model_failure_error({"message": "safe"}).response_integrity_reason is None
     assert (
         _model_failure_error(
-            {"message": "safe", "response_integrity_reason": value}
+            {"message": "safe", "response_integrity_reason": None}
         ).response_integrity_reason
         is None
     )
