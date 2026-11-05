@@ -114,7 +114,7 @@ fi
 
 case "$mode" in
   code)
-    pattern='^(docs/(.*\.md|sdk/topics\.json)$|README\.md$|mkdocs\.yml$|\.github/release/|src/|tests/|integration_tests/|examples/|packages/codex/|\.github/actions/|\.agents/skills/code-change-verification/|\.github/scripts/|\.github/workflows/(tests|codex-python|docs|publish|repo-skills|release-please|release-candidate|release-readiness|release-readiness-refresh)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
+    pattern='^(docs/(.*\.md|sdk/topics\.json)$|README\.md$|mkdocs\.yml$|\.github/release/|src/|tests/|integration_tests/|examples/|packages/codex/|\.github/actions/|\.agents/skills/code-change-verification/|\.github/scripts/|\.github/workflows/(tests|codex-python|codex-python-qualify|native-python-push|docs|publish|repo-skills|release-please|release-candidate|release-readiness|release-readiness-refresh)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
   docs)
     pattern='^(docs/|mkdocs\.yml$|uv\.lock$|\.github/workflows/(docs|tests)\.yml$)'
