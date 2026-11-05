@@ -227,7 +227,11 @@
     {
       "path": "0045-native-request-preparation.patch",
       "sha256": "05ed237c96f58624d36b56342e8f9894086e701703dc489fc947a26eebd924f8"
+    },
+    {
+      "path": "0051-terminal-authentication-retry.patch",
+      "sha256": "d99ab93a7335f674875d1b9dfa5ec2406f6a9752b31c560a536ee840b87263d3"
     }
   ],
-  "result_tree": "4f78f45270ecd92f96579d3625b1a1a000c8569d"
+  "result_tree": "98e03aa3d38e9611ff19624d23fee637f20793cf"
 }
