@@ -1,0 +1,179 @@
+# Temporary sizing experiment; never a production native bundle donor.
+name: Experimental Windows python sizing
+'on':
+  push:
+    branches:
+    - ci/benchmark-windows-python-20261105
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    name: Cold Windows python 16 cores sample 1
+    runs-on:
+      group: codex-runners
+      labels: codex-windows-x64
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: '0'
+      RUSTUP_TOOLCHAIN: 1.95.0
+      OPENAI_AGENTS_NATIVE_TIMINGS: '1'
+      OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
+      CARGO_BUILD_JOBS: '16'
+      BENCHMARK_SAMPLE: '1'
+      BENCHMARK_SOURCE_SHA: 0f3e347486770c9ad17ed92c0e3ff0d19c32cb34
+    steps:
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      with:
+        persist-credentials: 'false'
+        ref: 0f3e347486770c9ad17ed92c0e3ff0d19c32cb34
+    - name: Record machine and begin low-rate sampling
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $cpu = Get-CimInstance Win32_Processor
+        $os = Get-CimInstance Win32_OperatingSystem
+        if ((git rev-parse HEAD) -ne $env:BENCHMARK_SOURCE_SHA) { throw 'Source SHA mismatch' }
+        $logical = ($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum
+        if ($logical -ne [int]$env:CARGO_BUILD_JOBS) { throw 'Unexpected runner CPU size' }
+        foreach ($directory in @('agents-cargo', 'agents-native-target', 'agents-target', 'agents-native-uv')) {
+          if (Test-Path "$env:RUNNER_TEMP/$directory") { throw "Unexpected preexisting cache: $directory" }
+        }
+        @{ logical_cpus = [int]($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum; ram_kib = $os.TotalVisibleMemorySize; cargo_jobs = $env:CARGO_BUILD_JOBS; source_sha = (git rev-parse HEAD); sample = $env:BENCHMARK_SAMPLE } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/benchmark-machine.json"
+        Get-Content "$env:RUNNER_TEMP/benchmark-machine.json"
+        $script = @'
+        while ($true) {
+          $cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
+          $memory = Get-CimInstance Win32_PerfFormattedData_PerfOS_Memory
+          $disk = Get-CimInstance Win32_PerfFormattedData_PerfDisk_PhysicalDisk -Filter "Name='_Total'"
+          $processes = @(Get-Process -Name rustc,cargo,link,lld-link -ErrorAction SilentlyContinue | Select-Object ProcessName,CPU,WorkingSet64)
+          @{ timestamp = [DateTime]::UtcNow.ToString('o'); cpu_percent = $cpu.PercentProcessorTime; available_mb = $memory.AvailableMBytes; disk_bytes_sec = $disk.DiskBytesPersec; processes = $processes } | ConvertTo-Json -Compress -Depth 4 | Add-Content "$env:RUNNER_TEMP/benchmark-samples.jsonl"
+          Start-Sleep -Seconds 30
+        }
+        '@
+        $script | Set-Content "$env:RUNNER_TEMP/benchmark-sampler.ps1"
+        $child = Start-Process pwsh -ArgumentList @('-NoProfile', '-File', "`"$env:RUNNER_TEMP/benchmark-sampler.ps1`"") -PassThru
+        $child.Id | Set-Content "$env:RUNNER_TEMP/benchmark-sampler.pid"
+    - name: Select shared Cargo directories
+      run: |
+        echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
+        echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+        echo "UV_CACHE_DIR=$RUNNER_TEMP/agents-native-uv" >> "$GITHUB_ENV"
+        # Match Maturin's macOS environment before compiling shared dependencies.
+        if [[ "$RUNNER_OS" == macOS ]]; then
+          echo "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}" >> "$GITHUB_ENV"
+          echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
+        fi
+    - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: '3.12'
+    - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+      with:
+        enable-cache: 'false'
+    - name: Install native build tools
+      uses: ./.github/actions/setup-native
+    - name: Prepare the source distribution
+      run: |
+        uv build --sdist
+        python - <<'PYTHON'
+        import os
+        import tarfile
+        from pathlib import Path
+        source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-source"
+        source.mkdir()
+        archive_path, = Path("dist").glob("openai_agents-*.tar.gz")
+        with tarfile.open(archive_path) as archive:
+            archive.extractall(source, filter="data")
+        extracted, = source.iterdir()
+        project = source / "project"
+        extracted.rename(project)
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+            output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
+        PYTHON
+    - name: Build the SDK and native runtime together
+      run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
+    - name: Build the shared test executor
+      run: |
+        python - <<'PYTHON'
+        import os
+        import shutil
+        import subprocess
+        import sys
+        from pathlib import Path
+        root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+        fixture = Path("tests/fixtures/exec_server.rs")
+        (root / fixture).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(Path("packages/codex") / fixture, root / fixture)
+        sys.path.insert(0, str(root / "scripts"))
+        from native_env import build_environment, cargo_build_options
+        environment = build_environment(root)
+        options, build_target = cargo_build_options(root, environment)
+        subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
+        target = Path(environment["CARGO_TARGET_DIR"])
+        if not target.is_absolute():
+            target = root / target
+        if build_target:
+            target /= Path(build_target).stem
+        name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+        shutil.copy2(target / "release" / "examples" / name, Path("dist") / name)
+        PYTHON
+    - name: Test Windows named pipes and Unix peer approval with the installed wheel
+      if: runner.os == 'Windows'
+      run: |
+        stage=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/windows-ipc.XXXXXX")
+        mkdir -p "$stage/tests/qualification"
+        cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+        cp tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/tests/qualification"
+        uv venv --seed --python 3.12 "$stage/venv"
+        uv export --frozen --group dev --no-emit-workspace --no-hashes \
+          --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+        "$stage/venv/Scripts/python.exe" -m pip install --constraint "$stage/constraints.txt" \
+          dist/*-win_amd64.whl aiohttp pytest pytest-asyncio
+        python -I - "$stage" <<'PYTHON'
+        import os
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        stage = Path(sys.argv[1]).resolve(strict=True)
+        fixture = Path("dist/exec-server-fixture.exe").resolve(strict=True)
+        keep = set("""
+            ALLUSERSPROFILE APPDATA COMMONPROGRAMFILES COMMONPROGRAMFILES(X86) COMMONPROGRAMW6432
+            COMPUTERNAME COMSPEC HOMEDRIVE HOMEPATH LOCALAPPDATA NUMBER_OF_PROCESSORS OS PATH PATHEXT
+            PROCESSOR_ARCHITECTURE PROGRAMDATA PROGRAMFILES PROGRAMFILES(X86) PROGRAMW6432 PUBLIC
+            SYSTEMDRIVE SYSTEMROOT TEMP TMP USERDOMAIN USERNAME USERPROFILE WINDIR
+        """.split())
+        env = {key: value for key, value in os.environ.items() if key.upper() in keep}
+        subprocess.run(
+            [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
+             "import os, sys, pytest; sys.path.insert(0, os.getcwd()); "
+             "sys.exit(pytest.main(['-q', 'tests/qualification/unix_peer_approval.py']))"],
+            cwd=stage, env=env, check=True, timeout=90,
+        )
+        subprocess.run(
+            [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
+             "import os, runpy, sys; sys.path.insert(0, os.getcwd()); "
+             "runpy.run_module('tests.qualification.windows_ipc', run_name='__main__')", fixture],
+            cwd=stage, env=env, check=True,
+        )
+        PYTHON
+    - name: Stop sampler
+      if: always()
+      shell: pwsh
+      run: |
+        $path = "$env:RUNNER_TEMP/benchmark-sampler.pid"
+        if (Test-Path $path) { Stop-Process -Id ([int](Get-Content $path)) -ErrorAction SilentlyContinue }
+    - name: Share experimental measurements only
+      if: always()
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+      with:
+        name: experimental-windows-python-16-sample-1
+        path: |
+          ${{ runner.temp }}/benchmark-machine.json
+          ${{ runner.temp }}/benchmark-samples.jsonl
+          ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
+          ${{ runner.temp }}/agents-native-target/**/cargo-timings/*.html
+        if-no-files-found: warn
+        retention-days: '3'
