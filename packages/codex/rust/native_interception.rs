@@ -540,6 +540,17 @@ impl Control {
         self.creation_tracing.get().cloned().flatten()
     }
 
+    pub(crate) fn tracing_context(&self) -> codex_otel::sdk_trace::CapturedContext {
+        if self.native_ancestor.is_some() {
+            // A child keeps its creation owner, including an absent tracing scope.
+            codex_otel::sdk_trace::CapturedContext {
+                context: self.creation_tracing(),
+            }
+        } else {
+            codex_otel::sdk_trace::CapturedContext::capture()
+        }
+    }
+
     // Lifecycle callbacks retain the unpublished receiver if its opening future
     // is cancelled. Cleanup always joins this exact native session.
     async fn close_pending_code_import(&self, turn: Option<&Arc<DirectTurn>>) -> Result<()> {
@@ -4031,6 +4042,16 @@ pub(crate) mod tests {
             mcp_calls: Mutex::default(),
         });
         control
+    }
+
+    pub(crate) fn bind_child_tracing_owner(
+        thread: &ExtensionData,
+        tracing: Option<Arc<codex_otel::sdk_trace::ContextLease>>,
+    ) {
+        let parent = Control::new("tracing-parent".into(), true);
+        let control = Control::descendant(thread.level_id().to_owned(), &parent);
+        let _ = control.creation_tracing.set(tracing);
+        thread.insert(control);
     }
 
     #[test]
