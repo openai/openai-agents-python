@@ -1102,7 +1102,7 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
     entry = tool._capture(None)
     admitted = asyncio.Event()
     resume = asyncio.Event()
-    calls: list[tuple[str, ...]] = []
+    calls: list[tuple[str, str | None]] = []
 
     class Thread:
         id = "restored-session"
@@ -1113,8 +1113,10 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
         def _respond_manual_tool(self, grant: Any, output: str) -> bool:
             return True
 
-        async def _continue_manual(self, *args: str) -> str:
-            calls.append(args)
+        async def _continue_manual(
+            self, observation_submission_id: str, *, tracing_context: str | None = None
+        ) -> str:
+            calls.append((observation_submission_id, tracing_context))
             admitted.set()
             await resume.wait()
             return json.dumps({"status": "started", "turn_id": "original-turn"})
@@ -1154,7 +1156,7 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
             pending = asyncio.create_task(request.respond("accepted"))
             await admitted.wait()
             context = captured.context
-            assert calls == [(context,) if context is not None else ()]
+            assert calls == [(handle.submission_id, context)]
             if scoped:
                 assert context is not None
                 assert json.loads(native.trace_span_context(context))["span_id"] != old
@@ -2039,6 +2041,7 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
                     assert caught.value._effects == "not_started"
                 else:
                     assert (await turn.get_result()).final_output == "done"
+        assert requests[0]["observation_submission_id"] == turn.submission_id
         assert requests[0]["mode"] == "start_if_idle"
         if expected is None:
             assert "writable_roots" not in requests[0]
@@ -2050,6 +2053,9 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
             assert requests[1]["mode"] == "continue_if_idle"
             assert "writable_roots" not in requests[1]
             assert requests[1]["expected_previous_turn_id"] == "turn-1"
+            continuation_route = requests[1]["observation_submission_id"]
+            assert isinstance(continuation_route, str) and continuation_route
+            assert continuation_route != turn.submission_id
         assert session._writable_roots == (opening if refuse else applied)
         assert trace_owner in native.released
         assert not session._broken
@@ -3200,3 +3206,286 @@ async def test_execution_factory_rejection_releases_owner_and_allows_progress(
         release.set()
         session._reader.cancel()
         await asyncio.gather(session._reader, return_exceptions=True)
+
+
+@pytest.mark.parametrize("route", ["environment", "cell", "mcp", "collaboration", "child"])
+@pytest.mark.parametrize("policy", ["disabled", "metadata", "legacy"])
+async def test_interception_reader_keeps_native_context_private_through_dispatch(
+    native: NativeTracing, tmp_path: Path, route: str, policy: str
+) -> None:
+    from dataclasses import asdict
+    from types import MethodType
+
+    from agents import Environment, HttpMCP, NativeAgents
+    from agents.native_interception import (
+        Allow,
+        NativeToolCall,
+        _CellPolicyOwner,
+        _NativeInterception,
+    )
+    from agents.schema import _prepare_spec
+    from agents.session import Session, _ChildCallbacks, _Submission
+
+    entered, finish, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    observations = []
+    resolved = []
+    release_calls = []
+    live = True
+    read_count = 0
+
+    async def callback(context: Any, value: Any) -> Any:
+        current = telemetry.current_context()
+        if policy == "legacy":
+            assert current is None
+        else:
+            assert current is not None and current.disabled == (policy == "disabled")
+            assert not current.include_sensitive_data
+            with telemetry.span(
+                "interception nested work", options=telemetry.TraceOptions(disabled=False)
+            ) as nested:
+                assert nested.context.disabled == current.disabled
+                assert not nested.context.include_sensitive_data
+            observations.append((current.trace_id, current.disabled))
+        if isinstance(value, NativeToolCall):
+            assert "tracing_context" not in asdict(value)
+            assert not hasattr(value, "tracing_context")
+        entered.set()
+        await finish.wait()
+        return True if route == "collaboration" else Allow()
+
+    executor = Environment.local(cwd=tmp_path, tools=["exec_command"], transform_arguments=callback)
+    turn = SimpleNamespace(turn_id="turn", child_id=None, instance_id=None)
+    root = _Submission(_prepare_spec(str))
+    root.handle = turn
+    root.accepted.set_result(turn)
+    child = _ChildCallbacks(SimpleNamespace(turn_id="turn", child_id="child", instance_id=1))
+    request = {
+        "thread_id": "child" if route == "child" else "session",
+        "turn_id": "turn",
+        "call_id": "call",
+        "tool_name": {"name": "exec_command", "namespace": None},
+        "phase": "before",
+        "route": "direct",
+        "boundary": "pre_dispatch",
+        "tool_kind": "function_json",
+        "input": "{}",
+        "result": None,
+        "instance": 1,
+        "outer_call_id": None,
+        "cell_id": None,
+        "runtime_tool_call_id": None,
+    }
+    if route == "mcp":
+        request["tool_name"] = {"name": "search", "namespace": "mcp__records"}
+        request["route"] = "mcp"
+    elif route == "collaboration":
+        request["tool_name"] = {"name": "spawn_agent", "namespace": "collaboration"}
+    elif route == "cell":
+        request.update(
+            route="code_mode",
+            outer_call_id="outer",
+            cell_id="cell",
+            runtime_tool_call_id="nested",
+            cell_owner_id=7,
+        )
+    if policy != "legacy":
+        with telemetry.trace(
+            "native original owner",
+            options=telemetry.TraceOptions(
+                disabled=policy == "disabled", include_sensitive_data=False
+            ),
+        ) as original:
+            request["tracing_context"] = original.context._handle
+
+    async def next_notice() -> str:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 1:
+            return json.dumps({"nonce": 41, "request": request})
+        await released.wait()
+        return "null"
+
+    def resolve(nonce: int, encoded: str) -> bool:
+        nonlocal live
+        if live:
+            resolved.append(json.loads(encoded))
+            live = False
+            return True
+        return False
+
+    def release(nonce: int) -> None:
+        release_calls.append(nonce)
+        released.set()
+
+    issuer = SimpleNamespace(
+        id="session",
+        _active=root,
+        _context=None,
+        _agent=object(),
+        _closing=False,
+        _broken=False,
+        _executor=executor if route in ("environment", "cell", "child") else None,
+        _native_agents=NativeAgents(approval=callback)
+        if route == "collaboration"
+        else NativeAgents(),
+        _mcp_tools=(
+            HttpMCP(name="records", url="http://unused.invalid", tools=["search"], before=callback),
+        )
+        if route == "mcp"
+        else (),
+        _child_callback_state=lambda *args: child,
+        _native=SimpleNamespace(
+            _next_native_interception=next_notice,
+            _check_native_interception=lambda nonce: live,
+            _handoff_native_interception=lambda nonce: True,
+            _resolve_native_interception=resolve,
+            _release_native_interception=release,
+            _revoke_native_interception=lambda: None,
+            _finish_native_interception_reader=lambda: None,
+        ),
+    )
+    issuer._invoke_executor_policy = MethodType(Session._invoke_executor_policy, issuer)
+    issuer._invoke_executor_policy_body = MethodType(Session._invoke_executor_policy_body, issuer)
+    interception = _NativeInterception(issuer)
+    issuer._interception = interception
+    if route == "cell":
+        interception.cell_owners[7] = _CellPolicyOwner(
+            7, "session", "turn", "outer", "cell", turn, executor, None, issuer._agent
+        )
+    with telemetry.trace(
+        "unrelated reader", options=telemetry.TraceOptions(include_sensitive_data=True)
+    ) as unrelated:
+        before = set(native.leases)
+        reader = asyncio.create_task(interception._read())
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            assert not released.is_set()
+            assert not issuer._broken and not root.failure.done() and not child.failure.done()
+            if policy != "legacy":
+                held = set(native.leases) - before
+                assert any(token not in native.released for token in held)
+            finish.set()
+            await asyncio.wait_for(reader, 1)
+            assert telemetry.current_context() is unrelated.context
+        finally:
+            finish.set()
+            reader.cancel()
+            await asyncio.gather(reader, *interception.tasks.values(), return_exceptions=True)
+    # Let the loop retire canceled policy timers and their context snapshots.
+    await asyncio.sleep(0)
+    gc.collect()
+    assert resolved == [{"action": "continue"}] and release_calls == [41]
+    assert interception.tasks == {} and not issuer._broken
+    assert observations == ([] if policy == "legacy" else [("a" * 32, policy == "disabled")])
+    assert all(token in native.released for token in set(native.leases) - before), [
+        (token, native.leases[token])
+        for token in set(native.leases) - before
+        if token not in native.released
+    ]
+
+
+@pytest.mark.parametrize(
+    "expiry", ["before_ingress", "during_retain", "before_dispatch", "unexpected"]
+)
+async def test_interception_reader_skips_only_revoked_contexts(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, expiry: str
+) -> None:
+    from agents import NativeAgents
+    from agents.native_interception import _NativeInterception
+    from agents.schema import _prepare_spec
+    from agents.session import _Submission
+
+    called = []
+    releases = []
+    revoked = []
+    done = asyncio.Event()
+    live = expiry != "before_ingress"
+    reads = 0
+    retentions = []
+    original_retain = native.retain_trace_context
+    with telemetry.trace("owned original") as owner:
+        original_token = owner.context._handle
+
+    def retain(handle: str) -> str:
+        nonlocal live
+        retentions.append(handle)
+        if expiry in ("during_retain", "unexpected"):
+            if expiry == "during_retain":
+                live = False
+            raise RuntimeError("Native context unavailable")
+        return original_retain(handle)
+
+    monkeypatch.setattr(native, "retain_trace_context", retain)
+    message = {
+        "nonce": 41,
+        "request": {
+            "thread_id": "session",
+            "turn_id": "turn",
+            "call_id": "call",
+            "tool_name": {"name": "spawn_agent", "namespace": "collaboration"},
+            "phase": "before",
+            "route": "direct",
+            "boundary": "pre_dispatch",
+            "tool_kind": "function_json",
+            "input": "{}",
+            "result": None,
+            "tracing_context": original_token,
+        },
+    }
+
+    async def next_notice() -> str:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return json.dumps(message)
+        if expiry == "before_dispatch":
+            await done.wait()
+        return "null"
+
+    def release(nonce: int) -> None:
+        releases.append(nonce)
+        done.set()
+
+    def create(work: Any) -> asyncio.Task[Any]:
+        nonlocal live
+        live = False
+        return asyncio.create_task(work)
+
+    if expiry == "before_dispatch":
+        monkeypatch.setattr(telemetry, "_create_task", create)
+    state = _Submission(_prepare_spec(str))
+    state.handle = SimpleNamespace(turn_id="turn")
+    state.accepted.set_result(state.handle)
+    issuer = SimpleNamespace(
+        id="session",
+        _active=state,
+        _context=None,
+        _closing=False,
+        _broken=False,
+        _executor=None,
+        _mcp_tools=(),
+        _native_agents=NativeAgents(approval=lambda *args: called.append(True) or True),
+        _native=SimpleNamespace(
+            _next_native_interception=next_notice,
+            _check_native_interception=lambda nonce: live,
+            _resolve_native_interception=lambda *args: False,
+            _release_native_interception=release,
+            _revoke_native_interception=lambda: revoked.append(True),
+            _finish_native_interception_reader=lambda: None,
+        ),
+    )
+    interception = _NativeInterception(issuer)
+    before = set(native.leases)
+    await asyncio.wait_for(interception._read(), 1)
+    await asyncio.sleep(0)
+    gc.collect()
+    assert called == [] and releases == [41]
+    assert issuer._broken == (expiry == "unexpected")
+    assert state.failure.done() == (expiry == "unexpected")
+    assert revoked == ([True] if expiry == "unexpected" else [])
+    if expiry == "before_dispatch":
+        assert len(retentions) == 2 and retentions[0] == original_token
+        assert native.leases[retentions[1]] == native.leases[original_token]
+    else:
+        assert retentions == ([] if expiry == "before_ingress" else [original_token])
+    assert all(token in native.released for token in set(native.leases) - before)
