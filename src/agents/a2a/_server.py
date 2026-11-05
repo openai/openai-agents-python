@@ -160,10 +160,12 @@ class _Projection:
             task.context_id = self.context.context_id or ""
             task.status.state = p.TASK_STATE_SUBMITTED
         message = self.context.message
-        if message is not None and not any(
-            old.message_id == message.message_id for old in task.history
-        ):
-            self.manager.update_with_message(message, task)
+        if message is not None:
+            matches = [old for old in task.history if old.message_id == message.message_id]
+            if any(old != message for old in matches):
+                raise InvalidParamsError(message="Conflicting reuse of an existing message ID")
+            if not matches:
+                self.manager.update_with_message(message, task)
         await self.store.save(task, self.context.call_context)
 
     async def apply(self, events: list[Any]) -> bytes:
@@ -336,6 +338,8 @@ class NativeA2AExecutor(AgentExecutor):
         try:
             async with self.store.own(binding) as lease:
                 record = await self._load(lease, binding)
+                if context.message is not None:
+                    _json(MessageToDict(context.message), self.limits.message_bytes)
                 reply = None
                 if record is None:
                     if context.current_task is not None:
@@ -349,7 +353,6 @@ class NativeA2AExecutor(AgentExecutor):
                         raise InvalidParamsError(
                             message="Only bounded nonempty text input is supported"
                         )
-                    _json(prompt, self.limits.message_bytes)
                 elif record.status == "waiting":
                     prompt = None
                 else:
@@ -383,12 +386,12 @@ class NativeA2AExecutor(AgentExecutor):
                     pass
                 if configured is None:
                     raise InvalidParamsError(message="Current native configuration is unavailable")
+                projection = _Projection(context)
+                await projection.open()
                 if record is not None:
                     reply = self._reply(context, record, configured)
-                projection = _Projection(context)
                 previous = record
                 try:
-                    await projection.open()
                     events = []
                     if record is None:
                         initial = await projection.manager.get_task()
@@ -418,7 +421,9 @@ class NativeA2AExecutor(AgentExecutor):
                 except Exception:
                     # Never erase a committed waiting/completed publication on enqueue failure.
                     latest = await self._load(lease, binding)
-                    if latest is not None and latest.status in {"running", "claimed"}:
+                    if latest is None:
+                        raise
+                    if latest.status in {"running", "claimed"}:
                         await self._commit(
                             lease,
                             latest,

@@ -21,7 +21,7 @@ from starlette.routing import Route
 from agents import FunctionTool
 from agents.a2a import A2AInputReply, A2AJobProvider, A2ALimits
 from agents.a2a._client import _BoundedTransport
-from agents.experimental.deferred import DeferredTools, JobBinding, JobClaim
+from agents.experimental.deferred import DeferredTools, JobBinding, JobClaim, JobUpdate
 from tests.a2a_http import card, serve, service
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 from tests.test_a2a_client import endpoint, token
@@ -749,3 +749,207 @@ async def test_respond_preflight_rejects_another_task_without_reserving_or_sendi
         assert update.value is None and methods == ["SendMessage", "GetTask"]
         with sqlite3.connect(tmp_path / "journal.db") as db:
             assert db.execute("SELECT operation FROM reservations").fetchall() == [("start",)]
+
+
+@pytest.mark.parametrize(
+    "invalid", ["missing-id", "unspecified-role", "agent-role", "unknown-role"]
+)
+async def test_invalid_creation_envelope_preserves_reservation(tmp_path, invalid):
+    journal = tmp_path / "reservations.db"
+    provider = make_provider(endpoint("http://127.0.0.1:1"), journal)
+    message = new_text_message("request", role=p.ROLE_USER)
+    if invalid == "missing-id":
+        message.message_id = ""
+    else:
+        message.role = {
+            "unspecified-role": p.ROLE_UNSPECIFIED,
+            "agent-role": p.ROLE_AGENT,
+            "unknown-role": 999,
+        }[invalid]
+    provider._encode = lambda arguments: message
+
+    async def unexpected_token():
+        pytest.fail("invalid creation must fail before discovery or credential acquisition")
+
+    provider._authorization = unexpected_token
+    with pytest.raises(ValueError, match="creation requires"):
+        await provider.start(claim(provider), Query(text="request"))
+    with sqlite3.connect(journal) as db:
+        assert db.execute("SELECT count(*) FROM reservations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("operation", ["start", "observe", "respond", "cancel"])
+@pytest.mark.parametrize(
+    "reflection", ["task-id", "context-id", "pending", "auth", "artifact", "project", "tuple"]
+)
+async def test_bearer_reflection_never_reaches_journal_or_projector(
+    tmp_path, operation, reflection
+):
+    # An escaped credential checks decoded JSON recursion, rather than matching
+    # only the serialized representation. Each call acquires its current token.
+    bearer = 'synthetic-"bearer\\token'
+    task = p.Task(
+        id="task",
+        context_id="context",
+        status=p.TaskStatus(state=p.TASK_STATE_COMPLETED),
+        artifacts=[p.Artifact(parts=[p.Part(text="safe answer")])],
+    )
+    if reflection == "task-id":
+        task.id = "prefix-" + bearer
+    elif reflection == "context-id":
+        task.context_id = "prefix-" + bearer
+    elif reflection in {"pending", "auth"}:
+        task.status.state = (
+            p.TASK_STATE_INPUT_REQUIRED if reflection == "pending" else p.TASK_STATE_AUTH_REQUIRED
+        )
+        task.status.message.parts.add().data.struct_value.update(
+            {"challenge": "current", "generation": 1, "nested": [{bearer: "reflected"}]}
+        )
+    elif reflection == "artifact":
+        task.artifacts[0].parts[0].text = "prefix-" + bearer
+    projected = []
+
+    def project(value):
+        projected.append(value.id)
+        if reflection == "project":
+            return {"nested": [{bearer: "reflected"}]}
+        if reflection == "tuple":
+            return ({"nested": ["prefix-" + bearer]},)
+        return {"answer": "safe answer"}
+
+    methods = []
+
+    def peer(url):
+        async def rpc(request):
+            assert request.headers["authorization"] == f"Bearer {bearer}"
+            body = await request.json()
+            methods.append(body["method"])
+            result = MessageToDict(task)
+            if body["method"] == "SendMessage":
+                result = {"task": result}
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+        return Starlette(
+            routes=[*create_agent_card_routes(card(url)), Route("/rpc", rpc, methods=["POST"])]
+        )
+
+    async def authorization():
+        return bearer
+
+    async with serve(peer) as url:
+        provider = make_provider(endpoint(url), tmp_path / "reservations.db", project=project)
+        provider._authorization = authorization
+        previous = None
+        if operation != "start":
+            previous = JobUpdate(
+                "pending", json.dumps({"task_id": "task", "context_id": "context"})
+            )
+        current = claim(provider, previous, operation)
+        if operation == "start":
+            update = await provider.start(current, Query(text="request"))
+        elif operation == "observe":
+            update = await provider.observe(current)
+        elif operation == "respond":
+            update = await provider.respond(
+                current,
+                A2AInputReply(
+                    task_id="task",
+                    context_id="context",
+                    challenge="current",
+                    generation=1,
+                    result=True,
+                ),
+            )
+        else:
+            update = await provider.cancel(current)
+        assert update.status == "unknown" and update.value is None
+        assert bearer not in json.dumps(update.receipt)
+        if reflection in {"task-id", "context-id"} and operation == "start":
+            assert update.receipt is None
+        else:
+            assert json.loads(update.receipt) == {"task_id": "task", "context_id": "context"}
+        assert projected == (["task"] if reflection in {"project", "tuple"} else [])
+        assert methods == (["SendMessage"] if operation == "start" else ["GetTask"])
+        journal = Journal()
+        await journal.prepare("checkpoint", (current.binding,))
+        jobs = DeferredTools(journal=journal, tenant="alice", run_id="run")
+        journal_claim = await journal.claim(current.binding, "advance")
+        await jobs._record(journal_claim, update)
+        recorded = await journal.claim(current.binding, "advance")
+        assert recorded.update.value is None
+        assert bearer not in json.dumps(recorded.update.receipt)
+
+
+async def test_complete_reply_message_limit_precedes_network_and_reservation(tmp_path):
+    journal = tmp_path / "reservations.db"
+    provider = make_provider(
+        endpoint("http://127.0.0.1:1"), journal, limits=A2ALimits(message_bytes=1024)
+    )
+    task_id, context_id = "t" * 200, "c" * 200
+    previous = JobUpdate(
+        "input_required", json.dumps({"task_id": task_id, "context_id": context_id})
+    )
+    reply = A2AInputReply(
+        task_id=task_id, context_id=context_id, challenge="current", generation=1, result="x" * 900
+    )
+    # The JSON answer fits; the complete message, including the acknowledged
+    # task/context identities and generated message ID, exceeds the same bound.
+    assert len(json.dumps({"challenge": "current", "generation": 1, "result": reply.result})) < 1024
+    with pytest.raises(ValueError, match="byte limit"):
+        await provider.respond(claim(provider, previous, "respond"), reply)
+    with sqlite3.connect(journal) as db:
+        assert db.execute("SELECT count(*) FROM reservations").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("operation", ["respond", "cancel"])
+async def test_mutation_acknowledgment_rejects_reflected_bearer(tmp_path, operation):
+    methods = []
+    projected = []
+
+    def peer(url):
+        async def rpc(request):
+            body = await request.json()
+            methods.append(body["method"])
+            task = p.Task(id="task", context_id="context")
+            if body["method"] == "GetTask":
+                task.status.state = p.TASK_STATE_INPUT_REQUIRED
+                task.status.message.parts.add().data.struct_value.update(
+                    {"challenge": "current", "generation": 1}
+                )
+            else:
+                task.status.state = p.TASK_STATE_COMPLETED
+                task.artifacts.add().parts.add(text="alice-token")
+            result = MessageToDict(task)
+            if body["method"] == "SendMessage":
+                result = {"task": result}
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": result})
+
+        return Starlette(
+            routes=[*create_agent_card_routes(card(url)), Route("/rpc", rpc, methods=["POST"])]
+        )
+
+    async with serve(peer) as url:
+        provider = make_provider(
+            endpoint(url), tmp_path / "reservations.db", project=lambda task: projected.append(task)
+        )
+        previous = JobUpdate(
+            "input_required", json.dumps({"task_id": "task", "context_id": "context"})
+        )
+        current = claim(provider, previous, operation)
+        if operation == "respond":
+            update = await provider.respond(
+                current,
+                A2AInputReply(
+                    task_id="task",
+                    context_id="context",
+                    challenge="current",
+                    generation=1,
+                    result=True,
+                ),
+            )
+        else:
+            update = await provider.cancel(current)
+        assert update.status == "unknown" and update.value is None
+        assert json.loads(update.receipt) == {"task_id": "task", "context_id": "context"}
+        assert not projected
+        assert methods == ["GetTask", "SendMessage" if operation == "respond" else "CancelTask"]

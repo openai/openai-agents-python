@@ -5,10 +5,12 @@ import gzip
 import json
 import traceback
 
+import httpx
 import pytest
 
 pytest.importorskip("a2a")
 
+from a2a.client import ClientCallContext
 from a2a.client.errors import A2AClientTimeoutError
 from a2a.helpers.proto_helpers import new_data_message, new_text_message
 from a2a.types import a2a_pb2 as p
@@ -67,6 +69,101 @@ async def completed(client, task_id):
             return task
         await asyncio.sleep(0.01)
     raise AssertionError("Remote task never settled")
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+@pytest.mark.parametrize("oversized", [False, True])
+async def test_direct_client_bounds_complete_message(tmp_path, responses, streaming, oversized):
+    responses.respond(assistant_output("finished"))
+    executor = make_executor(tmp_path, responses)
+    message = p.Message(message_id="message", role=p.ROLE_USER, parts=[p.Part(text="☃" * 140)])
+    if oversized:
+        message.metadata.update({"large": "x" * 512})
+    async with serve(lambda url: service(executor, executor.store, url)) as url:
+        async with connect_a2a(
+            endpoint(url),
+            authorization=token,
+            limits=A2ALimits(message_bytes=512),
+            streaming=streaming,
+        ) as client:
+
+            async def send():
+                task = None
+                async for event in client.send_message(p.SendMessageRequest(message=message)):
+                    if event.HasField("task"):
+                        task = event.task
+                return task
+
+            if oversized:
+                with pytest.raises(ValueError, match="configured byte limit"):
+                    await send()
+                assert not responses.requests
+            else:
+                task = await send()
+                final = await completed(client, task.id)
+                assert final.status.state == p.TASK_STATE_COMPLETED
+                assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("kind", ["deadline", "idle", "stream-idle"])
+async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
+    received = []
+
+    def app(url):
+        async def discovery(request):
+            return JSONResponse(MessageToDict(card(url)))
+
+        async def rpc(request):
+            received.append(request.headers["authorization"])
+
+            async def body():
+                for _ in range(20):
+                    yield b": heartbeat\n\n" if kind == "stream-idle" else b" "
+                    await asyncio.sleep(0.05 if kind == "deadline" else 0.2)
+
+            return StreamingResponse(
+                body(),
+                media_type="text/event-stream" if kind == "stream-idle" else "application/json",
+            )
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+        async with connect_a2a(
+            endpoint(url),
+            authorization=token,
+            limits=A2ALimits(timeout=0.3),
+            streaming=kind == "stream-idle",
+        ) as client:
+            with pytest.raises(A2AClientTimeoutError) as caught:
+                context = ClientCallContext(timeout=0.05) if kind != "deadline" else None
+                if kind == "stream-idle":
+                    async for _ in client.send_message(
+                        p.SendMessageRequest(message=new_text_message("stream", role=p.ROLE_USER)),
+                        context=context,
+                    ):
+                        pass
+                else:
+                    await client.get_task(p.GetTaskRequest(id="task"), context=context)
+    assert received == ["Bearer alice-token"]
+    assert isinstance(caught.value.__cause__, httpx.TimeoutException)
+    if kind != "deadline":
+        assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
+    pending, seen = [caught.value], set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        request = getattr(error, "_request", None)
+        if request is not None:
+            assert "authorization" not in request.headers
+        pending.extend(item for item in (error.__cause__, error.__context__) if item is not None)
 
 
 async def test_two_independent_servers_selected_from_500_entry_host_catalog(tmp_path, responses):

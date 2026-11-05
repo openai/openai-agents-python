@@ -176,6 +176,121 @@ async def test_nontext_input_rejected_before_model_admission(tmp_path, responses
     assert not responses.requests
 
 
+@pytest.mark.parametrize("growth", ["metadata", "identifier", "parts"])
+async def test_complete_message_limit_rejects_non_prompt_growth(tmp_path, responses, growth):
+    executor = make_executor(tmp_path, responses, limits=A2ALimits(message_bytes=512))
+    context = request_context()
+    if growth == "metadata":
+        context.message.metadata.update({"oversized": "x" * 1024})
+    elif growth == "identifier":
+        context.message.message_id = "x" * 1024
+    else:
+        context.message.parts.extend([p.Part(text="")] * 100)
+
+    with pytest.raises(ValueError, match="configured byte limit"):
+        await invoke(executor, context)
+
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    assert executor.store.read(binding) is None
+    assert not responses.requests
+    assert binding not in executor._live
+
+
+@pytest.mark.parametrize("failure", ["snapshot", "store"])
+async def test_initial_commit_failure_propagates_without_admitting_native_work(
+    tmp_path, responses, monkeypatch, failure
+):
+    from contextlib import asynccontextmanager
+
+    executor = make_executor(
+        tmp_path, responses, limits=A2ALimits(checkpoint_bytes=1 if failure == "snapshot" else 1024)
+    )
+    primary = OSError("Synthetic initial store outage")
+    if failure == "store":
+        original = executor.store.own
+
+        @asynccontextmanager
+        async def failing_store(binding):
+            async with original(binding) as lease:
+
+                async def fail_commit(*args, **kwargs):
+                    raise primary
+
+                monkeypatch.setattr(lease, "commit", fail_commit)
+                yield lease
+
+        monkeypatch.setattr(executor.store, "own", failing_store)
+
+    with pytest.raises(ValueError if failure == "snapshot" else OSError) as raised:
+        await invoke(executor, request_context())
+
+    if failure == "store":
+        assert raised.value is primary
+    else:
+        assert str(raised.value) == "A2A snapshot exceeds configured byte limit"
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    assert executor.store.read(binding) is None
+    assert await executor.store.get(binding.task_id, call_context()) is None
+    assert not responses.requests
+    assert binding not in executor._live
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_projection_requires_identical_message_for_existing_id(conflict):
+    from agents.a2a._server import _Projection
+
+    context = request_context()
+    task = p.Task(id="task-a", context_id="context-a", history=[context.message])
+    context = request_context(current=task)
+    context.message.CopyFrom(task.history[0])
+    if conflict:
+        context.message.metadata.update({"different": True})
+    projection = _Projection(context)
+
+    if conflict:
+        with pytest.raises(InvalidParamsError, match="Conflicting reuse"):
+            await projection.open()
+    else:
+        await projection.open()
+        projected = await projection.manager.get_task()
+        assert list(projected.history) == list(task.history)
+
+
+@pytest.mark.parametrize("invalid", ["message_id", "size"])
+async def test_invalid_continuation_preserves_pending_answer(tmp_path, responses, invalid):
+    tool = FunctionTool(
+        name="approve", description="Application approval", input_type=Approval, output_type=str
+    )
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    executor = make_executor(tmp_path, responses, [tool], limits=A2ALimits(message_bytes=1024))
+    first, _ = await invoke(executor, request_context())
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    answer = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": "yes",
+    }
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    context = request_context(reply=answer, current=first.task)
+    if invalid == "message_id":
+        context.message.message_id = first.task.history[0].message_id
+    else:
+        context.message.metadata.update({"oversized": "x" * 2048})
+
+    with pytest.raises(InvalidParamsError if invalid == "message_id" else ValueError):
+        await invoke(executor, context)
+
+    assert executor.store.read(binding) == saved
+    assert len(responses.requests) == 1
+    responses.respond(assistant_output("approved"))
+    completed, _ = await invoke(executor, request_context(reply=answer, current=first.task))
+    assert completed.task.status.state == p.TASK_STATE_COMPLETED
+    assert MessageToDict(completed.task.history[-1].parts[0].data) == answer
+    assert executor.store.read(binding).acknowledges(completed.task)
+    assert len(responses.requests) == 2
+
+
 async def test_same_context_still_owns_independent_native_sessions(tmp_path, responses):
     responses.respond(assistant_output("one"))
     responses.respond(assistant_output("two"))

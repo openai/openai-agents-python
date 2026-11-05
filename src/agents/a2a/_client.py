@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -140,14 +141,30 @@ class _BoundedClient(httpx.AsyncClient):
             trust_env=False,
         )
         self._request_deadline = limits.timeout
+        self._message_limit = limits.message_bytes
 
     async def send(self, request: httpx.Request, **options: Any) -> httpx.Response:
         # HTTPX reads an ordinary response here. A streaming send returns at the headers.
         try:
+            if request.method == "POST":
+                body = json.loads(request.content)
+                if body.get("method") in {"SendMessage", "SendStreamingMessage"}:
+                    message = json.dumps(
+                        body["params"]["message"],
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        separators=(",", ":"),
+                    )
+                    if len(message.encode()) > self._message_limit:
+                        raise ValueError("A2A message exceeds configured byte limit")
             with anyio.fail_after(self._request_deadline):
                 return await super().send(request, **options)
         except TimeoutError as exc:
             raise httpx.TimeoutException("A2A request deadline exceeded", request=request) from exc
+        finally:
+            # The wire send has finished. Later errors, including SSE read timeouts,
+            # may retain this same request in their exception chain.
+            request.headers.pop("authorization", None)
 
 
 @asynccontextmanager
@@ -165,6 +182,8 @@ async def connect_a2a(
     other encodings before reading the body. The timeout bounds each ordinary
     request, including its body. Explicit event streams use an inactivity
     timeout after the response headers arrive.
+    Message limits measure compact UTF-8 JSON of the complete protocol message,
+    excluding the request configuration and JSON-RPC envelope.
     The resolver returns a current bearer token for this configured endpoint.
     It must not select authority from peer content. Closing a connection does not
     cancel remote work. Use explicit CancelTask for that separate mutation.

@@ -17,7 +17,7 @@ from a2a.types import a2a_pb2 as p
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
 
-from ..experimental.deferred import JobClaim, JobUpdate
+from ..experimental.deferred import JobClaim, JobUpdate, _private_text
 from ._client import _DEFAULT_LIMITS, A2AEndpoint, A2ALimits, _endpoint, _limits, connect_a2a
 
 Operation = Literal["start", "observe", "respond", "cancel"]
@@ -70,11 +70,17 @@ class A2AJobProvider(Generic[_Input]):
         self.id = "a2a/" + hashlib.sha256(identity.encode()).hexdigest()
 
     @asynccontextmanager
-    async def _connect(self) -> AsyncIterator[Client]:
+    async def _connect(self, credentials: list[str]) -> AsyncIterator[Client]:
+        async def authorization() -> str:
+            token = await self._authorization()
+            if isinstance(token, str) and token:
+                credentials.append(token)
+            return token
+
         # Discovery, admission and all RPCs in one job operation share a deadline.
         with anyio.fail_after(self.limits.timeout):
             async with connect_a2a(
-                self.endpoint, authorization=self._authorization, limits=self.limits
+                self.endpoint, authorization=authorization, limits=self.limits
             ) as client:
                 yield client
 
@@ -101,7 +107,13 @@ class A2AJobProvider(Generic[_Input]):
             raise ValueError("No acknowledged A2A task")
         return receipt
 
-    def _update(self, task: p.Task, expected: dict[str, str] | None = None) -> JobUpdate:
+    def _update(
+        self,
+        task: p.Task,
+        expected: dict[str, str] | None = None,
+        *,
+        credentials: tuple[str, ...] = (),
+    ) -> JobUpdate:
         if (
             not task.id
             or not task.context_id
@@ -109,13 +121,21 @@ class A2AJobProvider(Generic[_Input]):
             and (task.id != expected["task_id"] or task.context_id != expected["context_id"])
         ):
             raise ValueError("A2A task identity does not match its receipt")
+        if _private_text([task.id, task.context_id], credentials):
+            raise ValueError("A2A task identity contains a credential")
         receipt = _json(
             {"task_id": task.id, "context_id": task.context_id}, self.limits.message_bytes
         )
         try:
             if task.status.state == p.TASK_STATE_COMPLETED:
+                # A host projector may persist its input, including fields it
+                # does not return. Reject reflection before invoking it.
+                if _private_text(MessageToDict(task), credentials):
+                    return JobUpdate("unknown", receipt)
                 value = self._project(task)
-                _json(value, self.limits.message_bytes)
+                public = json.loads(_json(value, self.limits.message_bytes))
+                if _private_text(public, credentials):
+                    return JobUpdate("unknown", receipt)
                 return JobUpdate("completed", receipt, value)
             if task.status.state in (p.TASK_STATE_INPUT_REQUIRED, p.TASK_STATE_AUTH_REQUIRED):
                 kind = (
@@ -143,6 +163,8 @@ class A2AJobProvider(Generic[_Input]):
                         return JobUpdate("unknown", receipt)
                 value = {"kind": kind, "message": message}
                 _json(value, self.limits.message_bytes)
+                if _private_text(value, credentials):
+                    return JobUpdate("unknown", receipt)
                 return JobUpdate("input_required", receipt, value)
         except Exception:
             return JobUpdate("unknown", receipt)
@@ -159,7 +181,9 @@ class A2AJobProvider(Generic[_Input]):
         await self._check(claim, "start")
         message = self._encode(arguments)
         if (
-            message.task_id
+            not message.message_id
+            or message.role != p.ROLE_USER
+            or message.task_id
             or message.context_id
             or any(not (part.HasField("text") or part.HasField("data")) for part in message.parts)
             or not message.parts
@@ -167,8 +191,9 @@ class A2AJobProvider(Generic[_Input]):
             raise ValueError("A2A creation requires bounded text/JSON without task identity")
         _json(MessageToDict(message), self.limits.message_bytes)
         result = None
+        credentials: list[str] = []
         try:
-            async with self._connect() as client:
+            async with self._connect(credentials) as client:
                 request = p.SendMessageRequest(
                     message=message,
                     configuration=p.SendMessageConfiguration(return_immediately=True),
@@ -178,7 +203,7 @@ class A2AJobProvider(Generic[_Input]):
                     return JobUpdate("unknown")
                 async for event in client.send_message(request):
                     if event.HasField("task"):
-                        result = self._update(event.task)
+                        result = self._update(event.task, credentials=tuple(credentials))
                         break
         except Exception:
             pass
@@ -188,11 +213,14 @@ class A2AJobProvider(Generic[_Input]):
         await self._check(claim, "observe")
         receipt = self._receipt(claim)
         result = None
+        credentials: list[str] = []
         try:
-            async with self._connect() as client:
+            async with self._connect(credentials) as client:
                 await self._check(claim, "observe")
                 result = self._update(
-                    await client.get_task(p.GetTaskRequest(id=receipt["task_id"])), receipt
+                    await client.get_task(p.GetTaskRequest(id=receipt["task_id"])),
+                    receipt,
+                    credentials=tuple(credentials),
                 )
         except Exception:
             pass
@@ -230,6 +258,7 @@ class A2AJobProvider(Generic[_Input]):
         )
         if MessageToDict(message.parts[0].data) != value:
             raise ValueError("A2A data cannot represent this JSON value exactly")
+        _json(MessageToDict(message), self.limits.message_bytes)
         return await self._mutate(claim, receipt, "respond", value, message=message)
 
     async def cancel(self, claim: JobClaim) -> JobUpdate:
@@ -247,11 +276,12 @@ class A2AJobProvider(Generic[_Input]):
     ) -> JobUpdate:
         result = None
         invalid = False
+        credentials: list[str] = []
         try:
-            async with self._connect() as client:
+            async with self._connect(credentials) as client:
                 await self._check(claim, operation)
                 task = await client.get_task(p.GetTaskRequest(id=receipt["task_id"]))
-                current = self._update(task, receipt)
+                current = self._update(task, receipt, credentials=tuple(credentials))
                 if current.status == "unknown":
                     return current
                 if operation == "cancel" and current.status not in {"pending", "input_required"}:
@@ -294,11 +324,14 @@ class A2AJobProvider(Generic[_Input]):
                         result = self._update(
                             await client.cancel_task(p.CancelTaskRequest(id=receipt["task_id"])),
                             receipt,
+                            credentials=tuple(credentials),
                         )
                     else:
                         async for event in client.send_message(request):
                             if event.HasField("task"):
-                                result = self._update(event.task, receipt)
+                                result = self._update(
+                                    event.task, receipt, credentials=tuple(credentials)
+                                )
                                 break
         except Exception:
             pass
