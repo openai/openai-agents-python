@@ -733,7 +733,7 @@ class Agent(Generic[ContextT, OutputT]):
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
         """
-        from .prepared_request import _check_output, _check_profile
+        from .prepared_request import _check_output, _check_profile, _check_tools
         from .schema import PromptedOutput, _prepare_spec
         from .session import InteractionRequired, NativeError, _split_tools
         from .state import SessionState
@@ -755,6 +755,13 @@ class Agent(Generic[ContextT, OutputT]):
                 else effective_provider._websockets_enabled,
                 environment=environment,
             )
+            if (
+                tools is None
+                and before_step is None
+                and state is None
+                and getattr(self.session, "__func__", None) is Agent.session
+            ):
+                _check_tools(self.tools)
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable")
         if not isinstance(return_state, bool):
@@ -835,7 +842,7 @@ class Agent(Generic[ContextT, OutputT]):
             context=cast(SessionContextT, context),
             **options,
         ) as session:
-            if pause_manual:
+            if pause_manual or (prepare_request is not None and on_interaction is None):
                 # A delegating factory may change the opening roster or its
                 # default operation. Check the same effective selection that
                 # submit will capture, before it admits work or starts MCP.
@@ -850,6 +857,11 @@ class Agent(Generic[ContextT, OutputT]):
                     environment=session._executor,
                     native_agents=None if effective is None else session._native_agents,
                 )
+                if prepare_request is not None and any(tool._bind is None for tool in selected):
+                    raise InteractionRequired(
+                        "Running manual tools with prepare_request requires on_interaction. "
+                        "Use Agent.session() to reply to requests directly."
+                    )
                 if any(tool is eligible for tool in selected for eligible in pause_manual) and (
                     opening.programmatic_tool_calling
                     or session._default_output.mode == "prompted"

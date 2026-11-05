@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import inspect
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from typing_extensions import TypedDict
 
 if TYPE_CHECKING:
+    from .tools import ToolRef
     from .turn import Turn
 
 
@@ -115,9 +116,6 @@ def _capturing_callback(
 
 
 def _check_profile(agent: Any, *, websockets: bool, environment: Any) -> None:
-    from ._function_tools import FunctionTool
-    from .mcp import HttpMCP, StdioMCP
-
     if websockets:
         raise ValueError(
             "prepare_request requires a standard Responses (non-Lite) model and HTTP; "
@@ -128,14 +126,28 @@ def _check_profile(agent: Any, *, websockets: bool, environment: Any) -> None:
             "prepare_request supports direct-root eager function/MCP tools "
             "without an Environment or code mode"
         )
-    for tool in agent.tools:
-        if not (isinstance(tool, FunctionTool) or type(tool) in (HttpMCP, StdioMCP)):
-            raise ValueError(
-                "prepare_request supports only ordinary eager function/MCP tools, "
-                "without children or hosted tools"
-            )
+
+
+def _check_tools(tools: Sequence[Any], refs: Sequence[ToolRef] | None = None) -> None:
+    from ._function_tools import FunctionTool
+    from .mcp import HttpMCP, StdioMCP
+
+    unsupported = (
+        "prepare_request supports only ordinary eager function/MCP tools, "
+        "without children or hosted tools"
+    )
+    allowed: set[ToolRef] = set()
+    for tool in tools:
+        if isinstance(tool, FunctionTool):
+            allowed.add(tool.ref)
+        elif type(tool) in (HttpMCP, StdioMCP):
+            allowed.update(tool.tool(name) for name in tool.tools)
+        else:
+            raise ValueError(unsupported)
         if tool.defer_loading:
             raise ValueError("prepare_request requires eager tools; set defer_loading=False")
+    if refs is not None and not allowed.issuperset(refs):
+        raise ValueError(unsupported)
 
 
 def _check_output(output: Any) -> None:

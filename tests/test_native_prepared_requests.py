@@ -18,7 +18,9 @@ from agents import (
     Agent,
     CapabilityError,
     FunctionTool,
+    HostedVerificationMCP,
     HttpMCP,
+    InteractionRequired,
     NativeError,
     NativeOutput,
     NativeProvider,
@@ -28,6 +30,7 @@ from agents import (
     ToolContext,
     ToolOutput,
     TurnStoppedError,
+    WebSearch,
     function_tool,
 )
 from tests._asyncio import timeout
@@ -854,3 +857,175 @@ async def test_output_repair_without_editor_keeps_existing_correction_flow(
         ).run("Repair if needed")
         assert result.final_output.value == 9
         assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("entry", ["agent", "session"])
+@pytest.mark.parametrize("selection", ["empty", "reference", "hosted-excluded"])
+async def test_editor_uses_the_selected_tools(
+    responses: ResponsesFixture, entry: str, selection: str
+) -> None:
+    @function_tool(defer_loading=False)
+    def allowed() -> str:
+        return "allowed"
+
+    @function_tool(defer_loading=True)
+    def deferred() -> str:
+        return "deferred"
+
+    selected = [] if selection == "empty" else [allowed.ref]
+    received: list[list[str]] = []
+
+    def edit(turn: Any, request: PreparedRequest, **indices: int) -> None:
+        received.append([tool["name"] for tool in request["tools"]])
+        return None
+
+    responses.respond(assistant_output("done"))
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        tools=[allowed, WebSearch() if selection == "hosted-excluded" else deferred],
+        provider=provider(responses),
+    )
+    if entry == "agent":
+        result = await agent.run("answer", tools=selected, prepare_request=edit)
+    else:
+        async with agent.session() as session:
+            result = await (
+                await session.submit("answer", tools=selected, prepare_request=edit)
+            ).get_result()
+    assert result.final_output == "done"
+    assert received == [[] if selection == "empty" else ["allowed"]]
+    assert len(responses.requests) == 1
+    wire = responses.requests[0].get("tools", [])
+    assert [tool["name"] for tool in wire] == received[0]
+
+
+async def test_editor_rejects_selected_deferred_and_hosted_references(
+    responses: ResponsesFixture,
+) -> None:
+    from agents import ToolRef
+
+    @function_tool(defer_loading=True)
+    def deferred() -> str:
+        return "unused"
+
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        tools=[deferred, WebSearch()],
+        provider=provider(responses),
+    )
+    async with agent.session() as session:
+        for ref in (deferred.ref, ToolRef("run", "web")):
+            with pytest.raises(ValueError, match="prepare_request"):
+                await session.submit(
+                    "answer", tools=[ref], prepare_request=lambda turn, request, **indices: None
+                )
+    assert responses.requests == []
+
+
+async def test_editor_checks_each_dynamic_roster_before_dispatch(
+    responses: ResponsesFixture,
+) -> None:
+    effects: list[str] = []
+    rosters: list[list[str]] = []
+
+    @function_tool(defer_loading=False)
+    def allowed() -> str:
+        effects.append("allowed")
+        return "done"
+
+    @function_tool(defer_loading=True)
+    def deferred() -> str:
+        pytest.fail("deferred handler ran")
+
+    def prepare(turn: Any, request: PreparedRequest, **indices: int) -> None:
+        rosters.append([tool["name"] for tool in request["tools"]])
+
+    responses.respond(function_call("allowed", {}, "effect"))
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        tools=[allowed, deferred],
+        provider=provider(responses),
+    )
+    async with agent.session() as session:
+        turn = await session.submit(
+            "answer",
+            before_step=lambda turn, **indices: [deferred if effects else allowed],
+            prepare_request=prepare,
+        )
+        with pytest.raises(NativeError, match="prepare_request"):
+            await turn.get_result()
+    assert effects == ["allowed"]
+    assert rosters == [["allowed"]]
+    assert len(responses.requests) == 1
+
+
+async def test_editor_rejects_a_fixed_hosted_registration_with_an_empty_roster(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer()
+    edits: list[PreparedRequest] = []
+
+    def edit(turn: Any, request: PreparedRequest, **indices: int) -> None:
+        edits.append(request)
+
+    responses.respond(assistant_output("unexpected"))
+    async with peer.serve() as url:
+        agent = Agent(
+            model="gpt-5.5",
+            instructions="Answer.",
+            tools=[HostedVerificationMCP(url=url, tools=["search"], approval_mode="approve")],
+            provider=provider(responses),
+        )
+        async with agent.session() as session:
+            with pytest.raises(ValueError, match="hosted"):
+                await session.submit("answer", tools=[], prepare_request=edit)
+    assert edits == []
+    assert responses.requests == []
+    assert peer.calls == []
+
+
+@pytest.mark.parametrize("selection", ["default", "excluded", "handled"])
+async def test_manual_editor_run_requires_a_handler_for_selected_manual_tools(
+    responses: ResponsesFixture, selection: str
+) -> None:
+    manual = FunctionTool(
+        name="lookup", description="Lookup", input_type=LookupArgs, output_type=str
+    )
+    agent = Agent(
+        model="gpt-5.5", instructions="Answer.", tools=[manual], provider=provider(responses)
+    )
+    edits: list[int] = []
+
+    def edit(turn: Any, request: PreparedRequest, **indices: int) -> None:
+        edits.append(len(request["tools"]))
+
+    if selection == "excluded":
+        responses.respond(assistant_output("done"))
+        result = await agent.run("answer", tools=[], prepare_request=edit)
+        assert result.final_output == "done"
+        assert edits == [0]
+        assert len(responses.requests) == 1
+        return
+
+    responses.respond(function_call("lookup", {"key": "one"}, "manual"))
+    if selection == "default":
+        with pytest.raises(InteractionRequired):
+            await agent.run("answer", prepare_request=edit)
+        assert edits == []
+        assert responses.requests == []
+        return
+
+    responses.respond(assistant_output("done"))
+
+    async def answer(question: Any) -> Any:
+        request = manual.match(question)
+        assert request is not None and request.arguments.key == "one"
+        return request.reply("manual result")
+
+    result = await agent.run("answer", on_interaction=answer, prepare_request=edit)
+    assert result.final_output == "done"
+    assert edits == [1, 1]
+    assert len(responses.requests) == 2

@@ -100,6 +100,7 @@ from .prepared_request import (
     _capturing_callback,
     _check_output,
     _check_profile,
+    _check_tools,
     _PrepareRequest,
 )
 from .rate_limits import ApiRateLimits, _api_rate_limits
@@ -3836,6 +3837,10 @@ class Session(Generic[ContextT, OutputT]):
             if not callable(prepare_request):
                 raise TypeError("prepare_request must be callable")
             assert self._opening_agent is not None
+            if self._hosted_verification is not None:
+                raise ValueError(
+                    "prepare_request cannot edit requests for a fixed hosted MCP registration"
+                )
             _check_profile(
                 self._opening_agent, websockets=self._websockets_enabled, environment=self._executor
             )
@@ -3866,6 +3871,8 @@ class Session(Generic[ContextT, OutputT]):
                     environment=self._executor,
                     native_agents=self._native_agents,
                 )
+            if prepare_request is not None and before_step is None:
+                _check_tools(opening if tools is None else (*python, *mcp), operation_refs)
             for selected_tool in python:
                 selected_tool._check_context(self._context)
             for server in mcp:
@@ -4965,7 +4972,8 @@ class Session(Generic[ContextT, OutputT]):
                             raise
                     if self._native_agents is not None and state.operation_slots is not None:
                         state.operation_slots = tuple(range(len(selected)))
-                self._native._prepare_requests(state.prepare_request is not None)
+                if state.prepare_request is not None:
+                    self._native._prepare_requests(True)
                 self._native._select_steps(
                     input is not None
                     and (state.before_step is not None or state.operation_slots is not None),
@@ -5265,7 +5273,8 @@ class Session(Generic[ContextT, OutputT]):
             # futures with the original error before releasing its slot.
             if not self._broken:
                 self._native._select_steps(False)
-                self._native._prepare_requests(False)
+                if state.prepare_request is not None:
+                    self._native._prepare_requests(False)
             self._active = None
         # Issued roots also own their unreceived continuations.
         # A raw CancelledError as a shared result loses its cleanup
