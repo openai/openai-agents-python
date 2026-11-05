@@ -313,16 +313,18 @@ async def main() -> None:
                 key = (response["thread_id"], response["turn_id"], response["id"])
                 request_id = links.get(key)
                 dispatch = dispatches.get(request_id)
-                print({
-                    "occurrence_id": response["id"],
-                    "provider_response_id": response["response_id"],
-                    "provider_status": response.get("status"),
-                    "incomplete_reason": response.get("incomplete_reason"),
-                    "usage_source": response["usage_source"],
-                    "usage": response["usage"],
-                    "request_id": request_id,
-                    "dispatched_model": dispatch.model if dispatch else None,
-                })
+                print(
+                    {
+                        "occurrence_id": response["id"],
+                        "provider_response_id": response["response_id"],
+                        "provider_status": response.get("status"),
+                        "incomplete_reason": response.get("incomplete_reason"),
+                        "usage_source": response["usage_source"],
+                        "usage": response["usage"],
+                        "request_id": request_id,
+                        "dispatched_model": dispatch.model if dispatch else None,
+                    }
+                )
 
 
 if __name__ == "__main__":
