@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from contextlib import AsyncExitStack, asynccontextmanager
+from contextlib import AsyncExitStack, aclosing, asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from time import monotonic
@@ -32,6 +32,7 @@ from agents import (
     _native,
     function_tool,
 )
+from agents.observation import ApiRateLimitsUpdated
 from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
 from examples.supervised_worker import __main__ as worker, quota
 from tests._asyncio import timeout
@@ -221,10 +222,12 @@ async def test_tool_progress_and_sparse_api_headers_do_not_wake_worker(
     feed.read(watch, binding, None)
     connection = provider(responses)
     agent = Agent(instructions="Look up a value.", tools=[lookup], provider=connection)
+    expected_limits = ApiRateLimits(requests=ApiRateLimitWindow(remaining=0))
     async with (
         timeout(15),
         connection,
         agent.session() as session,
+        aclosing(session.events()) as observations,
         hold_final_text(responses) as (entered, release),
     ):
         turn = await session.submit("Look up a value.")
@@ -235,7 +238,14 @@ async def test_tool_progress_and_sparse_api_headers_do_not_wake_worker(
         try:
             await entered.wait()
             assert tool_output(responses.requests[1], "call-lookup") == "native callback result"
-            assert session.rate_limits() == ApiRateLimits(requests=ApiRateLimitWindow(remaining=0))
+            # The peer can reach its next response before the SDK applies the limit update.
+            async for observation in observations:
+                if isinstance(observation, ApiRateLimitsUpdated):
+                    assert observation.turn_id == turn.turn_id
+                    assert observation.snapshot == session.rate_limits() == expected_limits
+                    break
+            else:
+                pytest.fail("The session ended before applying the API rate-limit update")
             await assert_waiting(task)
             watch.observe_read(
                 feed.stamp(binding),
@@ -250,6 +260,7 @@ async def test_tool_progress_and_sparse_api_headers_do_not_wake_worker(
             release.set()
         result = await task
         assert isinstance(result, Completed) and result.final_output == "done"
+        assert session.rate_limits() == expected_limits
         assert report.first_tool_result_ms is not None
 
 
