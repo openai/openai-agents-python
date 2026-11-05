@@ -20,11 +20,13 @@ from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
+from pydantic import TypeAdapter
 
 from .. import ActionRequested, Agent, FunctionTool, PendingRequests, TurnStoppedError
 from .._trace_context import TraceContext, _trace_context
 from ..manual import _CapturedManual, _PreparedManualResult
 from ..observation import ToolFinished, ToolStarted
+from ..schema import NativeOutput, PromptedOutput
 from ..state import SessionState
 from ._client import _DEFAULT_LIMITS, A2ALimits, _limits
 from ._provider import _json
@@ -441,6 +443,7 @@ class NativeA2AExecutor(AgentExecutor):
         projection: _Projection,
         queue: EventQueue,
     ) -> NativeA2ATask:
+        output_type = configured.agent.output_type
         result, captured = None, None
         if not live.canceled:
             state = (
@@ -580,8 +583,10 @@ class NativeA2AExecutor(AgentExecutor):
         if result is None:
             raise RuntimeError("Native task has no settled result")
         output = result.final_output
-        if hasattr(output, "model_dump"):
-            output = output.model_dump(mode="json")
+        if isinstance(output_type, (NativeOutput, PromptedOutput)):
+            output_type = output_type.type_
+        if output_type is not None and output_type is not str:
+            output = TypeAdapter(output_type).dump_python(output, mode="json", warnings="error")
         _json(output, self.limits.message_bytes)
         parts = [p.Part(text=output)] if isinstance(output, str) else [_part({"result": output})]
         artifact = p.TaskArtifactUpdateEvent(

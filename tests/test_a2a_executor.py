@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from typing import Annotated
+
 import pytest
 
 pytest.importorskip("a2a")
@@ -7,10 +10,10 @@ pytest.importorskip("a2a")
 from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict
-from pydantic import BaseModel
+from pydantic import BaseModel, PlainSerializer
 
-from agents import Agent, FunctionTool, NativeProvider
-from agents.a2a import NativeA2AAgent, NativeA2ABinding, NativeA2AExecutor
+from agents import Agent, FunctionTool, NativeOutput, NativeProvider, PromptedOutput
+from agents.a2a import A2ALimits, NativeA2AAgent, NativeA2ABinding, NativeA2AExecutor
 from tests.a2a_helpers import HostStore, call_context, invoke, request_context
 from tests.native_fixtures import (
     assistant_output,
@@ -19,7 +22,7 @@ from tests.native_fixtures import (
 )
 
 
-def make_executor(tmp_path, responses, tools=()):
+def make_executor(tmp_path, responses, tools=(), *, output_type=None, **executor_options):
     store = HostStore(tmp_path)
     agent = Agent(
         name="Synthetic specialist",
@@ -27,9 +30,12 @@ def make_executor(tmp_path, responses, tools=()):
         model="test-model",
         provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
         tools=list(tools),
+        output_type=output_type,
     )
     return NativeA2AExecutor(
-        agent_factory=lambda binding, call_context: NativeA2AAgent(agent=agent), store=store
+        agent_factory=lambda binding, call_context: NativeA2AAgent(agent=agent),
+        store=store,
+        **executor_options,
     )
 
 
@@ -48,6 +54,49 @@ async def test_native_completion_is_exact_official_snapshot(tmp_path, responses)
     recovered = await executor.recover(binding, call_context())
     assert recovered == record
     assert len(responses.requests) == 1
+
+
+class ResultNode(BaseModel):
+    name: str
+    children: list[ResultNode]
+
+
+@pytest.mark.parametrize("mode", ["native", "explicit_native", "prompted"])
+async def test_nested_typed_result_uses_its_declared_json_serializer(tmp_path, responses, mode):
+    tree = [{"name": "parent", "children": [{"name": "leaf", "children": []}]}]
+    names = Annotated[
+        list[ResultNode],
+        PlainSerializer(lambda nodes: [node.name.upper() for node in nodes], return_type=list[str]),
+    ]
+    declaration = {
+        "native": list[ResultNode],
+        "explicit_native": NativeOutput(names),
+        "prompted": PromptedOutput(names),
+    }[mode]
+    wire = tree if mode == "prompted" else {"response": tree}
+    responses.respond(assistant_output(json.dumps(wire)))
+    executor = make_executor(tmp_path, responses, output_type=declaration)
+
+    stored, _ = await invoke(executor, request_context())
+
+    assert len(responses.requests) == 1
+    assert stored.task.status.state == p.TASK_STATE_COMPLETED
+    expected = tree if mode == "native" else ["PARENT"]
+    assert MessageToDict(stored.task.artifacts[0].parts[0].data) == {"result": expected}
+
+
+async def test_typed_result_limit_uses_serialized_size(tmp_path, responses):
+    expanded = Annotated[int, PlainSerializer(lambda value: str(value) * 1024, return_type=str)]
+    responses.respond(assistant_output('{"response": 7}'))
+    executor = make_executor(
+        tmp_path, responses, output_type=expanded, limits=A2ALimits(message_bytes=512)
+    )
+
+    stored, _ = await invoke(executor, request_context())
+
+    assert len(responses.requests) == 1
+    assert stored.task.status.state == p.TASK_STATE_FAILED
+    assert not stored.task.artifacts
 
 
 class Approval(BaseModel):
