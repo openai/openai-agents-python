@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .prepared_request import _PrepareRequest
     from .recovery import ReconciledCall
     from .schema import OutputSpec
     from .session import (
@@ -641,6 +642,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -658,6 +660,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -676,6 +679,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -695,12 +699,23 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
         provider, model, and model_settings follow the same precedence and
         restore restrictions as session(). An implicit provider is retired when
         the run closes, including failure and cancellation.
+
+        prepare_request(turn, request, *, preparation_index, recovery_attempt)
+        edits a detached next-request sampling copy. Return its complete value
+        or None. Use an explicitly HTTP provider and eager ordinary function/MCP
+        tools without children, Environment or code mode. The callback must
+        tolerate repeated preparation and avoid business effects. HTTP retries
+        reuse its captured edit; native stream recovery calls it again. Separate
+        output correction attempts are unsupported; set max_retries=0 or use
+        NativeOutput. Callback operations cannot suspend or export active state. Cancellation joins
+        callback settlement before a later operation can start.
 
         on_interaction receives a live request and returns request.reply(value),
         directly or through an awaitable. The SDK validates and delivers it.
@@ -718,11 +733,28 @@ class Agent(Generic[ContextT, OutputT]):
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
         """
-        from .schema import PromptedOutput
+        from .prepared_request import _check_output, _check_profile
+        from .schema import PromptedOutput, _prepare_spec
         from .session import InteractionRequired, NativeError, _split_tools
         from .state import SessionState
         from .tools import WebSearch
 
+        if prepare_request is not None:
+            if not callable(prepare_request):
+                raise TypeError("prepare_request must be callable")
+            _check_output(_prepare_spec(self.output_type))
+            effective_provider = provider or self.provider
+            if effective_provider is not None and not isinstance(
+                effective_provider, NativeProvider
+            ):
+                raise TypeError("provider must be a NativeProvider or None")
+            _check_profile(
+                self,
+                websockets=True
+                if effective_provider is None
+                else effective_provider._websockets_enabled,
+                environment=environment,
+            )
         if on_interaction is not None and not callable(on_interaction):
             raise TypeError("on_interaction must be callable")
         if not isinstance(return_state, bool):
@@ -740,8 +772,11 @@ class Agent(Generic[ContextT, OutputT]):
                 )
                 error.state = state
                 raise error
-            if tools is not None or before_step is not None:
-                raise ValueError("Cannot change tools or before_step on an already admitted turn")
+            if tools is not None or before_step is not None or prepare_request is not None:
+                raise ValueError(
+                    "Cannot change tools, before_step or prepare_request "
+                    "on an already admitted turn"
+                )
         elif input is None:
             raise TypeError("input is required unless resuming a pending manual checkpoint")
 
@@ -753,6 +788,7 @@ class Agent(Generic[ContextT, OutputT]):
             for tool in declared
             if on_interaction is None
             and before_step is None
+            and prepare_request is None
             and tool._bind is None
             and (tools is None or tool in tools or tool.ref in tools)
         )
@@ -837,7 +873,9 @@ class Agent(Generic[ContextT, OutputT]):
                 submission = cast("Turn[OutputT]", restored)
             else:
                 assert input is not None
-                submission = await session.submit(input, tools=tools, before_step=before_step)
+                submission = await session.submit(
+                    input, tools=tools, before_step=before_step, prepare_request=prepare_request
+                )
             if on_interaction is not None or pause_manual:
                 return await session._run_with_interactions(
                     submission, on_interaction, return_state=return_state, pause_manual=pause_manual
@@ -862,6 +900,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -879,6 +918,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -897,6 +937,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -916,6 +957,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        prepare_request: _PrepareRequest | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -952,6 +994,7 @@ class Agent(Generic[ContextT, OutputT]):
                     context=cast(SessionContextT, context),
                     tools=tools,
                     before_step=before_step,
+                    prepare_request=prepare_request,
                     **options,
                 )
             )

@@ -1,3 +1,7 @@
+#[path = "prepared_requests.rs"]
+mod prepared_requests;
+pub(crate) use prepared_requests::Contributor as PreparedRequestContributor;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
@@ -117,6 +121,7 @@ pub struct PythonTools {
     admission: Mutex<Option<Arc<TurnAdmission>>>,
     // A live native thread owns both. Keep no family-to-thread ownership cycle.
     interception: OnceLock<Weak<crate::native_interception::Control>>,
+    prepared_requests: Mutex<prepared_requests::State>,
     selecting_steps: AtomicBool,
     selecting_children: AtomicBool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
@@ -128,6 +133,7 @@ pub struct PythonTools {
 }
 
 enum QueuedRequest {
+    Prepared(Value),
     Step(Value),
     Call(Weak<PythonTools>, PendingKey, u64, Value),
     Retired {
@@ -204,9 +210,11 @@ const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup di
 // Core emits TurnComplete before releasing its active-turn slot. This receipt
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
+    thread_id: String,
     turn_id: String,
     owner: Weak<PythonTools>,
     use_deferred_specs: bool,
+    prepared_operation: Option<u64>,
     state: watch::Sender<AdmissionState>,
     completed_calls: Mutex<HashSet<String>>,
     graceful_requested: AtomicBool,
@@ -1066,6 +1074,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
             step_defaults: RwLock::new(None),
@@ -1109,6 +1118,7 @@ impl PythonTools {
             manual_progress: watch::channel(0).0,
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            prepared_requests: Mutex::default(),
             selecting_steps: AtomicBool::new(
                 parent.selecting_steps.load(Ordering::Acquire)
                     || parent.selecting_children.load(Ordering::Acquire),
@@ -1188,6 +1198,7 @@ impl PythonTools {
     }
 
     pub(crate) fn retire_steps(&self) {
+        self.retire_prepared_requests();
         // Dropping the owned senders wakes blocked selectors with no authority.
         let pending = self
             .step_replies
@@ -1787,6 +1798,7 @@ impl PythonTools {
         let mut receiver = self.family.receiver.lock().await;
         loop {
             match receiver.recv().await {
+                Some(QueuedRequest::Prepared(request)) => return request,
                 Some(QueuedRequest::Step(request)) => return request,
                 Some(QueuedRequest::Call(owner, key, invocation, request)) => {
                     if owner.upgrade().is_some_and(|tools| {
@@ -2220,9 +2232,11 @@ impl TurnLifecycleContributor for PythonContributor {
                 };
                 let graph = tools.family.graph.lock().expect("Python graph poisoned");
                 let receipt = Arc::new(TurnAdmission {
+                    thread_id: input.thread_store.level_id().to_owned(),
                     turn_id: input.turn_id.to_owned(),
                     owner: Arc::downgrade(&tools),
                     use_deferred_specs,
+                    prepared_operation: tools.prepared_operation(),
                     state: watch::channel(AdmissionState::Pending).0,
                     completed_calls: Mutex::default(),
                     graceful_requested: AtomicBool::new(false),
@@ -2611,6 +2625,7 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                     receipt.terminal.store(true, Ordering::Release);
                     receipt.state.send_replace(AdmissionState::Closed);
                 }
+                tools.retire_prepared_requests();
                 tools.family.graph_changed.send_replace(());
                 // A callback may still retain its issuer after Core tears it
                 // down. Stop must revoke its pending senders immediately.
@@ -3138,6 +3153,48 @@ pub(crate) mod managed_tests {
         };
         thread.insert(tools);
         thread
+    }
+
+    #[tokio::test]
+    async fn prepared_request_marker_survives_operation_and_thread_retirement() {
+        use codex_extension_api::ModelRequestContributor;
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        let contributor = PreparedRequestContributor;
+        let original = start_admission(&thread, "original").await;
+        assert!(!contributor.prepares_request(&original));
+        tools.prepare_requests(true).unwrap();
+        let edited = start_admission(&thread, "edited").await;
+        let captured = edited
+            .get::<Arc<TurnAdmission>>()
+            .unwrap()
+            .prepared_operation;
+        assert!(contributor.prepares_request(&edited));
+        tools.prepare_requests(false).unwrap();
+        assert!(contributor.prepares_request(&edited));
+        assert_ne!(tools.prepared_operation(), captured);
+        let ordinary = start_admission(&thread, "ordinary").await;
+        assert!(!contributor.prepares_request(&ordinary));
+        tools.retire_steps();
+        assert!(contributor.prepares_request(&edited));
+        assert!(tools.prepare_requests(true).is_err());
+    }
+
+    #[tokio::test]
+    async fn prepared_request_operations_and_selection_have_separate_owners() {
+        let thread = admission_thread();
+        let tools = thread.get::<PythonTools>().unwrap();
+        tools.prepare_requests(true).unwrap();
+        let operation = tools.prepared_operation();
+        tools.select_steps(true, None, false);
+        tools.select_steps(false, None, false);
+        assert_eq!(tools.prepared_operation(), operation);
+        tools.prepare_requests(false).unwrap();
+        tools.prepare_requests(true).unwrap();
+        assert_ne!(tools.prepared_operation(), operation);
+        let child = PythonTools::descendant(&tools, "synthetic-child".into());
+        assert!(child.prepared_operation().is_none());
+        assert!(child.prepare_requests(true).is_err());
     }
 
     // Seed the real registered SDK contributors in their Core registration
@@ -4405,6 +4462,7 @@ pub(crate) mod managed_tests {
             suspended: AtomicBool::new(false),
             admission: Mutex::new(None),
             interception: OnceLock::new(),
+            prepared_requests: Mutex::default(),
             manual_restore: Mutex::new(None),
             manual_progress: watch::channel(0).0,
             selecting_steps: AtomicBool::new(false),

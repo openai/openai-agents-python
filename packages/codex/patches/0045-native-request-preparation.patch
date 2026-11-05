@@ -1,0 +1,598 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 295d1f826b19efa6e781761ca0c3d8bba6dd0d8a..61d3e12d4c59edaed9778a9bcc2cc4c65bf7e4e2 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -3360,6 +3360,7 @@ dependencies = [
+  "codex-utils-path-uri",
+  "futures",
+  "pretty_assertions",
++ "serde",
+  "serde_json",
+  "tokio",
+ ]
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 2015061550d4acbed80ea2eefe1c86094f9a2fc5..c4819869a7bcc269c2915a04149e299bf61b531e 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1784,6 +1784,9 @@ impl ModelClientSession {
+             )
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+             crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
++            if let Some(admission) = &prompt.prepared_request_admission {
++                admission.admit_request().map_err(CodexErr::Fatal)?;
++            }
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = client.stream_request(request, options).await;
+ 
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 6188306e2ae26a96b758f2359697dc4ad4654b36..c6ffa49e94cb01075613b5a9e4bae3a9ec93a984 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -33,6 +33,9 @@ pub struct Prompt {
+ 
+     /// Stops new provider requests for this turn, including prompts without tools.
+     pub(crate) sampling_stop: Option<Arc<TurnSamplingStop>>,
++    /// Request-scoped host ownership, checked independently of response policies.
++    pub(crate) prepared_request_admission:
++        Option<Arc<dyn codex_extension_api::PreparedRequestAdmission>>,
+ 
+     /// Whether parallel tool calls are permitted for this prompt.
+     pub(crate) parallel_tool_calls: bool,
+@@ -55,6 +58,7 @@ impl Default for Prompt {
+             tools: Arc::default(),
+             tool_admission: None,
+             sampling_stop: None,
++            prepared_request_admission: None,
+             parallel_tool_calls: false,
+             base_instructions: BaseInstructions::default(),
+             output_schema: None,
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index c302aac22a6b055739501c55033aec814eb7a248..6843656823fe6a779c6d12ad191728510d1e1e98 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -98,6 +98,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+             Arc::clone(tool_router),
+         )),
+         sampling_stop: crate::model_request::turn_sampling_stop(&turn_context.extension_data),
++        prepared_request_admission: None,
+         parallel_tool_calls: true,
+         base_instructions,
+         output_schema: None,
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 5a5ae1d2c56ba260486336404a586652845a300e..5b8f87d3d66a2fa98dbaebb540d90d11691cffa0 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -11,6 +11,7 @@ mod apps;
+ mod client;
+ mod client_common;
+ mod model_request;
++mod prepared_request;
+ mod realtime_context;
+ mod realtime_conversation;
+ mod realtime_history;
+diff --git a/codex-rs/core/src/prepared_request.rs b/codex-rs/core/src/prepared_request.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..a70e5faf6d3b77f8fa6d90f9c92276aed1cb8ec0
+--- /dev/null
++++ b/codex-rs/core/src/prepared_request.rs
+@@ -0,0 +1,289 @@
++//! Sampling-copy editing, separate from the selected execution plan and canonical history.
++use crate::client_common::Prompt;
++use codex_extension_api::{PreparedRequestData, PreparedToolPresentation};
++use codex_protocol::models::ResponseItem;
++use codex_tools::{JsonSchema, ResponsesApiNamespaceTool, ResponsesApiTool, ToolSpec};
++use serde::Serialize;
++use serde::de::DeserializeOwned;
++use serde_json::Value;
++
++const PROFILE: &str = "prepare_request requires a standard Responses (non-Lite) model, Responses HTTP (supports_websockets=false), and direct-root eager function/MCP tools";
++
++/// Preserve submitted keys, including null values, while allowing native defaults.
++fn preserves(submitted: &Value, native: &Value) -> bool {
++    match (submitted, native) {
++        (Value::Object(a), Value::Object(b)) => a
++            .iter()
++            .all(|(key, value)| b.get(key).is_some_and(|actual| preserves(value, actual))),
++        (Value::Array(a), Value::Array(b)) => {
++            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| preserves(a, b))
++        }
++        _ => submitted == native,
++    }
++}
++
++fn parse_preserving<T: DeserializeOwned + Serialize>(value: Value) -> Result<T, String> {
++    let parsed: T = serde_json::from_value(value.clone())
++        .map_err(|_| "invalid native prepared-request value".to_string())?;
++    let canonical = serde_json::to_value(&parsed)
++        .map_err(|_| "cannot serialize prepared-request value".to_string())?;
++    if !preserves(&value, &canonical) {
++        return Err("prepared-request value loses fields in native serialization; omit skipped optional fields instead of explicit null".into());
++    }
++    Ok(parsed)
++}
++
++fn presentation(
++    namespace: Option<&str>,
++    tool: &ResponsesApiTool,
++) -> Result<PreparedToolPresentation, String> {
++    if tool.defer_loading == Some(true) {
++        return Err(PROFILE.into());
++    }
++    Ok(PreparedToolPresentation {
++        namespace: namespace.map(str::to_owned),
++        name: tool.name.clone(),
++        kind: "function".into(),
++        strict: tool.strict,
++        defer_loading: tool.defer_loading,
++        description: tool.description.clone(),
++        parameters: serde_json::to_value(&tool.parameters)
++            .map_err(|_| "cannot serialize native schema".to_string())?,
++    })
++}
++
++pub(crate) fn snapshot(prompt: &Prompt) -> Result<PreparedRequestData, String> {
++    let mut tools = Vec::new();
++    for spec in prompt.tools.iter() {
++        match spec {
++            ToolSpec::Function(tool) => tools.push(presentation(None, tool)?),
++            ToolSpec::Namespace(namespace) => {
++                for leaf in &namespace.tools {
++                    match leaf {
++                        ResponsesApiNamespaceTool::Function(tool) => {
++                            tools.push(presentation(Some(&namespace.name), tool)?)
++                        }
++                        _ => return Err(PROFILE.into()),
++                    }
++                }
++            }
++            _ => return Err(PROFILE.into()),
++        }
++    }
++    Ok(PreparedRequestData {
++        instructions: prompt.base_instructions.text.clone(),
++        input: prompt
++            .input
++            .iter()
++            .map(serde_json::to_value)
++            .collect::<Result<_, _>>()
++            .map_err(|_| "cannot serialize native input".to_string())?,
++        tools,
++    })
++}
++
++fn edit_tool(
++    namespace: Option<&str>,
++    tool: &mut ResponsesApiTool,
++    edit: &PreparedToolPresentation,
++) -> Result<(), String> {
++    let original = presentation(namespace, tool)?;
++    if edit.namespace != original.namespace
++        || edit.name != original.name
++        || edit.kind != original.kind
++        || edit.strict != original.strict
++        || edit.defer_loading != original.defer_loading
++    {
++        return Err(
++            "prepared-request tool identity, order, kind, strict and defer_loading are immutable"
++                .into(),
++        );
++    }
++    if !edit.parameters.is_object() {
++        return Err("prepared-request parameters must be a supported schema object".into());
++    }
++    if edit.parameters != original.parameters {
++        let mut schema: JsonSchema = parse_preserving(edit.parameters.clone())?;
++        // Retain native-only MCP bookkeeping; the executable owner remains untouched.
++        schema.mcp_input_schema_max_bytes = tool.parameters.mcp_input_schema_max_bytes;
++        tool.parameters = schema;
++    }
++    tool.description = edit.description.clone();
++    Ok(())
++}
++
++pub(crate) fn apply(original: &Prompt, data: PreparedRequestData) -> Result<Prompt, String> {
++    let before = snapshot(original)?;
++    if before.tools.len() != data.tools.len() {
++        return Err("prepared-request tool count is immutable".into());
++    }
++    let input: Vec<ResponseItem> = data
++        .input
++        .into_iter()
++        .enumerate()
++        .map(|(index, value)| {
++            parse_preserving(value)
++                .map_err(|category| format!("prepared-request input[{index}]: {category}"))
++        })
++        .collect::<Result<_, _>>()?;
++    let mut tools = original.tools.to_vec();
++    let mut edits = data.tools.iter();
++    for spec in &mut tools {
++        match spec {
++            ToolSpec::Function(tool) => {
++                edit_tool(None, tool, edits.next().ok_or("missing tool presentation")?)?
++            }
++            ToolSpec::Namespace(namespace) => {
++                for leaf in &mut namespace.tools {
++                    match leaf {
++                        ResponsesApiNamespaceTool::Function(tool) => edit_tool(
++                            Some(&namespace.name),
++                            tool,
++                            edits.next().ok_or("missing tool presentation")?,
++                        )?,
++                        _ => return Err(PROFILE.into()),
++                    }
++                }
++            }
++            _ => return Err(PROFILE.into()),
++        }
++    }
++    let mut result = original.clone();
++    result.input = input;
++    result.base_instructions.text = data.instructions;
++    result.tools = tools.into();
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn native_text_function_and_mcp_items_preserve_submitted_fields() {
++        for item in [
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"note"}]}),
++            json!({"type":"function_call","name":"reserve","arguments":"{\"seats\":2}","call_id":"call-1"}),
++            json!({"type":"function_call_output","call_id":"call-1","output":"SHAPED_RESULT"}),
++            json!({"type":"function_call","namespace":"mcp__local","name":"reserve","arguments":"{}","call_id":"mcp-1"}),
++            json!({"type":"function_call_output","call_id":"mcp-1","output":"ok"}),
++        ] {
++            assert!(parse_preserving::<ResponseItem>(item).is_ok());
++        }
++    }
++
++    #[test]
++    fn unknown_nested_null_and_skipped_optional_null_are_rejected() {
++        for item in [
++            json!({"type":"message","role":"user","content":[{"type":"input_text","text":"note","unknown":null}]}),
++            json!({"type":"message","role":"user","id":null,"content":[]}),
++        ] {
++            assert!(parse_preserving::<ResponseItem>(item).is_err());
++        }
++    }
++
++    #[test]
++    fn native_schema_rejects_discarded_keywords_without_sanitizing() {
++        assert!(parse_preserving::<JsonSchema>(json!({"type":"integer","maximum":99})).is_err());
++        assert!(
++            parse_preserving::<JsonSchema>(json!({"type":"string","enum":["one","two"]})).is_ok()
++        );
++    }
++
++    fn function(name: &str) -> ResponsesApiTool {
++        ResponsesApiTool {
++            name: name.into(),
++            description: "original".into(),
++            strict: false,
++            defer_loading: None,
++            parameters: serde_json::from_value(json!({"type":"string","enum":["one"]})).unwrap(),
++            output_schema: None,
++        }
++    }
++
++    #[test]
++    fn edit_changes_only_detached_sampling_presentation_and_input() {
++        let original = Prompt {
++            tools: vec![
++                ToolSpec::Function(function("local")),
++                ToolSpec::Namespace(codex_tools::ResponsesApiNamespace {
++                    name: "mcp__local".into(),
++                    description: "container".into(),
++                    tools: vec![ResponsesApiNamespaceTool::Function(function("remote"))],
++                }),
++            ]
++            .into(),
++            ..Default::default()
++        };
++        let original_tools = original.tools.clone();
++        let mut data = snapshot(&original).unwrap();
++        data.instructions = "edited".into();
++        data.input.push(json!({"type":"message","role":"user","content":[{"type":"input_text","text":"sampling only"}]}));
++        for tool in &mut data.tools {
++            tool.description = "edited description".into();
++            tool.parameters = json!({"type":"string","enum":["one","two"]});
++        }
++        let edited = apply(&original, data).unwrap();
++        assert_eq!(
++            snapshot(&edited).unwrap().tools[1].namespace.as_deref(),
++            Some("mcp__local")
++        );
++        assert_eq!(edited.base_instructions.text, "edited");
++        assert_eq!(edited.input.len(), 1);
++        assert!(original.input.is_empty());
++        assert_eq!(original.tools, original_tools);
++        assert_eq!(
++            snapshot(&original).unwrap().tools[0].description,
++            "original"
++        );
++        match &edited.tools[1] {
++            ToolSpec::Namespace(namespace) => assert_eq!(namespace.description, "container"),
++            _ => panic!("namespace was lost"),
++        }
++    }
++
++    #[test]
++    fn tool_mutations_and_invalid_schemas_apply_nothing() {
++        let original = Prompt {
++            tools: vec![ToolSpec::Function(function("local"))].into(),
++            ..Default::default()
++        };
++        let before = snapshot(&original).unwrap();
++        for mutation in 0..6 {
++            let mut data = before.clone();
++            match mutation {
++                0 => data.tools[0].name = "invented".into(),
++                1 => data.tools[0].strict = true,
++                2 => data.tools[0].defer_loading = Some(true),
++                3 => data.tools.clear(),
++                4 => data.tools[0].parameters = json!({"maximum":99}),
++                _ => data.tools[0].namespace = Some("other".into()),
++            }
++            assert!(apply(&original, data).is_err());
++            assert_eq!(snapshot(&original).unwrap(), before);
++        }
++    }
++
++    #[test]
++    fn unsupported_selected_presentations_fail_before_callback_entry() {
++        let mut tool = function("deferred");
++        tool.defer_loading = Some(true);
++        let original = Prompt {
++            tools: vec![ToolSpec::Function(tool)].into(),
++            ..Default::default()
++        };
++        assert!(snapshot(&original).is_err());
++    }
++
++    #[test]
++    fn defaults_may_be_added_but_array_shape_and_scalar_values_must_stay() {
++        assert!(preserves(
++            &json!({"a":[1]}),
++            &json!({"a":[1],"default":null})
++        ));
++        assert!(!preserves(&json!({"a":null}), &json!({})));
++        assert!(!preserves(&json!([1]), &json!([1, 2])));
++        assert!(!preserves(&json!(1), &json!(2)));
++    }
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee776062fc1 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1463,6 +1463,16 @@ async fn run_auto_compact(
+     phase: CompactionPhase,
+ ) -> CodexResult<()> {
+     let turn_context = &step_context.turn;
++    if sess
++        .services
++        .extensions
++        .model_request_contributors()
++        .iter()
++        .any(|contributor| contributor.prepares_request(&turn_context.extension_data))
++    {
++        return Err(CodexErr::Fatal("automatic compaction is unsupported for an operation with prepare_request; shorten the input or start a new operation".into()));
++    }
++
+     if matches!(phase, CompactionPhase::PreTurn)
+         && crate::guardian::is_basic_session_source(&turn_context.session_source)
+         && !crate::guardian::should_compact_guardian_input(sess)?
+@@ -1606,6 +1616,7 @@ pub(crate) fn build_prompt(
+         parallel_tool_calls: true,
+         tool_admission: None,
+         sampling_stop: None,
++        prepared_request_admission: None,
+         base_instructions,
+         output_schema: turn_context.final_output_json_schema.clone(),
+         output_schema_strict: !crate::guardian::is_basic_session_source(
+@@ -1657,6 +1668,7 @@ async fn run_sampling_request(
+     );
+     let max_retries = turn_context.provider.info().stream_max_retries();
+     let mut retry_state = ResponsesStreamRetryState::default();
++    let mut recovery_attempt = 0;
+     let mut initial_input = Some(input);
+     let mut original_input = None;
+     let mut executed_tool_calls_by_output = HashMap::new();
+@@ -1689,6 +1701,27 @@ async fn run_sampling_request(
+         let responses_metadata = sess
+             .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
+             .await;
++        let editors: Vec<_> = sess
++            .services
++            .extensions
++            .model_request_contributors()
++            .iter()
++            .filter(|contributor| contributor.prepares_request(&turn_context.extension_data))
++            .collect();
++        if !editors.is_empty() {
++            if editors.len() != 1
++                || turn_context.provider.info().supports_websockets
++                || step_context.settings.model_info.use_responses_lite
++                || step_context.realtime.active
++                || turn_context.config.features.enabled(Feature::CodeMode)
++                || matches!(
++                    turn_context.session_source,
++                    SessionSource::SubAgent(_) | SessionSource::Internal(_)
++                )
++            {
++                return Err(CodexErr::Fatal("prepare_request requires a standard Responses (non-Lite) model, Responses HTTP (supports_websockets=false), and direct-root eager function/MCP tools".into()));
++            }
++        }
+         if crate::guardian::is_basic_session_source(&turn_context.session_source) {
+             crate::guardian::prepare_guardian_prompt(
+                 &sess,
+@@ -1698,6 +1731,33 @@ async fn run_sampling_request(
+             )
+             .await?;
+         }
++        // The original prompt remains authoritative for history and retry bookkeeping.
++        let mut sampling_prompt = prompt.clone();
++        if !editors.is_empty() {
++            let data = crate::prepared_request::snapshot(&prompt).map_err(CodexErr::Fatal)?;
++            let admission = prompt.tool_admission.clone().ok_or_else(|| {
++                CodexErr::Fatal("prepared request has no selected tool admission".into())
++            })?;
++            let output = editors[0]
++                .prepare_request(codex_extension_api::PreparedRequestInput {
++                    admission,
++                    recovery_attempt,
++                    data,
++                })
++                .or_cancel(&preempt)
++                .or_cancel(&cancellation_token)
++                .await??
++                .map_err(CodexErr::Fatal)?;
++            if cancellation_token.is_cancelled() || preempt.is_cancelled() {
++                return Err(CodexErr::TurnAborted);
++            }
++            output.admission.admit_request().map_err(CodexErr::Fatal)?;
++            if let Some(data) = output.data {
++                sampling_prompt =
++                    crate::prepared_request::apply(&prompt, data).map_err(CodexErr::Fatal)?;
++            }
++            sampling_prompt.prepared_request_admission = Some(output.admission);
++        }
+         let err = match try_run_sampling_request(
+             tool_runtime.clone(),
+             Arc::clone(&sess),
+@@ -1706,7 +1766,7 @@ async fn run_sampling_request(
+             client_session,
+             &responses_metadata,
+             Arc::clone(&turn_diff_tracker),
+-            &prompt,
++            &sampling_prompt,
+             cancellation_token.child_token(),
+         )
+         .await
+@@ -1762,6 +1822,7 @@ async fn run_sampling_request(
+             ));
+         }
+         retry??;
++        recovery_attempt += 1;
+         turn_context.turn_timing_state.record_sampling_retry();
+     }
+ }
+diff --git a/codex-rs/ext/extension-api/Cargo.toml b/codex-rs/ext/extension-api/Cargo.toml
+index 4b487226eb7deb0a44ad5d9ae16e53f90fd7ec8e..3e19d0358c23532df40aca4dff37125b201c938c 100644
+--- a/codex-rs/ext/extension-api/Cargo.toml
++++ b/codex-rs/ext/extension-api/Cargo.toml
+@@ -27,6 +27,7 @@ codex-protocol = { workspace = true }
+ codex-tools = { workspace = true }
+ codex-utils-absolute-path = { workspace = true }
+ codex-utils-path-uri = { workspace = true }
++serde = { workspace = true }
+ serde_json = { workspace = true }
+ 
+ [dev-dependencies]
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index 940dc5f1f5d7437fdeaca8e333da3ba91146bd12..ae6ee3954b03f3637870b6c534c0ec8fe8f0170e 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -126,6 +126,12 @@ pub use model_request::ModelToolAdmission;
+ pub use model_request::ResponseEvent;
+ pub use model_request::TurnSamplingStop;
+ 
++pub use model_request::PreparedRequestAdmission;
++pub use model_request::PreparedRequestData;
++pub use model_request::PreparedRequestInput;
++pub use model_request::PreparedRequestOutput;
++pub use model_request::PreparedToolPresentation;
++
+ /// SDK host context for recording the settings used to prepare a sampling request.
+ pub struct SdkTurnReceiptSeed {
+     pub codex_revision: &'static str,
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 45fa289c1d3a458daa5305abc634e79a47c7b1e5..26a4e467282a70ff3cc5407a5f8e3b249b450612 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -3,7 +3,10 @@ use crate::ExtensionData;
+ pub use codex_api::ApiError as ModelResponseError;
+ pub use codex_api::ResponseEvent;
+ use codex_protocol::models::ResponseItem;
++use futures::future::BoxFuture;
+ use futures::stream::BoxStream;
++use serde::{Deserialize, Serialize};
++use serde_json::Value;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+@@ -48,9 +51,25 @@ pub struct ModelRequestInput<'a> {
+     pub model: &'a str,
+ }
+ 
+-/// Creates request-scoped interceptors without delaying inference.
++/// Contributes request-scoped preparation and response interception.
+ /// Return None for requests this host does not manage.
+ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
++    /// Whether this exact operation opted into prepared-request editing.
++    /// Keep this captured marker true through retirement; it is not an owner-liveness check.
++    /// Hosts must reject unsupported operation settings before starting work.
++    fn prepares_request(&self, _turn_store: &ExtensionData) -> bool {
++        false
++    }
++
++    /// Prepare an owned sampling copy. Dropping the future revokes its pending reply;
++    /// the host still owns cancellation and joining of application callbacks.
++    fn prepare_request(
++        &self,
++        _input: PreparedRequestInput,
++    ) -> BoxFuture<'_, Result<PreparedRequestOutput, String>> {
++        Box::pin(async { Err("prepared-request contributor is not implemented".into()) })
++    }
++
+     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
+ }
+ 
+@@ -89,3 +108,43 @@ pub trait ModelResponseInterceptor: Send + Sync {
+     /// The returned stream must own request state and propagate cancellation by dropping upstream.
+     fn intercept(self: Box<Self>, stream: ModelResponseStream) -> ModelResponseStream;
+ }
++
++/// Detached native sampling data. Unknown fields are rejected at the host reply boundary.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct PreparedRequestData {
++    pub instructions: String,
++    pub input: Vec<Value>,
++    pub tools: Vec<PreparedToolPresentation>,
++}
++
++/// Ordered function leaf. Only description and parameters may change.
++#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
++#[serde(deny_unknown_fields)]
++pub struct PreparedToolPresentation {
++    pub namespace: Option<String>,
++    pub name: String,
++    pub kind: String,
++    pub strict: bool,
++    pub defer_loading: Option<bool>,
++    pub description: String,
++    pub parameters: Value,
++}
++
++/// Native ownership evidence; hosts add their generation and one-shot nonce.
++pub struct PreparedRequestInput {
++    pub admission: Arc<dyn ModelToolAdmission>,
++    /// Outer sampling recovery count; lower-level transport retries reuse this preparation.
++    pub recovery_attempt: usize,
++    pub data: PreparedRequestData,
++}
++
++/// A settled reply retains an owner check even when it makes no edit.
++pub struct PreparedRequestOutput {
++    pub data: Option<PreparedRequestData>,
++    pub admission: Arc<dyn PreparedRequestAdmission>,
++}
++
++pub trait PreparedRequestAdmission: Send + Sync + std::fmt::Debug {
++    fn admit_request(&self) -> Result<(), String>;
++}
