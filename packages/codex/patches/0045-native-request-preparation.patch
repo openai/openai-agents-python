@@ -366,7 +366,7 @@ index 0000000000000000000000000000000000000000..a70e5faf6d3b77f8fa6d90f9c92276ae
 +    }
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720d29e9ed5 100644
+index 22f848a788512f008c73326694901f640343ea45..97fe88e0b826bcc086c2ad2dece7baf87a24005d 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -1,3 +1,4 @@
@@ -374,7 +374,7 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
  use std::collections::HashMap;
  use std::collections::HashSet;
  use std::sync::Arc;
-@@ -1468,6 +1469,26 @@ async fn run_auto_compact(
+@@ -1468,6 +1469,18 @@ async fn run_auto_compact(
      phase: CompactionPhase,
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
@@ -385,23 +385,15 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
 +        .iter()
 +        .any(|contributor| contributor.prepares_request(&turn_context.extension_data))
 +    {
-+        let err = CodexErr::Fatal("automatic compaction is unsupported for an operation with prepare_request; shorten the input or start a new operation".into());
-+        // The guard bypasses the compact task that normally reports mid-turn failures.
-+        if matches!(phase, CompactionPhase::MidTurn) {
-+            sess.track_turn_codex_error(turn_context.as_ref(), &err);
-+            sess.send_event(
-+                turn_context.as_ref(),
-+                EventMsg::Error(err.to_error_event(None)),
-+            )
-+            .await;
-+        }
-+        return Err(err);
++        return Err(CodexErr::Fatal(
++            "automatic compaction is unsupported for an operation with prepare_request; shorten the input or start a new operation".into(),
++        ));
 +    }
 +
      if matches!(phase, CompactionPhase::PreTurn)
          && crate::guardian::is_basic_session_source(&turn_context.session_source)
          && !crate::guardian::should_compact_guardian_input(sess)?
-@@ -1611,6 +1632,7 @@ pub(crate) fn build_prompt(
+@@ -1611,6 +1624,7 @@ pub(crate) fn build_prompt(
          parallel_tool_calls: true,
          tool_admission: None,
          sampling_stop: None,
@@ -409,7 +401,7 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
          base_instructions,
          output_schema: turn_context.final_output_json_schema.clone(),
          output_schema_strict: !crate::guardian::is_basic_session_source(
-@@ -1662,6 +1684,7 @@ async fn run_sampling_request(
+@@ -1662,6 +1676,7 @@ async fn run_sampling_request(
      );
      let max_retries = turn_context.provider.info().stream_max_retries();
      let mut retry_state = ResponsesStreamRetryState::default();
@@ -417,7 +409,7 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
      let mut initial_input = Some(input);
      let mut original_input = None;
      let mut executed_tool_calls_by_output = HashMap::new();
-@@ -1694,6 +1717,27 @@ async fn run_sampling_request(
+@@ -1694,6 +1709,27 @@ async fn run_sampling_request(
          let responses_metadata = sess
              .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
              .await;
@@ -445,7 +437,7 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
          if crate::guardian::is_basic_session_source(&turn_context.session_source) {
              crate::guardian::prepare_guardian_prompt(
                  &sess,
-@@ -1703,6 +1747,34 @@ async fn run_sampling_request(
+@@ -1703,6 +1739,34 @@ async fn run_sampling_request(
              )
              .await?;
          }
@@ -480,7 +472,7 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
          let err = match try_run_sampling_request(
              tool_runtime.clone(),
              Arc::clone(&sess),
-@@ -1711,7 +1783,7 @@ async fn run_sampling_request(
+@@ -1711,7 +1775,7 @@ async fn run_sampling_request(
              client_session,
              &responses_metadata,
              Arc::clone(&turn_diff_tracker),
@@ -489,7 +481,7 @@ index 22f848a788512f008c73326694901f640343ea45..4ddbb521c8269680f244215b7a820720
              cancellation_token.child_token(),
          )
          .await
-@@ -1767,6 +1839,7 @@ async fn run_sampling_request(
+@@ -1767,6 +1831,7 @@ async fn run_sampling_request(
              ));
          }
          retry??;
