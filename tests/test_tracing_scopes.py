@@ -20,6 +20,7 @@ from urllib.parse import unquote
 import pytest
 
 from agents import telemetry
+from agents._runtime import telemetry as runtime_telemetry
 from tests._asyncio import timeout
 
 
@@ -112,16 +113,16 @@ class NativeTracing:
 @pytest.fixture
 def native(monkeypatch: pytest.MonkeyPatch) -> NativeTracing:
     value = NativeTracing()
-    monkeypatch.setattr(telemetry, "_native_tracing", lambda: value)
-    monkeypatch.setattr(telemetry, "_processors", {})
-    monkeypatch.setattr(telemetry, "_processor_task", None)
-    monkeypatch.setattr(telemetry, "_processor_starting", False)
-    monkeypatch.setattr(telemetry, "_processor_closing", False)
-    monkeypatch.setattr(telemetry, "_processor_serial", 0)
-    monkeypatch.setattr(telemetry, "_active_processor_ids", set())
-    monkeypatch.setattr(telemetry, "_retired_routes", {})
-    monkeypatch.setattr(telemetry, "_processor_acknowledged", 0)
-    monkeypatch.setattr(telemetry, "_engine_options", "{}")
+    monkeypatch.setattr(runtime_telemetry, "_native_tracing", lambda: value)
+    monkeypatch.setattr(runtime_telemetry, "_processors", {})
+    monkeypatch.setattr(runtime_telemetry, "_processor_task", None)
+    monkeypatch.setattr(runtime_telemetry, "_processor_starting", False)
+    monkeypatch.setattr(runtime_telemetry, "_processor_closing", False)
+    monkeypatch.setattr(runtime_telemetry, "_processor_serial", 0)
+    monkeypatch.setattr(runtime_telemetry, "_active_processor_ids", set())
+    monkeypatch.setattr(runtime_telemetry, "_retired_routes", {})
+    monkeypatch.setattr(runtime_telemetry, "_processor_acknowledged", 0)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", "{}")
     return value
 
 
@@ -167,7 +168,7 @@ async def test_async_scopes_isolate_and_captured_work_outlives_parent(
     async def run(name: str) -> tuple[str, str]:
         nonlocal entered
         with telemetry.trace(name) as scope:
-            captured = telemetry._capture()
+            captured = runtime_telemetry._capture()
             entered += 1
             if entered == 2:
                 ready.set()
@@ -190,9 +191,9 @@ async def test_async_scopes_isolate_and_captured_work_outlives_parent(
 
 def test_options_capture_restores_context_and_session_defaults(native: NativeTracing) -> None:
     with telemetry.trace("session"):
-        session = telemetry._capture()
+        session = runtime_telemetry._capture()
     assert telemetry.current_context() is None
-    operation = telemetry._capture(telemetry.TraceOptions(disabled=True), session.context)
+    operation = runtime_telemetry._capture(telemetry.TraceOptions(disabled=True), session.context)
     assert telemetry.current_context() is None
     assert native.leases[native.starts[-1]["parent"]] == native.leases[session.context]
     assert native.starts[-1]["disabled"] is True
@@ -246,6 +247,7 @@ def test_rejected_credentials_leave_no_private_mapping_in_sdk_tracebacks(failure
         telemetry.TraceExportCredentials(headers=headers)
     pending = [raised.value]
     seen: set[int] = set()
+    retained_frames = 0
     while pending:
         error = pending.pop()
         if id(error) in seen:
@@ -256,9 +258,10 @@ def test_rejected_credentials_leave_no_private_mapping_in_sdk_tracebacks(failure
         while traceback is not None:
             frame = traceback.tb_frame
             if (
-                Path(frame.f_code.co_filename) == Path(telemetry.__file__)
+                Path(frame.f_code.co_filename) == Path(runtime_telemetry.__file__)
                 or frame.f_code.co_filename == "<string>"
             ):
+                retained_frames += 1
                 for name, value in frame.f_locals.items():
                     retained = getattr(value, "headers", None) if name == "self" else value
                     assert not isinstance(retained, Mapping) or secret not in retained.values(), (
@@ -266,6 +269,7 @@ def test_rejected_credentials_leave_no_private_mapping_in_sdk_tracebacks(failure
                         name,
                     )
             traceback = traceback.tb_next
+    assert retained_frames > 0
     assert headers["authorization"] == secret
 
 
@@ -338,7 +342,7 @@ async def test_copied_context_and_explicit_parent_outlive_recording_scope(
 def test_borrowed_activation_context_owns_a_distinct_lease(native: NativeTracing) -> None:
     with telemetry.trace("parent") as owner:
         borrowed = native.retain_trace_context(owner.context._handle)
-    with telemetry._activate(borrowed):
+    with runtime_telemetry._activate(borrowed):
         context = telemetry.current_context()
         assert context is not None and context._handle != borrowed
     owned = context._handle
@@ -395,7 +399,7 @@ async def test_admission_errors_drop_private_credentials_from_sdk_frames(
 
     with pytest.raises(RuntimeError, match="synthetic admission failure") as caught:
         if entry == "capture":
-            telemetry._capture(options)
+            runtime_telemetry._capture(options)
         elif entry == "session":
             async with Agent(instructions="test").session(trace_options=options):
                 pytest.fail("Failed tracing admission opened a Session")
@@ -417,7 +421,7 @@ async def test_admission_errors_drop_private_credentials_from_sdk_frames(
         error = error.__cause__ or error.__context__
     assert credentials.headers["authorization"] == secret
     assert options.export_credentials is credentials
-    assert telemetry._processor_task is None
+    assert runtime_telemetry._processor_task is None
 
 
 async def test_processor_invocation_suppresses_detached_scopes_and_bare_operations(
@@ -431,12 +435,12 @@ async def test_processor_invocation_suppresses_detached_scopes_and_bare_operatio
                 options=telemetry.TraceOptions(disabled=False, detached=True),
             ) as scope:
                 assert scope.context.disabled
-            operation = telemetry._capture()
+            operation = runtime_telemetry._capture()
             assert operation.scope is not None and operation.scope.context.disabled
             operation.close()
-            assert telemetry._processor_task is None
+            assert runtime_telemetry._processor_task is None
 
-    route = telemetry._ProcessorRoute(Processor())
+    route = runtime_telemetry._ProcessorRoute(Processor())
     await route._invoke({})  # type: ignore[typeddict-item]
     with telemetry.trace("application") as scope:
         assert not scope.context.disabled
@@ -450,8 +454,9 @@ async def test_invalid_options_clear_all_sdk_forwarding_frames(
     native: NativeTracing, monkeypatch: pytest.MonkeyPatch, entry: str, invalid: str
 ) -> None:
     from agents import Agent
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _ToolCatalog
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _ToolCatalog
+    from agents.session import Session
 
     secret = "synthetic-private-invalid-options"
     options: Any = {
@@ -480,7 +485,7 @@ async def test_invalid_options_clear_all_sdk_forwarding_frames(
             if entry in ("trace", "span"):
                 getattr(telemetry, entry)("invalid", options=options)
             elif entry == "capture":
-                telemetry._capture(options)
+                runtime_telemetry._capture(options)
             elif entry == "session":
                 async with agent.session(trace_options=options):
                     pytest.fail("Invalid options opened a Session")
@@ -546,7 +551,9 @@ def test_rejected_pump_factory_unwinds_admission_and_closes_coroutine(
             raise failure
 
         with telemetry.trace("parent") as parent:
-            telemetry._processors["registered"] = telemetry._ProcessorRoute(Processor())
+            runtime_telemetry._processors["registered"] = runtime_telemetry._ProcessorRoute(
+                Processor()
+            )
             loop = asyncio.get_running_loop()
             original = loop.get_task_factory()
             loop.set_task_factory(reject)
@@ -557,7 +564,7 @@ def test_rejected_pump_factory_unwinds_admission_and_closes_coroutine(
                 assert telemetry.current_context() is parent.context
                 assert native.ends[-1][1]["status"] == "error"
                 assert native.ends[-1][0] in native.released
-                assert telemetry._processor_task is None
+                assert runtime_telemetry._processor_task is None
                 assert len(work) == 1 and inspect.getcoroutinestate(work[0]) == inspect.CORO_CLOSED
             finally:
                 loop.set_task_factory(original)
@@ -573,7 +580,7 @@ def test_falsey_exceptions_record_scope_and_capture_errors(native: NativeTracing
     with pytest.raises(FalseyError):
         with telemetry.trace("falsey"):
             raise FalseyError()
-    captured = telemetry._capture(telemetry.TraceOptions())
+    captured = runtime_telemetry._capture(telemetry.TraceOptions())
     captured.close(FalseyError())
     assert [outcome["status"] for _, outcome in native.ends] == ["error", "error"]
 
@@ -581,13 +588,13 @@ def test_falsey_exceptions_record_scope_and_capture_errors(native: NativeTracing
 async def test_shutdown_rejects_processor_reentrancy_without_mutation(
     native: NativeTracing,
 ) -> None:
-    token = telemetry._in_processor.set(True)
+    token = runtime_telemetry._in_processor.set(True)
     try:
         with pytest.raises(RuntimeError, match="inside a trace processor"):
             await telemetry.shutdown(timeout_ms=20)
-        assert not native.acks and telemetry._processor_task is None
+        assert not native.acks and runtime_telemetry._processor_task is None
     finally:
-        telemetry._in_processor.reset(token)
+        runtime_telemetry._in_processor.reset(token)
 
 
 async def test_shutdown_joins_a_live_foreign_loop_pump(
@@ -612,23 +619,23 @@ async def test_shutdown_joins_a_live_foreign_loop_pump(
         return asyncio.create_task(asyncio.Event().wait())
 
     task = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(start(), loop))
-    telemetry._processor_task = task
+    runtime_telemetry._processor_task = task
     calls: list[int] = []
 
     async def shutdown(budget: int) -> None:
         calls.append(budget)
 
-    original = telemetry.importlib.import_module
+    original = runtime_telemetry.importlib.import_module
     monkeypatch.setattr(native, "shutdown_telemetry", shutdown, raising=False)
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: native if name == "agents._native" else original(name, package),
     )
     try:
         await telemetry.shutdown(timeout_ms=20)
         assert calls == [20] and task.cancelled()
-        assert telemetry._processor_task is None and not telemetry._processors
+        assert runtime_telemetry._processor_task is None and not runtime_telemetry._processors
     finally:
         loop.call_soon_threadsafe(loop.stop)
         await asyncio.to_thread(thread.join, 2)
@@ -654,7 +661,7 @@ def test_invalid_json_rejected_before_credential_registration(native: NativeTrac
 async def test_callback_worker_inherits_context_and_error_is_classified(
     native: NativeTracing,
 ) -> None:
-    from agents.session import _call_callback
+    from agents._runtime.session import _call_callback
 
     def callback() -> str:
         context = telemetry.current_context()
@@ -709,10 +716,10 @@ async def test_processors_get_ordered_lifecycle_and_failure_is_acknowledged(
         telemetry.set_trace_processors([])
         assert native.routes[-1] == {"processor_ids": [], "replace": True}
     finally:
-        assert telemetry._processor_task is not None
-        telemetry._processor_task.cancel()
-        await asyncio.gather(telemetry._processor_task, return_exceptions=True)
-        for route in telemetry._processors.values():
+        assert runtime_telemetry._processor_task is not None
+        runtime_telemetry._processor_task.cancel()
+        await asyncio.gather(runtime_telemetry._processor_task, return_exceptions=True)
+        for route in runtime_telemetry._processors.values():
             route.close()
 
 
@@ -742,11 +749,11 @@ def test_invalid_flush_preserves_queued_records_and_processor_owner(
     if previous_loop:
 
         async def prior() -> None:
-            telemetry._ensure_processor_pump()
+            runtime_telemetry._ensure_processor_pump()
 
         asyncio.run(prior())
-    original = telemetry._processor_task
-    identifier = next(iter(telemetry._processors))
+    original = runtime_telemetry._processor_task
+    identifier = next(iter(runtime_telemetry._processors))
     native.batches.put_nowait(
         {"events": [{"processor_ids": [identifier], "sequence": 1}], "through_sequence": 1}
     )
@@ -764,13 +771,13 @@ def test_invalid_flush_preserves_queued_records_and_processor_owner(
                 await telemetry.force_flush(timeout_ms=budget)
             for _ in range(5):
                 await asyncio.sleep(0)
-            assert telemetry._processor_task is original
+            assert runtime_telemetry._processor_task is original
             assert native.batches.qsize() == 1
             assert not drains and not received and not native.flushes and not native.acks
         finally:
-            if original is not None and telemetry._processor_task is original:
+            if original is not None and runtime_telemetry._processor_task is original:
                 assert original.done()
-                telemetry._processor_task = None
+                runtime_telemetry._processor_task = None
             await _stop_processor_pump()
 
     asyncio.run(reject())
@@ -820,8 +827,9 @@ async def test_public_submit_keeps_queued_context_until_cancel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from agents import Agent
-    from agents.schema import _prepare_spec
-    from agents.session import Session, TurnStoppedError, _ToolCatalog
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _ToolCatalog
+    from agents.session import Session, TurnStoppedError
 
     async def read_events(self: Any) -> None:
         await asyncio.Event().wait()
@@ -861,15 +869,15 @@ def test_session_policy_also_constrains_changed_ambient_and_explicit_parent(
     native: NativeTracing,
     policy: dict[str, bool],
 ) -> None:
-    session = telemetry._capture(telemetry.TraceOptions(**policy))
+    session = runtime_telemetry._capture(telemetry.TraceOptions(**policy))
     try:
         with telemetry.trace("different ambient") as ambient:
-            operation = telemetry._capture(fallback=session.context)
+            operation = runtime_telemetry._capture(fallback=session.context)
             assert native.starts[-1]["parent"] == ambient.context._handle
             assert native.starts[-1]["restrictions_parents"] == [session.context]
             operation.close()
             with telemetry.trace("explicit parent") as explicit:
-                operation = telemetry._capture(
+                operation = runtime_telemetry._capture(
                     telemetry.TraceOptions(
                         parent=ambient.context,
                         disabled=False,
@@ -895,10 +903,10 @@ async def _wait_for_ack(native: NativeTracing, sequence: int) -> None:
 
 
 async def _stop_processor_pump() -> None:
-    if telemetry._processor_task is not None:
-        telemetry._processor_task.cancel()
-        await asyncio.gather(telemetry._processor_task, return_exceptions=True)
-    for route in telemetry._processors.values():
+    if runtime_telemetry._processor_task is not None:
+        runtime_telemetry._processor_task.cancel()
+        await asyncio.gather(runtime_telemetry._processor_task, return_exceptions=True)
+    for route in runtime_telemetry._processors.values():
         route.close()
 
 
@@ -922,7 +930,7 @@ async def test_replacement_drains_old_events_then_uses_new_route_for_end(
     native.sequence = 1
     telemetry.set_trace_processors([Processor(new)])
     new_id = native.routes[-1]["processor_ids"][0]
-    assert old_id in telemetry._processors
+    assert old_id in runtime_telemetry._processors
     try:
         await native.batches.put(
             {
@@ -937,7 +945,7 @@ async def test_replacement_drains_old_events_then_uses_new_route_for_end(
             }
         )
         await _wait_for_ack(native, 1)
-        assert old_id not in telemetry._processors
+        assert old_id not in runtime_telemetry._processors
         await native.batches.put(
             {
                 "events": [
@@ -964,7 +972,7 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
 ) -> None:
     healthy: list[str] = []
     blocked: list[asyncio.Event] = []
-    monkeypatch.setattr(telemetry, "_MAX_PROCESSOR_WORKERS", 1)
+    monkeypatch.setattr(runtime_telemetry, "_MAX_PROCESSOR_WORKERS", 1)
 
     class Stalled:
         async def on_trace_event(self, event: Mapping[str, Any]) -> None:
@@ -978,7 +986,7 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
 
     # Wait for earlier tests' cooperatively closed workers to retire.
     async def idle() -> None:
-        while telemetry._worker_count:
+        while runtime_telemetry._worker_count:
             await asyncio.sleep(0.01)
 
     await asyncio.wait_for(idle(), timeout=1)
@@ -993,7 +1001,7 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
             }
         )
         await _wait_for_ack(native, 4)
-        old_route = telemetry._processors[old_id]
+        old_route = runtime_telemetry._processors[old_id]
         for sequence in range(5, 8):
             telemetry.set_trace_processors([Healthy()])
             identifier = native.routes[-1]["processor_ids"][0]
@@ -1005,10 +1013,10 @@ async def test_stalled_processor_does_not_stop_healthy_route_or_exceed_worker_bu
                 }
             )
             await _wait_for_ack(native, sequence)
-            assert telemetry._worker_count == 1
+            assert runtime_telemetry._worker_count == 1
         assert healthy == []
         assert native.acks == [(4, 4), (5, 1), (6, 1), (7, 1)]
-        assert len(telemetry._processors) == 1
+        assert len(runtime_telemetry._processors) == 1
         assert old_route.loop is not None
         old_route.loop.call_soon_threadsafe(blocked[0].set)
         await asyncio.wait_for(idle(), timeout=1)
@@ -1093,9 +1101,10 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
     from pydantic import BaseModel
 
     from agents import FunctionTool
-    from agents.schema import _prepare_spec
-    from agents.session import Completed, Session, _Submission, _ToolCatalog
-    from agents.turn import _root_turn
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _Submission, _ToolCatalog
+    from agents._runtime.turn import _root_turn
+    from agents.session import Completed, Session
 
     class Args(BaseModel):
         value: str
@@ -1154,7 +1163,7 @@ async def test_manual_restore_reply_forwards_fresh_context_and_joins_admission(
             old = historical.context.span_id
         scope = telemetry.trace("fresh restore") if scoped else nullcontext()
         with scope:
-            captured = telemetry._capture()
+            captured = runtime_telemetry._capture()
             state = _Submission(_prepare_spec(str), restored_pending=True, tracing=captured)
             handle = _root_turn(session, "original-turn", "fresh-submission", state.completion)
             state.handle = handle
@@ -1215,11 +1224,11 @@ async def test_failed_restore_opening_releases_unstarted_submission_after_native
     native: NativeTracing,
     started: bool,
 ) -> None:
-    from agents.schema import _prepare_spec
-    from agents.session import _OpeningOwner, _Submission
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _OpeningOwner, _Submission
 
     with telemetry.trace("fresh restore"):
-        captured = telemetry._capture()
+        captured = runtime_telemetry._capture()
     context = captured.context
     assert context is not None
     state = _Submission(_prepare_spec(str), tracing=captured, restored_pending=True)
@@ -1424,7 +1433,7 @@ async def test_blocked_batch_fences_late_records_and_drains_healthy_replacement(
 
     telemetry.add_trace_processor(AsyncProcessor() if asynchronous else SyncProcessor())
     identifier = native.routes[-1]["processor_ids"][0]
-    old_route = telemetry._processors[identifier]
+    old_route = runtime_telemetry._processors[identifier]
     native.sequence = 4
     await native.batches.put(
         {
@@ -1442,7 +1451,7 @@ async def test_blocked_batch_fences_late_records_and_drains_healthy_replacement(
         assert native.acks == [(4, 4)]
         assert seen == [0]
         assert not returned.is_set()
-        assert identifier not in telemetry._processors
+        assert identifier not in runtime_telemetry._processors
         await native.batches.put(
             {"events": [{"sequence": 5, "processor_ids": [replacement]}], "through_sequence": 5}
         )
@@ -1488,7 +1497,7 @@ async def test_cancelled_pump_fences_unstarted_records_until_worker_returns(
 
     telemetry.add_trace_processor(Processor())
     identifier = native.routes[-1]["processor_ids"][0]
-    route = telemetry._processors[identifier]
+    route = runtime_telemetry._processors[identifier]
     await native.batches.put(
         {
             "events": [
@@ -1529,19 +1538,22 @@ async def test_shutdown_keeps_pump_live_then_fences_unstarted_batch_records(
 
     async def shutdown_native(timeout_ms: int | None = None) -> None:
         budgets.append(timeout_ms)
-        assert telemetry._processor_task is not None and not telemetry._processor_task.done()
+        assert (
+            runtime_telemetry._processor_task is not None
+            and not runtime_telemetry._processor_task.done()
+        )
         await asyncio.sleep(0)
 
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
 
     def import_module(name: str, package: str | None = None) -> Any:
         return native if name == "agents._native" else original_import(name, package)
 
-    monkeypatch.setattr(telemetry.importlib, "import_module", import_module)
+    monkeypatch.setattr(runtime_telemetry.importlib, "import_module", import_module)
     monkeypatch.setattr(native, "shutdown_telemetry", shutdown_native, raising=False)
     telemetry.add_trace_processor(Processor())
     identifier = native.routes[-1]["processor_ids"][0]
-    route = telemetry._processors[identifier]
+    route = runtime_telemetry._processors[identifier]
     await native.batches.put(
         {
             "events": [
@@ -1555,7 +1567,7 @@ async def test_shutdown_keeps_pump_live_then_fences_unstarted_batch_records(
         await asyncio.wait_for(telemetry.shutdown(timeout_ms=20), timeout=1)
         assert budgets == [20]
         assert native.acks == [(4, 4)]
-        assert telemetry._processors == {}
+        assert runtime_telemetry._processors == {}
         assert seen == [0]
         release.set()
         assert route.pending is not None and route.pending.completion is not None
@@ -1590,7 +1602,7 @@ async def test_pump_cancellation_preserves_completed_outcomes_and_counts_later_r
     telemetry.add_trace_processor(First())
     telemetry.add_trace_processor(Later())
     identifiers = [route["processor_ids"][0] for route in native.routes]
-    route = telemetry._processors[identifiers[0]]
+    route = runtime_telemetry._processors[identifiers[0]]
     await native.batches.put(
         {
             "events": [{"sequence": sequence, "processor_ids": identifiers} for sequence in (1, 2)],
@@ -1633,8 +1645,8 @@ async def test_cancelled_drain_accounts_result_before_restart_without_new_events
         raw = json.dumps(await native.batches.get())
         entered.set()
         if completed_before_resume:
-            assert telemetry._processor_task is not None
-            asyncio.get_running_loop().call_soon(telemetry._processor_task.cancel)
+            assert runtime_telemetry._processor_task is not None
+            asyncio.get_running_loop().call_soon(runtime_telemetry._processor_task.cancel)
         else:
             try:
                 await release.wait()
@@ -1654,15 +1666,17 @@ async def test_cancelled_drain_accounts_result_before_restart_without_new_events
             "through_sequence": 2,
         }
     )
-    assert telemetry._processor_task is not None
-    pump = telemetry._processor_task
+    assert runtime_telemetry._processor_task is not None
+    pump = runtime_telemetry._processor_task
     await entered.wait()
     if not completed_before_resume:
         pump.cancel()
         await asyncio.sleep(0)
         # Model asyncio.run cancelling every child Task as well as its pump.
         owner = next(
-            task for task in asyncio.all_tasks() if isinstance(task, telemetry._ProcessorDrain)
+            task
+            for task in asyncio.all_tasks()
+            if isinstance(task, runtime_telemetry._ProcessorDrain)
         )
         assert owner.cancel() is False
         pump.cancel()
@@ -1674,8 +1688,8 @@ async def test_cancelled_drain_accounts_result_before_restart_without_new_events
     assert read_cancelled == []
     assert seen == []
     assert native.acks == [(2, 2)]
-    assert telemetry._processor_acknowledged == 2
-    for route in telemetry._processors.values():
+    assert runtime_telemetry._processor_acknowledged == 2
+    for route in runtime_telemetry._processors.values():
         route.close()
 
 
@@ -1685,12 +1699,13 @@ async def test_steering_retains_admitted_context_instead_of_callers_ambient(
     monkeypatch: pytest.MonkeyPatch,
     exact: bool,
 ) -> None:
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _Submission, _ToolCatalog
-    from agents.turn import _root_turn
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _Submission, _ToolCatalog
+    from agents._runtime.turn import _root_turn
+    from agents.session import Session
 
     with telemetry.trace("admitting workflow") as owner:
-        captured = telemetry._capture()
+        captured = runtime_telemetry._capture()
         admitted_span = owner.context._handle
     owner_token = captured.context
     sent: list[dict[str, Any]] = []
@@ -1766,9 +1781,9 @@ async def test_shutdown_retires_processors_before_primary_outcome(
         if fails:
             raise failure
 
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -1777,7 +1792,7 @@ async def test_shutdown_retires_processors_before_primary_outcome(
     monkeypatch.setattr(native, "shutdown_telemetry", shutdown_native, raising=False)
     telemetry.add_trace_processor(Processor())
     identifier = native.routes[-1]["processor_ids"][0]
-    route = telemetry._processors[identifier]
+    route = runtime_telemetry._processors[identifier]
     await native.batches.put(
         {
             "events": [{"sequence": 1, "processor_ids": [identifier]}],
@@ -1787,7 +1802,7 @@ async def test_shutdown_retires_processors_before_primary_outcome(
     async with timeout(2):
         while not native.acks:
             await asyncio.sleep(0)
-    pump = telemetry._processor_task
+    pump = runtime_telemetry._processor_task
     pending = asyncio.create_task(telemetry.shutdown(timeout_ms=20))
     try:
         await entered.wait()
@@ -1809,10 +1824,10 @@ async def test_shutdown_retires_processors_before_primary_outcome(
         else:
             assert outcome is failure
         assert pump is not None and pump.done()
-        assert telemetry._processor_task is None
-        assert telemetry._processors == {}
-        assert telemetry._active_processor_ids == set()
-        assert telemetry._retired_routes == {}
+        assert runtime_telemetry._processor_task is None
+        assert runtime_telemetry._processors == {}
+        assert runtime_telemetry._active_processor_ids == set()
+        assert runtime_telemetry._retired_routes == {}
         async with timeout(2):
             while route.loop is not None and not route.loop.is_closed():
                 await asyncio.sleep(0.01)
@@ -1836,9 +1851,9 @@ async def test_shutdown_rejects_invalid_budget_before_native_or_processor_mutati
     async def unexpected_shutdown(*args: Any) -> None:
         pytest.fail("Invalid budget reached native shutdown")
 
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -1846,13 +1861,13 @@ async def test_shutdown_rejects_invalid_budget_before_native_or_processor_mutati
     )
     monkeypatch.setattr(native, "shutdown_telemetry", unexpected_shutdown, raising=False)
     telemetry.add_trace_processor(Processor())
-    pump = telemetry._processor_task
-    routes = dict(telemetry._processors)
+    pump = runtime_telemetry._processor_task
+    routes = dict(runtime_telemetry._processors)
     try:
         with pytest.raises(ValueError, match="timeout_ms"):
             await telemetry.shutdown(timeout_ms=budget)
-        assert telemetry._processor_task is pump
-        assert telemetry._processors == routes
+        assert runtime_telemetry._processor_task is pump
+        assert runtime_telemetry._processors == routes
     finally:
         await _stop_processor_pump()
 
@@ -1883,9 +1898,9 @@ async def test_shutdown_joins_cancelled_drain_and_accounts_undelivered_records(
         await reading.wait()
         native_done.set()
 
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -1895,7 +1910,7 @@ async def test_shutdown_joins_cancelled_drain_and_accounts_undelivered_records(
     monkeypatch.setattr(native, "drain_trace_events", drain)
     telemetry.add_trace_processor(Processor())
     identifier = native.routes[-1]["processor_ids"][0]
-    pump = telemetry._processor_task
+    pump = runtime_telemetry._processor_task
     pending = asyncio.create_task(telemetry.shutdown(timeout_ms=20))
     try:
         async with timeout(2):
@@ -1910,8 +1925,8 @@ async def test_shutdown_joins_cancelled_drain_and_accounts_undelivered_records(
                 await pending
         assert native.acks == [(7, 1)]
         assert seen == []
-        assert telemetry._processor_task is None
-        assert telemetry._processors == {}
+        assert runtime_telemetry._processor_task is None
+        assert runtime_telemetry._processors == {}
     finally:
         release.set()
         await asyncio.gather(pending, return_exceptions=True)
@@ -1925,8 +1940,8 @@ async def test_batch_completion_cannot_swallow_waiter_cancellation(
 ) -> None:
     from time import monotonic
 
-    record = telemetry._ProcessorDelivery({"sequence": 1})
-    batch = telemetry._ProcessorBatch((record,))
+    record = runtime_telemetry._ProcessorDelivery({"sequence": 1})
+    batch = runtime_telemetry._ProcessorBatch((record,))
     wrap_future = asyncio.wrap_future
     pending: asyncio.Task[int]
 
@@ -1963,8 +1978,9 @@ async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
     refuse: bool,
 ) -> None:
     from agents import Agent, Environment, NativeError
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _ToolCatalog
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _ToolCatalog
+    from agents.session import Session
 
     requests: list[dict[str, Any]] = []
     trace_owner: str | None = None
@@ -2089,8 +2105,9 @@ async def test_steering_rejects_trace_and_write_policy_overrides(
     monkeypatch: pytest.MonkeyPatch,
     settings: str,
 ) -> None:
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _ToolCatalog
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _ToolCatalog
+    from agents.session import Session
 
     async def read_events(self: Any) -> None:
         await asyncio.Event().wait()
@@ -2125,7 +2142,7 @@ async def test_steering_rejects_trace_and_write_policy_overrides(
 async def test_question_context_retires_registration_but_survives_queued_callback(
     native: NativeTracing,
 ) -> None:
-    from agents.manual import _question
+    from agents._runtime.manual import _question
     from agents.session import Session
 
     class Issuer:
@@ -2147,7 +2164,7 @@ async def test_question_context_retires_registration_but_survives_queued_callbac
     entered = []
 
     async def callback(context: telemetry.SpanContext) -> None:
-        with telemetry._owned_span("queued callback", "callback", context._handle):
+        with runtime_telemetry._owned_span("queued callback", "callback", context._handle):
             current = telemetry.current_context()
             assert current is not None and current.disabled
             entered.append(current.trace_id)
@@ -2173,7 +2190,7 @@ async def test_question_context_retires_registration_but_survives_queued_callbac
 async def test_child_question_context_failure_discards_only_expired_grant(
     monkeypatch: pytest.MonkeyPatch, pending: bool, unsupported: bool
 ) -> None:
-    import agents.session as sessions
+    import agents._runtime.session as sessions
 
     loop = asyncio.get_running_loop()
     state = SimpleNamespace(
@@ -2233,10 +2250,10 @@ async def test_child_question_context_failure_discards_only_expired_grant(
 async def test_processor_factory_rejection_preserves_effective_routes(
     native: NativeTracing, monkeypatch: pytest.MonkeyPatch, replace: bool
 ) -> None:
-    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
-    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
-    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
-    monkeypatch.setattr(telemetry, "_processor_serial", 7)
+    old = runtime_telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(runtime_telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(runtime_telemetry, "_active_processor_ids", {"existing"})
+    monkeypatch.setattr(runtime_telemetry, "_processor_serial", 7)
     native.set_trace_routes(json.dumps({"processor_ids": ["existing"], "replace": False}))
     before = list(native.routes)
     loop = asyncio.get_running_loop()
@@ -2256,10 +2273,10 @@ async def test_processor_factory_rejection_preserves_effective_routes(
     finally:
         loop.set_task_factory(original)
     assert native.routes == before  # Replacement never removed the native exporter.
-    assert telemetry._processors == {"existing": old}
-    assert telemetry._active_processor_ids == {"existing"}
-    assert telemetry._retired_routes == {} and telemetry._processor_serial == 7
-    assert telemetry._processor_task is None
+    assert runtime_telemetry._processors == {"existing": old}
+    assert runtime_telemetry._active_processor_ids == {"existing"}
+    assert runtime_telemetry._retired_routes == {} and runtime_telemetry._processor_serial == 7
+    assert runtime_telemetry._processor_task is None
 
 
 @pytest.mark.parametrize("eager", [False, True])
@@ -2268,9 +2285,9 @@ async def test_processor_native_rejection_retires_only_provisional_pump(
 ) -> None:
     if eager and not hasattr(asyncio, "eager_task_factory"):
         pytest.skip("Eager task factories require Python 3.12")
-    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
-    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
-    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    old = runtime_telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(runtime_telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(runtime_telemetry, "_active_processor_ids", {"existing"})
     created = []
     drained = []
     loop = asyncio.get_running_loop()
@@ -2291,7 +2308,7 @@ async def test_processor_native_rejection_retires_only_provisional_pump(
 
     def reject(encoded: str) -> int:
         assert created and not created[0].done()
-        assert telemetry._processors == {"existing": old}
+        assert runtime_telemetry._processors == {"existing": old}
         raise RuntimeError("native registration rejected")
 
     monkeypatch.setattr(native, "set_trace_routes", reject)
@@ -2304,10 +2321,10 @@ async def test_processor_native_rejection_retires_only_provisional_pump(
         loop.set_task_factory(original)
     await asyncio.gather(*created, return_exceptions=True)
     assert created[0].cancelled() and drained == []
-    assert telemetry._processor_task is None
-    assert telemetry._processors == {"existing": old}
-    assert telemetry._active_processor_ids == {"existing"}
-    assert telemetry._retired_routes == {} and telemetry._processor_serial == 0
+    assert runtime_telemetry._processor_task is None
+    assert runtime_telemetry._processors == {"existing": old}
+    assert runtime_telemetry._active_processor_ids == {"existing"}
+    assert runtime_telemetry._retired_routes == {} and runtime_telemetry._processor_serial == 0
 
 
 async def test_eager_processor_pump_waits_for_committed_routes(
@@ -2316,9 +2333,9 @@ async def test_eager_processor_pump_waits_for_committed_routes(
     if not hasattr(asyncio, "eager_task_factory"):
         pytest.skip("Eager task factories require Python 3.12")
     seen = []
-    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
-    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
-    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    old = runtime_telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(runtime_telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(runtime_telemetry, "_active_processor_ids", {"existing"})
     native.sequence = 1
     native.batches.put_nowait(
         {"events": [{"sequence": 1, "processor_ids": ["python-0"]}], "through_sequence": 1}
@@ -2327,7 +2344,7 @@ async def test_eager_processor_pump_waits_for_committed_routes(
 
     def publish(encoded: str) -> int:
         assert seen == [] and native.acks == []
-        assert telemetry._processors == {"existing": old}
+        assert runtime_telemetry._processors == {"existing": old}
         return original_set(encoded)
 
     monkeypatch.setattr(native, "set_trace_routes", publish)
@@ -2344,8 +2361,8 @@ async def test_eager_processor_pump_waits_for_committed_routes(
     try:
         await _wait_for_ack(native, 1)
         assert seen == [1] and native.acks == [(1, 0)]
-        assert telemetry._active_processor_ids == {"python-0"}
-        assert set(telemetry._processors) == {"python-0"}
+        assert runtime_telemetry._active_processor_ids == {"python-0"}
+        assert set(runtime_telemetry._processors) == {"python-0"}
     finally:
         await _stop_processor_pump()
 
@@ -2377,7 +2394,7 @@ def test_live_loops_share_one_processor_startup(
         def __exit__(self, *args):
             lock.release()
 
-    monkeypatch.setattr(telemetry, "_processor_lock", ObservedLock())
+    monkeypatch.setattr(runtime_telemetry, "_processor_lock", ObservedLock())
     processor = SimpleNamespace(on_trace_event=lambda event: seen.append(event["sequence"]))
     telemetry.add_trace_processor(processor)  # Synchronous registration has no pump.
     native.batches.put_nowait(
@@ -2389,7 +2406,7 @@ def test_live_loops_share_one_processor_startup(
             loop = asyncio.get_running_loop()
 
             def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
-                if work.cr_code is telemetry._pump_processors.__code__:
+                if work.cr_code is runtime_telemetry._pump_processors.__code__:
                     created.append(index)
                     if index == 0:
                         first_factory.set()
@@ -2405,7 +2422,7 @@ def test_live_loops_share_one_processor_startup(
                 else:
                     with telemetry.trace("concurrent scope"):
                         pass
-                owners.append(telemetry._processor_task)
+                owners.append(runtime_telemetry._processor_task)
                 finished[index].set()
                 await asyncio.to_thread(stop.wait, 3)
             finally:
@@ -2413,7 +2430,7 @@ def test_live_loops_share_one_processor_startup(
                 pumps = [
                     task
                     for task in asyncio.all_tasks()
-                    if task.get_coro().cr_code is telemetry._pump_processors.__code__
+                    if task.get_coro().cr_code is runtime_telemetry._pump_processors.__code__
                 ]
                 for task in pumps:
                     task.cancel()
@@ -2452,7 +2469,7 @@ def test_live_loops_share_one_processor_startup(
             if thread.ident is not None:
                 thread.join(3)
                 assert not thread.is_alive()
-        for route in telemetry._processors.values():
+        for route in runtime_telemetry._processors.values():
             route.close()
     assert failures == []
 
@@ -2465,9 +2482,9 @@ async def test_reentrant_factory_reuses_startup_and_rejects_registration(
     created = []
 
     def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
-        if work.cr_code is telemetry._pump_processors.__code__:
+        if work.cr_code is runtime_telemetry._pump_processors.__code__:
             created.append(work)
-            telemetry._ensure_processor_pump()
+            runtime_telemetry._ensure_processor_pump()
             with pytest.raises(RuntimeError, match="startup or shutdown"):
                 telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
         return asyncio.Task(work, loop=loop, **kwargs)
@@ -2479,7 +2496,7 @@ async def test_reentrant_factory_reuses_startup_and_rejects_registration(
         loop.set_task_factory(original)
     try:
         assert len(created) == 1 and len(native.routes) == 1
-        assert telemetry._processor_serial == 1
+        assert runtime_telemetry._processor_serial == 1
     finally:
         await _stop_processor_pump()
 
@@ -2489,8 +2506,8 @@ async def test_shutdown_excludes_restart_while_joined_cleanup_is_pending(
 ) -> None:
     stopped, release = asyncio.Event(), asyncio.Event()
     telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
-    owner = telemetry._processor_task
-    original_stop = telemetry._stop_processor_task
+    owner = runtime_telemetry._processor_task
+    original_stop = runtime_telemetry._stop_processor_task
 
     async def stop(task: asyncio.Task[None]) -> None:
         await original_stop(task)
@@ -2500,11 +2517,11 @@ async def test_shutdown_excludes_restart_while_joined_cleanup_is_pending(
     async def shutdown(budget: int) -> None:
         pass
 
-    monkeypatch.setattr(telemetry, "_stop_processor_task", stop)
-    original_import = telemetry.importlib.import_module
+    monkeypatch.setattr(runtime_telemetry, "_stop_processor_task", stop)
+    original_import = runtime_telemetry.importlib.import_module
     monkeypatch.setattr(native, "shutdown_telemetry", shutdown, raising=False)
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -2514,14 +2531,14 @@ async def test_shutdown_excludes_restart_while_joined_cleanup_is_pending(
     try:
         await asyncio.wait_for(stopped.wait(), 1)
         assert owner is not None and owner.done()
-        telemetry._ensure_processor_pump()
-        assert telemetry._processor_task is owner
+        runtime_telemetry._ensure_processor_pump()
+        assert runtime_telemetry._processor_task is owner
         with pytest.raises(RuntimeError, match="startup or shutdown"):
             telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
     finally:
         release.set()
         await retiring
-    assert telemetry._processor_task is None and telemetry._processors == {}
+    assert runtime_telemetry._processor_task is None and runtime_telemetry._processors == {}
 
 
 async def test_foreign_pump_waits_for_native_route_publication(
@@ -2532,9 +2549,9 @@ async def test_foreign_pump_waits_for_native_route_publication(
     staged, reader_lookup, release = threading.Event(), threading.Event(), threading.Event()
     loop = asyncio.get_running_loop()
     original_lock = threading.RLock()
-    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
-    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
-    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    old = runtime_telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(runtime_telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(runtime_telemetry, "_active_processor_ids", {"existing"})
     seen = []
     failures = []
 
@@ -2547,8 +2564,8 @@ async def test_foreign_pump_waits_for_native_route_publication(
         def __exit__(self, *args):
             original_lock.release()
 
-    monkeypatch.setattr(telemetry, "_processor_lock", ObservedLock())
-    telemetry._ensure_processor_pump()
+    monkeypatch.setattr(runtime_telemetry, "_processor_lock", ObservedLock())
+    runtime_telemetry._ensure_processor_pump()
     original_drain = native.drain_trace_events
     read_count = 0
 
@@ -2595,8 +2612,8 @@ async def test_foreign_pump_waits_for_native_route_publication(
     try:
         await asyncio.wait_for(_wait_for_ack(native, 1), 3)
         assert failures == [] and seen == [1] and native.acks == [(1, 0)]
-        assert telemetry._processor_task is not None
-        assert telemetry._processor_task.get_loop() is loop
+        assert runtime_telemetry._processor_task is not None
+        assert runtime_telemetry._processor_task.get_loop() is loop
     finally:
         release.set()
         await asyncio.to_thread(writer.join, 2)
@@ -2614,7 +2631,7 @@ async def test_retained_cell_executor_span_records_its_own_outcome(
 ) -> None:
     from types import MethodType
 
-    from agents.native_interception import _CellPolicyOwner
+    from agents._runtime.native_interception import _CellPolicyOwner
     from agents.session import NativeError, Session
 
     loop = asyncio.get_running_loop()
@@ -2747,9 +2764,13 @@ async def test_capture_releases_ambient_lease_when_task_factory_rejects(
     ) as parent:
         before = set(native.leases)
         monkeypatch.setattr(
-            telemetry,
+            runtime_telemetry,
             "_processors",
-            {"old": telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))},
+            {
+                "old": runtime_telemetry._ProcessorRoute(
+                    SimpleNamespace(on_trace_event=lambda event: None)
+                )
+            },
         )
         loop = asyncio.get_running_loop()
         original = loop.get_task_factory()
@@ -2761,14 +2782,14 @@ async def test_capture_releases_ambient_lease_when_task_factory_rejects(
         loop.set_task_factory(reject)
         try:
             with pytest.raises(RuntimeError) as raised:
-                telemetry._capture()
+                runtime_telemetry._capture()
         finally:
             loop.set_task_factory(original)
         assert raised.value is failure
         [captured] = set(native.leases) - before
         assert native.released.count(captured) == 1
         assert telemetry.current_context() is parent.context
-        assert telemetry._processor_task is None
+        assert runtime_telemetry._processor_task is None
 
 
 @pytest.mark.parametrize("cleanup_error", [False, True])
@@ -2796,16 +2817,16 @@ def test_capture_rollback_closes_operation_and_preserves_primary_error(
             monkeypatch.setattr(native, "release_trace_context", release)
         raise primary
 
-    monkeypatch.setattr(telemetry, "_ensure_processor_pump", ensure)
+    monkeypatch.setattr(runtime_telemetry, "_ensure_processor_pump", ensure)
     with pytest.raises(RuntimeError) as raised:
-        telemetry._capture(telemetry.TraceOptions())
+        runtime_telemetry._capture(telemetry.TraceOptions())
     assert raised.value is primary
     assert native.released.count(retained[0]) == 1
     assert [handle for handle, _ in native.ends] == ["span-1"]
     assert native.released.count("span-1") == 1
     assert telemetry.current_context() is None
     if cleanup_error:
-        from agents.session import _error_contexts
+        from agents._runtime._lifecycle import _error_contexts
 
         assert cleanup in _error_contexts(primary.__context__)
 
@@ -2822,7 +2843,7 @@ def test_capture_retain_failure_still_closes_operation_once(
 
     monkeypatch.setattr(native, "retain_trace_context", retain)
     with pytest.raises(RuntimeError, match="capture retain failed"):
-        telemetry._capture(telemetry.TraceOptions())
+        runtime_telemetry._capture(telemetry.TraceOptions())
     assert [handle for handle, _ in native.ends] == ["span-1"]
     assert native.released.count("span-1") == 1
     assert telemetry.current_context() is None
@@ -2835,9 +2856,10 @@ async def test_restored_manual_validation_uses_fresh_owner_without_saved_carrier
     from pydantic import BaseModel, model_validator
 
     from agents import FunctionTool
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _Submission, _ToolCatalog
-    from agents.turn import _root_turn
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _Submission, _ToolCatalog
+    from agents._runtime.turn import _root_turn
+    from agents.session import Session
 
     seen = []
 
@@ -2890,7 +2912,7 @@ async def test_restored_manual_validation_uses_fresh_owner_without_saved_carrier
         "restored",
         _start_readers=False,
     )
-    captured = telemetry._capture(
+    captured = runtime_telemetry._capture(
         telemetry.TraceOptions(disabled=disabled, include_sensitive_data=False)
     )
     state = _Submission(_prepare_spec(str), tracing=captured, restored_pending=True)
@@ -2921,16 +2943,16 @@ async def test_configure_factory_rejection_precedes_native_admission_and_drops_c
     )
 
     admissions = []
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
 
     async def configure(encoded: str) -> None:
         admissions.append(True)
         assert len(admissions) == 1  # The rejected attempt left native unclaimed.
 
     monkeypatch.setattr(native, "configure_telemetry", configure, raising=False)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -2963,12 +2985,12 @@ async def test_configure_factory_rejection_precedes_native_admission_and_drops_c
     _assert_no_exporter_credentials(failure)
     assert rejected_work and rejected_work[0].cr_frame is None
     assert admissions == [] and native.routes == []
-    assert telemetry._engine_options is None and telemetry._processor_task is None
-    assert not telemetry._processor_starting and telemetry._processors == {}
+    assert runtime_telemetry._engine_options is None and runtime_telemetry._processor_task is None
+    assert not runtime_telemetry._processor_starting and runtime_telemetry._processors == {}
     try:
         await telemetry.configure(processors=[processor])
-        assert admissions == [True] and telemetry._engine_options is not None
-        assert telemetry._active_processor_ids == {"python-0"}
+        assert admissions == [True] and runtime_telemetry._engine_options is not None
+        assert runtime_telemetry._active_processor_ids == {"python-0"}
     finally:
         await _stop_processor_pump()
 
@@ -2979,13 +3001,13 @@ async def test_configure_native_failure_cancels_only_its_gated_pump(
 ) -> None:
     if eager and not hasattr(asyncio, "eager_task_factory"):
         pytest.skip("Eager task factories require Python 3.12")
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
     created = []
     drains = []
 
     async def configure(encoded: str) -> None:
         assert created and not created[0].done()
-        assert telemetry._processor_task is None and telemetry._processors == {}
+        assert runtime_telemetry._processor_task is None and runtime_telemetry._processors == {}
         raise RuntimeError("native configuration rejected")
 
     async def drain(count: int) -> str:
@@ -2994,9 +3016,9 @@ async def test_configure_native_failure_cancels_only_its_gated_pump(
 
     monkeypatch.setattr(native, "configure_telemetry", configure, raising=False)
     monkeypatch.setattr(native, "drain_trace_events", drain)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -3011,7 +3033,7 @@ async def test_configure_native_failure_cancels_only_its_gated_pump(
             if eager
             else asyncio.Task(work, loop=loop, **kwargs)
         )
-        if work.cr_code is telemetry._pump_processors.__code__:
+        if work.cr_code is runtime_telemetry._pump_processors.__code__:
             created.append(task)
         return task
 
@@ -3025,24 +3047,24 @@ async def test_configure_native_failure_cancels_only_its_gated_pump(
         loop.set_task_factory(old_factory)
     await asyncio.gather(*created, return_exceptions=True)
     assert created[0].cancelled() and drains == []
-    assert telemetry._engine_options is None and telemetry._processor_task is None
-    assert not telemetry._processor_starting and telemetry._processors == {}
+    assert runtime_telemetry._engine_options is None and runtime_telemetry._processor_task is None
+    assert not runtime_telemetry._processor_starting and runtime_telemetry._processors == {}
 
 
 async def test_configure_reuses_reservation_through_joined_cancellation(
     native: NativeTracing, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     entered, release = asyncio.Event(), asyncio.Event()
-    original_import = telemetry.importlib.import_module
+    original_import = runtime_telemetry.importlib.import_module
 
     async def configure(encoded: str) -> None:
         entered.set()
         await release.wait()
 
     monkeypatch.setattr(native, "configure_telemetry", configure, raising=False)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     monkeypatch.setattr(
-        telemetry.importlib,
+        runtime_telemetry.importlib,
         "import_module",
         lambda name, package=None: (
             native if name == "agents._native" else original_import(name, package)
@@ -3051,7 +3073,7 @@ async def test_configure_reuses_reservation_through_joined_cancellation(
     processor = SimpleNamespace(on_trace_event=lambda event: None)
     pending = asyncio.create_task(telemetry.configure(processors=[processor]))
     await entered.wait()
-    assert telemetry._processor_task is None and telemetry._processor_starting
+    assert runtime_telemetry._processor_task is None and runtime_telemetry._processor_starting
     with pytest.raises(RuntimeError, match="startup or shutdown"):
         telemetry.add_trace_processor(processor)
     pending.cancel()
@@ -3061,9 +3083,9 @@ async def test_configure_reuses_reservation_through_joined_cancellation(
     try:
         with pytest.raises(asyncio.CancelledError):
             await pending
-        assert telemetry._engine_options is not None
-        assert telemetry._processor_task is not None
-        assert len(native.routes) == 1 and not telemetry._processor_starting
+        assert runtime_telemetry._engine_options is not None
+        assert runtime_telemetry._processor_task is not None
+        assert len(native.routes) == 1 and not runtime_telemetry._processor_starting
     finally:
         await _stop_processor_pump()
 
@@ -3083,8 +3105,9 @@ async def test_execution_factory_rejection_releases_owner_and_allows_progress(
     native: NativeTracing, monkeypatch: pytest.MonkeyPatch, mode: str, backlog: int
 ) -> None:
     from agents import Agent
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _ToolCatalog
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _ToolCatalog
+    from agents.session import Session
 
     entered, release = asyncio.Event(), asyncio.Event()
     requests = []
@@ -3236,14 +3259,11 @@ async def test_interception_reader_keeps_native_context_private_through_dispatch
     from types import MethodType
 
     from agents import Environment, HttpMCP, NativeAgents
-    from agents.native_interception import (
-        Allow,
-        NativeToolCall,
-        _CellPolicyOwner,
-        _NativeInterception,
-    )
-    from agents.schema import _prepare_spec
-    from agents.session import Session, _ChildCallbacks, _Submission
+    from agents._runtime.native_interception import _CellPolicyOwner, _NativeInterception
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _ChildCallbacks, _Submission
+    from agents.native_interception import Allow, NativeToolCall
+    from agents.session import Session
 
     entered, finish, released = asyncio.Event(), asyncio.Event(), asyncio.Event()
     observations = []
@@ -3410,9 +3430,9 @@ async def test_interception_reader_skips_only_revoked_contexts(
     native: NativeTracing, monkeypatch: pytest.MonkeyPatch, expiry: str
 ) -> None:
     from agents import NativeAgents
-    from agents.native_interception import _NativeInterception
-    from agents.schema import _prepare_spec
-    from agents.session import _Submission
+    from agents._runtime.native_interception import _NativeInterception
+    from agents._runtime.schema import _prepare_spec
+    from agents._runtime.session import _Submission
 
     called = []
     releases = []
@@ -3471,7 +3491,7 @@ async def test_interception_reader_skips_only_revoked_contexts(
         return asyncio.create_task(work)
 
     if expiry == "before_dispatch":
-        monkeypatch.setattr(telemetry, "_create_task", create)
+        monkeypatch.setattr(runtime_telemetry, "_create_task", create)
     state = _Submission(_prepare_spec(str))
     state.handle = SimpleNamespace(turn_id="turn")
     state.accepted.set_result(state.handle)

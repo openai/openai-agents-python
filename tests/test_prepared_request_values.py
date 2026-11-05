@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 import agents
-from agents.prepared_request import _capturing_callback
+from agents._runtime.prepared_request import _capturing_callback
 
 
 def test_public_prepared_types_are_lazy_exports() -> None:

@@ -2,7 +2,19 @@
 
 The build produces one wheel for the root `openai-agents` distribution, which provides the `agents` Python package. For prebuilt preview wheels, see the [installation guide](../../docs/sdk/installation.md). For source builds, use the [SDK guides](../../docs/sdk/index.md) from the same commit.
 
-Codex owns every model turn. Python supplies typed declarations, conversion, and callbacks, and manages its asynchronous tasks.
+Codex owns every model turn for the native API. Python supplies typed declarations, conversion, and callbacks, and manages its asynchronous tasks.
+
+## Runtime ownership
+
+The retained v0 API has its own implementation under `agents.classic`; see [the Classic contract](../../CLASSIC.md). Keep it isolated from the Codex runtime described below.
+
+`src/agents/_runtime` owns the native API's Python runtime, including sessions, tools, checkpoints, telemetry, native completion handling, testing helpers, and experimental features. The modules directly under `src/agents` retain existing imports by forwarding to those implementations. The root export map stays lazy. `config.py` retains shared immutable type aliases, and `version.py` retains package metadata.
+
+Runtime code imports its private siblings directly. It may use the shared configuration declarations, version metadata, and native ABI, but must not import through the public facades. Public facades expose the same objects and retain their original literal `__all__` declarations. Explicit import aliases in the runtime let type checkers follow every forwarded binding. The private metadata helper preserves existing class, function, method, and TypeVar module identities for inspection and pickle. Forward references retain their actual implementation namespace so models can resolve annotations during initialization.
+
+This directory continues to own the Rust source, native build inputs, and artifact qualification. The single wheel includes both the public facades and private runtime. Keep `agents._native`, the `agents._native_async` forwarding module, and `agents/bin` stable: compiled bindings and packaged helper lookup depend on those paths. A Python implementation move does not require renaming native modules or distributing another wheel.
+
+`tests/test_runtime_architecture.py` checks the import boundary, forwarding surfaces, identities, and lazy loading. The released API checker follows explicit facades to their declarations and checks the unchanged reviewed API snapshot. Runtime tests patch private owners when they need implementation hooks; native callback tests still patch the public ABI entry point that Rust calls.
 
 ## Build from this source
 
@@ -155,7 +167,7 @@ The RMCP codec patch preserves general form JSON on `elicitation/create` for the
 
 The response-stream patch carries selected local context through HTTP response streams and reconnects without serializing it. Codex uses this context to reject requests that arrive after their original child tool call has ended.
 
-Record exact SDK/native revisions, compiled input hashes, prepared source identity, and platform for each qualified artifact. Changing Python module names requires matching PyO3/import paths and a built extension. Copying an old binary to a new path does not establish that match.
+Record exact SDK/native revisions, compiled input hashes, prepared source identity, and platform for each qualified artifact. Changing Python module names used by compiled bindings requires matching PyO3/import paths and a built extension. Copying an old binary to a new path does not establish that match.
 
 ## Verify the delivered wheel
 

@@ -7,14 +7,13 @@ from typing import Any
 
 import pytest
 
+from agents._runtime.observation import _ObservationBuffer, _request_observation
 from agents.observation import (
     EventGap,
     EventStream,
     ExecutionItemCompleted,
     ModelRequestDispatching,
     ModelResponseLinked,
-    _ObservationBuffer,
-    _request_observation,
 )
 
 
@@ -121,7 +120,8 @@ async def test_host_routes_exact_submission_and_drops_retired_metadata() -> None
     from types import SimpleNamespace
     from typing import cast
 
-    from agents.session import Session, _Submission
+    from agents._runtime.session import _Submission
+    from agents.session import Session
 
     session = object.__new__(Session)
     session._id = "thread"

@@ -313,7 +313,8 @@ async def test_cancelled_update_joins_acceptance_and_preserves_checkpoint_author
 
 
 async def test_cancelled_initial_publication_joins_then_closes_the_native_thread(monkeypatch):
-    from agents import _native, session as session_module
+    from agents import _native
+    from agents._runtime import session as session_module
 
     accepted, cancelled, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
     closed, retired = asyncio.Event(), asyncio.Event()

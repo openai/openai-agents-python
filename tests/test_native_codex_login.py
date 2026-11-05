@@ -98,7 +98,7 @@ def uncompressed_model_requests(monkeypatch):
 
 @pytest.fixture
 def codex_endpoint(responses, monkeypatch):
-    session_module = importlib.import_module("agents.session")
+    session_module = importlib.import_module("agents._runtime.session")
     assert session_module._CODEX_RESPONSES_BASE_URL == "https://chatgpt.com/backend-api/codex"
     monkeypatch.setattr(session_module, "_CODEX_RESPONSES_BASE_URL", responses.url)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
@@ -378,7 +378,7 @@ async def test_unauthorized_recovery_reloads_only_the_same_oauth_owner(
     app.router.add_post("/v1/responses", handle)
     async with TestServer(app) as server:
         monkeypatch.setattr(
-            importlib.import_module("agents.session"),
+            importlib.import_module("agents._runtime.session"),
             "_CODEX_RESPONSES_BASE_URL",
             str(server.make_url("/v1")),
         )

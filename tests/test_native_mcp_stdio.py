@@ -254,7 +254,7 @@ async def test_pending_stdio_call_settles_and_native_process_closes(
 async def test_stdio_home_removal_retires_lease_only_after_directory_is_gone(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ending: str
 ) -> None:
-    sdk_session = importlib.import_module("agents.session")
+    sdk_session = importlib.import_module("agents._runtime.session")
     current_provider = provider(responses)
     log = tmp_path / "home-retirement.jsonl"
     entered, release = asyncio.Event(), asyncio.Event()
@@ -336,7 +336,7 @@ async def test_stdio_home_removal_retires_lease_only_after_directory_is_gone(
 async def test_stdio_opening_failure_retains_orphan_until_real_cleanup(
     responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, persistent: bool
 ) -> None:
-    sdk_session = importlib.import_module("agents.session")
+    sdk_session = importlib.import_module("agents._runtime.session")
     native = importlib.import_module("agents._native")
     current_provider = provider(responses)
     log = tmp_path / "startup-retirement.jsonl"

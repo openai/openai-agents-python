@@ -24,6 +24,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, NativeProvider, function_tool, telemetry
+from agents._runtime import telemetry as runtime_telemetry
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 
 
@@ -97,7 +98,7 @@ async def test_exporter_serialization_hides_headers_and_maps_paths(
         captured.append(json.loads(config_json))
 
     monkeypatch.setattr(_native, "configure_telemetry", capture)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     monkeypatch.chdir(tmp_path)
     header = {"authorization": "synthetic-secret-header"}
     tls = telemetry.OtelTlsConfig(
@@ -159,7 +160,7 @@ async def test_tls_path_conversion_with_deleted_cwd_preserves_privacy(
         captured.append(json.loads(config_json))
 
     monkeypatch.setattr(_native, "configure_telemetry", capture)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     monkeypatch.chdir(tmp_path)
     tls_path = Path("synthetic-private-path") / "credential.pem"
     if absolute:
@@ -219,7 +220,7 @@ async def test_none_signals_disable_native_exporters(monkeypatch: pytest.MonkeyP
         captured.append(json.loads(config_json))
 
     monkeypatch.setattr(_native, "configure_telemetry", capture)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     await telemetry.configure()
     assert captured[0]["otel.exporter"] == "none"
     assert captured[0]["otel.trace_exporter"] == "none"
