@@ -3034,3 +3034,5 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 mod request_metadata;
+
+// Measure a Rust-source cache rebuild without changing runtime behavior.
