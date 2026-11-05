@@ -139,6 +139,9 @@ async def test_parent_trace_and_instruction_files_keep_admission_order(tmp_path:
             pytest.fail("Missing instruction file opened a Session")
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 @pytest.mark.parametrize("resume", [None, "synthetic-existing-session"])
 async def test_custom_storage_trace_admission_precedes_ownership(
     tmp_path: Path, resume: str | None
@@ -354,6 +357,9 @@ def test_fresh_process_manual_resume_uses_current_worker_parent(
     )
 
 
+@pytest.mark.skipif(
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
+)
 def test_custom_storage_reopen_uses_current_trace_parent(tmp_path: Path) -> None:
     from examples.observability.trace_walkthrough import Collector
 
