@@ -226,8 +226,8 @@
     },
     {
       "path": "0045-native-request-preparation.patch",
-      "sha256": "37dec3307b8d2c5d584e98ba044a6132c8da57c736581c513d26451bd4e6c26f"
+      "sha256": "05ed237c96f58624d36b56342e8f9894086e701703dc489fc947a26eebd924f8"
     }
   ],
-  "result_tree": "0c0128854cae55715a831325ae762d89848fe810"
+  "result_tree": "4f78f45270ecd92f96579d3625b1a1a000c8569d"
 }

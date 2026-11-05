@@ -577,6 +577,50 @@ async def test_automatic_compaction_refuses_before_hidden_dispatch(
         assert effects == ([] if boundary == "pre_turn" else ["completed once"])
 
 
+@pytest.mark.parametrize("enabled", [False, True], ids=["omitted_control", "editor"])
+async def test_post_turn_compaction_preserves_completed_answer(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    from agents import _native
+
+    create_engine = _native.create_engine
+
+    async def configured_engine(config_json, *args, **kwargs):
+        # The facade does not expose compaction thresholds. Keep the actual
+        # engine and public operation path, configuring only this test's budget.
+        config = json.loads(config_json)
+        config.update(
+            model_context_window=200_000,
+            model_auto_compact_token_limit=10_000,
+            model_post_turn_compact_threshold_percent=1,
+        )
+        return await create_engine(json.dumps(config), *args, **kwargs)
+
+    monkeypatch.setattr(_native, "create_engine", configured_engine)
+    preparations = []
+
+    def edit(turn, request, *, preparation_index, recovery_attempt):
+        preparations.append((preparation_index, recovery_attempt))
+        return None
+
+    async def completed_usage(event):
+        if event["type"] == "response.completed" and len(responses.requests) == 1:
+            event["response"]["usage"].update(
+                input_tokens=12_000, output_tokens=1, total_tokens=12_001
+            )
+
+    responses.before_event = completed_usage
+    responses.respond(assistant_output("completed answer"))
+    responses.respond(assistant_output("synthetic compaction summary"))
+    async with timeout(30):
+        result = await Agent(
+            model="gpt-5.5", instructions="Answer", provider=provider(responses)
+        ).run("Complete", prepare_request=edit if enabled else None)
+    assert result.final_output == "completed answer"
+    assert len(responses.requests) == (1 if enabled else 2)
+    assert preparations == ([(0, 0)] if enabled else [])
+
+
 async def test_mcp_without_application_policy_reaches_server_validation(
     responses: ResponsesFixture,
 ) -> None:
