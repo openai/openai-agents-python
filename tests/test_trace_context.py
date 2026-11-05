@@ -364,7 +364,7 @@ async def _flags_case(flags: str) -> dict[str, Any]:
         return "accepted"
 
     async with ScriptedResponses(
-        [tool_call("lookup", {}, call_id="flag-call"), text("done")]
+        [tool_call("lookup", {}, call_id="flag-call")], [text("done")]
     ) as peer:
         result = await Agent(
             instructions="Call lookup", tools=[lookup], provider=peer.provider
@@ -387,7 +387,7 @@ async def _manual_limit_case() -> dict[str, Any]:
     state = ",".join(f"v{i}=" + "x" * 128 for i in range(32))
     for carrier in [None, TraceContext(traceparent=PARENT, tracestate=state)]:
         async with ScriptedResponses(
-            [tool_call("lookup", {"key": "x" * 64_800}, call_id="limit-call"), text("done")]
+            [tool_call("lookup", {"key": "x" * 64_800}, call_id="limit-call")], [text("done")]
         ) as peer:
             result = await Agent(instructions="Read", tools=[lookup], provider=peer.provider).run(
                 "start", parent_trace=carrier, on_interaction=answer

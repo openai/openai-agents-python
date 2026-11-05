@@ -1,16 +1,22 @@
-# Debug one synthetic run
+# Debug a run with local telemetry
+
+Run a synthetic task, inspect its native traces and logs, and compare the application receipt with its recorded history.
+
+## Set up the walkthrough
 
 Install the [SDK preview wheel](../../docs/sdk/installation.md), activate your Python environment, and use the example files from the same release. Run the commands below from the root of that release's source archive. The receiver uses the Python standard library and needs no additional packages or API key.
+
+Keep these files local. Native telemetry may include paths, tool metadata, and other details even when you disable prompt and response text. This receiver has no authentication, storage service or production hardening. Use synthetic data only.
+
+## Run and inspect a trace
 
 ```sh
 python -m examples.observability.trace_walkthrough --scenario tool-error --view --output synthetic-trace.json
 ```
 
-The command starts a loopback OTLP HTTP JSON receiver, configures native traces and logs, runs the synthetic task, closes its Session, and flushes telemetry.
+The command starts a loopback OpenTelemetry Protocol (OTLP) HTTP JSON receiver, configures native traces and logs, runs the synthetic task, closes its Session, and flushes telemetry.
 
-Open the printed viewer URL while the command waits for Enter. The page shows received payloads. The JSON file also includes the application receipt.
-
-Keep these files local. Native telemetry may include paths, tool metadata, and other details even when you disable prompt and response text. This receiver has no authentication, storage service or production hardening. Use synthetic data only.
+Open the printed viewer URL while the command waits for Enter. The page shows received payloads. The JSON file also includes the application receipt. For this scenario, expect `outcome` set to `completed` and a `lookup` result containing `Synthetic catalog unavailable`. The artifact also contains received telemetry batches. Press Enter to close the viewer and receiver.
 
 ## Find related records
 
