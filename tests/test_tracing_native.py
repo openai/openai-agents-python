@@ -795,3 +795,37 @@ asyncio.run(second())
             timeout=15,
         )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("queued_events", [False, True])
+def test_shutdown_owns_processors_on_a_fresh_event_loop(queued_events: bool) -> None:
+    env = dict(os.environ)
+    env.pop("OPENAI_API_KEY", None)
+    root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, (root, env.get("PYTHONPATH"))))
+    script = r"""
+import asyncio,json,sys
+from agents import telemetry
+seen=[]
+class Processor:
+    def on_trace_event(self,event): seen.append((event['name'],event['lifecycle']))
+async def configure(): await telemetry.configure(processors=[Processor()])
+asyncio.run(configure())
+if sys.argv[1]=='True':
+    with telemetry.trace('between loops'): pass
+asyncio.run(telemetry.shutdown(timeout_ms=2000))
+expected=[('between loops','start'),('between loops','end')] if sys.argv[1]=='True' else []
+assert seen==expected,seen
+assert telemetry._processors=={} and telemetry._processor_task is None
+print(json.dumps({'seen':seen,'shutdown':'complete'}))
+"""
+    with tempfile.TemporaryDirectory() as home:
+        env["CODEX_HOME"] = home
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(queued_events)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    assert result.returncode == 0, result.stdout + result.stderr

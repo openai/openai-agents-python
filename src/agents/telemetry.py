@@ -227,20 +227,31 @@ async def shutdown(*, timeout_ms: int | None = None) -> None:
     native = importlib.import_module("agents._native")
     from .session import _join
 
-    operation = (
-        native.shutdown_telemetry()
-        if timeout_ms is None
-        else native.shutdown_telemetry(_timeout(timeout_ms))
-    )
-    await _join(asyncio.ensure_future(operation))
-    if _processor_task is not None:
-        _processor_task.cancel()
-        await asyncio.gather(_processor_task, return_exceptions=True)
-    for processor in _processors.values():
-        processor.close()
-    _processors.clear()
-    _active_processor_ids.clear()
-    _retired_routes.clear()
+    budget = None if timeout_ms is None else _timeout(timeout_ms)
+
+    async def retire() -> None:
+        global _processor_task
+        try:
+            _ensure_processor_pump()
+            if budget is None:
+                await native.shutdown_telemetry()
+            else:
+                await native.shutdown_telemetry(budget)
+        finally:
+            processor_task = _processor_task
+            if processor_task is not None and not processor_task.done():
+                processor_task.cancel()
+                await asyncio.gather(processor_task, return_exceptions=True)
+            _processor_task = None
+            for processor in _processors.values():
+                processor.close()
+            _processors.clear()
+            _active_processor_ids.clear()
+            _retired_routes.clear()
+
+    # Own native retirement and Python cleanup together, including a failure
+    # or repeated cancellation of the caller waiting for terminal shutdown.
+    await _join(asyncio.create_task(retire()))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -676,12 +687,11 @@ class _ProcessorBatch:
                     success, previous_finished = delivery.result.result()
                 else:
                     remaining = max(0.0, previous_finished + 1.0 - monotonic())
-                    try:
-                        success, previous_finished = await asyncio.wait_for(
-                            asyncio.shield(asyncio.wrap_future(delivery.result)), remaining
-                        )
-                    except asyncio.TimeoutError:
+                    completion = asyncio.wrap_future(delivery.result)
+                    done, _ = await asyncio.wait((completion,), timeout=remaining)
+                    if not done:
                         return failures + len(self.deliveries) - index
+                    success, previous_finished = completion.result()
                 failures += not success
             return failures
         finally:
