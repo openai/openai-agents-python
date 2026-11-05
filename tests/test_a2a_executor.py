@@ -7,14 +7,17 @@ import pytest
 
 pytest.importorskip("a2a")
 
+from a2a.helpers.proto_helpers import new_text_message
+from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel, PlainSerializer
 
-from agents import Agent, FunctionTool, NativeOutput, NativeProvider, PromptedOutput
+from agents import Agent, FunctionTool, NativeOutput, NativeProvider, PromptedOutput, function_tool
 from agents.a2a import A2ALimits, NativeA2AAgent, NativeA2ABinding, NativeA2AExecutor
 from tests.a2a_helpers import HostStore, call_context, invoke, request_context
+from tests.a2a_http import card
 from tests.native_fixtures import (
     assistant_output,
     function_call,
@@ -523,3 +526,55 @@ async def test_oversized_final_snapshot_settles_and_recovers_failure(tmp_path, r
     assert saved.acknowledges(recovered.task)
     assert executor.store.read(binding) == saved
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("prompt_size", "with_tool", "has_progress"),
+    [(305, False, False), (305, True, False), (260, True, True)],
+    ids=["near-limit", "near-limit-after-tool", "progress-fits"],
+)
+async def test_official_handler_acknowledges_failure_near_snapshot_limit(
+    tmp_path, responses, prompt_size, with_tool, has_progress
+):
+    import asyncio
+
+    effects = []
+
+    @function_tool
+    def record_effect(value: str) -> str:
+        effects.append(value)
+        return value
+
+    if with_tool:
+        responses.respond(function_call("record_effect", {"value": "once"}, "call-progress"))
+    responses.respond(assistant_output("x" * 1024))
+    executor = make_executor(
+        tmp_path,
+        responses,
+        [record_effect] if with_tool else [],
+        limits=A2ALimits(message_bytes=4096, checkpoint_bytes=512),
+    )
+    handler = DefaultRequestHandler(executor, executor.store, card("http://127.0.0.1:1"))
+    prompt = "p" * prompt_size
+    try:
+        task = await asyncio.wait_for(
+            handler.on_message_send(
+                p.SendMessageRequest(message=new_text_message(prompt, role=p.ROLE_USER)),
+                call_context(),
+            ),
+            20,
+        )
+    finally:
+        await handler.aclose()
+
+    binding = NativeA2ABinding(principal="alice", task_id=task.id, context_id=task.context_id)
+    saved = executor.store.read(binding)
+    assert task.status.state == p.TASK_STATE_FAILED and not task.status.HasField("message")
+    assert task.history[0].parts[0].text == prompt and not task.artifacts
+    assert ("progress" in task.metadata) is has_progress
+    assert saved.status == "failed" and saved.acknowledges(task)
+    assert executor.store.acknowledged(binding) == saved.publication_revision
+    assert all(len(snapshot) <= 512 for snapshot in executor.store.saved)
+    assert await executor.recover(binding, call_context()) == saved
+    assert effects == (["once"] if with_tool else [])
+    assert len(responses.requests) == (2 if with_tool else 1)

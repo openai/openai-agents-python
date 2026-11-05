@@ -171,6 +171,13 @@ class _Projection:
             raise RuntimeError("A2A task projection is unavailable")
         return _bytes(task)
 
+    async def preview(self, events: list[Any]) -> tuple[_Projection, bytes]:
+        current = await self.manager.get_task()
+        if current is None:
+            raise RuntimeError("A2A task projection is unavailable")
+        candidate = _Projection(self.context)
+        return candidate, await candidate.apply([current, *events])
+
 
 def _status(
     binding: NativeA2ABinding, state: p.TaskState, message: p.Message | None = None
@@ -281,11 +288,10 @@ class NativeA2AExecutor(AgentExecutor):
         queue: EventQueue,
         **changes: Any,
     ) -> NativeA2ATask:
-        current = await projection.manager.get_task()
-        if current is None:
-            raise RuntimeError("A2A task projection is unavailable")
-        candidate = _Projection(projection.context)
-        snapshot = await candidate.apply([current, *events])
+        candidate, snapshot = await projection.preview(events)
+        if len(snapshot) > self.limits.checkpoint_bytes and changes.get("status") == "failed":
+            events = [_status(binding, p.TASK_STATE_FAILED)]
+            candidate, snapshot = await projection.preview(events)
         if len(snapshot) > self.limits.checkpoint_bytes:
             raise ValueError("A2A snapshot exceeds configured byte limit")
         next_record = (
@@ -636,7 +642,10 @@ class NativeA2AExecutor(AgentExecutor):
                     },
                     update.metadata,
                 )
-                await projection.apply([update])
+                candidate, snapshot = await projection.preview([update])
+                if len(snapshot) > self.limits.checkpoint_bytes:
+                    return
+                projection.store, projection.manager = candidate.store, candidate.manager
                 await queue.enqueue_event(update)
                 count += 1
                 if count >= self.limits.progress_events:
