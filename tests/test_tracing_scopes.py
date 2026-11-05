@@ -1451,3 +1451,162 @@ async def test_batch_completion_cannot_swallow_waiter_cancellation(
     if not completed:
         record.result.set_result((True, monotonic()))
     assert record.result.result()[0] is True
+
+
+@pytest.mark.parametrize("roots_kind", ["inherit", "clear", "replace"])
+@pytest.mark.parametrize("refuse", [False, True])
+async def test_write_policy_and_trace_snapshots_survive_queue_and_continuation(
+    native: NativeTracing,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Any,
+    roots_kind: str,
+    refuse: bool,
+) -> None:
+    from agents import Agent, Environment, NativeError
+    from agents.schema import _prepare_spec
+    from agents.session import Session, _ToolCatalog
+
+    requests: list[dict[str, Any]] = []
+    trace_owner: str | None = None
+
+    class Thread:
+        id = "session"
+
+        def _select_steps(self, *args: Any) -> None:
+            pass
+
+        async def _submit(self, encoded: str) -> str:
+            request = json.loads(encoded)
+            assert request["tracing_context"] == trace_owner
+            assert trace_owner not in native.released
+            requests.append(request)
+            if refuse:
+                return json.dumps(
+                    {
+                        "status": "not_submitted",
+                        "reason": {
+                            "type": "writable_roots_refused",
+                            "message": "synthetic policy refusal",
+                        },
+                    }
+                )
+            state = session._active
+            assert state is not None
+            if len(requests) == 1:
+                state.unsampled_steering = True
+            else:
+                assert state.writable_roots is None
+                assert session._writable_roots == applied
+            state.terminal.set_result({"type": "turn_complete", "last_agent_message": "done"})
+            return json.dumps({"status": "started", "turn_id": f"turn-{len(requests)}"})
+
+        async def call(self, operation: str) -> str:
+            assert operation == "token_usage_info"
+            assert trace_owner not in native.released
+            await asyncio.sleep(0)
+            return "null"
+
+    async def read_events(self: Any) -> None:
+        await asyncio.Event().wait()
+
+    promote = Session._promote
+    monkeypatch.setattr(Session, "_read_events", read_events)
+    monkeypatch.setattr(Session, "_promote", lambda self: None)
+    session = Session(
+        None,
+        Thread(),
+        None,
+        _ToolCatalog(0, ()),
+        (),
+        None,
+        _prepare_spec(str),
+        "test",
+        _start_readers=False,
+    )
+    session._opening_agent = Agent(instructions="test")
+    session._executor = Environment.local(cwd=tmp_path)
+    opening = ((tmp_path / "opening").as_uri(),)
+    session._writable_roots = opening
+    roots = (
+        None if roots_kind == "inherit" else [] if roots_kind == "clear" else [tmp_path / "first"]
+    )
+    expected = None if roots is None else tuple(path.as_uri() for path in roots)
+    applied = opening if expected is None else expected
+    try:
+        with telemetry.trace("admitting workflow"):
+            turn = await session.submit(
+                "input",
+                if_busy="queue",
+                writable_roots=roots,
+                trace_options=telemetry.TraceOptions(disabled=True),
+            )
+            state, _ = session._pending[0]
+            assert state.tracing is not None
+            trace_owner = state.tracing.context
+            assert state.writable_roots == expected
+        if roots is not None:
+            roots.append(tmp_path / "later mutation")
+        with telemetry.trace("unrelated caller"):
+            promote(session)
+            async with timeout(3):
+                if refuse:
+                    with pytest.raises(NativeError, match="synthetic policy refusal") as caught:
+                        await turn.get_result()
+                    assert caught.value._effects == "not_started"
+                else:
+                    assert (await turn.get_result()).final_output == "done"
+        assert requests[0]["mode"] == "start_if_idle"
+        if expected is None:
+            assert "writable_roots" not in requests[0]
+        else:
+            assert requests[0]["writable_roots"] == list(expected)
+        if not refuse:
+            assert len(requests) == 2
+            assert requests[1]["mode"] == "continue_if_idle"
+            assert "writable_roots" not in requests[1]
+            assert requests[1]["expected_previous_turn_id"] == "turn-1"
+        assert session._writable_roots == (opening if refuse else applied)
+        assert trace_owner in native.released
+        assert not session._broken
+    finally:
+        session._reader.cancel()
+        await asyncio.gather(session._reader, return_exceptions=True)
+
+
+@pytest.mark.parametrize("settings", ["trace", "roots", "both"])
+async def test_steering_rejects_trace_and_write_policy_overrides(
+    native: NativeTracing,
+    monkeypatch: pytest.MonkeyPatch,
+    settings: str,
+) -> None:
+    from agents.schema import _prepare_spec
+    from agents.session import Session, _ToolCatalog
+
+    async def read_events(self: Any) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Session, "_read_events", read_events)
+    session = Session(
+        None,
+        SimpleNamespace(id="session"),
+        None,
+        _ToolCatalog(0, ()),
+        (),
+        None,
+        _prepare_spec(str),
+        "test",
+        _start_readers=False,
+    )
+    kwargs: dict[str, Any] = {}
+    if settings != "roots":
+        kwargs["trace_options"] = telemetry.TraceOptions(disabled=True)
+    if settings != "trace":
+        kwargs["writable_roots"] = []
+    try:
+        with pytest.raises(TypeError, match="cannot override"):
+            await session.submit("steer", if_busy="steer", **kwargs)
+        assert not session._pending
+        assert native.starts == []
+    finally:
+        session._reader.cancel()
+        await asyncio.gather(session._reader, return_exceptions=True)
