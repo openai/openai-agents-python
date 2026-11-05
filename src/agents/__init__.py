@@ -13,6 +13,8 @@ if TYPE_CHECKING:
     from ._trace_context import TraceContext as TraceContext
     from .agent import (
         Agent as Agent,
+        CodexAccount as CodexAccount,
+        CodexLogin as CodexLogin,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
     )
@@ -147,6 +149,8 @@ _MODULES = {
     "VerificationProof": ".manual",
     "Interaction": ".manual",
     "Agent": ".agent",
+    "CodexAccount": ".agent",
+    "CodexLogin": ".agent",
     "ModelSettings": ".agent",
     "NativeProvider": ".agent",
     "NativeOutput": ".schema",

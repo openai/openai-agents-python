@@ -45,6 +45,8 @@ struct RuntimeOptions {
     // The facade owns this signal on its live runtime; checkpoint runtime is ignored.
     #[serde(rename = "_sdk_native_config")]
     sdk_native_config: bool,
+    #[serde(rename = "_sdk_codex_login")]
+    sdk_codex_login: Option<crate::auth::SavedCodexLogin>,
     environment: Option<crate::environment::EnvironmentOptions>,
     deferred_environment: Option<crate::environment::DeferredEnvironmentOptions>,
     codex_home: Option<PathBuf>,
@@ -168,6 +170,11 @@ pub fn native_agents(runtime_json: &str) -> Result<bool> {
 pub fn sdk_native_config(runtime_json: &str) -> Result<bool> {
     let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
     Ok(options.sdk_native_config)
+}
+
+pub fn sdk_codex_login(runtime_json: &str) -> Result<Option<crate::auth::SavedCodexLogin>> {
+    let options: RuntimeOptions = decode(serde_json::from_str(runtime_json)?)?;
+    Ok(options.sdk_codex_login)
 }
 
 pub fn native_goal_store_enabled(runtime_json: &str) -> Result<bool> {

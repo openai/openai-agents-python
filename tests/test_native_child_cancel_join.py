@@ -547,9 +547,9 @@ async def test_child_cancel_withholds_private_function_cleanup_exception_chains(
                     peer.release["alpha"].set()
                     await entered.wait()
                     alpha_id = peer.child_metadata["alpha"][0]["thread_id"]
+                    turns = {turn.child_id: turn for turn in await handles(session, 2)}
                     child = [item async for item in session.subagents() if item.id == alpha_id][0]
-                    assert child.turn is not None
-                    pending = asyncio.create_task(child.try_cancel(child.turn))
+                    pending = asyncio.create_task(child.try_cancel(turns[alpha_id]))
                     await cleaning.wait()
                     if close_race:
                         await confirmed.wait()
