@@ -1,6 +1,6 @@
 # Troubleshoot and operate an agent
 
-Start with the symptom below. Preserve the original exception and inspect the failed operation before retrying. A failed request or timeout does not prove that earlier tools had no effects.
+Find the symptom below, then inspect the failed operation and any completed tool effects before retrying. Preserve the original exception. A failed request or timeout does not prove that earlier tools had no effects.
 
 ## Install and start
 
@@ -14,10 +14,10 @@ Start with the symptom below. Preserve the original exception and inspect the fa
 
 | Symptom | What to check |
 | --- | --- |
-| A new prompt raises `SessionBusyError` | Wait for the Turn, or [queue or steer](sessions.md#conversations-events-and-state). Retrying `submit()` can duplicate input. |
-| A one-shot run raises `InteractionRequired` | Inspect its optional checkpoint and [continue the pending request](tools.md#continue-a-one-shot-manual-request). Do not resubmit the original prompt. |
+| A new prompt raises `SessionBusyError` | Wait for the Turn, or [queue or steer](sessions.md). Retrying `submit()` can duplicate input. |
+| A one-shot run raises `InteractionRequired` | Inspect its optional checkpoint and [continue the pending request](approvals.md#continue-a-one-shot-manual-request). Do not resubmit the original prompt. |
 | A Python tool raises an exception | Inspect the [tool error contract](tools.md#return-text-images-and-tool-errors) and any completed effects before submitting new work. |
-| The agent is waiting for your application | Check for [manual results or approvals](tools.md#answer-interactions-during-a-one-shot-run). Reply to the exact live request. |
+| The agent is waiting for your application | Check for [manual results or approvals](approvals.md#answer-interactions-during-a-one-shot-run). Reply to the exact live request. |
 | Streamed text is incomplete or an `EventGap` appears | The observation stream can drop records. Use `turn.get_result()` and its final output; see [streaming](sessions.md#stream-observations). |
 | A result fails validation | Catch [`OutputValidationError`](configuration.md#structured-output). A new submission can repeat completed tool effects; validation does not undo them. |
 | A provider or native operation fails | Inspect available `NativeError` metadata and [effect status](sessions.md#failures-and-recovery). Missing metadata remains unknown. |
@@ -27,14 +27,14 @@ Start with the symptom below. Preserve the original exception and inspect the fa
 
 | Symptom | What to check |
 | --- | --- |
-| Portable restore reports an unsupported Codex revision or `checkpoint core revision differs` | Use a wheel with the saving SDK's pinned Codex revision. Editing `codex_revision` does not migrate state. See [compatibility](sessions.md#compact-save-and-restore). |
-| Local resume reports an unknown tool outcome or an active descendant | Keep the profile. Check application records and supply confirmed outcomes for unresolved root calls. If a child still blocks reopening, keep the conversation closed. See [local recovery](sessions.md#recover-after-interruption). |
+| Portable restore reports an unsupported Codex revision or `checkpoint core revision differs` | Use a wheel with the saving SDK's pinned Codex revision. Editing `codex_revision` does not migrate state. See [compatibility](state.md#save-and-restore-a-portable-checkpoint). |
+| Local resume reports an unknown tool outcome or an active descendant | Keep the profile. Check application records and supply confirmed outcomes for unresolved root calls. If a child still blocks reopening, keep the conversation closed. See [local recovery](state.md#recover-after-interruption). |
 | Opening fails and cleanup also fails | Follow [provider cleanup recovery](configuration.md#recover-a-failed-managed-environment-opening) before discarding the owning event loop. |
-| A checkpoint cannot be saved or restored | Check [capture readiness and supported boundaries](sessions.md#check-support-and-capture-readiness), matching tools and instructions, and current permissions. |
+| A checkpoint cannot be saved or restored | Check [capture readiness and supported boundaries](state.md#check-support-and-capture-readiness), matching tools and instructions, and current permissions. |
 
 ## Bound a wait and stop owned work
 
-Timing out `turn.get_result()` stops only the wait. The Turn can continue. If your application owns the whole Session, let the timeout leave its async context. Session exit stops and waits for its work before raising the original exception:
+Choose cancellation based on the work your application owns. Timing out `turn.get_result()` stops waiting without canceling the Turn. If your application owns the whole Session and needs that work to stop, let the timeout leave the Session's async context. Session exit stops its work and waits for cleanup before propagating the original exception:
 
 ```python
 import asyncio
@@ -54,7 +54,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 ```
 
-The 30-second limit applies to the result wait. Cleanup can take longer. Catch `asyncio.TimeoutError` outside `async with`. If cleanup also fails, the timeout stays primary and retains the cleanup error in its exception context.
+The 30-second limit applies to waiting for the result; cleanup can take longer. Catch `asyncio.TimeoutError` outside `async with` so Session cleanup runs before your timeout handler. If cleanup also fails, the SDK keeps the timeout as the primary exception and retains the cleanup error in its exception context.
 
 Cancellation has these limits:
 
@@ -86,7 +86,7 @@ Read usage with these accounting rules:
 - Cached and reasoning tokens are already included in totals. Do not add them again.
 - Root usage excludes child threads. [Prompted-output repairs](configuration.md#structured-output) have separate records.
 
-Both counts expose the fields listed in [usage types](reference.md#tokenusageinfo-and-tokenusage). `model_context_window` can be `None`. These counts are not billing records.
+Both `total_token_usage` and `last_token_usage` expose the fields listed in [usage types](reference.md#tokenusageinfo-and-tokenusage). `model_context_window` can be `None`. These counts are not billing records.
 
 For a live display, replace the snapshot with `UsageUpdated.usage` from `agents.observation`, which can be `None`. Do not add event counts. Because observations can drop, read the final result after completion.
 
@@ -98,7 +98,7 @@ The SDK runs inside your application, which manages its workers, storage and cre
 | --- | --- |
 | When to initialize diagnostics | Configure [telemetry](configuration.md#telemetry) before the first Session opens. |
 | Which work belongs to a conversation | Own each [Session](sessions.md) explicitly and choose queueing or steering when submissions overlap. |
-| Where history survives a restart | Choose [portable checkpoints or a local profile](sessions.md#choose-how-to-store-a-conversation). Retain the required state or conversation ID in application storage. |
+| Where history survives a restart | Choose [portable checkpoints or a local profile](state.md#choose-how-to-store-a-conversation). Retain the required state or conversation ID in application storage. |
 | What tools may do | Supply current [tools and execution permissions](tools.md). Restored history does not supply current credentials or grant new authority. |
 | Whether work can be retried | Inspect [effect metadata and history](sessions.md#failures-and-recovery), together with your application's records of external effects. |
 | How to shut down | Close owned Sessions, then close any [explicit providers](configuration.md) after their Sessions are closed. Shut down [telemetry](configuration.md#telemetry) after all Sessions close. |
@@ -125,7 +125,7 @@ First follow the [example-project setup](installation.md#examples-and-upgrades) 
 
 ### Compare evidence
 
-Match the application's `example.run_id`, available span `traceId`, Session identity and available `conversation.id`. Compare application outcomes with telemetry and the [history reader](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/history_reader.py), which joins tool calls and results by turn and call identity. Missing timestamps and usage stay missing.
+Connect application receipts, spans and history using `example.run_id`, span `traceId`, Session identity and `conversation.id` where those identifiers are present. Compare application outcomes with telemetry and the [history reader](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/history_reader.py), which joins tool calls and results by turn and call identity. Missing timestamps and usage stay missing.
 
 | Evidence | What it can show | What it does not prove |
 | --- | --- | --- |
@@ -136,4 +136,6 @@ Match the application's `example.run_id`, available span `traceId`, Session iden
 | Recorded web search | Recorded query, action and text fields | These fields cannot reconstruct authoritative source records or citation spans. |
 | Collector export | Received native spans and logs and configured telemetry fields | Export does not prove coverage of all Python failures, undo effects or define collector retention. |
 
-A tool may return an error value and let the turn complete, or raise an exception that fails the turn. Final-output validation can fail after a tool effect. Diagnose those cases separately. Closing the Session does not delete data already exported to the collector.
+Inspect the tool result and the application's outcome together. A tool may return an error value and let the turn complete, or raise an exception that fails the turn. Final-output validation can also fail after a tool effect. Each case needs a different recovery decision because turn completion alone does not describe the tool's outcome.
+
+Closing the Session does not delete data already exported to the collector.

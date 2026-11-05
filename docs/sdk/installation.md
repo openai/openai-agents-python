@@ -6,8 +6,6 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 [0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) is available as a GitHub prerelease with prebuilt wheels. The release includes checksums in `SHA256SUMS`.
 
-The local execution and supervised worker examples use APIs that alpha.6 does not include, such as `Environment.local()` and `Turn.wait_for_attention()`. To try these examples, [build from this branch](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) or install a newer release whose notes include these APIs. The alpha.6 install commands below do not enable them.
-
 The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides.
 
 ## Requirements
@@ -79,6 +77,8 @@ Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`.
 ## Examples and upgrades
 
 Use documentation and example files from the same release as the installed wheel. You can copy a self-contained example into your application.
+
+The local execution and supervised worker examples use APIs that alpha.6 does not include, such as `Environment.local()` and `Turn.wait_for_attention()`. To try these examples, [build from this branch](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) or install a newer release whose notes include these APIs. The alpha.6 install commands on this page do not enable them.
 
 The wheel does not include example files. To run an example project:
 

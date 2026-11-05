@@ -12,17 +12,22 @@ The development and pull request instructions below are for maintainers and repo
 
 ## Development workflow
 
-Read [AGENTS.md](AGENTS.md) for the repository's scope, compatibility, review, and verification requirements. Install Make and the [native build prerequisites](packages/codex/MAINTAINING.md#build-from-this-source), including a supported CPython version, `uv`, Git, and Rust, before running `make sync`. That command installs the SDK for contributor work and can compile its native extension. Run Python commands through `uv run`.
+Run these steps from the repository root:
 
-Before running the test suite, install Git with your operating system's package manager and check that `git` is on `PATH`. Tests use Git to create temporary repositories, verify release sources, and detect changes. Neither `make sync` nor Python package installers install Git.
+1. Read [AGENTS.md](AGENTS.md) for the repository's scope, compatibility, review, and verification requirements.
+2. Install Make and the [native build prerequisites](packages/codex/MAINTAINING.md#build-from-this-source), including a supported CPython version, `uv`, Git, and Rust. Check that `git` is on `PATH`, then run `make sync` to install the SDK for contributor work. This command can compile the native extension. Run Python commands through `uv run`.
+3. Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [tests/README.md](tests/README.md) to run focused checks while developing.
+4. Run the applicable final checks in [AGENTS.md](AGENTS.md#testing--automated-checks). Use the [pull request template](.github/PULL_REQUEST_TEMPLATE/pull_request_template.md) to explain the problem, change, and validation. Documentation changes follow the repository's verification tiers and release-timing rules.
 
-Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [tests/README.md](tests/README.md) for test execution. Run focused checks while developing, then the applicable final checks described in [AGENTS.md](AGENTS.md#testing--automated-checks). Use the [pull request template](.github/PULL_REQUEST_TEMPLATE/pull_request_template.md) to explain the problem, change, and validation. Documentation changes follow the repository's verification tiers and release-timing rules.
+Tests use Git to create temporary repositories, verify release sources, and detect changes. Install Git with your operating system's package manager. Neither `make sync` nor Python package installers install Git.
 
 ## Build the SDK from source
 
 Source builds are for SDK development. Users install prebuilt wheels as described in the [installation guide](docs/sdk/installation.md).
 
 Install standard CPython 3.10–3.14, Git, `uv`, Rust 1.95.0, and the [platform-specific native build tools](packages/codex/MAINTAINING.md#build-from-this-source), including a compiler and Protocol Buffers. The build downloads pinned public Codex and RMCP sources. Python package installers do not install these system tools.
+
+### Prepare the checkout and build
 
 Clone the development branch and record the source commit:
 
@@ -38,7 +43,9 @@ On Windows, use `py -3` instead of `python3`. For source preparation with Python
 
 Preparation verifies the pinned native sources. The wheel build compiles the native extension and matching execution helpers, then writes a wheel under `dist/`. Keep the wheel and its build records with the source commit. See the [maintenance guide](packages/codex/MAINTAINING.md) for native build details and troubleshooting.
 
-To check the built package, create a fresh virtual environment outside the SDK checkout. Install the exact wheel from `dist/` with `python -m pip install` followed by its absolute path. Use that environment to run the [installation check](docs/sdk/installation.md#install-a-preview-wheel). A matching package version alone does not identify a development commit.
+### Check the built package
+
+Create a fresh virtual environment outside the SDK checkout. Install the exact wheel from `dist/` with `python -m pip install` followed by its absolute path. Use that environment to run the [installation check](docs/sdk/installation.md#install-a-preview-wheel). A matching package version alone does not identify a development commit.
 
 ## Security checklist
 
