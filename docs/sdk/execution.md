@@ -56,7 +56,9 @@ Set the initial `writable_roots` on a local Environment or a compatible Linux or
 
 The strict policy disables native sandbox escalation and permission requests that could widen the grants.
 
-Use a supported local executor or Linux WSS executor to change write grants between turns. With macOS WSS, choose the write roots in the Environment when opening the Session. The SDK cannot confirm that processes from earlier remote commands have exited. You can resubmit an equivalent grant if the paths pass validation.
+To replace write grants between turns, use a supported local executor or Linux WSS executor. With macOS WSS, set write roots when opening the Session. Later submissions can resubmit an equivalent grant if the paths pass validation.
+
+Before replacing grants, account for earlier command processes. The SDK cannot confirm that processes from earlier remote commands have exited.
 
 In a Session without `NativeAgents`, wait for the active turn and any descendant or background executor work to settle. Collect the results of any yielded tool cells before changing the roots. Then supply the complete replacement list on the next root turn. If the Session uses `NativeAgents`, set its write roots when opening it.
 
@@ -208,7 +210,11 @@ Explicit policies have platform limits:
 
 ### Domain and local access rules
 
-The policy accepts `allowed_domains` and `denied_domains`. A denial takes precedence over an allowance. On a macOS executor, `NetworkPolicy(allowed_domains=("api.example.com",))` permits that host through the managed proxy without granting Unix socket access. Rules cover hosts across all ports. Supply hostnames or supported host patterns without a scheme or port. The proxy checks hostnames and cannot inspect the contents of encrypted traffic. The policy never permits an upstream proxy or an unsandboxed fallback.
+The policy accepts `allowed_domains` and `denied_domains`. A denial takes precedence over an allowance. Supply hostnames or supported host patterns without a scheme or port; each rule covers all ports on the matching hosts. The managed proxy checks hostnames and cannot inspect the contents of encrypted traffic. The policy never permits an upstream proxy or an unsandboxed fallback.
+
+On a macOS executor, `NetworkPolicy(allowed_domains=("api.example.com",))` permits that host through the managed proxy without granting Unix socket access.
+
+### Grant local access
 
 On Linux and macOS executors, `allow_all_unix_sockets=True` grants access to every reachable Unix socket. Use this grant only on an executor private to the job. Keep every socket the job does not need out of reach. The SDK rejects grants for individual socket paths.
 
@@ -252,9 +258,9 @@ An empty destination list does not prevent proxy hostname lookups before denial.
 
 The backend must verify the offline boundary. The SDK cannot infer that isolation from a URL.
 
-When restoring a portable checkpoint, keep the recorded network policy. When reopening with `LocalStorage`, supply the same normalized network policy for a local executor or WSS with strict writes. If the recorded executor used implicit WSS writes (`writable_roots=None`), you can omit the Environment to reopen for model-only work, even if the executor used a managed network policy. If you keep the WSS Environment, supply the same normalized network policy. Start a new conversation to change the network policy.
+When restoring a checkpoint or reopening with `LocalStorage`, follow the [executor policy matching rules](state.md#restore-executor-policy). These rules also explain when an implicit WSS conversation can reopen for model-only work. Start a new conversation to change the network policy.
 
-Python callbacks can run fixed operations directly in the application's worker. See [Restore an Environment](state.md#save-and-restore-a-portable-checkpoint).
+Python callbacks can run fixed operations directly in the application's worker, using the worker's permissions.
 
 ### Docker creation and restore checks
 
@@ -318,6 +324,8 @@ Callbacks cannot replace these identities.
 
 An executor approval or transform callback cannot observe its own Session, submit work to it, update it, interrupt it, checkpoint it, or close it. Start any event observer in an application task outside the callback. Use application context for data needed to make a decision.
 
-Arguments for `exec_command` and `write_stdin` are JSON objects; `apply_patch` receives a patch string. Native validation still applies after transformation. A result transform runs after the remote effect and cannot undo it. `policy_timeout` bounds transform decisions in seconds and defaults to 30. The SDK rejects invalid, late, or failed decisions. The callbacks cover root and native child calls.
+Arguments for `exec_command` and `write_stdin` are JSON objects; `apply_patch` receives a patch string. Native validation still applies after transformation. A result transform runs after the executor effect and cannot undo it.
+
+`policy_timeout` bounds transform decisions in seconds and defaults to 30. The SDK rejects invalid, late, or failed decisions. These callbacks cover root and native child calls.
 
 See [programmatic tool calling](configuration.md#programmatic-tool-calling). Saved configuration contains no policy callbacks, credentials, endpoints or network-policy names. The [network-policy support](#network-and-local-socket-access) also compares the current Environment policy with the recorded digest on restore. This does not redact command history or native debug logs.

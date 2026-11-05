@@ -1,6 +1,6 @@
 # Tools
 
-Declare the functions and services an agent may call in its `tools` list. Codex selects and dispatches calls during the model loop. Python functions run in your application with its permissions. For native MCP tools, Codex manages the connection and sends calls to the selected server, which owns execution of the operation.
+Declare the functions and services an agent may call in its `tools` list. Codex selects and dispatches calls during the model loop. Python functions run in your application with its permissions. For [MCP tools](mcp.md), Codex manages the connection and the selected server executes the operation.
 
 Examples with `await` or `async with` are fragments for an async function. [Configure the provider and its credentials](configuration.md#provider-connection) before opening a Session.
 
@@ -11,7 +11,7 @@ Examples with `await` or `async with` are fragments for an async function. [Conf
 | Call a Python function | [Python functions](#python-functions) |
 | Search the web through the native provider | [Native web search](#native-web-search) |
 | Give a function application data | [Application context](#application-context) |
-| Connect tools from an MCP server | [Native MCP](#native-mcp) |
+| Connect tools from an MCP server | [MCP servers](mcp.md) |
 | Run commands or edit workspace files | [Local and remote execution](execution.md) |
 | Delegate work to child agents | [Native children](delegation.md#native-children) |
 | Supply a tool result from your application | [Manual tool results](approvals.md#manual-tool-results) |
@@ -169,91 +169,19 @@ Keep the original `search` declaration in every explicit turn or step selection,
 
 Saved history retains search results but does not enable search. To search after restore, declare `WebSearch` again in the current Agent or opening Session tools. `Environment.network` controls executor commands, not web search.
 
-## Native MCP
+## Connect MCP tools
 
-Use `HttpMCP` for Streamable HTTP and `StdioMCP` for a server process. Both declarations select the server's raw tool names. For this HTTP example, set `DOCS_MCP_URL` and `DOCS_MCP_TOKEN` for your server, which must provide `search`:
+Use the [MCP guide](mcp.md) to connect servers and control tool calls:
 
-```python
-import os
-
-from agents import Agent, HttpMCP
-
-agent = Agent(
-    instructions="Answer using the documentation search tool.",
-    tools=[
-        HttpMCP(
-            name="docs",
-            url=os.environ["DOCS_MCP_URL"],
-            tools=("search",),
-            bearer_token=os.environ["DOCS_MCP_TOKEN"],
-        )
-    ],
-)
-```
-
-Read the token in application code and pass its value as `bearer_token`. The declaration keeps that value. Restore uses the application's current declarations and credentials.
-
-### Handle MCP startup errors
-
-A fresh or idle-restored Session captures MCP declarations when it opens. The SDK checks that the server provides selected tools at these points:
-
-- For a turn selection, handle startup or missing-tool errors from `turn.get_result()`.
-- For an idle selection, handle those errors from `session.update()`.
-- When restoring a pending manual request, the SDK prepares selected MCP resources before exposing fresh requests. Errors can prevent the Session from opening.
-
-Codex normalizes the tool namespaces the model sees. Conflicting names fail before the model can use the tools.
-
-For lists that mix context-aware Python tools and MCP declarations, MyPy may need an explicit `list[Tool[Application]]` or `Agent[Application, Answer]` annotation.
-
-### Configure MCP approval
-
-MCP selection and approval are separate. The default `approval_mode="auto"` keeps Codex's native approval rules, which can require interaction when a tool lacks annotations or can make changes. Answer supported live requests through `session.interactions()` or a one-shot handler. A run without a handler can raise `InteractionRequired` when a native decision is needed. A successful read-only tool does not prove that a write tool can run without interaction.
-
-To explicitly approve calls to selected tools, use `approval_mode="approve"`:
-
-```python
-writer = HttpMCP(
-    name="records",
-    url="https://mcp.example.com/mcp",
-    tools=("write_record",),
-    approval_mode="approve",
-)
-```
-
-Codex applies that setting only to the selected raw tool names. Native constraints and strict review still apply. The setting does not answer a server's own requests for interactive input, sandbox server startup, or limit effects the server does not disclose. Result policies still run after execution and cannot undo those effects. Do not change a tool's read-only annotation to obtain approval.
-
-Approval settings follow the current descriptor during idle replacement and restore. Restoring with the default `auto` does not inherit an explicit approval from the saved Session.
-
-### Start a stdio server
-
-For a trusted stdio server, use `StdioMCP` and supply its command:
-
-```python
-from agents import StdioMCP
-
-server = StdioMCP(
-    name="docs",
-    command="/opt/docs-server/bin/server",
-    args=("--read-only",),
-    env_vars=("DOCS_API_KEY",),
-    cwd="/srv/docs",
-    tools=("search",),
-)
-```
-
-By default, `location="host"` starts the server on the application host. Set `location="environment"` to start it on the remote executor passed to `agent.session(environment=...)`. A connected Environment can host stdio MCP servers even when `Environment.tools` is empty.
-
-Codex manages the process and its standard input and output connection until the Session closes. Supply a trusted command because the process uses the selected machine's permissions. Tool selection and approval do not sandbox server startup. Codex passes arguments as separate values without shell expansion.
-
-Configure the server's process environment as follows:
-
-- Use an absolute `cwd`. If omitted, host servers use Codex's runtime directory and remote servers use the Environment's working directory.
-- Use `env_vars` to select variables from the machine that runs the server. Codex reads their values at startup.
-- Pass arguments as separate values. The declaration captures the arguments and variable names.
-
-Restore uses the application's current server declarations and Environment.
+- <a id="native-mcp"></a>[Connect an HTTP server](mcp.md#connect-an-http-server).
+- <a id="start-a-stdio-server"></a>[Start a stdio server](mcp.md#start-a-stdio-server).
+- <a id="configure-mcp-approval"></a>[Configure MCP approval](mcp.md#configure-mcp-approval).
+- <a id="handle-mcp-startup-errors"></a>[Handle MCP startup errors](mcp.md#handle-mcp-startup-errors).
+- <a id="mcp-startup-and-restore-limits"></a>[Replace and restore MCP connections](mcp.md#replace-and-restore-mcp-connections).
+- <a id="mcp-result-policies"></a>[Apply MCP result policies](mcp.md#mcp-result-policies).
 
 <a id="idle-replacement"></a>
+<a id="change-tools-between-turns"></a>
 
 ## Replace tools between turns
 
@@ -266,8 +194,6 @@ Replacements must stay within the tools declared when the Session opened:
 - Each MCP server must retain its opening `defer_loading` value.
 
 To add names or MCP pairs, or change discovery mode, open a new Session. Await a successful update before submitting work. If an update fails without confirming which definitions are active, close the Session and open a new one.
-
-### Change tools between turns
 
 Declare every tool the conversation may need when opening the Session. Then replace the default selection while idle. This example first selects an updated `lookup` implementation and later switches to `summarize`:
 
@@ -302,19 +228,15 @@ async with agent.session() as session:
 
 Here `lookup` selects the last accepted definition, `current_lookup`. It does not restore the original callback. Temporary `submit(tools=...)` and `before_step` selections cannot replace tools or MCP connections, even with the same names. Use an idle update for those changes. An explicit turn selection can choose a tool omitted from the current default. That selection uses the last accepted definition, including its MCP credentials.
 
-### MCP startup and restore limits
-
-Selecting fewer tools before the first turn can leave omitted MCP servers unstarted. A later explicit selection can still use them. To exclude a tool for the whole Session, leave it out when opening.
-
 For an idle checkpoint restore, supply matching saved Python and manual definitions. MCP declarations come from the opening `tools=` override, or otherwise `Agent.tools`. Storage does not supply credentials or callbacks. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
 If the Session opened with `NativeAgents`, retain that declaration in every explicit selection. Update tools only after all native children close. See [Session updates](sessions.md#update-tools-instructions-and-model-settings).
 
-To use host stdio after replacement, open with at least one `StdioMCP(location="host")` declaration. A Session opened with only HTTP or environment stdio cannot later start a host process. Environment stdio requires the Session's current Environment. Both locations remain limited to opening server and tool-name pairs.
+For MCP connection and process restrictions, see [replace and restore MCP connections](mcp.md#replace-and-restore-mcp-connections).
 
-With the pinned native revision, host stdio initialization rejects incompatible `CODEX_EXEC_SERVER_NOISE_*` settings from the environment. It does not silently select the remote executor those settings describe. HTTP-only Sessions do not require a local executor.
+<a id="select-one-mcp-tool"></a>
 
-### Select one MCP tool
+### Select individual tools
 
 Use `function.ref` to select a Python or manual tool. Use `server.tool(raw_name)` to select one MCP tool allowed when the Session opened. Both return a `ToolRef`. The MCP helper supplies the normalized native namespace. These references select the last accepted definitions without adding names or connections.
 
@@ -382,50 +304,7 @@ async def greeting(name: str) -> str:
 
 `function_tool` also accepts `before` and `after` for checks shared across Python callbacks. Use the function body for checks specific to that function.
 
-### MCP result policies
-
-Configure MCP policies on `HttpMCP` or `StdioMCP` in execution order:
-
-1. `before(context, call)` returns `Allow`, `ReplaceArguments`, or `StopTurn` within its own 30-second deadline.
-2. `approval` receives the effective arguments accepted after `before`.
-3. If execution proceeds, the server runs the operation.
-4. `transform_result` accepts or changes the reply before consumers receive it.
-
-Executor policies use a different order: [executor approval](execution.md#executor-policies) receives the original arguments before transformation. `transform_result_timeout` limits the MCP result callback, not approval.
-
-The `transform_result` callback receives `MCPResultContext` and a native MCP `CallToolResult` dictionary. It returns a dictionary directly or through an awaitable. The dictionary uses `content`, `structuredContent`, `isError`, and `_meta`.
-
-`transform_result_timeout=None`, including omission, uses a 30-second result-policy deadline. An explicit timeout must be greater than zero and at most 3,600 seconds, and requires `transform_result`. This deadline is separate from server execution and approval. Unlike Python `callback_timeout=None`, `None` does not disable the MCP result-policy deadline.
-
-The following declaration logs call identity and returns the whole result unchanged, preserving its content, structured data, error flag and metadata. Set `DOCS_MCP_URL` and `DOCS_MCP_TOKEN` for your Streamable HTTP server, which must provide a `search` tool. Include `server` in the Agent's `tools` list.
-
-```python
-import os
-from typing import Any
-
-from agents import HttpMCP, MCPResultContext
-
-
-def log_mcp_result(ctx: MCPResultContext[None], result: dict[str, Any]) -> dict[str, Any]:
-    print(ctx.server_name, ctx.tool_name, ctx.call_id)
-    return result
-
-
-server = HttpMCP(
-    name="docs",
-    url=os.environ["DOCS_MCP_URL"],
-    tools=("search",),
-    bearer_token=os.environ["DOCS_MCP_TOKEN"],
-    transform_result=log_mcp_result,
-    transform_result_timeout=30,
-)
-```
-
-MCP result transforms run after server execution and before native events, history, the model, or code cells receive the result. They cover direct calls, programmatic calls, and declared native children. Child callbacks receive the child's call identity.
-
-Invalid, late, or failed decisions withhold the original result and fail the submission. A transform cannot turn a server error into success, undo server effects, or reveal unreported effects.
-
-Checkpoints store no transform callbacks. Restore uses the current Agent's declarations and credentials.
+For MCP input, approval and result callbacks, see [MCP result policies](mcp.md#mcp-result-policies).
 
 ## Tool notifications
 

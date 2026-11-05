@@ -29,9 +29,9 @@ The storage choices have these limits:
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 
-The SDK rejects a local working directory or writable root that overlaps the session store. For example, put the worker in `worker/workspace` and keep its session history in `worker/history`.
-
 ## Reopen a conversation from local storage
+
+Keep the profile separate from the executor workspace. The SDK rejects a local working directory or writable root that overlaps the session store. For example, put the worker in `worker/workspace` and keep its session history in `worker/history`.
 
 Save this complete script as `local_conversation.py`:
 
@@ -351,10 +351,10 @@ For a per-turn output override, use `agent.with_output_type(...)` with the saved
 Follow this sequence:
 
 1. Call `await session.suspend()`. Success retires the original Session and expires its live requests. Repeated calls return the same state.
-2. Restore with `agent.session(state=state)` under the [restore configuration rules](#supply-restore-configuration). The saved model, accepted model settings, original turn and call IDs, and order of accepted results remain. Current credentials, transport, declarations, reply types, and permissions apply. You can switch between HTTP and WebSockets.
+2. Restore with `agent.session(state=state)` under the [restore configuration rules](#supply-restore-configuration). Supply current credentials, transport, declarations, reply types, and permissions.
 3. Get fresh requests with `await session.pending_interactions()` and reply through those requests. The snapshot covers the root and children but reserves nothing. Handle expiry if another consumer answers first or the Session closes.
 
-Restore does not call completed tools again. Saved handles and live replies do not transfer.
+Restore retains the saved model, accepted model settings, original turn and call IDs, and order of accepted results. You can switch between HTTP and WebSockets. Completed tools do not run again. Saved handles and live replies do not transfer.
 
 To find the restored root, use `restored.restored_turn`. It keeps returning that initial handle after later work starts, and returns `None` for fresh Sessions and idle restores. `session.active_turn` returns the current root or `None`. Neither accessor preserves the output type, because individual turns may override it.
 
@@ -384,7 +384,7 @@ Resume a supported checkpoint with `agent.run(None, state=state, on_interaction=
 
 Without a handler, a pending restore raises `InteractionRequired` and keeps the supplied checkpoint in `error.state`. You cannot change tools or `before_step` on an already admitted turn. Restore creates fresh requests for the current declarations, so reply through those requests. Old handles do not transfer, and completed tools do not run again.
 
-For an idle checkpoint, pass ordinary input to start a new turn. Set `return_state=True` to save successful completion in `Completed.state`. The default is `False`, which leaves `state=None`. Both `agent.run()` and `agent.run_sync()` require a bool and fail if saving fails. `turn.get_result()` waits for completion but does not save state.
+For an idle checkpoint, pass ordinary input to start a new turn. To save its result, use [`return_state=True`](#use-one-shot-runs). `turn.get_result()` waits for completion but does not save state.
 
 For typed output and other suspension constraints, check [manual checkpoint support](#check-manual-checkpoint-support) before capturing state.
 

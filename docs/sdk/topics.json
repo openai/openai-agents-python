@@ -76,9 +76,18 @@
       "path": "tools.md",
       "aliases": [
         "function_tool",
+        "Python callbacks"
+      ]
+    },
+    {
+      "id": "mcp",
+      "path": "mcp.md",
+      "aliases": [
         "MCP",
-        "Python callbacks",
-        "MCP authentication"
+        "MCP servers",
+        "MCP authentication",
+        "HttpMCP",
+        "StdioMCP"
       ]
     },
     {
@@ -154,9 +163,19 @@
       "id": "configure",
       "path": "configuration.md",
       "aliases": [
-        "structured output",
+        "structured output"
+      ]
+    },
+    {
+      "id": "observability",
+      "path": "observability.md",
+      "aliases": [
+        "usage",
         "telemetry",
-        "trace"
+        "trace",
+        "tracing",
+        "OpenTelemetry",
+        "TraceContext"
       ]
     },
     {
@@ -164,14 +183,11 @@
       "path": "troubleshooting.md",
       "aliases": [
         "timeout",
-        "usage",
         "error",
         "diagnose",
         "rate limits",
         "token budget",
-        "retry",
-        "tracing",
-        "OpenTelemetry"
+        "retry"
       ]
     },
     {

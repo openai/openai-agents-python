@@ -1,6 +1,6 @@
 # Debug a run with local telemetry
 
-Run a synthetic task, inspect its native traces and logs, and compare the application receipt with its recorded history.
+Run a synthetic task, inspect its native traces and logs, and compare the application receipt with its recorded history. For exporter configuration and the role of each source of evidence, see the [observability guide](../../docs/sdk/observability.md).
 
 ## Set up the walkthrough
 
@@ -42,6 +42,8 @@ python -m examples.observability.trace_walkthrough --scenario provider --output 
 | `tool` | The real Python callback raises; `get_result()` raises and the receipt records `tool_callback_exception`. | The model request returned 200. A provider success does not establish callback success. |
 | `validation` | `PromptedOutput(Report)` rejects the final JSON value; the receipt records `output_validation_failure`. | The model request returned 200. Native telemetry does not establish Python output validity. |
 | `provider` | A local synthetic provider returns HTTP 401; the receipt records `provider_failure`, `status_code=401`, `category=authentication_error` and `code=invalid_api_key`. | API-request log records contain HTTP 401. This exercises the provider failure path without contacting a real provider. |
+
+### Interpret records from the checked build
 
 In the checked source build, traces included `run_turn`, `traceId`, `spanId`, parent links, start/end times and the custom run attribute. API-request logs included the conversation ID, HTTP status, attempt and duration fields.
 

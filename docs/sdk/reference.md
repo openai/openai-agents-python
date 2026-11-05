@@ -135,7 +135,7 @@ Import these immutable data classes from `agents.usage`. `Completed.usage` is a 
 
 `TokenUsage` contains integer fields `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` and `total_tokens`. Cached and reasoning counts are already included in the totals.
 
-These values describe native thread snapshots. They do not report per-submission costs or billing records. See [usage readback and accounting limits](troubleshooting.md#read-usage-without-double-counting).
+These values describe native thread snapshots. They do not report per-submission costs or billing records. See [usage readback and accounting limits](observability.md#read-usage-without-double-counting).
 
 ## Errors
 
@@ -276,7 +276,7 @@ StdioMCP(*, name: str, tools: Sequence[str], command: str,
          before=None, approval=None, defer_loading=False)
 ```
 
-`location="environment"` runs stdio on the Session's Environment. Neither MCP descriptor accepts `interceptor`. See [native MCP](tools.md#native-mcp) and [result policies](tools.md#mcp-result-policies).
+`location="environment"` runs stdio on the Session's Environment. Neither MCP descriptor accepts `interceptor`. See [native MCP](mcp.md#connect-an-http-server) and [result policies](mcp.md#mcp-result-policies).
 
 For both descriptors, `transform_result_timeout=None` uses a 30-second deadline; it does not disable the deadline. An explicit value must be in `(0, 3600]` seconds and requires `transform_result`. This deadline is separate from tool execution and approval. Where supported, `defer_loading=True` controls when the model sees selected schemas. It does not delay connection startup.
 
@@ -361,15 +361,17 @@ Import `CodexLogin` from `agents` and pass it as `NativeProvider(auth=CodexLogin
 
 `session.codex_account` returns a `CodexAccount` with `account_id` and `plan_type`, or `None` in API-key mode. Import `CodexAccount` from `agents`. `account_id` identifies the saved workspace and is `None` for personal logins without a workspace ID. `plan_type` comes from saved login metadata. See [account identity, refresh, and usage](configuration.md#account-identity-refresh-and-usage).
 
-### TraceContext and trace options
-
-`TraceContext(*, traceparent, tracestate=None)` holds validated W3C trace headers. `to_headers()` returns a new header mapping. Import `TraceContext` from `agents`. Pass it or a mapping containing `traceparent` and optional `tracestate` as `parent_trace` when opening a Session, running an Agent, or submitting a new root Turn. See [trace correlation](configuration.md#continue-a-trace-across-workers) for inheritance and restore rules.
-
-Import `TraceOptions` from `agents.telemetry` for the `trace_options` argument. These options control native tracing linkage and policy. A local `TraceOptions.parent` uses an SDK `SpanContext`; a `TraceContext` carries only W3C headers between workers. Neither type grants tool or workspace access.
-
 ### ModelSettings
 
 Supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted settings keep native defaults. `service_tier=None` clears that override.
+
+## Tracing
+
+### TraceContext and trace options
+
+`TraceContext(*, traceparent, tracestate=None)` holds validated W3C trace headers. `to_headers()` returns a new header mapping. Import `TraceContext` from `agents`. Pass it or a mapping containing `traceparent` and optional `tracestate` as `parent_trace` when opening a Session, running an Agent, or submitting a new root Turn. See [trace correlation](observability.md#continue-a-trace-across-workers) for inheritance and restore rules.
+
+Import `TraceOptions` from `agents.telemetry` for the `trace_options` argument. These options control native tracing linkage and policy. A local `TraceOptions.parent` uses an SDK `SpanContext`; a `TraceContext` carries only W3C headers between workers. Neither type grants tool or workspace access.
 
 ## Native tools and delegation
 

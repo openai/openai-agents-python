@@ -88,7 +88,14 @@ Every selected platform publishes a `native-snapshot-<OS>-<ARCH>` artifact befor
 
 #### Check donor eligibility
 
-A donor is a push run that supplies a reusable native artifact. CI checks the complete caller and native workflows at the push commit, compares committed native and build inputs against the current checkout, and requires successful later platform qualification. CI selects original publications by artifact ID and SHA-256 digest before the earliest SDK execution across all attempts. A branch producer records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
+A donor is a push run that supplies a reusable native artifact. For each donor, CI:
+
+- Checks the complete caller and native workflows at the push commit.
+- Compares committed native and build inputs against the current checkout.
+- Requires successful later platform qualification.
+- Selects original publications by artifact ID and SHA-256 digest, from before the earliest SDK execution across all attempts.
+
+A branch producer also records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
 
 PR Tests checks the latest 20 successful push runs for each eligible source. It reuses a compatible, qualified snapshot if one exists. Otherwise it starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
 
@@ -102,7 +109,9 @@ Use the existing source preparation and build tools. Keep `CODEX_REVISION` and t
 
 ### Maintain the patch manifest
 
-Store reviewed SDK-local changes as ordinary Git diffs under `patches/`. Never edit `.upstream/codex` directly or add executable patch hooks. Preparation authenticates the complete canonical base archive and applies the ordered patches in private Git storage. The result must match the tree recorded in the committed manifest. Fresh builds and source audits verify every resulting file, directory, symlink and Git mode. An empty series must reproduce the pristine pinned tree.
+Store reviewed SDK-local changes as ordinary Git diffs under `patches/`. Never edit `.upstream/codex` directly or add executable patch hooks.
+
+Preparation authenticates the complete canonical base archive and applies the ordered patches in private Git storage. The result must match the tree recorded in the committed manifest. Fresh builds and source audits verify every resulting file, directory, symlink and Git mode. An empty series must reproduce the pristine pinned tree.
 
 `patches/series.json` has exactly two fields:
 

@@ -10,13 +10,15 @@ For a live model example, supply `OPENAI_API_KEY` through your usual credential 
 
 ## Run a Python tool
 
-Run the greeting example:
+With `OPENAI_API_KEY` configured, run the greeting example:
 
 ```sh
 python -m examples.basic
 ```
 
 The example asks the agent to greet Ada with the Python `greeting` tool and prints the final answer. Live wording can vary. The [source](basic.py) shows the tool declaration and `Agent.run()` call.
+
+To start without model credentials, choose a [scripted recipe](../docs/sdk/recipes.md#test-application-logic-without-a-model).
 
 ## Choose an agent task
 
