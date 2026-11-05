@@ -63,6 +63,7 @@ from .manual import (
     VerificationRequest,
     _CapturedManual,
     _NativeQuestion,
+    _PreparedManualResult,
     _question,
 )
 from .mcp import (
@@ -3242,7 +3243,12 @@ class Session(Generic[ContextT, OutputT]):
         return False
 
     async def _respond(
-        self, request: ActionRequested[Any, Any], result: Any, *, expected_json: str | None = None
+        self,
+        request: ActionRequested[Any, Any],
+        result: Any = None,
+        *,
+        expected_json: str | None = None,
+        prepared: _PreparedManualResult | None = None,
     ) -> Turn[Any]:
         self._check_loop()
         if (
@@ -3286,6 +3292,10 @@ class Session(Generic[ContextT, OutputT]):
         entry = self._catalog.tools[request._slot]
         if not isinstance(entry, _CapturedManual) or entry.declaration is not request._declaration:
             raise InteractionExpiredError("Manual tool reply belongs to a different declaration")
+        if prepared is not None and (
+            prepared.declaration is not entry.declaration or prepared.call_id != request.call_id
+        ):
+            raise InteractionExpiredError("Prepared manual result belongs to a different call")
         self._check_open()
         if isinstance(state, _ChildCallbacks):
             # Native manual grants can reach a cursor before the event reader
@@ -3332,21 +3342,13 @@ class Session(Generic[ContextT, OutputT]):
         token = _invocation.set(scope)
         output: str | None = None
         try:
-            value = entry.output_adapter.validate_python(result)
-            if not self._native._check_manual_tool(request._grant):
-                raise InteractionExpiredError("Manual tool reply expired during validation")
-            text = (
-                value
-                if isinstance(value, str)
-                else entry.output_adapter.dump_json(
-                    value, warnings="error" if expected_json is not None else True
-                ).decode()
-            )
-            if expected_json is not None and text != expected_json:
-                raise ValueError("Manual tool result differs from its verified projection")
-            response = value if isinstance(value, ToolOutput) else ToolOutput.text(text)
-            response._validate()
-            output = json.dumps(response.to_native())
+            if prepared is None:
+                value = entry.output_adapter.validate_python(result)
+                if not self._native._check_manual_tool(request._grant):
+                    raise InteractionExpiredError("Manual tool reply expired during validation")
+                output = entry.encode_result(value, expected_json=expected_json)
+            else:
+                output = prepared.output
         except Exception:
             pass
         finally:

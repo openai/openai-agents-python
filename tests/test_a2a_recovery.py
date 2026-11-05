@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Annotated
 
 import pytest
 
@@ -14,15 +15,61 @@ from a2a.server.cluster.task_store import ConcurrentTaskModificationError
 from a2a.server.cluster.version import TaskVersion
 from a2a.server.events.event_queue_v2 import EventQueueSource
 from a2a.types import a2a_pb2 as p
+from google.protobuf.json_format import MessageToDict
+from pydantic import AfterValidator
 
+from agents import FunctionTool
 from agents.a2a import NativeA2ABinding, NativeA2AExecutor, NativeA2ATask
 from tests.a2a_helpers import call_context, invoke, request_context
-from tests.native_fixtures import assistant_output, responses as responses
-from tests.test_a2a_executor import make_executor
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+    tool_output,
+)
+from tests.test_a2a_executor import Approval, make_executor
 
 
 def binding():
     return NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+
+
+@pytest.mark.parametrize("accepts_only_raw", [False, True])
+async def test_manual_answer_transform_runs_once_before_durable_claim(
+    tmp_path, responses, accepts_only_raw
+):
+    values = []
+
+    def transform(value: str) -> str:
+        values.append(value)
+        if accepts_only_raw and value != "yes":
+            raise ValueError("Expected the original answer")
+        return value + "!"
+
+    tool = FunctionTool(
+        name="approve",
+        description="Host approval",
+        input_type=Approval,
+        output_type=Annotated[str, AfterValidator(transform)],
+    )
+    executor = make_executor(tmp_path, responses, [tool])
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    first, _ = await invoke(executor, request_context())
+    assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    reply = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": "yes",
+    }
+    responses.respond(assistant_output("approved"))
+    settled, _ = await invoke(executor, request_context(reply=reply, current=first.task))
+
+    assert values == ["yes"]
+    assert settled.task.status.state == p.TASK_STATE_COMPLETED
+    assert executor.store.read(binding()).acknowledges(settled.task)
+    assert len(responses.requests) == 2
+    assert tool_output(responses.requests[1], "call-a") == "yes!"
 
 
 async def worker(directory, mode):

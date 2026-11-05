@@ -23,7 +23,7 @@ from google.protobuf.struct_pb2 import Value
 
 from .. import ActionRequested, Agent, FunctionTool, PendingRequests, TurnStoppedError
 from .._trace_context import TraceContext, _trace_context
-from ..manual import _CapturedManual
+from ..manual import _CapturedManual, _PreparedManualResult
 from ..observation import ToolFinished, ToolStarted
 from ..state import SessionState
 from ._client import _DEFAULT_LIMITS, A2ALimits, _limits
@@ -232,13 +232,12 @@ class NativeA2AExecutor(AgentExecutor):
 
     def _reply(
         self, context: RequestContext, record: NativeA2ATask, configured: NativeA2AAgent
-    ) -> object:
+    ) -> _PreparedManualResult:
         parts = context.message.parts if context.message is not None else []
         if len(parts) != 1 or not parts[0].HasField("data"):
             raise InvalidParamsError(message="Expected one bounded challenge answer")
         value = MessageToDict(parts[0].data)
-        valid = False
-        checked: object = None
+        prepared = None
         try:
             _json(value, self.limits.message_bytes)
             if (
@@ -247,6 +246,7 @@ class NativeA2AExecutor(AgentExecutor):
                 and value["challenge"] == record.challenge
                 and type(value["generation"]) in (int, float)
                 and value["generation"] == record.challenge_generation
+                and record.call_id is not None
             ):
                 tools = [
                     tool
@@ -257,13 +257,16 @@ class NativeA2AExecutor(AgentExecutor):
                     captured = tools[0]._capture(configured.context)
                     if isinstance(captured, _CapturedManual):
                         checked = captured.output_adapter.validate_python(value["result"])
-                        captured.output_adapter.dump_json(checked, warnings="error")
-                        valid = True
+                        prepared = _PreparedManualResult(
+                            captured.declaration,
+                            record.call_id,
+                            captured.encode_result(checked, strict=True),
+                        )
         except Exception:
             pass
-        if not valid:
+        if prepared is None:
             raise InvalidParamsError(message="Invalid, stale or unsupported manual answer")
-        return checked
+        return prepared
 
     async def _commit(
         self,
@@ -430,7 +433,7 @@ class NativeA2AExecutor(AgentExecutor):
         configured: NativeA2AAgent,
         binding: NativeA2ABinding,
         previous: NativeA2ATask | None,
-        reply: object,
+        reply: _PreparedManualResult | None,
         prompt: str | None,
         live: _Live,
         lease: NativeA2ALease,
@@ -472,12 +475,12 @@ class NativeA2AExecutor(AgentExecutor):
                                 ),
                                 None,
                             )
-                            if request is None:
+                            if request is None or reply is None:
                                 raise ValueError(
                                     "Checkpoint does not match the current manual declaration"
                                 )
                             if not live.canceled:
-                                await request.respond(reply)
+                                await session._respond(request, prepared=reply)
                         if not live.canceled:
                             progress = asyncio.create_task(
                                 self._progress(turn, binding, projection, queue)
