@@ -53,6 +53,12 @@ def test_carrier_exports_immutable_headers_and_hides_values() -> None:
     )
 
 
+@pytest.mark.parametrize("flags", ["00", "01", "02", "03"])
+def test_defined_trace_flags_round_trip(flags: str) -> None:
+    parent = PARENT[:-2] + flags
+    assert TraceContext(traceparent=parent).to_headers() == {"traceparent": parent}
+
+
 @pytest.mark.parametrize(
     "parent",
     [
@@ -62,7 +68,7 @@ def test_carrier_exports_immutable_headers_and_hides_values() -> None:
         PARENT[:36] + "0" * 16 + PARENT[52:],
         "ff" + PARENT[2:],
         PARENT + "-extra",
-        PARENT[:-2] + "03",
+        PARENT[:-2] + "04",
         "01" + PARENT[2:] + "invalid",
         PARENT + "\r\nsynthetic-private-header",
         "01" + PARENT[2:] + "-" + "x" * 512,
@@ -251,6 +257,27 @@ def test_model_compaction_uses_session_parent_after_overridden_turn(tmp_path: Pa
     _assert_parent(_dispatch(spans, receipt["after"]), PARENT)
 
 
+@pytest.mark.parametrize("flags", ["02", "03"])
+def test_native_defined_flags_preserve_callback_headers(flags: str, tmp_path: Path) -> None:
+    from examples.observability.trace_walkthrough import Collector
+
+    with Collector().serve() as collector:
+        receipt = _run_case("flags-" + flags, collector.url, tmp_path / "flags.json")
+    assert receipt["headers"]["traceparent"][3:35] == PARENT[3:35]
+    assert receipt["headers"]["traceparent"].endswith("-" + flags)
+    if flags == "03":
+        dispatch = _dispatch(_spans(collector), receipt["turn"])
+        _assert_parent(dispatch, PARENT[:-2] + flags)
+
+
+def test_native_manual_request_limit_excludes_trace_metadata(tmp_path: Path) -> None:
+    from examples.observability.trace_walkthrough import Collector
+
+    with Collector().serve() as collector:
+        receipt = _run_case("manual-limit", collector.url, tmp_path / "limit.json")
+    assert receipt == {"lengths": [64_800, 64_800], "outputs": ["done", "done"]}
+
+
 def test_fresh_process_manual_resume_uses_current_worker_parent(tmp_path: Path) -> None:
     from examples.observability.trace_walkthrough import Collector
 
@@ -314,6 +341,10 @@ async def _native_case(case: str, collector: str, output: str) -> None:
             receipt = await _graph_case()
         elif case == "compact":
             receipt = await _compact_case()
+        elif case.startswith("flags-"):
+            receipt = await _flags_case(case.removeprefix("flags-"))
+        elif case == "manual-limit":
+            receipt = await _manual_limit_case()
         elif case == "unsupported":
             receipt = await _unsupported_case()
         else:
@@ -321,6 +352,48 @@ async def _native_case(case: str, collector: str, output: str) -> None:
     finally:
         await telemetry.shutdown()
     Path(output).write_text(json.dumps(receipt))
+
+
+async def _flags_case(flags: str) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    @function_tool
+    async def lookup(context: ToolContext) -> str:
+        assert context.trace_context is not None
+        captured.update(context.trace_context.to_headers())
+        return "accepted"
+
+    async with ScriptedResponses(
+        [tool_call("lookup", {}, call_id="flag-call"), text("done")]
+    ) as peer:
+        result = await Agent(
+            instructions="Call lookup", tools=[lookup], provider=peer.provider
+        ).run("start", parent_trace={"traceparent": PARENT[:-2] + flags})
+        return {"headers": captured, "turn": result.turn.turn_id}
+
+
+async def _manual_limit_case() -> dict[str, Any]:
+    from agents import ActionRequested
+
+    lookup = FunctionTool(name="lookup", description="Read", input_type=_Lookup, output_type=str)
+    lengths: list[int] = []
+    outputs: list[str] = []
+
+    def answer(request: Any) -> Any:
+        assert isinstance(request, ActionRequested)
+        lengths.append(len(request.arguments.key))
+        return request.reply("accepted")
+
+    state = ",".join(f"v{i}=" + "x" * 128 for i in range(32))
+    for carrier in [None, TraceContext(traceparent=PARENT, tracestate=state)]:
+        async with ScriptedResponses(
+            [tool_call("lookup", {"key": "x" * 64_800}, call_id="limit-call"), text("done")]
+        ) as peer:
+            result = await Agent(instructions="Read", tools=[lookup], provider=peer.provider).run(
+                "start", parent_trace=carrier, on_interaction=answer
+            )
+            outputs.append(result.final_output)
+    return {"lengths": lengths, "outputs": outputs}
 
 
 async def _compact_case() -> dict[str, Any]:

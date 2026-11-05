@@ -1948,7 +1948,13 @@ impl PythonTools {
                 key.clone(),
                 PendingCall {
                     invocation,
-                    manual_request: entry.manual.then(|| request.clone()),
+                    manual_request: entry.manual.then(|| {
+                        let mut manual = request.clone();
+                        // Trace metadata belongs to automatic ToolContext callbacks,
+                        // not the bounded manual action envelope.
+                        manual["msg"].as_object_mut().unwrap().remove("_sdk_trace");
+                        manual
+                    }),
                     sender,
                     phase: Phase::Admitted,
                     reentry,
@@ -4622,7 +4628,14 @@ pub(crate) mod managed_tests {
             key: key.clone(),
             invocation,
         };
-        let (_, grant, _) = tools.manual_snapshot("owner").unwrap().pop().unwrap();
+        let (_, grant, raw) = tools.manual_snapshot("owner").unwrap().pop().unwrap();
+        let manual: Value = serde_json::from_str(&raw).unwrap();
+        assert!(
+            !manual["msg"]
+                .as_object()
+                .unwrap()
+                .contains_key("_sdk_trace")
+        );
         let foreign = catalog(
             ToolPolicy::default(),
             DynamicToolSpec::Function(function("lookup")),

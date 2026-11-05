@@ -18,14 +18,15 @@ class TraceContext:
     """An immutable W3C parent carrier, independent of any tracing provider.
 
     The traceparent has an SDK limit of 512 ASCII characters. Trace IDs and span
-    IDs must be nonzero lowercase hex. Version 00 accepts defined flags 00 or
-    01. Future versions retain their opaque suffix; native execution interprets
-    the known prefix. Tracestate accepts at most 32 members, each with a key and
-    value of at most 256 ASCII characters. The native propagator limits the
-    system ID after @ to 13 characters. Optional whitespace and empty members
-    are normalized. These limits define the supported native carrier profile.
-    Put no credentials or private content in either header. This value does
-    not keep a span alive, create spans, or propagate baggage.
+    IDs must be nonzero lowercase hex. Version 00 accepts defined flags 00
+    through 03 (sampled and random trace ID). Future versions retain their
+    opaque suffix; native execution interprets the known prefix. Tracestate
+    accepts at most 32 members, each with a key and value of at most 256 ASCII
+    characters. The native propagator limits the system ID after @ to 13
+    characters. Optional whitespace and empty members are normalized. These
+    limits define the supported native carrier profile. Put no credentials or
+    private content in either header. This value does not keep a span alive,
+    create spans, or propagate baggage.
     """
 
     traceparent: str = field(repr=False)
@@ -43,7 +44,7 @@ class TraceContext:
             or int(match[2], 16) == 0
             or int(match[3], 16) == 0
             or (match[1] == "00" and len(parent) != 55)
-            or (match[1] == "00" and match[4] not in ("00", "01"))
+            or (match[1] == "00" and match[4] not in ("00", "01", "02", "03"))
             or (len(parent) > 55 and parent[55] != "-")
             or any(not 0x21 <= ord(char) <= 0x7E for char in parent)
         ):

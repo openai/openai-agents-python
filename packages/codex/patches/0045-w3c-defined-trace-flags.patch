@@ -1,0 +1,120 @@
+diff --git a/codex-rs/otel/src/trace_context.rs b/codex-rs/otel/src/trace_context.rs
+index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..584f547c9be88d64a2dd4924ad86097209b1ec0d 100644
+--- a/codex-rs/otel/src/trace_context.rs
++++ b/codex-rs/otel/src/trace_context.rs
+@@ -9,7 +9,9 @@ use std::sync::RwLock;
+ use codex_protocol::protocol::W3cTraceContext;
+ use opentelemetry::Context;
+ use opentelemetry::propagation::TextMapPropagator;
++use opentelemetry::trace::SpanContext;
+ use opentelemetry::trace::TraceContextExt;
++use opentelemetry::trace::TraceFlags;
+ use opentelemetry::trace::TraceState;
+ use opentelemetry_sdk::propagation::TraceContextPropagator;
+ use tracing::Span;
+@@ -38,6 +40,16 @@ pub fn span_w3c_trace_context(span: &Span) -> Option<W3cTraceContext> {
+ 
+     let mut headers = HashMap::new();
+     TraceContextPropagator::new().inject_context(&context, &mut headers);
++    // The pinned propagator predates the W3C random-trace-id flag. Child
++    // spans retain it, so preserve it when writing their canonical header.
++    let flags = context.span().span_context().trace_flags().to_u8() & 0x03;
++    if flags & 0x02 != 0 {
++        if let Some(parent) = headers.get_mut("traceparent") {
++            if let Some((prefix, _)) = parent.rsplit_once('-') {
++                *parent = format!("{prefix}-{flags:02x}");
++            }
++        }
++    }
+     let tracestate = headers.remove("tracestate");
+     let configured_tracestate_guard = tracestate_entries()
+         .read()
+@@ -131,8 +143,25 @@ pub(crate) fn context_from_trace_headers(
+     tracestate: Option<&str>,
+ ) -> Option<Context> {
+     let traceparent = traceparent?;
++    // W3C Level 2 defines bit 0 as sampled and bit 1 as random trace ID.
++    // Let the pinned propagator validate all other header syntax using its
++    // supported sampling bit, then restore the complete defined flags.
++    let flags = match traceparent.split('-').nth(3) {
++        Some("02") => Some(0x02),
++        Some("03") => Some(0x03),
++        _ => None,
++    };
++    let normalized = flags.and_then(|flags| {
++        traceparent.strip_prefix("00-")?;
++        traceparent
++            .strip_suffix(if flags == 2 { "02" } else { "03" })
++            .map(|prefix| format!("{prefix}{:02x}", flags & 1))
++    });
+     let mut headers = HashMap::new();
+-    headers.insert("traceparent".to_string(), traceparent.to_string());
++    headers.insert(
++        "traceparent".to_string(),
++        normalized.unwrap_or_else(|| traceparent.to_string()),
++    );
+     if let Some(tracestate) = tracestate {
+         headers.insert("tracestate".to_string(), tracestate.to_string());
+     }
+@@ -142,6 +171,17 @@ pub(crate) fn context_from_trace_headers(
+     if !context.span().span_context().is_valid() {
+         return None;
+     }
++    if let Some(flags) = flags {
++        let span = context.span();
++        let parent = span.span_context();
++        return Some(context.with_remote_span_context(SpanContext::new(
++            parent.trace_id(),
++            parent.span_id(),
++            TraceFlags::new(flags),
++            true,
++            parent.trace_state().clone(),
++        )));
++    }
+     Some(context)
+ }
+ 
+@@ -368,6 +408,43 @@ mod tests {
+         assert!(span_context.is_remote());
+     }
+ 
++    #[test]
++    fn defined_trace_flags_survive_child_header_propagation() {
++        use super::span_w3c_trace_context;
++        use tracing_opentelemetry::OpenTelemetrySpanExt;
++
++        for flags in ["00", "01", "02", "03"] {
++            let provider = SdkTracerProvider::builder().build();
++            let subscriber = tracing_subscriber::registry()
++                .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("flags")));
++            tracing::subscriber::with_default(subscriber, || {
++                let parent =
++                    format!("00-11111111111111111111111111111111-2222222222222222-{flags}");
++                let context =
++                    context_from_trace_headers(Some(&parent), Some("vendor=value")).unwrap();
++                assert_eq!(
++                    context.span().span_context().trace_flags().to_u8(),
++                    u8::from_str_radix(flags, 16).unwrap()
++                );
++                let span = tracing::info_span!("child");
++                span.set_parent(context).unwrap();
++                let headers = span_w3c_trace_context(&span).unwrap();
++                let header = headers.traceparent.unwrap();
++                assert_eq!(&header[3..35], &parent[3..35]);
++                assert_eq!(&header[53..], flags);
++                assert_eq!(headers.tracestate.as_deref(), Some("vendor=value"));
++            });
++        }
++        assert!(
++            context_from_trace_headers(
++                Some("00-00000000000000000000000000000000-2222222222222222-03"),
++                None
++            )
++            .is_none()
++        );
++        assert!(context_from_trace_headers(Some("00-bad-2222222222222222-03"), None).is_none());
++    }
++
+     #[test]
+     fn invalid_traceparent_returns_none() {
+         let parent = context_from_trace_headers(
