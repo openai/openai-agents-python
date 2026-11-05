@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
 
 from typing_extensions import TypedDict, TypeVar
 
+from ._trace_context import TraceContext, _trace_context
+
 if TYPE_CHECKING:
     from ._function_tools import Tool
     from .canonical_storage import CustomStorage
@@ -533,6 +535,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
@@ -551,6 +554,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
@@ -569,6 +573,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
@@ -587,9 +592,14 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
+
+        parent_trace parents startup and defaults every new root or restored manual
+        continuation. None supplies no explicit parent. Pass a fresh worker
+        carrier on restore; trace context is never restored from saved state.
 
         An explicit provider here overrides this Agent's provider. Both are
         borrowed; the application closes them. When neither is supplied, this
@@ -659,6 +669,7 @@ class Agent(Generic[ContextT, OutputT]):
         from .telemetry import _capture
 
         try:
+            parent_trace = _trace_context(parent_trace)
             captured = _capture(trace_options)
         finally:
             del trace_options
@@ -677,6 +688,7 @@ class Agent(Generic[ContextT, OutputT]):
                 tool_selection=tools,
                 instruction_files=instruction_files,
                 reconciled_calls=reconciled_calls,
+                parent_trace=parent_trace,
                 **({"_tracing_context": captured.context} if captured.context is not None else {}),
             )
             session._trace_context = captured.context
@@ -718,6 +730,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
@@ -736,6 +749,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
@@ -755,6 +769,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
@@ -775,9 +790,13 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
+
+        parent_trace sets the W3C parent for native work, including a restored
+        manual continuation. trace_options controls captured SDK workflow policy.
 
         provider, model, and model_settings follow the same precedence and
         restore restrictions as session(). An implicit provider is retired when
@@ -869,6 +888,8 @@ class Agent(Generic[ContextT, OutputT]):
             # Capture before opening. An override may expose the Session and its
             # observations, including when it delegates to the original method.
             session_factory = self.session
+            if parent_trace is not None:
+                options["parent_trace"] = _trace_context(parent_trace)
             if trace_options is not None:
                 options["trace_options"] = trace_options
             if state is not None:
@@ -955,6 +976,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
@@ -973,6 +995,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
@@ -992,6 +1015,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
@@ -1012,6 +1036,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
@@ -1030,6 +1055,8 @@ class Agent(Generic[ContextT, OutputT]):
             try:
                 asyncio.get_running_loop()
             except RuntimeError:
+                if parent_trace is not None:
+                    options["parent_trace"] = _trace_context(parent_trace)
                 if trace_options is not None:
                     options["trace_options"] = trace_options
                 if state is not None:

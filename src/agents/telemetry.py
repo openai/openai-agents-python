@@ -21,7 +21,17 @@ from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
 from typing_extensions import ReadOnly, TypedDict
 
-__all__ = ["OtelTlsConfig", "OtlpGrpc", "OtlpHttp", "Exporter", "configure", "shutdown"]
+from ._trace_context import TraceContext as TraceContext
+
+__all__ = [
+    "TraceContext",
+    "OtelTlsConfig",
+    "OtlpGrpc",
+    "OtlpHttp",
+    "Exporter",
+    "configure",
+    "shutdown",
+]
 
 
 @dataclass(frozen=True, kw_only=True)

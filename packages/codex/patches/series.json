@@ -209,9 +209,13 @@
       "sha256": "0e45e726652f4df20626a7f21be11a7eb1cdc81f65f9d3c4030470962e7cb6b1"
     },
     {
+      "path": "0051-w3c-defined-trace-flags.patch",
+      "sha256": "b138e7672a1f3d2e20255598bab467d8b7d08f4b8f2415091f41474b8778d21c"
+    },
+    {
       "path": "0051-terminal-authentication-retry.patch",
       "sha256": "4f12eb2d9794fec908b2e78425641bf4d22e66de089f4523321c57c60f44f2bb"
     }
   ],
-  "result_tree": "f1fe54029fe19021a5ddf4f238cf2c75f465ac47"
+  "result_tree": "9491b77e7fae2cbf962bbbb7a12ccc3f6fe5c932"
 }
