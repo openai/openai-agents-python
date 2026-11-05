@@ -5,11 +5,11 @@ import gzip
 import json
 import traceback
 
-import httpx
 import pytest
 
 pytest.importorskip("a2a")
 
+import httpx
 from a2a.client import ClientCallContext
 from a2a.client.errors import A2AClientTimeoutError
 from a2a.helpers.proto_helpers import new_data_message, new_text_message
