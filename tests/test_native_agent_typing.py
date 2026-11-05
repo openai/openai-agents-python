@@ -1,7 +1,7 @@
 # pyright: strict
 """Consumer types for declarations, mixed tools, sessions, and results."""
 
-from collections.abc import AsyncIterator, Awaitable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -79,9 +79,26 @@ async def no_context_executor() -> None:
         assert_type(turn.events(), EventStream)
         assert_type(await turn.steer("detail"), None)
         assert_type(await session.submit("detail", if_busy="steer", writable_roots=None), Turn[Any])
+        assert_type(await session.submit("detail", if_busy="steer", trace_options=None), Turn[Any])
         assert_type(await turn.cancel(mode="graceful"), None)
         assert_type(await session.cancel_all(), None)
     assert_type(await executor_agent.run("read", environment=executor), Completed[str])
+
+
+async def mapping_trace_option_types(options: Mapping[str, Any]) -> None:
+    async with executor_agent.session(environment=executor, trace_options=options) as session:
+        assert_type(await session.submit("read", trace_options=options), Turn[str])
+        assert_type(await session.submit("read", trace_options={"disabled": True}), Turn[str])
+    assert_type(
+        await executor_agent.run("read", environment=executor, trace_options=options),
+        Completed[str],
+    )
+
+
+def mapping_trace_option_sync_types(options: Mapping[str, Any]) -> None:
+    assert_type(
+        executor_agent.run_sync("read", environment=executor, trace_options=options), Completed[str]
+    )
 
 
 native_roles = NativeAgents(

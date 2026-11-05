@@ -35,6 +35,7 @@ def owner(callback):
         _native_agents=SimpleNamespace(before_step=callback),
         _catalog=SimpleNamespace(generation=7),
     )
+    session._select_step_body = Session._select_step_body.__get__(session, Session)
     message = {
         "step_id": key[0],
         "thread": key[1],
@@ -153,6 +154,7 @@ def settlement(session, state):
     state.handle = SimpleNamespace(turn_id="child-turn", submission_id="child-submission")
     session.id = "session"
     session._observations = SimpleNamespace(notify=lambda: None, append=observations.append)
+    session._retire_questions = Session._retire_questions
     session._finish_failed_observations = lambda: None
 
     async def stop(owner):
@@ -196,6 +198,7 @@ async def test_expired_child_step_reply_preserves_later_native_cancelled_outcome
     assert not effects
     assert not state.failure.done()
     assert state.completion.done()
+    assert state.cleanup_error is None
     assert [(item.status, item.error_type) for item in observations] == [
         ("cancelled", "CancelledError")
     ]
@@ -227,4 +230,5 @@ async def test_expired_child_step_reply_keeps_real_callback_failure():
     await asyncio.wait_for(Session._settle_child_callbacks(session, state), 5)
     assert state.failure.result() is error
     assert state.completion.done()
+    assert state.cleanup_error is None
     assert [(item.status, item.error_type) for item in observations] == [("failed", "LookupError")]
