@@ -4,7 +4,9 @@ Use deterministic tests to check Python tools, application state and the request
 
 `agents.testing.ScriptedResponses` starts a local HTTP server with scripted responses. The native Session and Python tools still run. Configure a direct connection or proxy bypass for `127.0.0.1`, including applicable operating-system proxy settings, while both run. The server follows proxy configuration and does not isolate network access.
 
-After installing the matching SDK, save this complete script as `test_agent.py`. It uses synthetic data and needs no real model API key:
+## Write a tool test
+
+After [installing the matching SDK](installation.md), save this complete script as `test_agent.py`. It uses synthetic data and needs no real model API key:
 
 <!-- docs-check: run -->
 

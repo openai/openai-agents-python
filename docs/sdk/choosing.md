@@ -1,20 +1,18 @@
 # Choose how to run your agent
 
-Use Agents SDK v1 to run Codex in your Python application. Connect Python functions and application data, and return typed results.
-
-Follow the [installation guide](installation.md) to install the SDK preview.
+Choose where the agent loop runs. The Agents SDK runs Codex in your Python application. The hosted Agents API lets OpenAI run the agent loop and manage its sessions.
 
 ## Use your existing Python code
 
-Codex runs the model and tool loop. Agents SDK v1 connects that loop to your Python code:
+Use the Agents SDK to connect the model and tool loop to your Python code:
 
 - **[Functions as tools](tools.md#python-functions).** `@function_tool` declares a tool from supported type annotations, validates arguments, and calls the Python function.
 - **[Application objects](tools.md#application-context).** `ToolContext` gives a tool access to the application's context, such as an account or database client.
 - **[Python result types](configuration.md).** Set `output_type` to a supported type, such as a Pydantic model. The SDK validates the result and returns a value of that type in `final_output`.
 
-You manage the application workers, storage, and credentials. Configure the agent's tools and [execution permissions](tools.md#executor-policies) for your application.
+You manage the application workers, storage, and credentials. Configure the agent's tools and [execution permissions](execution.md#executor-policies) for your application.
 
-Continue with the [Agent and Session guide](index.md) to build your first agent.
+Follow [installation](installation.md) and the [quickstart](index.md) to build your first agent.
 
 ## Let OpenAI run the agent
 
@@ -44,7 +42,7 @@ Keep the Session open instead when any of these limits applies:
 - The pending request belongs to a child thread.
 - The root or a child has executed a code cell, even if the cell has finished.
 
-Set `programmatic_tool_calling=True` to aggregate tool results with generated JavaScript in V8. It cannot run arbitrary Python this way. Idle checkpoints preserve conversation history but not the JavaScript runtime state. Manual suspension requires history proving that neither the root nor a child has executed a code cell. See [capture limits](sessions.md#saving-a-settled-manual-request). Use direct function tools for simple calls.
+Set `programmatic_tool_calling=True` to aggregate tool results with generated JavaScript in V8. It cannot run arbitrary Python this way. Idle checkpoints preserve conversation history but not the JavaScript runtime state. Manual suspension requires history proving that neither the root nor a child has executed a code cell. See [capture limits](state.md#save-a-settled-manual-request). Use direct function tools for simple calls.
 
 Declare `NativeAgents` to delegate with the same permissions. Children share selected tools, context, and policies and return text. Model metadata and nesting depth limit which children can start. Use separately configured Agents when tasks need different tool access.
 
@@ -54,4 +52,4 @@ For a custom Responses endpoint, run separate [text, tools, strict-output, and W
 
 In an open Session, `session.capabilities.get(feature)` reports configuration support. To check whether the Session is ready to save, call `await session.checkpoint_status(kind="idle")` or use `kind="manual_wait"`.
 
-A readiness check reserves no state. The SDK checks again when saving, and independent children can still be running when the root result arrives. See [support and readiness](sessions.md#check-support-and-capture-readiness).
+A readiness check reserves no state. The SDK checks again when saving, and independent children can still be running when the root result arrives. See [support and readiness](state.md#check-support-and-capture-readiness).

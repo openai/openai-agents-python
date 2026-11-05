@@ -40,9 +40,14 @@ nav:
   - Build:
       - Task recipes: recipes.md
       - Tools: tools.md
-      - Sessions and state: sessions.md
+      - Conversations and streaming: sessions.md
+      - Save and restore state: state.md
       - Configuration: configuration.md
       - Custom Responses endpoints: providers.md
+  - Control work:
+      - Command execution: execution.md
+      - Approvals and manual results: approvals.md
+      - Delegate work: delegation.md
   - Test and operate:
       - Testing: testing.md
       - Troubleshooting and usage: troubleshooting.md

@@ -1,12 +1,8 @@
 # OpenAI Agents SDK
 
-Build Python agents that use Codex to run model turns and keep conversation history. Define instructions, connect Python functions and MCP tools, and manage conversations in your application. Your Python code supplies typed tools, callbacks, and application data.
+Build Python agents that use Codex to run model turns and keep conversation history. Define instructions, connect Python functions and MCP tools, and manage conversations in your application. The SDK validates tool arguments, calls your functions, and parses typed results.
 
-## Build agents in Python
-
-Use Agents SDK to connect your Python functions and application data to an agent. The SDK validates tool arguments, calls your functions, and parses typed results.
-
-Use [Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview) when you want OpenAI to run the agent and manage sessions and recovery.
+Your application runs the agent and owns its workers, storage, and credentials. See [Choose how to run your agent](docs/sdk/choosing.md) to compare this model with the hosted Agents API.
 
 ## Install
 
@@ -33,7 +29,9 @@ python -m pip install "https://github.com/openai/openai-agents-python/releases/d
 
 This preview is distributed through GitHub Releases. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API shown here. See the [installation guide](docs/sdk/installation.md) for setup, supported platforms, and troubleshooting.
 
-## Example
+<a id="example"></a>
+
+## Run your first agent
 
 Save this as `agent.py` in your project directory:
 
@@ -70,15 +68,17 @@ This example makes live model requests and prints a greeting for Ada, such as `H
 
 ## SDK guides
 
-Start with the [SDK overview](docs/sdk/index.md), or choose a topic below. These guides describe the SDK preview.
+Start with the [quickstart](docs/sdk/index.md), then choose a task below. The branch guides include development APIs; use the [documentation for your installed release](docs/sdk/versions.md) when running a published wheel.
 
 | Guide | What you can do |
 | --- | --- |
 | [Agent configuration](docs/sdk/configuration.md) | Set instructions, the model, the provider, and the output type. |
-| [Function tools](docs/sdk/tools.md#python-functions) | Make Python functions available with `function_tool`. |
-| [MCP tools](docs/sdk/tools.md#native-mcp) | Connect an agent to tools from MCP servers. |
-| [Sessions and state](docs/sdk/sessions.md) | Continue conversations and save checkpoints. |
-| [Streaming](docs/sdk/sessions.md#stream-observations) | Show text and tool events as they arrive. |
+| [Tools](docs/sdk/tools.md) | Call Python functions or connect MCP servers. |
+| [Conversations and streaming](docs/sdk/sessions.md) | Continue a conversation, show progress, and stop work. |
+| [Save and restore state](docs/sdk/state.md) | Choose storage, compact history, and restore checkpoints. |
+| [Command execution](docs/sdk/execution.md) | Run commands with explicit workspace and network permissions. |
+| [Approvals and manual results](docs/sdk/approvals.md) | Ask for a decision or accept a tool result from your application. |
+| [Delegate work](docs/sdk/delegation.md) | Start and control native child agents. |
 | [API reference](docs/sdk/reference.md) | Find supported calls and defaults. |
 
 ## More examples

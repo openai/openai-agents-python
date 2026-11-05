@@ -16,9 +16,13 @@ The historical private-preview preparation skills do not apply to this public br
 
 ## Qualify the exact commit
 
+### Check the Tests run
+
 Wait for the candidate's **Tests** push run to complete successfully. It must include successful native builds for Linux, macOS, and Windows, all Python test matrices, native macOS sandbox tests, lint, and type checks. A skipped build or a successful documentation-only run cannot qualify a release.
 
 The distribution qualifier requires the latest Tests push run for the exact commit and source branch. It checks the version change, every required job's latest execution, artifact producer times, commit identities, and archive digests. It then validates wheel names, native platform tags, and package versions. Unless you explicitly select the preview branch, the qualifier preserves the existing `main` behavior.
+
+### Collect the distributions
 
 From the checked-out candidate, set the release tag and create a fresh staging directory:
 
@@ -36,6 +40,8 @@ python -I .github/scripts/release_automation.py qualify-distributions \
 The collector retains three wheels and the Linux source distribution. Only the wheels are release assets. Retain the qualification record. Before publication, inspect the source/build and installed-wheel receipts from the selected artifacts. Confirm that the packaged Python source and native inputs match the candidate. Do not substitute a locally built wheel or an artifact from a different repository or commit.
 
 Current wheels support standard CPython 3.10–3.14 on Linux x86_64 with glibc 2.39 or newer, Windows x64, and macOS 11 or newer on Apple Silicon. They do not support Intel Macs, ARM Linux, ARM Windows, Alpine/musl, PyPy or free-threaded Python.
+
+### Create wheel checksums
 
 Create the checksums for the three reviewed wheel files:
 
@@ -57,7 +63,11 @@ PY
 
 ## Publish the prerelease
 
+### Prepare release notes
+
 Prepare `$RELEASE_STAGE/notes.md` from the reviewed changelog. Include the exact version, source commit, qualifying Tests run, supported platforms, wheel filenames, and installation commands. Use versioned links so the release remains usable after the README advances.
+
+### Publish the reviewed tag and assets
 
 Recheck that the tag and release are absent. Confirm that the source branch, reviewed commit, and qualification record still agree. Create and validate the local tag before pushing it:
 
@@ -73,7 +83,9 @@ gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
   "$RELEASE_STAGE"/dist/*.whl "$RELEASE_STAGE/dist/SHA256SUMS"
 ```
 
-After an uncertain write, inspect the existing tag, release and assets before retrying. Read back the target commit, prerelease flag, asset names and hashes. Do not upload the source distribution, test executables or CI receipts as customer assets.
+### Read back the release
+
+After an uncertain write, inspect the existing tag, release, and assets before retrying. Read back the target commit, prerelease flag, asset names, and hashes. Do not upload the source distribution, test executables or CI receipts as customer assets.
 
 ## Verify the downloads and update documentation
 
