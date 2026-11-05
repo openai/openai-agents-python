@@ -77,6 +77,7 @@ async def no_context_executor() -> None:
         assert_type(turn.events(), EventStream)
         assert_type(await turn.steer("detail"), None)
         assert_type(await session.submit("detail", if_busy="steer", writable_roots=None), Turn[Any])
+        assert_type(await session.submit("detail", if_busy="steer", trace_options=None), Turn[Any])
         assert_type(await turn.cancel(mode="graceful"), None)
         assert_type(await session.cancel_all(), None)
     assert_type(await executor_agent.run("read", environment=executor), Completed[str])

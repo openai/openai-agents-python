@@ -2786,7 +2786,7 @@ class Session(Generic[ContextT, OutputT]):
         tools: None = None,
         before_step: None = None,
         writable_roots: None = None,
-        trace_options: TraceOptions | None = None,
+        trace_options: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
