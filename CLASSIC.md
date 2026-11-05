@@ -16,6 +16,26 @@ Classic is part of the same `openai-agents` distribution. The extra installs the
 
 Optional v0 integrations use `classic-` prefixed extras, for example `.[classic,classic-voice]`, `.[classic,classic-litellm]`, or `.[classic,classic-sqlalchemy]`. Install only the integrations your application uses. The base classic extra does not install every optional service client.
 
+### SQLite session drivers
+
+`AsyncSQLiteSession` requires `aiosqlite` in addition to the classic extra:
+
+```sh
+python -m pip install '.[classic]' aiosqlite
+```
+
+`SQLAlchemySession` requires an async driver that matches your database URL. For SQLite URLs that start with `sqlite+aiosqlite://`, install:
+
+```sh
+python -m pip install '.[classic-sqlalchemy]' aiosqlite
+```
+
+The `classic-sqlalchemy` extra includes the classic runtime and `asyncpg` for PostgreSQL URLs that start with `postgresql+asyncpg://`. Install drivers for other databases separately, as in v0.
+
+### Experimental Codex integration
+
+`agents.classic.extensions.experimental.codex` runs the Codex CLI as a separate process. Install the CLI separately and make `codex` available on `PATH`, or select its executable with `CODEX_PATH` or `Codex(codex_path_override="/absolute/path/to/codex")`. This distribution does not bundle that CLI. The native SDK helper executables serve the root `agents` API and are not replacements for the CLI used by this integration.
+
 ## Change imports before changing behavior
 
 Change imports for each existing workflow together:
