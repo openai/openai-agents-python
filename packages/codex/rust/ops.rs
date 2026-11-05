@@ -410,6 +410,7 @@ impl Default for Mode {
 
 params!(TurnParams {
     input: Value,
+    observation_submission_id: Option<String>,
     client_id: Option<String>,
     #[serde(default, alias = "settings", with = "ThreadSettings")]
     thread_settings: ThreadSettingsOverrides,
@@ -600,18 +601,25 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    observation_submission_id: Option<String>,
     #[serde(default)]
     output_schema: Option<serde_json::Map<String, Value>>,
 });
 
 pub async fn recover_prepared(
-    thread: &CodexThread,
+    state: &crate::engine::ThreadState,
     turn_id: String,
     original_call_ids: Vec<String>,
     value: Value,
 ) -> Result<Value> {
     let p: RecoveryOptions = decode(value)?;
+    let thread = &state.thread;
     let mut init = thread.config_snapshot().await.turn_extension_init;
+    if let Some(submission) = p.observation_submission_id {
+        state
+            .request_metadata
+            .seed(&mut init, submission, state.id.to_string());
+    }
     crate::recovery_guard::Seed::attach(&mut init, &turn_id, original_call_ids);
     let seed = crate::turn_settlement::Seed::attach(&mut init);
     let submission = thread
@@ -647,6 +655,20 @@ async fn start_with_params<'a>(
         p.writable_roots.is_none(),
         "Writable roots require a managed Session"
     );
+    let turn_init = if let (Some((state, _)), Some(submission)) =
+        (managed.as_ref(), p.observation_submission_id)
+    {
+        let mut init = match turn_init {
+            Some(init) => init,
+            None => thread.config_snapshot().await.turn_extension_init,
+        };
+        state
+            .request_metadata
+            .seed(&mut init, submission, state.id.to_string());
+        Some(init)
+    } else {
+        turn_init
+    };
     let input = if p.input.is_array() {
         TurnInput::UserInput {
             content: decode::<Vec<UserInput>>(p.input)?,
