@@ -22,7 +22,7 @@ pub(crate) struct SavedCodexLogin {
 }
 
 pub(crate) struct CodexAccount {
-    pub account_id: String,
+    pub account_id: Option<String>,
     pub plan_type: String,
     pub binding: String,
     pub auth_file: PathBuf,
@@ -46,13 +46,11 @@ impl SavedCodexLogin {
         let auth = manager
             .auth_cached()
             .context("Saved Codex OAuth login is unavailable")?;
-        let account_id = auth
-            .get_account_id()
-            .context("Saved Codex account ID is unavailable")?;
+        let account_id = auth.get_account_id();
         ensure!(
             self.account_id
                 .as_ref()
-                .is_none_or(|expected| *expected == account_id),
+                .is_none_or(|expected| Some(expected) == account_id.as_ref()),
             "Saved Codex login does not match the expected account"
         );
         let user_id = auth

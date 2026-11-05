@@ -158,9 +158,9 @@ class CodexLogin:
 
 @dataclass(frozen=True, kw_only=True)
 class CodexAccount:
-    """The account ID and plan type recorded in the login at Session opening."""
+    """The saved plan type and optional workspace ID at Session opening."""
 
-    account_id: str
+    account_id: str | None
     plan_type: str
 
 

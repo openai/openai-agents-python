@@ -1,5 +1,19 @@
+diff --git a/codex-rs/codex-api/src/sse/responses_error.rs b/codex-rs/codex-api/src/sse/responses_error.rs
+index 12df487a9d91ac7f6ea63ebc8929e57b659b69dc..577af7a5ee1e5c06013028e058627c151f5ff875 100644
+--- a/codex-rs/codex-api/src/sse/responses_error.rs
++++ b/codex-rs/codex-api/src/sse/responses_error.rs
+@@ -51,7 +51,8 @@ pub(super) fn parse_failed_response(response: Option<Value>) -> ApiError {
+             | "credit_balance_exhausted"
+             | "organization_spend_limit_exceeded"
+             | "project_spend_limit_exceeded"
+-            | "organization_usage_limit_exceeded",
++            | "organization_usage_limit_exceeded"
++            | "subscription_sharing_usage_limit_exceeded",
+         ) => ApiError::QuotaExceeded,
+         Some("usage_not_included") => ApiError::UsageNotIncluded,
+         Some("cyber_policy") => ApiError::CyberPolicy {
 diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
-index ab15a338718561251a4673c1e53e77b5e68485a8..3fdd1682b10bd4b1d5dccba34e2d096b478be077 100644
+index ab15a338718561251a4673c1e53e77b5e68485a8..78ea721f37378d268e4251e6c1e3171ef858c6ee 100644
 --- a/codex-rs/login/src/auth/auth_tests.rs
 +++ b/codex-rs/login/src/auth/auth_tests.rs
 @@ -81,6 +81,7 @@ async fn refresh_without_id_token() {
@@ -10,7 +24,7 @@ index ab15a338718561251a4673c1e53e77b5e68485a8..3fdd1682b10bd4b1d5dccba34e2d096b
      )
      .expect("update_tokens should succeed");
  
-@@ -90,6 +91,47 @@ async fn refresh_without_id_token() {
+@@ -90,6 +91,115 @@ async fn refresh_without_id_token() {
      assert_eq!(tokens.refresh_token, "new-refresh-token");
  }
  
@@ -55,27 +69,97 @@ index ab15a338718561251a4673c1e53e77b5e68485a8..3fdd1682b10bd4b1d5dccba34e2d096b
 +    Ok(())
 +}
 +
++#[tokio::test]
++async fn saved_chatgpt_refresh_adopts_a_concurrent_same_owner_update() -> anyhow::Result<()> {
++    for (other_workspace, authority_rejected) in [(false, true), (false, false), (true, true)] {
++        let home = tempdir()?;
++        write_auth_file(
++            AuthFileParams {
++                openai_api_key: None,
++                chatgpt_plan_type: Some("pro".to_string()),
++                chatgpt_account_id: None,
++            },
++            home.path(),
++        )?;
++        let manager = AuthManager::shared_saved_chatgpt(
++            home.path().to_path_buf(),
++            crate::test_support::transport_default_auth_route_config(),
++        )?;
++        let Some(CodexAuth::Chatgpt(auth)) = manager.auth_cached() else {
++            anyhow::bail!("expected saved ChatGPT auth");
++        };
++        let attempted = auth.current_auth_json().expect("saved login");
++        let mut replacement = attempted.clone();
++        let tokens = replacement.tokens.as_mut().expect("login tokens");
++        tokens.access_token = "other-process-access-token".to_string();
++        tokens.refresh_token = "other-process-refresh-token".to_string();
++        if other_workspace {
++            let workspace = Some(WORKSPACE_ID_DISALLOWED.to_string());
++            let jwt = fake_jwt_for_auth_file_params(&AuthFileParams {
++                openai_api_key: None,
++                chatgpt_plan_type: Some("pro".to_string()),
++                chatgpt_account_id: workspace.clone(),
++            })?;
++            tokens.id_token = parse_chatgpt_jwt_claims(&jwt)?;
++            tokens.account_id = workspace;
++        }
++        auth.storage().save(&replacement)?;
++
++        let response = if authority_rejected {
++            Err(RefreshTokenFailedError::new(
++                RefreshTokenFailedReason::Exhausted,
++                "Refresh token already used.".to_string(),
++            )
++            .into())
++        } else {
++            Ok(RefreshResponse {
++                id_token: None,
++                access_token: Some("stale-response-access-token".to_string()),
++                refresh_token: Some("stale-response-refresh-token".to_string()),
++            })
++        };
++        let result = manager
++            .finish_chatgpt_refresh(&auth, Some(&attempted), response)
++            .await;
++        let expected_token = if other_workspace {
++            assert!(matches!(result, Err(RefreshTokenError::Permanent(_))));
++            "test-access-token"
++        } else {
++            result?;
++            "other-process-access-token"
++        };
++        assert_eq!(
++            manager.auth_cached().expect("cached login").get_token()?,
++            expected_token
++        );
++        assert_eq!(auth.storage().load()?.as_ref(), Some(&replacement));
++    }
++    Ok(())
++}
++
  #[test]
  fn login_with_api_key_overwrites_existing_auth_json() {
      let dir = tempdir().unwrap();
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb0bf80678 100644
+index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b67629295a17693 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
-@@ -1596,16 +1596,71 @@ async fn load_auth(
+@@ -1596,16 +1596,73 @@ async fn load_auth(
      Ok(Some(auth))
  }
  
 +// The SDK opts into the exact file-backed Codex OAuth login. Unlike the
 +// regular loader, this path never looks at environment or in-memory auth.
-+fn saved_chatgpt_owner(auth: &AuthDotJson) -> Option<(String, String)> {
++type SavedChatgptOwner = (Option<String>, String);
++
++fn saved_chatgpt_owner(auth: &AuthDotJson) -> Option<SavedChatgptOwner> {
 +    let tokens = auth.tokens.as_ref()?;
-+    let account_id = tokens.account_id.as_ref()?;
++    let account_id = tokens.account_id.as_ref();
 +    let user_id = tokens.id_token.chatgpt_user_id.as_ref()?;
 +    if auth.resolved_mode() != AuthMode::Chatgpt
 +        || auth.last_refresh.is_none()
-+        || account_id.trim().is_empty()
-+        || tokens.id_token.chatgpt_account_id.as_ref() != Some(account_id)
++        || account_id.is_some_and(|account| account.trim().is_empty())
++        || tokens.id_token.chatgpt_account_id.as_ref() != account_id
 +        || tokens.id_token.is_fedramp_account()
 +        || user_id.trim().is_empty()
 +        || tokens.access_token.trim().is_empty()
@@ -83,14 +167,14 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
 +    {
 +        return None;
 +    }
-+    Some((account_id.clone(), user_id.clone()))
++    Some((account_id.cloned(), user_id.clone()))
 +}
 +
 +fn load_saved_chatgpt(
 +    codex_home: &Path,
 +    auth_route_config: &AuthRouteConfig,
-+    expected_owner: Option<&(String, String)>,
-+) -> std::io::Result<Option<(CodexAuth, (String, String))>> {
++    expected_owner: Option<&SavedChatgptOwner>,
++) -> std::io::Result<Option<(CodexAuth, SavedChatgptOwner)>> {
 +    let storage = create_auth_storage(
 +        codex_home.to_path_buf(),
 +        AuthCredentialsStoreMode::File,
@@ -134,7 +218,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
  
      let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
      if let Some(id_token) = id_token {
-@@ -1618,6 +1673,13 @@ fn persist_tokens(
+@@ -1618,6 +1675,13 @@ fn persist_tokens(
          tokens.refresh_token = refresh_token;
      }
      auth_dot_json.last_refresh = Some(Utc::now());
@@ -148,7 +232,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
      storage.save(&auth_dot_json)?;
      Ok(auth_dot_json)
  }
-@@ -1627,9 +1689,13 @@ fn persist_tokens(
+@@ -1627,9 +1691,13 @@ fn persist_tokens(
  async fn request_chatgpt_token_refresh(
      refresh_token: String,
      client: &HttpClient,
@@ -164,15 +248,15 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
      let oauth = OAuthClient::new(
          client,
          TokenEndpoint {
-@@ -2059,6 +2125,7 @@ pub struct AuthManager {
+@@ -2059,6 +2127,7 @@ pub struct AuthManager {
      agent_identity_bootstrap_cooldown: Mutex<AgentIdentityBootstrapCooldown>,
      external_auth: RwLock<Option<Arc<dyn ExternalAuth>>>,
      workload_identity_selected: bool,
-+    saved_chatgpt_owner: Option<(String, String)>,
++    saved_chatgpt_owner: Option<SavedChatgptOwner>,
      auth_route_config: AuthRouteConfig,
  }
  
-@@ -2181,6 +2248,14 @@ impl AuthManager {
+@@ -2181,6 +2250,14 @@ impl AuthManager {
              .await
              .ok()
              .flatten();
@@ -187,7 +271,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
          let AuthConfig {
              codex_home,
              auth_credentials_store_mode,
-@@ -2216,10 +2291,37 @@ impl AuthManager {
+@@ -2216,10 +2293,37 @@ impl AuthManager {
              agent_identity_bootstrap_cooldown: Mutex::default(),
              external_auth: RwLock::new(None),
              workload_identity_selected: false,
@@ -225,7 +309,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
      /// Create an AuthManager with a specific CodexAuth, for testing only.
      pub fn from_auth_for_testing(auth: CodexAuth) -> Arc<Self> {
          Self::from_optional_auth_for_testing(Some(auth))
-@@ -2252,6 +2354,7 @@ impl AuthManager {
+@@ -2252,6 +2356,7 @@ impl AuthManager {
              agent_identity_bootstrap_cooldown: Mutex::default(),
              external_auth: RwLock::new(None),
              workload_identity_selected: false,
@@ -233,7 +317,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
              auth_route_config: crate::test_support::transport_default_auth_route_config(),
          })
      }
-@@ -2282,6 +2385,7 @@ impl AuthManager {
+@@ -2282,6 +2387,7 @@ impl AuthManager {
              agent_identity_bootstrap_cooldown: Mutex::default(),
              external_auth: RwLock::new(None),
              workload_identity_selected: false,
@@ -241,7 +325,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
              auth_route_config: crate::test_support::transport_default_auth_route_config(),
          })
      }
-@@ -2320,6 +2424,7 @@ impl AuthManager {
+@@ -2320,6 +2426,7 @@ impl AuthManager {
              agent_identity_bootstrap_cooldown: Mutex::default(),
              external_auth: RwLock::new(None),
              workload_identity_selected: false,
@@ -249,7 +333,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
              auth_route_config: crate::test_support::transport_default_auth_route_config(),
          })
      }
-@@ -2348,6 +2453,7 @@ impl AuthManager {
+@@ -2348,6 +2455,7 @@ impl AuthManager {
              agent_identity_bootstrap_cooldown: Mutex::default(),
              external_auth: RwLock::new(Some(Arc::new(BearerTokenRefresher::new(config)))),
              workload_identity_selected: false,
@@ -257,7 +341,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
              // External bearer auth refreshes by running the provider's command and never makes
              // auth-owned HTTP requests, so this route is intentionally inert.
              auth_route_config: AuthRouteConfig::from_http_client_factory(HttpClientFactory::new(
-@@ -2417,6 +2523,9 @@ impl AuthManager {
+@@ -2417,6 +2525,9 @@ impl AuthManager {
          policy: AgentIdentityAuthPolicy,
          session_source: SessionSource,
      ) -> std::io::Result<Option<AgentIdentityAuth>> {
@@ -267,7 +351,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
          let Some(auth) = self.auth().await else {
              return Ok(None);
          };
-@@ -2572,6 +2681,12 @@ impl AuthManager {
+@@ -2572,6 +2683,12 @@ impl AuthManager {
      }
  
      async fn load_auth(&self) -> Option<CodexAuth> {
@@ -280,7 +364,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
          if let Some(external_auth) = self.external_auth_provider() {
              let cached_auth = self.auth_cached();
              if cached_auth
-@@ -2661,6 +2776,11 @@ impl AuthManager {
+@@ -2661,6 +2778,11 @@ impl AuthManager {
          &self,
          external_auth: Arc<dyn ExternalAuth>,
      ) -> Result<(), RefreshTokenError> {
@@ -292,7 +376,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
          if self.workload_identity_selected {
              return Err(permanent_external_auth_error(
                  "workload identity auth cannot be replaced at runtime",
-@@ -2843,7 +2963,15 @@ impl AuthManager {
+@@ -2843,7 +2965,15 @@ impl AuthManager {
      /// we can assume that the source already refreshed it. Otherwise, ask the
      /// token authority to refresh.
      pub async fn refresh_token(&self) -> Result<(), RefreshTokenError> {
@@ -309,7 +393,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
              RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                  RefreshTokenFailedReason::Other,
                  REFRESH_TOKEN_UNKNOWN_MESSAGE.to_string(),
-@@ -2882,6 +3010,9 @@ impl AuthManager {
+@@ -2882,6 +3012,9 @@ impl AuthManager {
      /// it and update the shared cache. If the token refresh fails, returns the
      /// error to the caller.
      pub async fn refresh_token_from_authority(&self) -> Result<(), RefreshTokenError> {
@@ -319,7 +403,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
          let _refresh_guard = self.refresh_lock.acquire().await.map_err(|_| {
              RefreshTokenError::Permanent(RefreshTokenFailedError::new(
                  RefreshTokenFailedReason::Other,
-@@ -2974,6 +3105,12 @@ impl AuthManager {
+@@ -2974,6 +3107,12 @@ impl AuthManager {
      }
  
      fn ensure_logout_allowed(&self) -> std::io::Result<()> {
@@ -332,7 +416,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
          if self.workload_identity_selected {
              return Err(std::io::Error::new(
                  std::io::ErrorKind::PermissionDenied,
-@@ -3091,13 +3228,24 @@ impl AuthManager {
+@@ -3091,17 +3230,52 @@ impl AuthManager {
          auth: &ChatgptAuth,
          refresh_token: String,
      ) -> Result<(), RefreshTokenError> {
@@ -345,16 +429,52 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..237775e8513e286db4c9fa11698ba6fb
 +        } else {
 +            None
 +        };
-+        let refresh_response =
++        let response =
 +            request_chatgpt_token_refresh(refresh_token, auth.client(), saved_login.is_some())
-+                .await?;
++                .await;
++        self.finish_chatgpt_refresh(auth, saved_login.as_ref(), response)
++            .await
++    }
  
-         persist_tokens(
-             auth.storage(),
-             refresh_response.id_token,
-             refresh_response.access_token,
-             refresh_response.refresh_token,
-+            saved_login.as_ref(),
-         )
-         .map_err(RefreshTokenError::from)?;
+-        persist_tokens(
+-            auth.storage(),
+-            refresh_response.id_token,
+-            refresh_response.access_token,
+-            refresh_response.refresh_token,
+-        )
+-        .map_err(RefreshTokenError::from)?;
++    async fn finish_chatgpt_refresh(
++        &self,
++        auth: &ChatgptAuth,
++        saved_login: Option<&AuthDotJson>,
++        response: Result<RefreshResponse, RefreshTokenError>,
++    ) -> Result<(), RefreshTokenError> {
++        let result = response.and_then(|response| {
++            persist_tokens(
++                auth.storage(),
++                response.id_token,
++                response.access_token,
++                response.refresh_token,
++                saved_login,
++            )
++            .map_err(RefreshTokenError::from)
++        });
++        if let Err(error) = result {
++            // A separate Codex process may have saved a replacement during the
++            // request. The saved loader checks the owner before we adopt it.
++            if let Some(attempted) = saved_login.and_then(|saved| saved.tokens.as_ref())
++                && !matches!(&error, RefreshTokenError::Policy(_))
++                && let Some(replacement) = self.load_auth().await
++                && let Ok(token) = replacement.get_token()
++                && token != attempted.access_token
++            {
++                self.set_cached_auth(Some(replacement));
++                return Ok(());
++            }
++            return Err(error);
++        }
          self.reload().await;
+-
+         Ok(())
+     }
+ }

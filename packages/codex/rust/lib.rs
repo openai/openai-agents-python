@@ -262,7 +262,7 @@ impl Engine {
         })
     }
     #[getter]
-    fn _codex_account(&self) -> PyResult<Option<(String, String, String)>> {
+    fn _codex_account(&self) -> PyResult<Option<(Option<String>, String, String)>> {
         let inner = self.current()?;
         Ok(inner.codex_account.as_ref().map(|account| {
             (

@@ -45,20 +45,20 @@ def saved_login(
     home: Path,
     *,
     user: str = USER,
-    account: str = ACCOUNT,
+    account: str | None = ACCOUNT,
     token: str = "saved-token",
     mode: str = "chatgpt",
     id_account: str | None = None,
     fedramp: bool = False,
 ) -> Path:
-    payload = {
-        "https://api.openai.com/auth": {
-            "chatgpt_account_id": id_account or account,
-            "chatgpt_account_is_fedramp": fedramp,
-            "chatgpt_user_id": user,
-            "chatgpt_plan_type": "pro",
-        }
+    auth_claims = {
+        "chatgpt_account_is_fedramp": fedramp,
+        "chatgpt_user_id": user,
+        "chatgpt_plan_type": "pro",
     }
+    if (workspace := id_account or account) is not None:
+        auth_claims["chatgpt_account_id"] = workspace
+    payload = {"https://api.openai.com/auth": auth_claims}
     claims = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
     home.mkdir(exist_ok=True)
     (home / "auth.json").write_text(
@@ -258,8 +258,9 @@ async def test_managed_mode_refuses_missing_or_non_oauth_login_despite_env_keys(
     assert codex_endpoint.requests == []
 
 
-async def test_expected_account_checked_before_model_work(codex_endpoint, tmp_path):
-    home = saved_login(tmp_path / "codex")
+@pytest.mark.parametrize("account", [ACCOUNT, None], ids=["workspace", "personal"])
+async def test_expected_account_checked_before_model_work(codex_endpoint, tmp_path, account):
+    home = saved_login(tmp_path / "codex", account=account)
     provider = NativeProvider(auth=CodexLogin(codex_home=home, account_id="other-workspace"))
     with pytest.raises(RuntimeError, match="does not match the expected account"):
         async with Agent(instructions=INSTRUCTIONS, provider=provider).session():
@@ -268,13 +269,17 @@ async def test_expected_account_checked_before_model_work(codex_endpoint, tmp_pa
 
 
 @pytest.mark.parametrize("local", [False, True])
-async def test_resume_keeps_the_original_user_and_workspace(codex_endpoint, tmp_path, local):
+@pytest.mark.parametrize("account", [ACCOUNT, None], ids=["workspace", "personal"])
+async def test_resume_keeps_the_original_user_and_workspace(
+    codex_endpoint, tmp_path, local, account
+):
     peer = codex_endpoint
-    home = saved_login(tmp_path / "codex")
+    home = saved_login(tmp_path / "codex", account=account)
     agent = codex_agent(home)
     opening = {"storage": LocalStorage(tmp_path / "threads")} if local else {}
     peer.respond(assistant_output("Original answer."))
     async with timeout(30), agent.session(**opening) as session:
+        assert session.codex_account == CodexAccount(account_id=account, plan_type="pro")
         assert (await submit(session, "Start.")).final_output == "Original answer."
         restore = (
             {"storage": opening["storage"], "resume": session.id}
@@ -290,20 +295,42 @@ async def test_resume_keeps_the_original_user_and_workspace(codex_endpoint, tmp_
         async with api_agent.session(**restore):
             pytest.fail("Restored plan-backed history with an API key")
 
-    for user, account in (("other-user", ACCOUNT), (USER, "other-workspace")):
-        saved_login(home, user=user, account=account, token="wrong-token")
+    for user, changed_account in (("other-user", account), (USER, "other-workspace")):
+        saved_login(home, user=user, account=changed_account, token="wrong-token")
         with pytest.raises(RuntimeError, match="Codex login"):
             async with agent.session(**restore):
                 pytest.fail("Restored with a different login")
     assert len(peer.requests) == 1
 
-    saved_login(home, token="rotated-token")
+    saved_login(home, account=account, token="rotated-token")
     peer.respond(assistant_output("Continued answer."))
     async with timeout(30), agent.session(**restore) as resumed:
         assert (await submit(resumed, "Continue.")).final_output == "Continued answer."
     assert peer.request_headers[1]["authorization"] == "Bearer rotated-token"
-    assert peer.request_headers[1]["chatgpt-account-id"] == ACCOUNT
+    assert all(headers.get("chatgpt-account-id") == account for headers in peer.request_headers)
     assert "Original answer." in json.dumps(peer.requests[1]["input"])
+
+
+async def test_terminal_saved_login_plan_limit_is_not_retried(codex_endpoint, tmp_path):
+    home = saved_login(tmp_path / "codex")
+    codex_endpoint.respond(
+        {
+            "type": "response.failed",
+            "response": {
+                "error": {
+                    "code": "subscription_sharing_usage_limit_exceeded",
+                    "type": "usage_limit_reached",
+                    "message": "Synthetic plan limit.",
+                }
+            },
+        }
+    )
+    codex_endpoint.respond(assistant_output("An unexpected retry succeeded."))
+    async with timeout(30), codex_agent(home).session() as session:
+        with pytest.raises(NativeError) as caught:
+            await submit(session, "Hello.")
+    assert caught.value.category == "usage_limit_exceeded"
+    assert len(codex_endpoint.requests) == 1
 
 
 async def test_api_key_mode_stays_on_its_explicit_provider(codex_endpoint, monkeypatch, tmp_path):
