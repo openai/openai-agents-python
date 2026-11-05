@@ -1382,24 +1382,39 @@ impl NativeThread {
 
     fn _submit<'py>(&self, py: Python<'py>, params_json: &str) -> PyResult<Bound<'py, PyAny>> {
         let params: Value = serde_json::from_str(params_json).map_err(py_error)?;
+        let context = params
+            .get("tracing_context")
+            .filter(|value| !value.is_null())
+            .map(|value| {
+                let token = value
+                    .as_str()
+                    .ok_or_else(|| py_error("Invalid tracing context token"))?;
+                codex_otel::sdk_trace::context(token).map_err(py_error)
+            })
+            .transpose()?
+            .unwrap_or_default();
         let inner = self.current()?;
-        async_bridge::future_into_py(py, async move {
-            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            if inner
-                .thread
-                .thread_extension_data()
-                .get::<python_tools::PythonTools>()
-                .is_none()
-            {
-                return Err(py_error(
-                    "managed submit requires a replaceable tool session",
-                ));
+        async_bridge::future_into_py(
+            py,
+            async move {
+                let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+                if inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+                    .is_none()
+                {
+                    return Err(py_error(
+                        "managed submit requires a replaceable tool session",
+                    ));
+                }
+                let result = ops::submit_replaceable(&inner, params)
+                    .await
+                    .map_err(py_error)?;
+                serde_json::to_string(&result).map_err(py_error)
             }
-            let result = ops::submit_replaceable(&inner, params)
-                .await
-                .map_err(py_error)?;
-            serde_json::to_string(&result).map_err(py_error)
-        })
+            .with_context(context),
+        )
     }
 
     fn _reconcile_local_calls<'py>(

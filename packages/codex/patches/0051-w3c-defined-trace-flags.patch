@@ -1,3 +1,315 @@
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 10926b40ccfb44657688ec4939562bcca8ec7b48..ab10d45d9c6fcbe0a088eacc1e1cc08b14e9a19e 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -5829,6 +5829,7 @@ async fn tree_shutdown_preserves_sibling_completion_activity_with_full_parent_qu
+     let _original_sender = std::mem::replace(&mut parent.io.tx_sub, tx_sub.clone());
+     tx_sub
+         .try_send(crate::session::Submission {
++            trace_policy: None,
+             id: "fill-parent-queue".to_owned(),
+             op: Op::ReloadUserConfig,
+             trace: None,
+diff --git a/codex-rs/core/src/codex_delegate.rs b/codex-rs/core/src/codex_delegate.rs
+index 6caab5ea785bb91a73c2d92ae7082721107261ae..ecab827b6b61b4fb32394be51ce110f724034b93 100644
+--- a/codex-rs/core/src/codex_delegate.rs
++++ b/codex-rs/core/src/codex_delegate.rs
+@@ -283,6 +283,7 @@ pub(crate) async fn run_codex_thread_one_shot(
+             if should_shutdown {
+                 let _ = ops_tx
+                     .send(Submission {
++                        trace_policy: None,
+                         id: "shutdown".to_string(),
+                         op: Op::Shutdown {},
+                         turn_extension_init: None,
+diff --git a/codex-rs/core/src/codex_delegate_tests.rs b/codex-rs/core/src/codex_delegate_tests.rs
+index 0ca83da485e6d2c2cc068bf203291b9d1c400982..80a9191283f609ffceee85141c3367111a4f1d08 100644
+--- a/codex-rs/core/src/codex_delegate_tests.rs
++++ b/codex-rs/core/src/codex_delegate_tests.rs
+@@ -146,6 +146,7 @@ async fn forward_ops_preserves_submission_trace_context() {
+     let forward = tokio::spawn(forward_ops(Arc::clone(&io), rx_ops, cancel));
+
+     let submission = Submission {
++        trace_policy: None,
+         id: "sub-1".to_string(),
+         op: Op::Interrupt,
+         turn_extension_init: None,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index c72af6e0d6fa01bec1f66ff10cc9f035a01454b7..4d30f7fb75dd03a9f523fa2f65089f5f97ee715a 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -567,6 +567,7 @@ impl CodexThread {
+         self.io
+             .tx_sub
+             .send(Submission {
++                trace_policy: None,
+                 id: new_submission_id(),
+                 op: Op::SuspendTurnAndShutdown { reply },
+                 turn_extension_init: None,
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index dccc2da3cde466c70ea3688d17dfcd355dbba29c..ab3bba5718370c2c85af009fd854cc1dd4de350a 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -6,7 +6,8 @@ use crate::realtime_conversation::handle_speech as handle_realtime_conversation_
+ use crate::realtime_conversation::handle_start as handle_realtime_conversation_start;
+ use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
+ use async_channel::Receiver;
+-use codex_otel::set_parent_from_w3c_trace_context;
++use codex_otel::context_from_w3c_trace_context;
++use codex_otel::set_parent_from_context;
+ use tracing::Instrument;
+ use tracing::debug_span;
+ use tracing::info_span;
+@@ -776,13 +777,22 @@ pub(super) fn submission_dispatch_span(sub: &Submission) -> tracing::Span {
+             codex.op = op_name
+         ),
+     };
+-    if let Some(trace) = sub.trace.as_ref()
+-        && !set_parent_from_w3c_trace_context(&dispatch_span, trace)
+-    {
++    let parent = sub.trace.as_ref().and_then(context_from_w3c_trace_context);
++    if sub.trace.is_some() && parent.is_none() {
+         warn!(
+             submission.id = sub.id.as_str(),
+             "ignoring invalid submission trace carrier"
+         );
+     }
++    let policy = sub.trace_policy.clone();
++    if let Some(policy) = policy {
++        // Linkage comes from the incoming carrier; policy belongs to this submission.
++        set_parent_from_context(
++            &dispatch_span,
++            parent.unwrap_or_default().with_value(policy),
++        );
++    } else if let Some(parent) = parent {
++        set_parent_from_context(&dispatch_span, parent);
++    }
+     dispatch_span
+ }
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..8d5b60205bffd252add3c55131d3f725fd35a948 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -1013,6 +1013,7 @@ impl SessionIo {
+             turn_extension_init,
+         } = op.into();
+         let sub = Submission {
++            trace_policy: None,
+             id: id.clone(),
+             op,
+             turn_extension_init,
+@@ -1030,6 +1031,15 @@ impl SessionIo {
+         if sub.trace.is_none() {
+             sub.trace = current_span_w3c_trace_context();
+         }
++        if sub.trace_policy.is_none() {
++            // Capture policy without registering caller-supplied span IDs.
++            let tracing = codex_otel::sdk_trace::CapturedContext::capture();
++            sub.trace_policy = tracing
++                .context
++                .as_ref()
++                .and_then(|lease| codex_otel::sdk_trace::context(lease.token()).ok())
++                .and_then(|context| codex_otel::sdk_trace::policy_for_context(&context));
++        }
+         self.tx_sub
+             .send(sub)
+             .await
+@@ -1054,6 +1064,7 @@ impl SessionIo {
+         } = request.into();
+         let trace = request.trace.take();
+         self.submit_with_id(Submission {
++            trace_policy: None,
+             id,
+             op: Op::TurnInput {
+                 request: Box::new(request),
+@@ -1080,6 +1091,7 @@ impl SessionIo {
+     ) -> CodexResult<TurnInputSubmission> {
+         let (reply_tx, reply_rx) = oneshot::channel();
+         self.submit_with_id(Submission {
++            trace_policy: None,
+             id: turn_id,
+             op: Op::RecoverTurn {
+                 thread_settings,
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 0202c02075fc3b3d8c4379f393a01b0695d25690..c4dd7d4c9d71fbeecc97f58b32fa846931fbcd85 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -488,6 +488,7 @@ fn settings_submission(
+     let (reply, receiver) = oneshot::channel();
+     (
+         Submission {
++            trace_policy: None,
+             id: id.to_string(),
+             turn_extension_init: None,
+             op: Op::TurnSettings {
+diff --git a/codex-rs/core/src/session/submission.rs b/codex-rs/core/src/session/submission.rs
+index 413e1874b1de51b440798f89e8fc81c4492164be..52d1a8c199e3cff46547d679d9f97e25cfe7e306 100644
+--- a/codex-rs/core/src/session/submission.rs
++++ b/codex-rs/core/src/session/submission.rs
+@@ -14,6 +14,8 @@ pub(crate) struct Submission {
+     pub turn_extension_init: Option<ExtensionDataInit>,
+     /// Optional W3C trace carrier propagated across async submission handoffs.
+     pub trace: Option<W3cTraceContext>,
++    /// Recording policy belongs to this queued owner, never Session settings.
++    pub trace_policy: Option<std::sync::Arc<codex_otel::sdk_trace::ScopePolicy>>,
+     pub parent_turn_id: Option<String>,
+     pub root_turn_id: Option<String>,
+     /// Keeps a V2 recipient resident until this submission is handled or dropped.
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 756c097d715fb612a8ed2fd4884f80a1a1c80e54..e9466795d74cedfa887924490a738f239fc40ddb 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -6096,6 +6096,7 @@ async fn standalone_settings_invalidate_continuation_before_delivering_acceptanc
+     let (tx_sub, rx_sub) = async_channel::bounded(1);
+     tx_sub
+         .send(Submission {
++            trace_policy: None,
+             id: "settings".into(),
+             turn_extension_init: None,
+             op: Op::ThreadSettings {
+@@ -8180,6 +8181,7 @@ fn submission_dispatch_span_prefers_submission_trace_context() {
+     };
+     let dispatch_span = ambient_span.in_scope(|| {
+         submission_dispatch_span(&Submission {
++            trace_policy: None,
+             turn_extension_init: None,
+             id: "sub-1".into(),
+             op: Op::Interrupt,
+@@ -8202,6 +8204,7 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
+     let _trace_test_context = install_test_tracing("codex-core-tests");
+
+     let dispatch_span = submission_dispatch_span(&Submission {
++        trace_policy: None,
+         turn_extension_init: None,
+         id: "sub-1".into(),
+         op: Op::RealtimeConversationAudio(ConversationAudioParams {
+@@ -8569,6 +8572,7 @@ async fn spawn_task_turn_span_inherits_dispatch_trace_context() {
+             .await;
+
+     let dispatch_span = submission_dispatch_span(&Submission {
++        trace_policy: None,
+         turn_extension_init: None,
+         id: "sub-1".into(),
+         op: Op::Interrupt,
+diff --git a/codex-rs/otel/src/sdk_trace.rs b/codex-rs/otel/src/sdk_trace.rs
+index e89fb14a0467f958784bb017fcd0e69ebdb75bb9..2eabc0c9fc0f86ceb5bfe1b666d435e869a624e1 100644
+--- a/codex-rs/otel/src/sdk_trace.rs
++++ b/codex-rs/otel/src/sdk_trace.rs
+@@ -130,7 +130,8 @@ pub struct ScopedSpan {
+ }
+ pub fn wrap_span(span: global::BoxedSpan, parent: &Context) -> ScopedSpan {
+     let span_context = span.span_context().clone();
+-    let registration = policy_for_context(parent).map(|policy| retain_policy(&span_context, policy));
++    let registration =
++        policy_for_context(parent).map(|policy| retain_policy(&span_context, policy));
+     ScopedSpan {
+         span: Some(span),
+         span_context,
+@@ -205,7 +206,11 @@ pub fn build_span(
+     }
+     let policy = policy_for_context(parent);
+     if policy.is_none() {
+-        return ScopedSpan { span: None, span_context: SpanContext::NONE, _registration: None };
++        return ScopedSpan {
++            span: None,
++            span_context: SpanContext::NONE,
++            _registration: None,
++        };
+     }
+     use opentelemetry_sdk::trace::{IdGenerator, RandomIdGenerator};
+     let generator = RandomIdGenerator::default();
+@@ -336,8 +341,13 @@ fn bounded_value(value: &Value, depth: usize) -> Result<(), String> {
+     }
+ }
+ fn metadata_attribute_value(value: &Value) -> Result<String, String> {
+-    let encoded = match value { Value::String(value) => value.clone(), _ => value.to_string() };
+-    if encoded.len() > 4096 { return Err("Encoded tracing metadata value exceeds 4096 UTF-8 bytes".into()); }
++    let encoded = match value {
++        Value::String(value) => value.clone(),
++        _ => value.to_string(),
++    };
++    if encoded.len() > 4096 {
++        return Err("Encoded tracing metadata value exceeds 4096 UTF-8 bytes".into());
++    }
+     Ok(encoded)
+ }
+
+@@ -429,8 +439,8 @@ pub fn start_trace_span(encoded: &str) -> Result<String, String> {
+         return Err("trace_id does not match the selected parent".into());
+     }
+     let context = parent_context.with_value(policy);
+-    let mut builder = opentelemetry::trace::SpanBuilder::from_name(options.name)
+-        .with_attributes(attributes);
++    let mut builder =
++        opentelemetry::trace::SpanBuilder::from_name(options.name).with_attributes(attributes);
+     builder.trace_id = trace_id;
+     let span = build_span("codex_agents_sdk", builder, &context);
+     let context = context.with_span(span);
+@@ -494,7 +504,9 @@ pub fn end_trace_span(key: &str, encoded: &str) -> Result<(), String> {
+     }
+     if let Some(data) = &outcome.data {
+         bounded_value(data, 0)?;
+-        if data.to_string().len() > 4096 { return Err("Encoded tracing outcome data exceeds 4096 UTF-8 bytes".into()); }
++        if data.to_string().len() > 4096 {
++            return Err("Encoded tracing outcome data exceeds 4096 UTF-8 bytes".into());
++        }
+     }
+     let handle = resolve(key)?;
+     let mut ended = handle.ended.lock().unwrap_or_else(|e| e.into_inner());
+@@ -572,8 +584,13 @@ mod tests {
+     }
+     #[test]
+     fn bounds_actual_metadata_attribute_encoding() {
+-        assert_eq!(metadata_attribute_value(&json!("x".repeat(4096))).unwrap().len(),4096);
+-        assert!(metadata_attribute_value(&json!(["x".repeat(3000),"y".repeat(3000)])).is_err());
++        assert_eq!(
++            metadata_attribute_value(&json!("x".repeat(4096)))
++                .unwrap()
++                .len(),
++            4096
++        );
++        assert!(metadata_attribute_value(&json!(["x".repeat(3000), "y".repeat(3000)])).is_err());
+         assert!(metadata_attribute_value(&json!({"key":[1,2]})).is_ok());
+     }
+     #[test]
+@@ -641,11 +658,14 @@ pub fn prepare_submission(value: &mut Value) -> Result<(), String> {
+             return Ok(());
+         }
+         let token = token.as_str().ok_or("Invalid tracing context token")?;
+-        object.insert(
+-            "trace".into(),
+-            serde_json::to_value(trace_carrier(token)?)
+-                .map_err(|_| "Native tracing carrier could not serialize")?,
+-        );
++        let scoped = trace_carrier(token)?;
++        if object.get("trace").is_none_or(Value::is_null) {
++            object.insert(
++                "trace".into(),
++                serde_json::to_value(scoped)
++                    .map_err(|_| "Native tracing carrier could not serialize")?,
++            );
++        }
+     }
+     Ok(())
+ }
+@@ -679,6 +699,17 @@ mod lifecycle_tests {
+         end_trace_span(root_key, r#"{"status":"error"}"#).unwrap();
+         release_trace_span(root_key);
+         let carrier = trace_carrier(&lease).unwrap();
++        let explicit = json!({
++            "traceparent": "00-11111111111111111111111111111111-2222222222222222-03",
++            "tracestate": "fixture=remote",
++        });
++        let mut submission = json!({"trace": explicit, "tracing_context": lease});
++        prepare_submission(&mut submission).unwrap();
++        assert_eq!(submission["trace"], explicit);
++        assert!(submission.get("tracing_context").is_none());
++        let mut inherited = json!({"tracing_context": lease});
++        prepare_submission(&mut inherited).unwrap();
++        assert_eq!(inherited["trace"], serde_json::to_value(&carrier).unwrap());
+         let parent = crate::context_from_w3c_trace_context(&carrier).unwrap();
+         assert!(!policy_for_context(&parent).unwrap().include_sensitive_data);
+         let child = global::tracer("native-fixture").start_with_context("native-child", &parent);
 diff --git a/codex-rs/otel/src/trace_context.rs b/codex-rs/otel/src/trace_context.rs
 index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f53656f0f6 100644
 --- a/codex-rs/otel/src/trace_context.rs
@@ -16,7 +328,7 @@ index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f5
 @@ -17,6 +20,13 @@ use tracing::debug;
  use tracing::warn;
  use tracing_opentelemetry::OpenTelemetrySpanExt;
- 
+
 +// The pinned SDK clears flags on dropped spans. Bind the inherited random bit
 +// to its trace identity so it cannot leak when a Context adopts another trace.
 +struct RandomTraceId {
@@ -28,7 +340,7 @@ index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f5
  const TRACESTATE_ENV_VAR: &str = "TRACESTATE";
  static TRACEPARENT_CONTEXT: OnceLock<Option<Context>> = OnceLock::new();
 @@ -42,6 +52,22 @@ pub(crate) fn context_w3c_trace_context(context: &Context) -> Option<W3cTraceCon
- 
+
      let mut headers = HashMap::new();
      TraceContextPropagator::new().inject_context(context, &mut headers);
 +    // The pinned propagator predates the W3C random-trace-id flag. Child
@@ -52,7 +364,7 @@ index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f5
          .read()
 @@ -122,7 +148,23 @@ pub fn set_parent_from_w3c_trace_context(span: &Span, trace: &W3cTraceContext) -
  }
- 
+
  pub fn set_parent_from_context(span: &Span, context: Context) {
 -    let _ = span.set_parent(context);
 +    let _ = span.set_parent(with_inherited_random_flag(context));
@@ -73,7 +385,7 @@ index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f5
 +        };
 +    context
  }
- 
+
  pub fn traceparent_context_from_env() -> Option<Context> {
 @@ -135,9 +177,38 @@ pub(crate) fn context_from_trace_headers(
      traceparent: Option<&str>,
@@ -136,12 +448,12 @@ index e1c62777f1c1bd33eaf6898a57b9157de0085e79..734b2c0d2043dab1c1981e5bb06e40f5
 +    }
 +    Some(with_inherited_random_flag(context))
  }
- 
+
  fn load_traceparent_context() -> Option<Context> {
 @@ -373,6 +457,134 @@ mod tests {
          assert!(span_context.is_remote());
      }
- 
+
 +    #[test]
 +    fn defined_trace_flags_survive_child_header_propagation() {
 +        use super::span_w3c_trace_context;
