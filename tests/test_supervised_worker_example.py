@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shlex
 import signal
 import sys
@@ -123,6 +124,85 @@ async def wait_for_file(path: Path, owner: asyncio.subprocess.Process) -> None:
             _, err = await owner.communicate()
             pytest.fail(err.decode())
         await asyncio.sleep(0.01)
+
+
+async def test_readme_shell_runs_both_workers_and_publishes(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    readme = (repository / "examples/supervised_worker/README.md").read_text()
+    script = readme.split("```sh\n", 1)[1].split("```", 1)[0]
+    fixture = ResponsesFixture()
+
+    async def respond(request: web.Request) -> web.StreamResponse:
+        body = await request.json()
+        history = json.dumps(body.get("input", []))
+        if '"call_id": "readme-check"' in history:
+            reply = assistant_output(ARTIFACT_RESULT)
+        elif '"call_id": "readme-write"' in history:
+            reply = function_call("exec_command", {"cmd": worker.VERIFY_COMMAND}, "readme-check")
+        elif '"call_id": "readme-brief"' in history:
+            expected = re.search(r"\b(alpha|bravo): verified", history)
+            assert expected is not None
+            reply = function_call(
+                "exec_command",
+                {"cmd": f"printf '{expected[1]}: verified\\n' > summary.txt"},
+                "readme-write",
+            )
+        else:
+            reply = function_call("brief", {}, "readme-brief")
+        fixture.respond(reply)
+        return await fixture.handle(request)
+
+    app = web.Application()
+    app.router.add_post("/v1/responses", respond)
+    home, jobs = tmp_path / "home", tmp_path / "jobs"
+    home.mkdir()
+    jobs.mkdir()
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith(("OPENAI_", "AZURE_OPENAI_", "WORKER_")) and name != "PYTHONSAFEPATH"
+    }
+    env.update(
+        HOME=str(home),
+        TMPDIR=str(jobs),
+        PATH=str(Path(sys.executable).parent) + os.pathsep + env.get("PATH", ""),
+        PYTHONPATH=os.pathsep.join(filter(None, (str(repository), env.get("PYTHONPATH")))),
+        OPENAI_API_KEY="synthetic-supervised-worker",
+    )
+    async with timeout(100), TestServer(app) as server:
+        env["OPENAI_BASE_URL"] = str(server.make_url("/v1"))
+        child = await asyncio.create_subprocess_exec(
+            "/bin/sh",
+            "-c",
+            script,
+            cwd=repository,
+            env=env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            out, err = await child.communicate()
+            assert child.returncode == 0, (out.decode(), err.decode())
+        finally:
+            if child.returncode is None:
+                os.killpg(child.pid, signal.SIGKILL)
+            await child.communicate()
+
+    (directory,) = jobs.iterdir()
+    for name in ("alpha", "bravo"):
+        journal = directory / name
+        text = f"{name}: verified\n"
+        assert (journal / "workspace" / worker.ARTIFACT).read_text() == text
+        accepted = worker.read_record(journal, "accepted")
+        assert accepted is not None
+        assert accepted["text"] == text
+        assert accepted["sha256"] == hashlib.sha256(text.encode()).hexdigest()
+        if name == "alpha":
+            assert worker.read_record(journal, "published") == accepted
+        else:
+            assert worker.read_record(journal, "published") is None
+    assert len(fixture.requests) == 8
 
 
 async def test_two_workers_revise_reconnect_recover_and_publish_once(
