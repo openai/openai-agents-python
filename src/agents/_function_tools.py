@@ -29,6 +29,7 @@ from typing import (
 from pydantic import BaseModel, PydanticSchemaGenerationError, TypeAdapter
 from typing_extensions import ParamSpec, TypeVar
 
+from ._trace_context import TraceContext
 from .manual import ActionRequested, InputT, ResultT, _CapturedManual
 from .mcp import HttpMCP, StdioMCP
 from .native_agents import ChildInvocation, NativeAgents
@@ -61,6 +62,10 @@ class ToolContext(Generic[ContextT_co]):
 
     A first parameter annotated with ToolContext is injected by the session.
     Its value never becomes part of the model-visible argument schema.
+    trace_context snapshots the native issuing span for outgoing propagation;
+    None means native tracing supplied no carrier in the supported profile.
+    Retaining this metadata
+    does not keep that span alive or grant callback execution authority.
     """
 
     context: ContextT_co = field(repr=False)
@@ -69,6 +74,7 @@ class ToolContext(Generic[ContextT_co]):
     original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)
     effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)
     call: ToolCallInfo = field(kw_only=True)
+    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)
 
 
 @dataclass(frozen=True, kw_only=True)
