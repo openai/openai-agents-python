@@ -527,7 +527,10 @@ async def _mcp_policy(
     children = [event for event in ended if event["name"] == "MCP policy child"]
     assert len(callbacks) == len(children) == 1
     assert callbacks[0]["trace_id"] == "a" * 32
-    assert children[0]["parent_span_id"] == callbacks[0]["span_id"]
+    active_callbacks = [event for event in ended if event["span_id"] == seen[0][0].span_id]
+    assert len(active_callbacks) == 1 and active_callbacks[0]["name"] == "callback"
+    assert active_callbacks[0]["parent_span_id"] == callbacks[0]["span_id"]
+    assert children[0]["parent_span_id"] == active_callbacks[0]["span_id"]
     assert not any(event["trace_id"] == "b" * 32 for event in recorder.events)
 
 
@@ -616,7 +619,9 @@ async def _manual_restore(
 
     # Native history can retain historical trace IDs. It must not retain a
     # live scope lease or the process's exporter credentials/routing context.
-    assert source_scope.context._handle not in serialized
+    # Registry handles are short tokens, so exclude the complete JSON value
+    # rather than coincidental substrings of retained revision/content hashes.
+    assert json.dumps(source_scope.context._handle) not in serialized
     assert "tracing_context" not in serialized
     assert "credential_ref" not in serialized
     assert "default-key" not in serialized
