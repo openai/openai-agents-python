@@ -164,13 +164,18 @@ def test_manual_verification_checks_unchanged_tree_without_deploying(
         ("pyrightconfig.json", True, False, False, False),
         (".agents/skills/code-change-verification/SKILL.md", True, False, False, False),
         (".agents/skills/code-change-verification/scripts/run.sh", True, False, False, False),
-        ("docs/native-alpha/index.md", True, True, True, True),
+        ("docs/native-alpha/index.md", False, True, True, True),
         ("docs/sdk/topics.json", True, True, True, True),
+        ("docs/sdk/configuration.md", False, True, True, True),
+        ("docs/sdk/reference.md", False, True, True, True),
+        ("docs/sdk/providers.md", True, True, True, True),
+        ("docs/sdk/execution.md", True, True, True, True),
+        ("docs/sdk/testing.md", True, True, True, True),
         ("docs/assets/diagram.png", False, True, True, True),
-        ("docs/日本語 guide.md", True, True, True, True),
+        ("docs/日本語 guide.md", False, True, True, True),
         pytest.param(
             "docs/line\nbreak.md",
-            True,
+            False,
             True,
             True,
             True,
@@ -2035,3 +2040,42 @@ def test_v1_qualification_requests_windows_without_a_release_manifest(
         exec(compile(script, workflow_path, "exec"), {})
     assert result.value.code == 0
     assert output.read_text() == "run=true\n"
+
+
+@pytest.mark.parametrize("change", ["add", "remove", "delete", "rename"])
+def test_changed_executable_docs_require_native_checks(
+    change_repo: tuple[Path, str], change: str
+) -> None:
+    repo, _ = change_repo
+    page = repo / "docs/sdk/custom.md"
+    _commit(repo, "docs/sdk/custom.md")
+    if change != "add":
+        page.write_text("<!-- docs-check: run -->\n```python\nprint('ok')\n```\n")
+    base = _commit(repo)
+    if change == "add":
+        page.write_text("<!-- docs-check: run -->\n```python\nprint('ok')\n```\n")
+    elif change == "remove":
+        page.write_text("# Now prose only\n")
+    elif change == "delete":
+        page.unlink()
+    else:
+        _git(repo, "mv", "docs/sdk/custom.md", "docs/sdk/renamed.md")
+    head = _commit(repo)
+    assert _detect(repo, "code", base, head)
+    assert _detect(repo, "docs", base, head)
+
+
+def test_docs_import_validation_runs_without_a_native_producer() -> None:
+    workflow = yaml.safe_load((ROOT / ".github/workflows/tests.yml").read_text())
+    job = workflow["jobs"]["build-docs"]
+    # All producer jobs are skipped for a prose-only change. Keep this check green.
+    assert "needs.changes.outputs.code == 'false'" in job["if"]
+    for platform in ("linux", "windows", "macos"):
+        assert f"needs.produce-{platform}.result == 'skipped'" in job["if"]
+    check = next(step for step in job["steps"] if step.get("name") == "Check documentation imports")
+    assert check["if"] == "steps.changes.outputs.run == 'true'"
+    assert check["run"] == "uv run --no-sync python .github/scripts/check_docs.py --imports-only"
+    assert job["env"]["PYTHONPATH"] == "src"
+    assert not any(
+        step.get("uses", "").startswith("./.github/actions/use-native") for step in job["steps"]
+    )

@@ -866,6 +866,9 @@ jobs:
       - name: Install dependencies
         if: steps.changes.outputs.run == 'true'
         run: uv sync --group dev --no-install-project
+      - name: Check documentation imports
+        if: steps.changes.outputs.run == 'true'
+        run: uv run --no-sync python .github/scripts/check_docs.py --imports-only
       - name: Build docs
         if: steps.changes.outputs.run == 'true'
         run: make build-docs
