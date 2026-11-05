@@ -33,6 +33,7 @@ from agents import (
     NativeRole,
     PromptedOutput,
     ReplaceArguments,
+    ResponseIntegrityReason,
     Session,
     Tool,
     ToolContext,
@@ -58,6 +59,7 @@ assert_type(provider_error.status_code, int | None)
 assert_type(provider_error.code, str | None)
 assert_type(provider_error.request_id, str | None)
 assert_type(provider_error.category, str | None)
+assert_type(provider_error.response_integrity_reason, ResponseIntegrityReason | None)
 
 executor = Environment(
     url="wss://executor.example.invalid/session",
