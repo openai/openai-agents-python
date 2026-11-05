@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import traceback
 
 import pytest
@@ -12,7 +13,7 @@ from a2a.types import a2a_pb2 as p
 from a2a.utils.errors import TaskNotFoundError
 from google.protobuf.json_format import MessageToDict
 from starlette.applications import Starlette
-from starlette.responses import JSONResponse, RedirectResponse
+from starlette.responses import JSONResponse, RedirectResponse, StreamingResponse
 from starlette.routing import Route
 
 from agents import Agent, FunctionTool, NativeProvider, ToolContext, function_tool
@@ -152,6 +153,51 @@ async def test_discovery_rejects_before_credential_acquisition(kind):
             ):
                 pytest.fail("Untrusted card was admitted")
     assert not acquired
+
+
+@pytest.mark.parametrize("route", ["card", "rpc"])
+async def test_rejects_encoded_responses_before_reading_the_body(route):
+    release_body = asyncio.Event()
+    seen = []
+    acquired = []
+
+    async def credentials():
+        acquired.append(True)
+        return "alice-token"
+
+    def app(url):
+        async def respond(request):
+            seen.append(request.headers["accept-encoding"])
+            if route == "rpc" and request.method == "GET":
+                return JSONResponse(MessageToDict(card(url)))
+
+            async def compressed_body():
+                await release_body.wait()
+                yield gzip.compress(b"x" * 1_000_000)
+
+            return StreamingResponse(compressed_body(), headers={"content-encoding": "gzip"})
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", respond),
+                Route("/rpc", respond, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+
+        async def call():
+            async with connect_a2a(endpoint(url), authorization=credentials) as client:
+                await client.get_task(p.GetTaskRequest(id="synthetic-task"))
+
+        try:
+            with pytest.raises(ValueError, match="A2A discovery failed|encoded A2A response"):
+                await asyncio.wait_for(call(), 5)
+        finally:
+            release_body.set()
+
+    assert seen == (["identity"] if route == "card" else ["identity", "identity"])
+    assert acquired == ([] if route == "card" else [True])
 
 
 async def test_native_orchestrator_discovers_and_dispatches_two_specialists(tmp_path, responses):

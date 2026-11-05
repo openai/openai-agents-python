@@ -93,7 +93,7 @@ class _BoundedStream(httpx.AsyncByteStream):
     async def __aiter__(self) -> AsyncIterator[bytes]:
         size = 0
         try:
-            async for chunk in self.response.aiter_bytes():
+            async for chunk in self.response.aiter_raw():
                 size += len(chunk)
                 if size > self.limit:
                     raise ValueError("A2A response exceeds configured byte limit")
@@ -111,13 +111,14 @@ class _BoundedTransport(httpx.AsyncBaseTransport):
         self._limit = limit
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        request.headers["accept-encoding"] = "identity"
         response = await self._transport.handle_async_request(request)
-        headers = dict(response.headers)
-        headers.pop("content-encoding", None)
-        headers.pop("content-length", None)
+        if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+            await response.aclose()
+            raise ValueError("Cannot accept an encoded A2A response")
         return httpx.Response(
             response.status_code,
-            headers=headers,
+            headers=response.headers,
             stream=_BoundedStream(response, self._limit),
             request=request,
         )
@@ -137,6 +138,8 @@ async def connect_a2a(
 ) -> AsyncIterator[Client]:
     """Admit a configured card before acquiring credentials; yield the official client.
 
+    Discovery and RPC request uncompressed HTTP bodies. The adapter rejects
+    other encodings before reading the body.
     The resolver returns a current bearer token for this configured endpoint.
     It must not select authority from peer content. Closing a connection does not
     cancel remote work. Use explicit CancelTask for that separate mutation.

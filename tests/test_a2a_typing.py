@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import pytest
+
+pytest.importorskip("a2a")
+
 from a2a.helpers.proto_helpers import new_text_message
 from a2a.types import a2a_pb2 as p
 from pydantic import BaseModel
