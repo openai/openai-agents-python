@@ -1,0 +1,835 @@
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 8c8be8ce432f68ab3fe4c87b0c159e09823396f2..571739e6cf1acf160bebb1db736dc8f354f4abd0 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -316,7 +316,11 @@ async fn run_compact_task_inner_impl(
+                     retries = 0;
+                     continue;
+                 }
+-                sess.set_total_tokens_full(turn_context.as_ref()).await;
++                sess.set_total_tokens_full(
++                    turn_context.as_ref(),
++                    &replacement_step_context.settings,
++                )
++                .await;
+                 return Err(e);
+             }
+             Err(e) => {
+@@ -382,8 +386,7 @@ async fn run_compact_task_inner_impl(
+         },
+     )
+     .await;
+-    sess.recompute_token_usage(&replacement_step_context.turn)
+-        .await;
++    sess.recompute_token_usage(&replacement_step_context).await;
+ 
+     sess.emit_turn_item_completed(&turn_context, compaction_item)
+         .await;
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index bb266ca2c7fbb92bfbcad80f919f8ba1f7a704a3..5c4a913789c2838bbd21a1fc989b8d3d1f636df8 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -364,8 +364,7 @@ async fn run_remote_compact_task_inner_impl(
+         },
+     )
+     .await;
+-    sess.recompute_token_usage(&replacement_step_context.turn)
+-        .await;
++    sess.recompute_token_usage(&replacement_step_context).await;
+ 
+     sess.emit_turn_item_completed(compaction_turn_context, compaction_item)
+         .await;
+diff --git a/codex-rs/core/src/realtime_conversation/transcript_tail.rs b/codex-rs/core/src/realtime_conversation/transcript_tail.rs
+index 8bdb9ba22e7d6157b992417b63541009a707e5f8..94faba5acb993d98497ba85b0204c88ee38fd37e 100644
+--- a/codex-rs/core/src/realtime_conversation/transcript_tail.rs
++++ b/codex-rs/core/src/realtime_conversation/transcript_tail.rs
+@@ -41,7 +41,7 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
+             root_turn_id: Some(turn.sub_id.clone()),
+             trace_id: turn.trace_id.clone(),
+             started_at: Some(now.timestamp()),
+-            model_context_window: turn.model_context_window(),
++            model_context_window: turn.reported_model_context_window(),
+             collaboration_mode_kind: turn.mode(),
+         });
+         session
+@@ -94,3 +94,48 @@ pub(super) async fn record(session: &Session, text: String) -> std::io::Result<(
+         .await?;
+     session.flush_rollout().await
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::rollout::recorder::RolloutRecorder;
++    use crate::session::tests::attach_thread_persistence;
++    use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
++    use codex_history::InitialHistory;
++    use codex_login::CodexAuth;
++
++    #[tokio::test]
++    async fn transcript_recording_start_reports_unknown_context_without_starting_a_ui_turn() {
++        let (mut session, _, rx) = make_session_and_context_with_auth_and_config_and_rx(
++            CodexAuth::from_api_key("Test API Key"),
++            Vec::new(),
++            |config| {
++                config.model = Some("unknown-transcript-context-test".to_string());
++            },
++        )
++        .await;
++        let path = attach_thread_persistence(Arc::get_mut(&mut session).unwrap()).await;
++        record(&session, "Terminal speech.".to_string())
++            .await
++            .unwrap();
++        assert!(session.active_turn.lock().await.is_none());
++        while let Ok(event) = rx.try_recv() {
++            assert!(!matches!(event.msg, EventMsg::TurnStarted(_)));
++        }
++        let InitialHistory::Resumed(history) =
++            RolloutRecorder::get_rollout_history(&path).await.unwrap()
++        else {
++            panic!("recorded history");
++        };
++        let starts = history
++            .history
++            .iter()
++            .filter_map(|item| match item {
++                RolloutItem::EventMsg(EventMsg::TurnStarted(start)) => Some(start),
++                _ => None,
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(starts.len(), 1);
++        assert_eq!(starts[0].model_context_window, None);
++    }
++}
+diff --git a/codex-rs/core/src/session/context_metadata_tests.rs b/codex-rs/core/src/session/context_metadata_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..127ec6ec1a8051a9b7f1bf46f46f503c9478a667
+--- /dev/null
++++ b/codex-rs/core/src/session/context_metadata_tests.rs
+@@ -0,0 +1,217 @@
++use super::*;
++
++#[tokio::test]
++async fn unknown_context_metadata_replaces_prior_usage_without_changing_limits() {
++    let (session, turn, rx) = make_session_and_context_with_auth_and_config_and_rx(
++        CodexAuth::from_api_key("Test API Key"),
++        Vec::new(),
++        |config| {
++            config.model = Some("unknown-context-metadata-test".to_string());
++        },
++    )
++    .await;
++    let step = StepContext::for_test(Arc::clone(&turn));
++    assert!(step.settings.model_info.used_fallback_model_metadata);
++    assert_eq!(turn.model_context_window(), Some(258_400));
++    assert_eq!(
++        step.settings.model_info.auto_compact_token_limit(),
++        Some(244_800)
++    );
++    session.emit_turn_started(&turn).await;
++    let EventMsg::TurnStarted(start) = rx.recv().await.unwrap().msg else {
++        panic!("turn start");
++    };
++    assert_eq!(start.model_context_window, None);
++
++    // No usage must remain absent, even when this model has an operational limit.
++    session
++        .record_token_usage_info(&turn, &step.settings, None)
++        .await
++        .unwrap();
++    assert_eq!(session.token_usage_info().await, None);
++    session
++        .state
++        .lock()
++        .await
++        .set_token_info(Some(TokenUsageInfo {
++            total_token_usage: TokenUsage {
++                total_tokens: 10,
++                ..Default::default()
++            },
++            last_token_usage: TokenUsage::default(),
++            model_context_window: Some(258_400),
++        }));
++    let sample = TokenUsage {
++        input_tokens: 7,
++        total_tokens: 7,
++        ..Default::default()
++    };
++    session
++        .record_token_usage_info(&turn, &step.settings, Some(&sample))
++        .await
++        .unwrap();
++    let info = session.token_usage_info().await.unwrap();
++    assert_eq!(info.model_context_window, None);
++    assert_eq!(info.total_token_usage.total_tokens, 17);
++    assert_eq!(info.last_token_usage, sample);
++
++    // Synthetic accounting still fills the operational window, then reports unknown.
++    session.set_total_tokens_full(&turn, &step.settings).await;
++    let info = session.token_usage_info().await.unwrap();
++    assert_eq!(info.total_token_usage.total_tokens, 258_400);
++    assert_eq!(info.model_context_window, None);
++    session.recompute_token_usage(&step).await;
++    assert_eq!(
++        session
++            .token_usage_info()
++            .await
++            .unwrap()
++            .model_context_window,
++        None
++    );
++}
++
++#[tokio::test]
++async fn context_metadata_uses_the_response_snapshot_and_replaces_null_in_both_directions() {
++    let (session, turn) = make_session_and_context().await;
++    let original = Arc::clone(&turn.initial_settings);
++    let mut unknown = original.selected().clone();
++    unknown.collaboration_mode.settings.model = "unknown-context-metadata-test".to_string();
++    let model = unknown
++        .resolve_model_info(
++            session.services.models_manager.as_ref(),
++            &Default::default(),
++        )
++        .await;
++    let unknown = Arc::new(ResolvedStepSettings::new(
++        Arc::new(unknown),
++        Arc::new(model),
++        false,
++        None,
++    ));
++    turn.next_step_settings.store(Arc::clone(&unknown));
++    let sample = TokenUsage {
++        total_tokens: 3,
++        ..Default::default()
++    };
++    // The old response completes after the new selection has been installed.
++    for settings in [&unknown, &original, &unknown] {
++        session
++            .record_token_usage_info(&turn, settings, Some(&sample))
++            .await
++            .unwrap();
++        assert_eq!(
++            session
++                .token_usage_info()
++                .await
++                .unwrap()
++                .model_context_window,
++            settings.reported_context_window()
++        );
++    }
++    assert_eq!(
++        session
++            .token_usage_info()
++            .await
++            .unwrap()
++            .total_token_usage
++            .total_tokens,
++        9
++    );
++    // A serializer-only event must not reinterpret the stored null through the old turn.
++    session.send_token_count_event(&turn).await;
++    assert_eq!(
++        session
++            .token_usage_info()
++            .await
++            .unwrap()
++            .model_context_window,
++        None
++    );
++}
++
++#[tokio::test]
++async fn context_metadata_round_trips_null_and_historical_numbers_through_resume_and_fork() {
++    for window in [None, Some(258_400)] {
++        let expected = TokenUsageInfo {
++            total_token_usage: TokenUsage {
++                total_tokens: 123,
++                ..Default::default()
++            },
++            last_token_usage: TokenUsage {
++                total_tokens: 7,
++                ..Default::default()
++            },
++            model_context_window: window,
++        };
++        let items = vec![RolloutItem::EventMsg(EventMsg::TokenCount(
++            TokenCountEvent {
++                info: Some(expected.clone()),
++                rate_limits: None,
++                api_rate_limits: None,
++            },
++        ))];
++        let items: Vec<RolloutItem> =
++            serde_json::from_value(serde_json::to_value(items).unwrap()).unwrap();
++        for fork in [false, true] {
++            let (session, _) = make_session_and_context().await;
++            let history = if fork {
++                InitialHistory::Forked(items.clone())
++            } else {
++                InitialHistory::Resumed(ResumedHistory {
++                    history_revision: None,
++                    conversation_id: session.thread_id,
++                    history: Arc::new(items.clone()),
++                    rollout_path: None,
++                })
++            };
++            session.record_initial_history(history).await;
++            assert_eq!(session.token_usage_info().await, Some(expected.clone()));
++        }
++    }
++}
++
++#[tokio::test]
++async fn idle_model_update_keeps_historical_usage_until_the_next_response() {
++    let (session, _) = make_session_and_context().await;
++    let historical = TokenUsageInfo {
++        total_token_usage: TokenUsage {
++            total_tokens: 42,
++            ..Default::default()
++        },
++        last_token_usage: TokenUsage::default(),
++        model_context_window: Some(258_400),
++    };
++    session
++        .state
++        .lock()
++        .await
++        .set_token_info(Some(historical.clone()));
++    session
++        .update_settings(SessionSettingsUpdate {
++            step_settings: StepSettingsUpdate {
++                model: Some("unknown-idle-context-test".to_string()),
++                ..Default::default()
++            },
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    let next_turn = session.new_default_turn().await;
++    assert_eq!(next_turn.reported_model_context_window(), None);
++    assert_eq!(session.token_usage_info().await, Some(historical));
++    session
++        .record_token_usage_info(
++            &next_turn,
++            &next_turn.initial_settings,
++            Some(&TokenUsage {
++                total_tokens: 5,
++                ..Default::default()
++            }),
++        )
++        .await
++        .unwrap();
++    let info = session.token_usage_info().await.unwrap();
++    assert_eq!(info.model_context_window, None);
++    assert_eq!(info.total_token_usage.total_tokens, 47);
++}
+diff --git a/codex-rs/core/src/session/guardian_checkpoint_tests.rs b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
+index 6ff5ab358960273d3de2c237b2dd50c4724d146f..a728999e9baee03b9b22fe881dd2a77b379cde84 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint_tests.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
+@@ -130,3 +130,33 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(
+         serde_json::to_value(expected.token_info()).unwrap()
+     );
+ }
++
++#[tokio::test]
++async fn guardian_checkpoint_preserves_unknown_and_historical_context_metadata() {
++    for window in [None, Some(258_400)] {
++        let (session, _) = make_session_and_context().await;
++        let expected = codex_protocol::protocol::TokenUsageInfo {
++            total_token_usage: TokenUsage {
++                total_tokens: 123,
++                ..Default::default()
++            },
++            last_token_usage: TokenUsage {
++                total_tokens: 7,
++                ..Default::default()
++            },
++            model_context_window: window,
++        };
++        session
++            .state
++            .lock()
++            .await
++            .history
++            .set_token_info(Some(expected.clone()));
++        let items = session.guardian_fork_history().await;
++        let items = serde_json::from_value(serde_json::to_value(items).unwrap()).unwrap();
++        let (fork, _) = make_session_and_context().await;
++        fork.record_initial_history(InitialHistory::Forked(items))
++            .await;
++        assert_eq!(fork.token_usage_info().await, Some(expected));
++    }
++}
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 060f9fcf3d45c21923a62abe586ed6530c815631..0bab6f753c4f6f245cf2b390ad0c47e6ceffc90c 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -2278,7 +2278,7 @@ impl Session {
+             ),
+             trace_id: turn_context.trace_id.clone(),
+             started_at: turn_context.turn_timing_state.started_at_unix_secs().await,
+-            model_context_window: turn_context.model_context_window(),
++            model_context_window: turn_context.reported_model_context_window(),
+             collaboration_mode_kind: turn_context.mode(),
+         };
+         self.send_event(turn_context, EventMsg::TurnStarted(event))
+@@ -3783,6 +3783,7 @@ impl Session {
+                     Arc::new(selected),
+                     Arc::clone(&settings.model_info),
+                     self.features.enabled(Feature::FastMode),
++                    turn_context.config.model_context_window,
+                 );
+                 inherited_settings.mcp_approvals_reviewer_override =
+                     settings.mcp_approvals_reviewer_override;
+@@ -4624,7 +4625,7 @@ impl Session {
+             },
+         )
+         .await;
+-        self.recompute_token_usage(turn_context).await;
++        self.recompute_token_usage(step_context).await;
+         window_number
+     }
+ 
+@@ -4810,8 +4811,8 @@ impl Session {
+         if let Some(token_usage) = token_usage {
+             let token_info = {
+                 let mut state = self.state.lock().await;
+-                state
+-                    .update_token_info_from_usage(token_usage, turn_context.model_context_window());
++                state.update_token_info_from_usage(token_usage, settings.reported_context_window());
++                state.replace_reported_context_window(settings.reported_context_window());
+                 if matches!(
+                     turn_context.config.model_auto_compact_token_limit_scope,
+                     AutoCompactTokenLimitScope::BodyAfterPrefix
+@@ -4849,7 +4850,8 @@ impl Session {
+         Ok(())
+     }
+ 
+-    pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
++    pub(crate) async fn recompute_token_usage(&self, step_context: &StepContext) {
++        let turn_context = step_context.turn.as_ref();
+         let history = self.clone_history().await;
+         let base_instructions = self.get_base_instructions().await;
+         let Some(estimated_total_tokens) =
+@@ -4875,9 +4877,7 @@ impl Session {
+                 codex_rollout_budget_units: None,
+             };
+ 
+-            if let Some(model_context_window) = turn_context.model_context_window() {
+-                info.model_context_window = Some(model_context_window);
+-            }
++            info.model_context_window = step_context.settings.reported_context_window();
+ 
+             state.set_token_info(Some(info));
+         }
+@@ -4954,10 +4954,15 @@ impl Session {
+             .await;
+     }
+ 
+-    pub(crate) async fn set_total_tokens_full(&self, turn_context: &TurnContext) {
++    pub(crate) async fn set_total_tokens_full(
++        &self,
++        turn_context: &TurnContext,
++        settings: &ResolvedStepSettings,
++    ) {
+         if let Some(context_window) = turn_context.model_context_window() {
+             let mut state = self.state.lock().await;
+             state.set_token_usage_full(context_window);
++            state.replace_reported_context_window(settings.reported_context_window());
+         }
+         self.send_token_count_event(turn_context).await;
+     }
+diff --git a/codex-rs/core/src/session/reasoning_effort_tests.rs b/codex-rs/core/src/session/reasoning_effort_tests.rs
+index d9ff4ba24ef8f378bf9921bc693007c7d6700c0f..ed2194d8397076ce1b285da12ea15ea2ac31552d 100644
+--- a/codex-rs/core/src/session/reasoning_effort_tests.rs
++++ b/codex-rs/core/src/session/reasoning_effort_tests.rs
+@@ -41,6 +41,7 @@ async fn initial_replay_preserves_prewarmed_effort(history: InitialHistory) {
+         Arc::new(selected.clone()),
+         Arc::clone(&model_info),
+         /*fast_mode_enabled*/ false,
++        None,
+     );
+     // Force the ordering where prewarm pins its request before initial replay finishes.
+     assert_eq!(
+@@ -56,6 +57,7 @@ async fn initial_replay_preserves_prewarmed_effort(history: InitialHistory) {
+         Arc::new(selected),
+         model_info,
+         /*fast_mode_enabled*/ false,
++        None,
+     );
+     assert_eq!(
+         session
+diff --git a/codex-rs/core/src/session/review.rs b/codex-rs/core/src/session/review.rs
+index d1080745c2a4058f12ead8c37733a5d11a18319a..784c769924ae1e5f7d8b8798968414f7ca9ee3c0 100644
+--- a/codex-rs/core/src/session/review.rs
++++ b/codex-rs/core/src/session/review.rs
+@@ -100,6 +100,7 @@ pub(super) async fn spawn_review_thread(
+         Arc::new(selected),
+         Arc::new(model_info.clone()),
+         review_features.enabled(Feature::FastMode),
++        per_turn_config.model_context_window,
+     ));
+     per_turn_config.model = Some(model);
+     per_turn_config.model_reasoning_effort = reasoning_effort;
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 0202c02075fc3b3d8c4379f393a01b0695d25690..9abd00334133ddc88b5a3a5abab58f996f0d711c 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -689,6 +689,33 @@ async fn submitted_sparse_updates_preserve_captured_steps_and_ordering() {
+             step.settings.reasoning_summary,
+         );
+     }
++    // Reporting follows each captured request, even after a live model update.
++    assert_eq!(
++        [&before, &during, &after].map(|step| step.settings.reported_context_window()),
++        [Some(258_400), Some(258_400), Some(152_000)],
++    );
++    for step in [&after, &before, &during] {
++        session
++            .record_token_usage_info(
++                &step.turn,
++                &step.settings,
++                Some(&TokenUsage {
++                    input_tokens: 7,
++                    total_tokens: 7,
++                    ..Default::default()
++                }),
++            )
++            .await
++            .unwrap();
++        assert_eq!(
++            session
++                .token_usage_info()
++                .await
++                .unwrap()
++                .model_context_window,
++            step.settings.reported_context_window()
++        );
++    }
+     assert_eq!(after.settings.model_info.as_ref(), &expected_destination);
+     let initial_budget = turn
+         .config
+@@ -1066,6 +1093,7 @@ async fn activation_must_match_the_retained_turn_authority(change: ManagedPolicy
+         Arc::new(selected),
+         Arc::new(model_info),
+         session.features.enabled(Feature::FastMode),
++        None,
+     );
+     let mut live = session.state.lock().await.session_configuration.clone();
+     live.original_config_do_not_use = Arc::clone(&prepared.config);
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index cd00b6d216417a900c344708779fb377a908ed2a..f8ad3a0229845ab3e335f92d552e7d4f0ac0464f 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -43,6 +43,8 @@ pub(crate) struct ResolvedStepSettings {
+     /// tiers must not be reconstructed from the effective values below.
+     selected: Arc<StepSettings>,
+     pub(crate) model_info: Arc<ModelInfo>,
++    /// Known or explicitly configured usable limit, captured with this model.
++    reported_context_window: Option<i64>,
+     /// Effective request summary: the configured value or the pinned model's default.
+     pub(crate) reasoning_summary: ReasoningSummary,
+     /// Tier sent on requests, filtered by feature and model support.
+@@ -58,6 +60,7 @@ impl ResolvedStepSettings {
+         selected: Arc<StepSettings>,
+         model_info: Arc<ModelInfo>,
+         fast_mode_enabled: bool,
++        context_window_override: Option<i64>,
+     ) -> Self {
+         let reasoning_summary = selected
+             .reasoning_summary
+@@ -67,15 +70,26 @@ impl ResolvedStepSettings {
+             fast_mode_enabled,
+             &model_info,
+         );
++        let reported_context_window =
++            if model_info.used_fallback_model_metadata && context_window_override.is_none() {
++                None
++            } else {
++                model_info.usable_context_window()
++            };
+         Self {
+             selected,
+             model_info,
++            reported_context_window,
+             reasoning_summary,
+             service_tier,
+             mcp_approvals_reviewer_override: None,
+         }
+     }
+ 
++    pub(crate) fn reported_context_window(&self) -> Option<i64> {
++        self.reported_context_window
++    }
++
+     pub(crate) fn reasoning_effort(&self) -> Option<&ReasoningEffort> {
+         self.selected
+             .collaboration_mode
+@@ -140,7 +154,12 @@ impl ResolvedStepSettings {
+         } else {
+             Arc::new(selected.resolve_model_info(models_manager, overrides).await)
+         };
+-        let mut next = Self::new(Arc::new(selected), model_info, fast_mode_enabled);
++        let mut next = Self::new(
++            Arc::new(selected),
++            model_info,
++            fast_mode_enabled,
++            overrides.context_window,
++        );
+         next.mcp_approvals_reviewer_override = update
+             .approvals_reviewer
+             .or(self.mcp_approvals_reviewer_override);
+diff --git a/codex-rs/core/src/session/step_settings_tests.rs b/codex-rs/core/src/session/step_settings_tests.rs
+index 38fd6d1ad903fc593d3680dba41239f110e47fbe..c5c85bedcb197b9a057a35706ab37821e1857e22 100644
+--- a/codex-rs/core/src/session/step_settings_tests.rs
++++ b/codex-rs/core/src/session/step_settings_tests.rs
+@@ -485,3 +485,87 @@ async fn model_resolution_preserves_startup_overrides_and_instruction_provenance
+         );
+     }
+ }
++
++#[tokio::test]
++async fn reported_context_window_distinguishes_catalog_fallback_and_explicit_override() {
++    let mut known = model_info_from_slug("catalog-context-window");
++    known.context_window = None;
++    known.max_context_window = Some(400_000);
++    let manager = StaticModelsManager::new(
++        None,
++        ModelsResponse {
++            models: vec![known],
++        },
++    );
++    for (slug, override_window, expected_report, expected_operational) in [
++        ("catalog-context-window", None, Some(380_000), Some(400_000)),
++        ("unknown-context-window", None, None, Some(272_000)),
++        (
++            "unknown-context-window",
++            Some(160_000),
++            Some(152_000),
++            Some(160_000),
++        ),
++        (
++            "unknown-context-window",
++            Some(400_000),
++            Some(258_400),
++            Some(272_000),
++        ),
++    ] {
++        let overrides = ModelInfoOverrides {
++            context_window: override_window,
++            ..Default::default()
++        };
++        let mut selected = configured_settings();
++        selected.collaboration_mode.settings.model = slug.to_string();
++        let model = selected.resolve_model_info(&manager, &overrides).await;
++        let fallback = model.used_fallback_model_metadata;
++        let compact_limit = model.auto_compact_token_limit();
++        let settings =
++            ResolvedStepSettings::new(Arc::new(selected), Arc::new(model), false, override_window);
++        assert_eq!(settings.reported_context_window(), expected_report);
++        assert_eq!(
++            settings.model_info.resolved_context_window(),
++            expected_operational
++        );
++        assert_eq!(settings.model_info.used_fallback_model_metadata, fallback);
++        assert_eq!(
++            settings.model_info.auto_compact_token_limit(),
++            compact_limit
++        );
++        assert_eq!(fallback, slug == "unknown-context-window");
++
++        let next = settings
++            .apply_update(
++                &StepSettingsUpdate {
++                    model: Some("another-unknown-context-window".to_string()),
++                    ..Default::default()
++                },
++                &step_settings_constraints(&ConfigRequirements::default()),
++                &manager,
++                &overrides,
++                false,
++            )
++            .await
++            .unwrap();
++        assert_eq!(
++            next.reported_context_window(),
++            override_window.map(|window| window.min(272_000) * 95 / 100)
++        );
++        assert_eq!(settings.reported_context_window(), expected_report);
++    }
++}
++
++pub(crate) fn refresh_reported_context_window_for_test(
++    settings: &mut ResolvedStepSettings,
++    context_window_override: Option<i64>,
++) {
++    settings.reported_context_window = ResolvedStepSettings::new(
++        Arc::clone(&settings.selected),
++        Arc::clone(&settings.model_info),
++        false,
++        context_window_override,
++    )
++    .reported_context_window();
++}
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 756c097d715fb612a8ed2fd4884f80a1a1c80e54..2bf7732a5a90a36d55a297e035f3326abe16e400 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -253,6 +253,10 @@ pub(crate) fn update_turn_settings_for_test(
+ ) {
+     let mut settings = turn.initial_settings.as_ref().clone();
+     update(&mut settings);
++    super::step_settings::tests::refresh_reported_context_window_for_test(
++        &mut settings,
++        turn.config.model_context_window,
++    );
+     let settings = Arc::new(settings);
+     turn.initial_settings = Arc::clone(&settings);
+     turn.next_step_settings.store(settings);
+@@ -3458,7 +3462,9 @@ async fn recompute_token_usage_uses_session_base_instructions() {
+         .expect("estimate with model instructions");
+     assert_ne!(expected_tokens, model_estimated_tokens);
+ 
+-    session.recompute_token_usage(&turn_context).await;
++    session
++        .recompute_token_usage(&StepContext::for_test(Arc::new(turn_context)))
++        .await;
+ 
+     let actual_tokens = session
+         .state
+@@ -3489,7 +3495,9 @@ async fn recompute_token_usage_updates_model_context_window() {
+         Arc::make_mut(&mut settings.model_info).effective_context_window_percent = 100;
+     });
+ 
+-    session.recompute_token_usage(&turn_context).await;
++    session
++        .recompute_token_usage(&StepContext::for_test(Arc::new(turn_context)))
++        .await;
+ 
+     let actual = session.state.lock().await.token_info().expect("token info");
+     assert_eq!(actual.model_context_window, Some(128_000));
+@@ -4713,6 +4721,7 @@ async fn turn_context_with_model_updates_model_fields() {
+             Arc::new(selected),
+             Arc::clone(&settings.model_info),
+             /*fast_mode_enabled*/ true,
++            None,
+         );
+     });
+     Arc::make_mut(&mut turn_context.config).service_tier =
+@@ -4729,6 +4738,7 @@ async fn turn_context_with_model_updates_model_fields() {
+         Arc::new(current_selection),
+         Arc::clone(turn_context.model_info()),
+         /*fast_mode_enabled*/ true,
++        None,
+     ));
+     turn_context.next_step_settings.store(Arc::clone(&current));
+     let updated = turn_context
+@@ -4908,7 +4918,7 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
+         .expect("thread should have rollout path")
+ }
+ 
+-async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
++pub(crate) async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
+     let rollout_path = open_thread_persistence(session).await;
+     session
+         .ensure_rollout_materialized(PersistContext::Standard)
+@@ -7043,6 +7053,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+             Arc::clone(&session_configuration.step_settings),
+             Arc::new(model_info),
+             config.features.enabled(Feature::FastMode),
++            config.model_context_window,
+         )),
+         &models_manager,
+         /*network*/ None,
+@@ -9309,6 +9320,7 @@ where
+             Arc::clone(&session_configuration.step_settings),
+             Arc::new(model_info),
+             config.features.enabled(Feature::FastMode),
++            config.model_context_window,
+         )),
+         &models_manager,
+         /*network*/ None,
+@@ -11327,6 +11339,7 @@ async fn build_initial_context_uses_retained_step_after_model_change() {
+             Arc::new(selected_b),
+             Arc::new(model_b),
+             /*fast_mode_enabled*/ false,
++            None,
+         )));
+     let step_b = session
+         .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
+@@ -13596,3 +13609,6 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
+         "rejection must not permit same-name ordinary-auth replacement in this session"
+     );
+ }
++
++#[path = "context_metadata_tests.rs"]
++mod context_metadata_tests;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index bcf6fa284f200164485b1b6dcee97fa1d6d6f0f2..c105672e2043e02097472dae9d3b7556f25ef7b9 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1706,7 +1706,8 @@ async fn run_sampling_request(
+                 }
+                 match err.details() {
+                     CodexErrorDetails::ContextWindowExceeded => {
+-                        sess.set_total_tokens_full(&turn_context).await;
++                        sess.set_total_tokens_full(&turn_context, &step_context.settings)
++                            .await;
+                         return Err(err);
+                     }
+                     CodexErrorDetails::UsageLimitReached(e) => {
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 0b00915161474caaa30191035ba8477d249e5adb..83910c5cbc41f5e477ea4a529500cc2da512b07a 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -757,7 +757,12 @@ impl TurnContext {
+             .unwrap_or_else(|| "default".to_string())
+     }
+ 
+-    /// Legacy: returns the frozen initial-turn model context window.
++    /// Reporting metadata from the initial captured settings, including unknown limits.
++    pub(crate) fn reported_model_context_window(&self) -> Option<i64> {
++        self.initial_settings.reported_context_window()
++    }
++
++    /// Legacy operational limit from the frozen initial-turn model.
+     /// Step-scoped consumers should use their captured `StepContext::settings`.
+     pub(crate) fn model_context_window(&self) -> Option<i64> {
+         self.model_info().usable_context_window()
+@@ -823,6 +828,7 @@ impl TurnContext {
+             Arc::new(selected),
+             model_info,
+             config.features.enabled(Feature::FastMode),
++            config.model_context_window,
+         ));
+         config.service_tier = step_settings.service_tier.clone();
+         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
+@@ -1397,6 +1403,7 @@ impl Session {
+             Arc::clone(&session_configuration.step_settings),
+             Arc::new(model_info),
+             self.features.enabled(Feature::FastMode),
++            session_configuration.model_info_overrides.context_window,
+         ));
+         let mut turn_context: TurnContext = Self::make_turn_context(
+             self.thread_id(),
+diff --git a/codex-rs/core/src/state/session.rs b/codex-rs/core/src/state/session.rs
+index b10c99bfd9334b5aded11e38f02186febc6b8b3a..0a245c301dd99804837d9eb59ef267e04733a4fc 100644
+--- a/codex-rs/core/src/state/session.rs
++++ b/codex-rs/core/src/state/session.rs
+@@ -256,6 +256,14 @@ impl SessionState {
+     }
+ 
+     // Token/rate limit helpers
++    /// Replaces reporting metadata without changing token accounting.
++    pub(crate) fn replace_reported_context_window(&mut self, window: Option<i64>) {
++        if let Some(mut info) = self.history.token_info() {
++            info.model_context_window = window;
++            self.history.set_token_info(Some(info));
++        }
++    }
++
+     pub(crate) fn update_token_info_from_usage(
+         &mut self,
+         usage: &TokenUsage,

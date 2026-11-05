@@ -175,7 +175,15 @@
     {
       "path": "0044-scan-deep-helper-hard-links.patch",
       "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
+    },
+    {
+      "path": "0045-native-context-metadata.patch",
+      "sha256": "4f9e1ff49c985288c87edaf74c15ed33aa6dbad150ec907f8a70ca48c75655bf"
+    },
+    {
+      "path": "0046-native-documented-defaults.patch",
+      "sha256": "e03f4c67d22f559ac9ba3056c91c5731c7a66975022603a0d571a8acdc34fc34"
     }
   ],
-  "result_tree": "fc1ed1b5c1649e5ca265af011f4748f9af391744"
+  "result_tree": "39aae3032c5837cb7fe0dc971339ccf13757f14b"
 }
