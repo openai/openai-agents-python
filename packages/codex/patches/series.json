@@ -181,9 +181,17 @@
       "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
     },
     {
+      "path": "0018-native-response-observations.patch",
+      "sha256": "2ba277adb749a1b874debb21d8ad6a0e77b372d1d2a177f29d0e381bb1bb9b8b"
+    },
+    {
+      "path": "0024-native-request-metadata.patch",
+      "sha256": "e4b910cb9e9c649d04d63fedc46c21cd75ae7da921511c19a943d82fd13f6f02"
+    },
+    {
       "path": "0046-sdk-native-tracing.patch",
       "sha256": "417c24b71ae57e8af5657bcadd763f9a758473f2a5a877d7360380616bcccd8a"
     }
   ],
-  "result_tree": "074c933d8a0061bef27c2dd8f98f6c41f07e0f08"
+  "result_tree": "892394303d108272205ad874db4f239b3119487d"
 }
