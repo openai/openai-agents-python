@@ -1060,6 +1060,46 @@ async def test_run_editor_uses_falsy_provider_override(responses, synchronous):
 
 
 @pytest.mark.parametrize("synchronous", [False, True])
+@pytest.mark.parametrize("websockets", [False, True])
+async def test_run_editor_uses_delegated_session_transport(responses, synchronous, websockets):
+    delegated = NativeProvider(
+        base_url=responses.url, api_key="synthetic", supports_websockets=websockets
+    )
+
+    class DelegatedAgent(Agent):
+        def session(self, **options):
+            return super().session(provider=delegated, **options)
+
+    # The declared provider must not stand in for the Session factory's provider.
+    declared = provider(responses) if websockets else None
+    agent = DelegatedAgent(model="gpt-5.5", instructions="Answer.", provider=declared)
+    edits = []
+
+    def edit(_turn, request, **_indices):
+        edits.append(True)
+        request["instructions"] = "Edited through the delegated HTTP Session."
+        return request
+
+    async def run():
+        if synchronous:
+            return await asyncio.to_thread(agent.run_sync, "answer", prepare_request=edit)
+        return await agent.run("answer", prepare_request=edit)
+
+    if websockets:
+        with pytest.raises(ValueError, match="HTTP"):
+            await run()
+        assert edits == []
+        assert responses.requests == []
+    else:
+        responses.respond(assistant_output("delegated"))
+        result = await run()
+        assert result.final_output == "delegated"
+        assert edits == [True]
+        assert len(responses.requests) == 1
+        assert "Edited through the delegated HTTP Session." in json.dumps(responses.requests[0])
+
+
+@pytest.mark.parametrize("synchronous", [False, True])
 @pytest.mark.parametrize(
     "selection", ["empty", "eager", "default", "manual", "handled", "later-manual"]
 )

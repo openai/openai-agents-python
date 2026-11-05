@@ -844,26 +844,22 @@ class Agent(Generic[ContextT, OutputT]):
             if prepare_request is not None:
                 if not callable(prepare_request):
                     raise TypeError("prepare_request must be callable")
-                _check_output(_prepare_spec(self.output_type))
-                effective_provider = self.provider if provider is None else provider
-                if effective_provider is not None and not isinstance(
-                    effective_provider, NativeProvider
-                ):
-                    raise TypeError("provider must be a NativeProvider or None")
-                _check_profile(
-                    self,
-                    websockets=True
-                    if effective_provider is None
-                    else effective_provider._websockets_enabled,
-                    environment=environment,
-                )
-                if (
-                    tools is None
-                    and before_step is None
-                    and state is None
-                    and getattr(self.session, "__func__", None) is Agent.session
-                ):
-                    _check_tools(self.tools)
+                if getattr(self.session, "__func__", None) is Agent.session:
+                    _check_output(_prepare_spec(self.output_type))
+                    effective_provider = self.provider if provider is None else provider
+                    if effective_provider is not None and not isinstance(
+                        effective_provider, NativeProvider
+                    ):
+                        raise TypeError("provider must be a NativeProvider or None")
+                    _check_profile(
+                        self,
+                        websockets=True
+                        if effective_provider is None
+                        else effective_provider._websockets_enabled,
+                        environment=environment,
+                    )
+                    if tools is None and before_step is None and state is None:
+                        _check_tools(self.tools)
             if on_interaction is not None and not callable(on_interaction):
                 raise TypeError("on_interaction must be callable")
             if not isinstance(return_state, bool):
