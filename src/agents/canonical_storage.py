@@ -55,7 +55,7 @@ def _after_fork_child() -> None:
     _stores_mutex.release()
 
 
-if os.name == "posix":
+if sys.platform != "win32" and os.name == "posix":
     os.register_at_fork(
         before=_before_fork, after_in_parent=_after_fork_parent, after_in_child=_after_fork_child
     )
@@ -310,6 +310,8 @@ class SQLiteSessionStore:
         self.read(session_id, token)
 
     def release(self, session_id: str, token: str) -> None:
+        if sys.platform == "win32":
+            raise RuntimeError("SQLiteSessionStore requires POSIX file locking")
         with self._mutex:
             if session_id not in self._owners:
                 return

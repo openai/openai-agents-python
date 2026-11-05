@@ -21,7 +21,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, LocalStorage, NativeProvider, Session
+from agents import Agent, Environment, LocalStorage, NativeProvider, Session
 from examples.supervised_worker import __main__ as worker
 from tests._asyncio import timeout
 from tests.native_fixtures import (
@@ -466,11 +466,19 @@ async def test_handoff_deadline_includes_submission(
         # Seed completed history: interrupting an unfinished callback would require
         # reconciliation before this test can reach the handoff deadline.
         directory.mkdir(mode=0o700)
+        workspace = worker.Worker(directory, pause_after_effect=False).workspace
+        workspace.mkdir(mode=0o700)
         async with NativeProvider(
             api_key="synthetic-supervised-worker", base_url=responses.url, supports_websockets=False
         ) as provider:
             async with Agent(instructions="Record a handoff.", provider=provider).session(
-                storage=LocalStorage(directory / "history")
+                storage=LocalStorage(directory / "history"),
+                environment=Environment.local(
+                    cwd=str(workspace),
+                    tools=("exec_command",),
+                    writable_roots=(str(workspace),),
+                    capability_directories=(),
+                ),
             ) as session:
                 responses.respond(assistant_output("Worker ready."))
                 await (await session.submit("Initialize the worker.")).get_result()
