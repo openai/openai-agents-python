@@ -211,10 +211,14 @@ async def test_shared_provider_keeps_fresh_agents_and_model_catalogs_independent
             "gamma complete",
         ]
         assert len({result.turn.session_id for result in (first, second, third)}) == 3
-        for result, tokens in ((first, 28), (second, 28), (third, 14)):
+        for result, tokens, context_window in (
+            (first, 28, None),
+            (second, 28, 258_400),
+            (third, 14, None),
+        ):
             assert result.usage is not None
             assert result.usage.total_token_usage.total_tokens == tokens
-            assert result.usage.model_context_window == 258_400
+            assert result.usage.model_context_window == context_window
         assert effects == ["alpha:apple", "beta:pear"]
         assert len(peer.requests) == peer.finished_bodies == 5
         assert tool_output(peer.requests[1], "shared-provider-call") == "first:apple"
@@ -669,10 +673,10 @@ async def test_reported_usage_promotes_before_followup_without_replaying_tool() 
             observed = [event async for event in events]
             assert any(isinstance(event, ContextCompacted) for event in observed)
             assert result.usage is not None
-            assert result.usage.model_context_window is not None
-            # The pinned gpt-5.2 fallback has a 272k window and 244800
-            # auto-compaction limit. The report fits the window, not the limit.
-            assert 250_000 <= result.usage.model_context_window <= 272_000
+            # gpt-5.2 has no catalog limit. Core still compacts with its
+            # operating fallback without reporting that fallback as known.
+            assert result.usage.model_context_window is None
+            assert result.usage.total_token_usage.total_tokens >= 250_000
             saved = await session.save_state()
             assert any(record["type"] == "compacted" for record in saved.history)
         assert effects == ["called"]
@@ -1159,14 +1163,16 @@ async def test_same_agent_model_switch_refreshes_catalog_metadata_and_closes_tra
     async with timeout(30), http_peer() as peer:
         agent = Agent(model="gpt-5.2", instructions="Answer briefly.", provider=peer.provider())
         roots = []
-        for index, model in enumerate(["gpt-5.2", "gpt-5.5", "gpt-5.2"]):
+        for index, (model, context_window) in enumerate(
+            [("gpt-5.2", None), ("gpt-5.5", 258_400), ("gpt-5.2", None)]
+        ):
             agent = replace(agent, model=model)
             expected = f"model-result-{index}"
             peer.respond(assistant_output(expected))
             result = await agent.run(f"model-input-{index}")
             assert result.final_output == expected
             assert result.usage is not None
-            assert result.usage.model_context_window == 258_400
+            assert result.usage.model_context_window == context_window
             assert result.usage.total_token_usage.total_tokens == 14
             assert result.usage.last_token_usage.total_tokens == 14
             roots.append(result.turn.session_id)
