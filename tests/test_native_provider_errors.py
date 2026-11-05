@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import pickle
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -340,9 +341,9 @@ async def test_terminal_http_auth_failure_preserves_one_prior_tool_effect(
 
 @pytest.mark.parametrize(
     "upgrade_status,status,expected_upgrades,expected_http",
-    [(401, 401, 2, 1), (401, 403, 2, 1), (426, 401, 1, 2), (426, 403, 1, 1)],
+    [(401, 401, 2, 2), (401, 403, 2, 1), (426, 401, 1, 2), (426, 403, 1, 1)],
 )
-async def test_websocket_auth_fallback_keeps_final_http_failure(
+async def test_websocket_startup_auth_fallback_keeps_final_http_failure(
     upgrade_status: int, status: int, expected_upgrades: int, expected_http: int
 ) -> None:
     async with (
@@ -365,11 +366,61 @@ async def test_websocket_auth_fallback_keeps_final_http_failure(
         assert caught.value.request_id == "final-http-request"
         assert caught.value.category == "authentication_error"
         assert len(peer.upgrades) == expected_upgrades
+        assert all(
+            json.loads(headers["x-codex-turn-metadata"])["request_kind"] == "prewarm"
+            for headers in peer.upgrades
+        )
         assert len(peer.http_requests) == expected_http
+        assert all(request.get("generate") is not False for request in peer.http_requests)
         assert all(
             header.get("authorization") == "Bearer synthetic-rejected-key"
             for header in [*peer.upgrades, *peer.request_headers]
         )
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_sampling_websocket_auth_recovery_is_spent_before_http_fallback(status: int) -> None:
+    steps = []
+
+    def before_step(turn: Any, step_index: int) -> list[Any]:
+        steps.append(step_index)
+        return []
+
+    async with timeout(30), websocket_peer() as peer:
+        peer.respond(assistant_output("socket ready"))
+        agent = Agent(
+            instructions="Answer.",
+            model="gpt-5.2",
+            provider=peer.provider(key="synthetic-rejected-key"),
+        )
+        async with agent.session() as session:
+            assert (
+                await (await session.submit("Prime the existing socket.")).get_result()
+            ).final_output == "socket ready"
+            assert peer.warmups == 1 and not peer.http_requests
+            prior_upgrades = len(peer.upgrades)
+            # Retire the warmed socket so the next actual turn must reconnect.
+            await asyncio.gather(*(socket.close() for socket in tuple(peer.sockets)))
+            await peer.disconnected.wait()
+            peer.upgrade_status = 401
+            peer.http_failure = (status, "final_http_rejection", "final-http-request")
+            with pytest.raises(NativeError) as caught:
+                await (
+                    await session.submit("Reject the sampling reconnect.", before_step=before_step)
+                ).get_result()
+        assert steps == [0]
+        rejected_upgrades = peer.upgrades[prior_upgrades:]
+        assert len(rejected_upgrades) == 2
+        for headers in rejected_upgrades:
+            metadata = json.loads(headers["x-codex-turn-metadata"])
+            assert metadata["request_kind"] == "turn" and metadata["turn_id"]
+            assert headers.get("authorization") == "Bearer synthetic-rejected-key"
+        assert len(peer.http_requests) == 1
+        assert peer.http_requests[0].get("generate") is not False
+        assert caught.value.status_code == status
+        assert caught.value.code == "final_http_rejection"
+        assert caught.value.request_id == "final-http-request"
+        assert caught.value.category == "authentication_error"
 
 
 async def test_http_auth_recovery_budget_resets_for_each_model_request(
