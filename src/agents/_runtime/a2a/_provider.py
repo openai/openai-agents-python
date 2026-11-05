@@ -18,7 +18,7 @@ from typing import Any as Any, Generic as Generic, Literal as Literal, TypeVar a
 import anyio as anyio
 from a2a.client import Client as Client
 from a2a.helpers.proto_helpers import new_data_message as new_data_message
-from a2a.types import a2a_pb2 as p
+from a2a.types import a2a_pb2 as _p
 from google.protobuf.json_format import MessageToDict as MessageToDict
 from pydantic import BaseModel as BaseModel
 
@@ -36,6 +36,8 @@ from ._client import (
     _limits as _limits,
     connect_a2a as connect_a2a,
 )
+
+p = _p
 
 Operation = Literal["start", "observe", "respond", "cancel"]
 _Input = TypeVar("_Input", bound=BaseModel)

@@ -19,7 +19,7 @@ from a2a.server.cluster.task_store import VersionedTaskStore as VersionedTaskSto
 from a2a.server.context import ServerCallContext as ServerCallContext
 from a2a.server.events import EventQueue as EventQueue
 from a2a.server.tasks import InMemoryTaskStore as InMemoryTaskStore, TaskManager as TaskManager
-from a2a.types import a2a_pb2 as p
+from a2a.types import a2a_pb2 as _p
 from a2a.utils.errors import InvalidParamsError as InvalidParamsError
 from google.protobuf.json_format import MessageToDict as MessageToDict, ParseDict as ParseDict
 from google.protobuf.struct_pb2 import Value as Value
@@ -44,6 +44,8 @@ from ..state import SessionState as SessionState
 from ..turn import PendingRequests as PendingRequests
 from ._client import _DEFAULT_LIMITS as _DEFAULT_LIMITS, A2ALimits as A2ALimits, _limits as _limits
 from ._provider import _json as _json
+
+p = _p
 
 
 def _bytes(task: p.Task) -> bytes:
