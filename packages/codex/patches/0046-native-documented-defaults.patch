@@ -1,0 +1,60 @@
+diff --git a/codex-rs/models-manager/models.json b/codex-rs/models-manager/models.json
+index 77e0389c56000ca19df5029278c30c3e9528af51..ac5e0eaf61673644511a11a1917b2c9de20c60f0 100644
+--- a/codex-rs/models-manager/models.json
++++ b/codex-rs/models-manager/models.json
+@@ -38,7 +38,7 @@
+       "default_reasoning_summary": "none",
+       "display_name": "GPT-6-Astra",
+       "description": "Frontier intelligence for the most demanding work.",
+-      "default_reasoning_level": "low",
++      "default_reasoning_level": "medium",
+       "supported_reasoning_levels": [
+         {
+           "effort": "low",
+@@ -211,7 +211,7 @@
+       "default_reasoning_summary": "none",
+       "display_name": "GPT-6.1-Sol",
+       "description": "Latest workhorse model for coding and everyday work.",
+-      "default_reasoning_level": "low",
++      "default_reasoning_level": "medium",
+       "supported_reasoning_levels": [
+         {
+           "effort": "low",
+@@ -729,7 +729,7 @@
+       "default_reasoning_summary": "none",
+       "display_name": "GPT-5.6-Sol",
+       "description": "Older generation workhorse model.",
+-      "default_reasoning_level": "low",
++      "default_reasoning_level": "medium",
+       "supported_reasoning_levels": [
+         {
+           "effort": "low",
+diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
+index 04336f5665f5381708860e7c61fe0fc51c357b0c..b04cdcfca6ff4dfb871d92518aa17d5ec4360b32 100644
+--- a/codex-rs/models-manager/src/manager_tests.rs
++++ b/codex-rs/models-manager/src/manager_tests.rs
+@@ -1682,6 +1682,24 @@ async fn static_manager_reads_latest_auth_mode() {
+     );
+ }
+ 
++#[test]
++fn bundled_sdk_reasoning_defaults_use_medium() {
++    use codex_protocol::openai_models::ReasoningEffort;
++
++    // Sol model references checked on 2026-11-04:
++    // https://developers.openai.com/api/docs/models/gpt-6.1-sol
++    // https://developers.openai.com/api/docs/models/gpt-5.6-sol
++    let response = crate::bundled_models_response().expect("bundled models should parse");
++    for slug in ["gpt-6-astra", "gpt-6.1-sol", "gpt-5.6-sol"] {
++        let model = response
++            .models
++            .iter()
++            .find(|model| model.slug == slug)
++            .expect("supported SDK model should have bundled metadata");
++        assert_eq!(model.default_reasoning_level, Some(ReasoningEffort::Medium));
++    }
++}
++
+ #[test]
+ fn bundled_models_json_roundtrips() {
+     let response = crate::bundled_models_response()

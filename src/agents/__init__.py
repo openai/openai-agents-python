@@ -64,6 +64,10 @@ if TYPE_CHECKING:
         ReplaceArguments as ReplaceArguments,
         StopTurn as StopTurn,
     )
+    from .prepared_request import (
+        PreparedRequest as PreparedRequest,
+        PreparedToolPresentation as PreparedToolPresentation,
+    )
     from .rate_limits import (
         ApiRateLimits as ApiRateLimits,
         ApiRateLimitWindow as ApiRateLimitWindow,
@@ -127,6 +131,8 @@ if TYPE_CHECKING:
     )
 
 _MODULES = {
+    "PreparedRequest": ".prepared_request",
+    "PreparedToolPresentation": ".prepared_request",
     "TraceContext": "._trace_context",
     "Allow": ".native_interception",
     "Deny": ".native_interception",

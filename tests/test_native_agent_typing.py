@@ -607,6 +607,29 @@ async def before_step_types(session: Session[Application, Answer]) -> None:
     )
 
 
+async def prepared_request_types(agent: Agent[None, str], session: Session[None, str]) -> None:
+    from agents import PreparedRequest, PreparedToolPresentation
+
+    async def edit(
+        turn: Turn[Any],
+        request: PreparedRequest,
+        *,
+        preparation_index: int,
+        recovery_attempt: int,
+    ) -> PreparedRequest | None:
+        assert_type(preparation_index, int)
+        assert_type(recovery_attempt, int)
+        assert_type(request["instructions"], str)
+        for tool in request["tools"]:
+            assert_type(tool, PreparedToolPresentation)
+            assert_type(tool["parameters"], dict[str, Any])
+        return request
+
+    assert_type(await agent.run("prepare", prepare_request=edit), Completed[str])
+    assert_type(await session.submit("prepare", prepare_request=edit), Turn[str])
+    assert_type(agent.run_sync("prepare", prepare_request=edit), Completed[str])
+
+
 async def trace_context_types(agent: Agent[None, str], ctx: ToolContext[None]) -> None:
     parent = TraceContext(traceparent="00-11111111111111111111111111111111-2222222222222222-01")
     headers: dict[str, str | None] = {"traceparent": parent.traceparent, "tracestate": None}

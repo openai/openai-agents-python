@@ -22,7 +22,6 @@ jobs:
     timeout-minutes: ${{ matrix.language == 'rust' && 180 || 45 }}
     permissions:
       contents: read
-      actions: read
       security-events: write
     strategy:
       fail-fast: false
@@ -40,47 +39,17 @@ jobs:
           rustup toolchain install 1.95.0 --profile minimal
           echo "RUSTUP_TOOLCHAIN=1.95.0" >> "$GITHUB_ENV"
 
-      - name: Select dedicated CodeQL Cargo directories
-        if: matrix.language == 'rust'
-        run: |
-          echo "CARGO_HOME=$RUNNER_TEMP/agents-codeql-cargo" >> "$GITHUB_ENV"
-          echo "CODEQL_EXTRACTOR_RUST_OPTION_CARGO_TARGET_DIR=$RUNNER_TEMP/agents-codeql-target" >> "$GITHUB_ENV"
-
       - name: Prepare verified native sources for Rust analysis
         if: matrix.language == 'rust'
         run: make native-prepare
 
       - name: Initialize CodeQL
-        id: codeql
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: ${{ matrix.language }}
           build-mode: none
 
-      - name: Restore verified CodeQL Cargo cache
-        if: matrix.language == 'rust' && github.repository == 'openai/openai-agents-python'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          CODEQL_CLI_VERSION: ${{ steps.codeql.outputs.codeql-version }}
-        run: python .github/scripts/codeql-cargo-cache.py restore
-
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           category: /language:${{ matrix.language }}
-
-      - name: Pack CodeQL Cargo cache
-        if: matrix.language == 'rust' && github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness'
-        env:
-          CODEQL_CLI_VERSION: ${{ steps.codeql.outputs.codeql-version }}
-        run: python .github/scripts/codeql-cargo-cache.py pack
-
-      - name: Publish CodeQL Cargo cache
-        if: matrix.language == 'rust' && github.repository == 'openai/openai-agents-python' && github.event_name == 'push' && github.ref == 'refs/heads/feat/codex-harness'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
-        with:
-          name: codeql-cargo-cache-Linux-X64
-          path: ${{ runner.temp }}/codeql-cargo-publication/
-          compression-level: 1
-          retention-days: 7
-          if-no-files-found: error
