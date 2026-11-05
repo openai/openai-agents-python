@@ -43,12 +43,35 @@ jobs:
         if: matrix.language == 'rust'
         run: make native-prepare
 
+      - name: Select SDK-owned Rust sources
+        if: matrix.language == 'rust'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          tracked = subprocess.check_output(["git", "ls-files", "-z", "--", "*.rs"], text=True)
+          paths = {path for path in tracked.split("\0") if path}
+          # Native preparation verifies these receipts against the pinned sources and our patches.
+          upstream = Path("packages/codex/.upstream")
+          for source in ("codex", "rust-sdk"):
+              receipt = json.loads((upstream / f"{source}-source.json").read_text())
+              for path, identity in receipt["result_files"].items():
+                  if path.endswith(".rs") and receipt["files"].get(path) != identity:
+                      paths.add((upstream / source / path).as_posix())
+          config = Path(os.environ["RUNNER_TEMP"]) / "codeql-rust.yml"
+          config.write_text(json.dumps({"paths": sorted(paths)}))
+          print(f"Selected {len(paths)} SDK and patched Rust files for analysis")
+          PY
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          config-file: ${{ matrix.language == 'rust' && '.github/codeql/rust.yml' || '' }}
+          config-file: ${{ matrix.language == 'rust' && format('{0}/codeql-rust.yml', runner.temp) || '' }}
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
