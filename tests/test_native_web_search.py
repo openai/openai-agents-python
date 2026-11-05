@@ -351,7 +351,6 @@ async def test_hosted_local_resume_admits_saved_model_before_executor_io(
                 instructions="Act",
                 provider=provider,
                 tools=[WebSearch(route="hosted")],
-                programmatic_tool_calling=True,
             )
             assert executor.attempts == 0
             if admitted:

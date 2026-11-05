@@ -17,6 +17,11 @@ if TYPE_CHECKING:
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
     )
+    from .canonical_storage import (
+        CustomStorage as CustomStorage,
+        SessionStore as SessionStore,
+        SQLiteSessionStore as SQLiteSessionStore,
+    )
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -158,6 +163,9 @@ _MODULES = {
     "OutputValidationError": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "CustomStorage": ".canonical_storage",
+    "SessionStore": ".canonical_storage",
+    "SQLiteSessionStore": ".canonical_storage",
     "LocalRecoveryRequired": ".recovery",
     "ReconciledCall": ".recovery",
     "UncertainCall": ".recovery",
