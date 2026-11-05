@@ -67,7 +67,19 @@
     {
       "path": "0017-native-policy-expiry-admission.patch",
       "sha256": "4406a07b8bcd9769595ba9295e10986311e8b3fd96bcfeda3d9dfe13a3095048"
+    },
+    {
+      "path": "0018-api-key-rate-limits.patch",
+      "sha256": "7214955c12f507f0534a7813205eeba656265aa6d919aa3704ec5a47f3ea7d64"
+    },
+    {
+      "path": "0019-retained-execution-completions.patch",
+      "sha256": "c96852d1582d17b99e5ffaafa110c471fd3af697a7b384afa15e86955897af10"
+    },
+    {
+      "path": "0020-sdk-turn-receipts.patch",
+      "sha256": "2e7b19c453c96c609fd5dafba2836eafe802776f02274ea45f6320a04d60a67c"
     }
   ],
-  "result_tree": "66f4dc7319790001e362f9dc425916708efe4729"
+  "result_tree": "6ff5f1b941c506337570089657c8c20e34c5a51c"
 }

@@ -42,6 +42,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "fork",
         "items",
         "turns",
+        "rate_limits",
         "cancel_all",
         "suspend",
         "subagents",

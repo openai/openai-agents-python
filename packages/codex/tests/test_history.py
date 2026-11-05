@@ -5,6 +5,7 @@ import copy
 import pytest
 
 from agents._history import project_history
+from agents._projection import project_execution_completion
 
 
 def event(kind, turn="t1", **fields):
@@ -155,7 +156,7 @@ def test_native_tool_records_override_matching_raw_calls_without_duplication():
     assert items[1]["output"] == []
 
 
-def test_specialized_native_call_replaces_generic_response_record():
+def test_specialized_native_call_keeps_generic_response_record():
     history = [
         event("task_started"),
         response(
@@ -178,10 +179,180 @@ def test_specialized_native_call_replaces_generic_response_record():
         event("task_complete"),
     ]
     _, items = project_history(history, "root")
-    assert len(items) == 1
-    assert items[0]["type"] == "command_execution"
-    assert items[0]["output"] == "README.md"
-    assert items[0]["exit_code"] == 0
+    call, execution = items
+    assert call == {
+        "type": "function_call",
+        "id": "shell:0",
+        "turn_id": "t1",
+        "call_id": "shell",
+        "name": "exec_command",
+        "arguments": '{"cmd":"ls"}',
+        "status": "incomplete",
+    }
+    assert execution["type"] == "command_execution"
+    assert execution["id"] == execution["call_id"] == call["call_id"]
+    assert execution["output"] == "README.md"
+    assert execution["exit_code"] == 0
+
+
+def test_late_command_completion_keeps_its_recorded_thread_and_turn():
+    native = event(
+        "item_completed",
+        "interrupted",
+        thread_id="origin",
+        item={
+            "type": "CommandExecution",
+            "id": "shell",
+            "command": ["sh", "-c", "echo 'two words'"],
+            "cwd": "file:///executor/work",
+            "status": "failed",
+            "exit_code": 137,
+        },
+    )
+    message = native["payload"]
+    observed = project_execution_completion(message, thread_id="origin", turn_id="interrupted")
+    assert observed is not None
+    assert observed["type"] == "command_execution"
+    assert observed["argv"] == ["sh", "-c", "echo 'two words'"]
+    assert observed["cwd"] == "file:///executor/work"
+    assert observed["call_id"] == observed["id"] == "shell"
+    assert observed["native_status"] == "failed"
+    assert observed["exit_code"] == 137
+    assert project_execution_completion(message, thread_id="child", turn_id="interrupted") is None
+    assert project_execution_completion(message, thread_id="origin", turn_id="next") is None
+    turns, items = project_history(
+        [
+            event("task_started", "interrupted"),
+            event("turn_aborted", "interrupted"),
+            event("task_started", "next"),
+            native,
+            response(
+                "message",
+                id="next-message",
+                role="assistant",
+                content=[{"type": "output_text", "text": "Next"}],
+            ),
+            event("task_complete", "next"),
+        ],
+        "root",
+        "child",
+    )
+    assert [turn["status"] for turn in turns] == ["cancelled", "completed"]
+    assert items[0] == observed
+    assert items[1]["turn_id"] == "next"
+
+
+def test_canonical_execution_replaces_legacy_receipt_and_keeps_model_records():
+    legacy = event(
+        "mcp_tool_call_end",
+        call_id="fetch",
+        invocation={"server": "catalog", "tool": "lookup", "arguments": {"key": "legacy"}},
+        result={"Err": "legacy result"},
+    )
+    canonical = event(
+        "item_completed",
+        thread_id="root",
+        item={
+            "type": "McpToolCall",
+            "id": "fetch",
+            "server": "catalog",
+            "tool": "lookup",
+            "arguments": {"key": "effective"},
+            "status": "failed",
+            "error": {"message": "native failure"},
+        },
+    )
+    raw_call = response(
+        "function_call", id="provider-id", call_id="fetch", name="lookup", arguments='{"key":"raw"}'
+    )
+    raw_output = response("function_call_output", call_id="fetch", output="model-facing result")
+    _, items = project_history(
+        [event("task_started"), legacy, canonical, raw_call, raw_output, event("task_complete")],
+        "root",
+    )
+    assert items == [
+        project_execution_completion(canonical["payload"], thread_id="root", turn_id="t1"),
+        {
+            "type": "function_call",
+            "id": "provider-id",
+            "turn_id": "t1",
+            "call_id": "fetch",
+            "name": "lookup",
+            "arguments": '{"key":"raw"}',
+            "status": "completed",
+        },
+        {
+            "type": "function_call_output",
+            "id": "fetch:output",
+            "turn_id": "t1",
+            "call_id": "fetch",
+            "status": "completed",
+            "output": "model-facing result",
+            "error": None,
+        },
+    ]
+    _, old = project_history([event("task_started"), legacy], "root", "child")
+    assert old[0]["type"] == "mcp_call"
+    assert old[0]["thread_id"] is None
+    assert old[0]["native_status"] is None
+    assert old[0]["error"] == {"message": "legacy result"}
+
+
+def test_latest_sampled_context_receipt_survives_inherited_turn_completion():
+    def receipt(model):
+        return {
+            "thread_id": "source",
+            "model": model,
+            "reasoning_effort": None,
+            "instruction_revision": None,
+            "developer_instructions_sha256": None,
+            "instruction_files": [],
+            "user_config_applied": False,
+            "codex_revision": "revision",
+            "codex_source_tree": "tree",
+            "approval_policy": "never",
+            "executors": [],
+        }
+
+    def context(turn, model):
+        return {
+            "type": "turn_context",
+            "payload": {
+                "turn_id": turn,
+                "sdk_receipt": {"version": 1, **receipt(model)},
+            },
+        }
+
+    history = [
+        event("task_started"),
+        context("t1", "first"),
+        context("t1", "last"),
+        {"type": "turn_context", "payload": {"turn_id": "t1"}},
+        {"type": "turn_context", "payload": {"turn_id": "t1", "sdk_receipt": None}},
+        event("task_complete"),
+        context("t2", "context-only"),
+    ]
+    turns, _ = project_history(history, "fork", "child")
+    assert turns[0]["status"] == "completed"
+    assert turns[0]["receipt"] == {"turn_id": "t1", **receipt("last")}
+    assert turns[1]["status"] == "in_progress"
+    assert turns[1]["receipt"]["thread_id"] == "source"
+    other_turn = turns[1]
+
+    history.append(
+        {
+            "type": "turn_context",
+            "payload": {"turn_id": "t1", "sdk_receipt": {"version": 2, "turn_id": "t2"}},
+        }
+    )
+    turns, _ = project_history(history, "fork", "child")
+    assert turns[0]["status"] == "completed"
+    assert "receipt" not in turns[0]
+    assert turns[1] == other_turn
+
+    history.append(context("t1", "resampled"))
+    turns, _ = project_history(history, "fork", "child")
+    assert turns[0]["receipt"] == {"turn_id": "t1", **receipt("resampled")}
 
 
 def test_child_call_attribution_and_rollback_remove_only_discarded_turns():

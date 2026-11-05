@@ -547,6 +547,9 @@ class McpCallItem(TypedDict):
     status: FunctionCallStatus
     output: JsonValue
     error: JsonValue
+    call_id: NotRequired[str]
+    thread_id: NotRequired[str | None]
+    native_status: NotRequired[str | None]
 
 
 class CommandExecutionItem(TypedDict):
@@ -559,6 +562,28 @@ class CommandExecutionItem(TypedDict):
     output: str | None
     exit_code: int | None
     duration_ms: int | None
+    argv: NotRequired[list[str]]
+    call_id: NotRequired[str]
+    thread_id: NotRequired[str | None]
+    native_status: NotRequired[str | None]
+
+
+class PatchExecutionItem(TypedDict):
+    type: Literal["patch_execution"]
+    id: str
+    turn_id: str
+    thread_id: str | None
+    call_id: str
+    status: FunctionCallStatus
+    native_status: str | None
+    changes: dict[str, JsonValue]
+    stdout: str | None
+    stderr: str | None
+
+
+ExecutionItem = TypeAliasType(
+    "ExecutionItem", CommandExecutionItem | PatchExecutionItem | McpCallItem
+)
 
 
 class _SubagentCallItem(TypedDict):
@@ -609,8 +634,7 @@ OutputItem = TypeAliasType(
         MessageItem
         | ReasoningItem
         | FunctionCallItem
-        | McpCallItem
-        | CommandExecutionItem
+        | ExecutionItem
         | CreateSubagentCallItem
         | SendSubagentInputCallItem
         | ResumeSubagentCallItem

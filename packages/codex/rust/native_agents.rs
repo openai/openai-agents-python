@@ -135,6 +135,7 @@ async fn validate_model(
 pub struct Policy {
     pub roles: Vec<String>,
     pub max_depth: usize,
+    pub(crate) instruction_files: Vec<crate::application_instructions::InstructionFile>,
     // Current startup policy is host authority. Core reads its own copy before
     // child lifecycle callbacks, so every direct dispatch checks this ceiling.
     pub allowed: OnceLock<Arc<ToolPolicy>>,
