@@ -279,11 +279,16 @@ def test_native_graph_covers_queued_override_callback_and_cancellation(tmp_path:
     )
 
 
-def test_model_compaction_uses_session_parent_after_overridden_turn(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workflow", [False, True])
+def test_model_compaction_uses_session_parent_after_overridden_turn(
+    tmp_path: Path, workflow: bool
+) -> None:
     from examples.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
-        receipt = _run_case("compact", collector.url, tmp_path / "compact.json")
+        receipt = _run_case(
+            "workflow-compact" if workflow else "compact", collector.url, tmp_path / "compact.json"
+        )
     spans = _spans(collector)
     _assert_parent(_dispatch(spans, receipt["first"]), OVERRIDE)
     _assert_parent(_dispatch(spans, receipt["compact"]), PARENT)
@@ -311,13 +316,17 @@ def test_native_manual_request_limit_excludes_trace_metadata(tmp_path: Path) -> 
     assert receipt == {"lengths": [64_800, 64_800], "outputs": ["done", "done"]}
 
 
-def test_fresh_process_manual_resume_uses_current_worker_parent(tmp_path: Path) -> None:
+@pytest.mark.parametrize("workflow", [False, True])
+def test_fresh_process_manual_resume_uses_current_worker_parent(
+    tmp_path: Path, workflow: bool
+) -> None:
     from examples.observability.trace_walkthrough import Collector
 
     output = tmp_path / "manual.json"
     with Collector().serve() as collector:
-        first = _run_case("suspend", collector.url, output)
-        resumed = _run_case("resume", collector.url, output)
+        prefix = "workflow-" if workflow else ""
+        first = _run_case(prefix + "suspend", collector.url, output)
+        resumed = _run_case(prefix + "resume", collector.url, output)
     assert first["turn"] == resumed["turn"]
     assert first["session"] == resumed["session"]
     assert first["pid"] != resumed["pid"]
@@ -381,21 +390,32 @@ async def _native_case(case: str, collector: str, output: str) -> None:
     await telemetry.configure(
         traces=telemetry.OtlpHttp(endpoint=collector + "/v1/traces", protocol="json")
     )
+    workflow = case.startswith("workflow-")
+    case = case.removeprefix("workflow-")
     try:
-        if case == "graph":
-            receipt = await _graph_case()
-        elif case == "compact":
-            receipt = await _compact_case()
-        elif case.startswith("flags-"):
-            receipt = await _flags_case(case.removeprefix("flags-"))
-        elif case == "store-reopen":
-            receipt = await _store_reopen_case(Path(output))
-        elif case == "manual-limit":
-            receipt = await _manual_limit_case()
-        elif case == "unsupported":
-            receipt = await _unsupported_case()
+
+        async def execute() -> dict[str, Any]:
+            if case == "graph":
+                return await _graph_case()
+            elif case == "compact":
+                return await _compact_case(workflow=workflow)
+            elif case.startswith("flags-"):
+                return await _flags_case(case.removeprefix("flags-"))
+            elif case == "store-reopen":
+                return await _store_reopen_case(Path(output))
+            elif case == "manual-limit":
+                return await _manual_limit_case()
+            elif case == "unsupported":
+                return await _unsupported_case()
+            else:
+                return await _manual_case(case, Path(output), workflow=workflow)
+
+        if workflow:
+            with telemetry.trace("synthetic workflow"):
+                receipt = await execute()
+                assert telemetry.current_context() is not None
         else:
-            receipt = await _manual_case(case, Path(output))
+            receipt = await execute()
     finally:
         await telemetry.shutdown()
     Path(output).write_text(json.dumps(receipt))
@@ -464,7 +484,7 @@ async def _manual_limit_case() -> dict[str, Any]:
     return {"lengths": lengths, "outputs": outputs}
 
 
-async def _compact_case() -> dict[str, Any]:
+async def _compact_case(*, workflow: bool = False) -> dict[str, Any]:
     async with ScriptedResponses(
         [text("before")], [text("Remember the synthetic label.")], [text("after")]
     ) as peer:
@@ -473,6 +493,8 @@ async def _compact_case() -> dict[str, Any]:
             first = await session.submit("before", parent_trace={"traceparent": OVERRIDE})
             assert (await first.get_result()).final_output == "before"
             assert await session.compact() is None
+            if workflow:
+                assert telemetry.current_context() is not None
             after = await session.submit("after")
             assert (await after.get_result()).final_output == "after"
             turns = [turn async for turn in session.turns()]
@@ -627,7 +649,7 @@ async def _graph_case() -> dict[str, Any]:
     return receipt
 
 
-async def _manual_case(case: str, output: Path) -> dict[str, Any]:
+async def _manual_case(case: str, output: Path, *, workflow: bool = False) -> dict[str, Any]:
     from agents import ActionRequested, InteractionRequired, SessionState
 
     lookup = FunctionTool(
@@ -654,6 +676,8 @@ async def _manual_case(case: str, output: Path) -> dict[str, Any]:
     def answer(request: Any) -> Any:
         assert isinstance(request, ActionRequested)
         assert request.call_id == "manual-call"
+        if workflow:
+            assert telemetry.current_context() is not None
         return request.reply("accepted")
 
     async with ScriptedResponses([text("resumed")]) as peer:

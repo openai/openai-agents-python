@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         _OpeningOwner,
     )
     from .state import LocalStorage, SessionState
+    from .telemetry import TraceOptions
     from .tools import ToolRef
     from .turn import Turn
 
@@ -535,6 +536,7 @@ class Agent(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -553,6 +555,7 @@ class Agent(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -571,6 +574,7 @@ class Agent(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -589,6 +593,7 @@ class Agent(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -611,6 +616,11 @@ class Agent(Generic[ContextT, OutputT]):
         them starts. Startup errors are reported on that Turn. Restoring an
         already-admitted pending manual turn readies its selected resources
         before exposing its replies.
+
+        trace_options captures native tracing defaults before opening. Every
+        submission inherits its disabled/content restrictions, including when
+        another ambient scope or explicit parent changes the trace linkage.
+        Tracing context and export credentials never enter SessionState.
 
         ``environment`` belongs to this session, so one Agent can use different
         application-owned executors for different users. A supplied Environment is
@@ -656,38 +666,54 @@ class Agent(Generic[ContextT, OutputT]):
         cannot modify. Each file's receipt identifies the exact bytes loaded.
         """
         from .session import Session, _close_after_error
+        from .telemetry import _capture
 
-        session = await Session[SessionContextT, OutputT]._open(
-            self,
-            context=context,
-            state=state,
-            storage=storage,
-            resume=resume,
-            environment=environment,
-            provider=provider,
-            model=model,
-            model_settings=model_settings,
-            tool_selection=tools,
-            instruction_files=instruction_files,
-            reconciled_calls=reconciled_calls,
-            parent_trace=parent_trace,
-        )
         try:
-            yield session
-        except BaseException as error:
-            lease = session._environment_lease
-            await _close_after_error(error, session._exit_scope)
-            if lease is not None:
-                lease.raise_if_interrupted(error)
-            raise
-        else:
-            lease = session._environment_lease
+            parent_trace = _trace_context(parent_trace)
+            captured = _capture(trace_options)
+        finally:
+            del trace_options
+        trace_error: BaseException | None = None
+        try:
+            session = await Session[SessionContextT, OutputT]._open(
+                self,
+                context=context,
+                state=state,
+                storage=storage,
+                resume=resume,
+                environment=environment,
+                provider=provider,
+                model=model,
+                model_settings=model_settings,
+                tool_selection=tools,
+                instruction_files=instruction_files,
+                reconciled_calls=reconciled_calls,
+                parent_trace=parent_trace,
+                **({"_tracing_context": captured.context} if captured.context is not None else {}),
+            )
+            session._trace_context = captured.context
             try:
-                await session._exit_scope()
+                yield session
             except BaseException as error:
+                lease = session._environment_lease
+                await _close_after_error(error, session._exit_scope)
                 if lease is not None:
                     lease.raise_if_interrupted(error)
                 raise
+            else:
+                lease = session._environment_lease
+                try:
+                    await session._exit_scope()
+                except BaseException as error:
+                    if lease is not None:
+                        lease.raise_if_interrupted(error)
+                    raise
+
+        except BaseException as error:
+            trace_error = error
+            raise
+        finally:
+            captured.close(trace_error)
 
     @overload
     async def run(
@@ -705,6 +731,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -723,6 +750,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -742,6 +770,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -762,11 +791,12 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
-        parent_trace follows session() and parents this run, including a restored
-        manual continuation. It does not capture an ambient Python trace.
+        parent_trace sets the W3C parent for native work, including a restored
+        manual continuation. trace_options controls captured SDK workflow policy.
 
         provider, model, and model_settings follow the same precedence and
         restore restrictions as session(). An implicit provider is retired when
@@ -788,136 +818,148 @@ class Agent(Generic[ContextT, OutputT]):
         needs input for a new turn. return_state=True captures a successful
         state before close; save_state restrictions and failures still apply.
         """
-        from .schema import PromptedOutput
-        from .session import InteractionRequired, NativeError, _split_tools
-        from .state import SessionState
-        from .tools import WebSearch
-
-        if on_interaction is not None and not callable(on_interaction):
-            raise TypeError("on_interaction must be callable")
-        if not isinstance(return_state, bool):
-            raise TypeError("return_state must be a bool")
-        if state is not None and not isinstance(state, SessionState):
-            raise TypeError("state must be a SessionState")
-        resume_manual = state is not None and state.native_continuation is not None
-        if resume_manual:
-            if input is not None:
-                raise ValueError("Use input=None to resume a pending manual checkpoint")
-            if on_interaction is None:
-                error = InteractionRequired(
-                    "Resuming a pending manual checkpoint requires on_interaction "
-                    "or Agent.session()"
-                )
-                error.state = state
-                raise error
-            if tools is not None or before_step is not None:
-                raise ValueError("Cannot change tools or before_step on an already admitted turn")
-        elif input is None:
-            raise TypeError("input is required unless resuming a pending manual checkpoint")
-
-        declared, mcp_tools, native_agents = _split_tools(
-            self.tools, self.programmatic_tool_calling
-        )
-        pause_manual = tuple(
-            tool
-            for tool in declared
-            if on_interaction is None
-            and before_step is None
-            and tool._bind is None
-            and (tools is None or tool in tools or tool.ref in tools)
-        )
-        # Restore persisted defaults before judging an omitted selection.
-        if (
-            pause_manual
-            and (state is None or tools is not None)
-            and (
-                self.programmatic_tool_calling
-                or isinstance(self.output_type, PromptedOutput)
-                or environment is not None
-                or native_agents is not None
-                or before_step is not None
-                or (
-                    mcp_tools
-                    and (
-                        (tools is None and state is None)
-                        or (tools is not None and _split_tools(tools, available=self.tools)[1])
-                    )
-                )
-            )
-        ):
-            raise InteractionRequired(
-                "Pausing for manual replies requires Python/manual tools, plain output or "
-                "native strict output, "
-                "no environment, children or before_step. "
-                "Pass on_interaction or use Agent.session() for live replies."
-            )
-        # Capture before opening. An override may expose the Session and its
-        # observations, including when it delegates to the original method.
-        session_factory = self.session
         options: dict[str, Any] = {}
-        if state is not None:
-            options["state"] = state
-        if provider is not None:
-            options["provider"] = provider
-        if model is not None:
-            options["model"] = model
-        if model_settings is not None:
-            options["model_settings"] = model_settings
-        if environment is not None:
-            options["environment"] = environment
-        if parent_trace is not None:
-            options["parent_trace"] = _trace_context(parent_trace)
-        async with session_factory(
-            context=cast(SessionContextT, context),
-            **options,
-        ) as session:
-            if pause_manual:
-                # A delegating factory may change the opening roster or its
-                # default operation. Check the same effective selection that
-                # submit will capture, before it admits work or starts MCP.
-                opening = session._opening_agent
-                assert opening is not None
-                effective = session._default_tools if tools is None else tools
-                selected, selected_mcp, _ = _split_tools(
-                    opening.tools if effective is None else effective,
-                    opening.programmatic_tool_calling,
-                    available=None if effective is None else session._bindings,
-                    ceiling=opening.tools,
-                    environment=session._executor,
-                    native_agents=None if effective is None else session._native_agents,
-                )
-                if any(tool is eligible for tool in selected for eligible in pause_manual) and (
-                    opening.programmatic_tool_calling
-                    or session._default_output.mode == "prompted"
-                    or session._executor is not None
-                    or session._native_agents is not None
-                    or session._storage is not None
-                    or selected_mcp
-                    or any(isinstance(tool, WebSearch) for tool in opening.tools)
-                ):
-                    raise InteractionRequired(
-                        "Pausing for manual replies requires Python/manual tools, plain output or "
-                        "native strict output, "
-                        "no local storage, environment, children or before_step. "
-                        "Pass on_interaction or use Agent.session() for live replies."
-                    )
-            session._fail_unhandled_questions = on_interaction is None and not pause_manual
+        try:
+            from .schema import PromptedOutput
+            from .session import InteractionRequired, NativeError, _split_tools
+            from .state import SessionState
+            from .tools import WebSearch
+
+            if on_interaction is not None and not callable(on_interaction):
+                raise TypeError("on_interaction must be callable")
+            if not isinstance(return_state, bool):
+                raise TypeError("return_state must be a bool")
+            if state is not None and not isinstance(state, SessionState):
+                raise TypeError("state must be a SessionState")
+            resume_manual = state is not None and state.native_continuation is not None
             if resume_manual:
-                restored = session.restored_turn
-                if restored is None:
-                    raise NativeError("Restored manual checkpoint has no pending submission")
-                submission = cast("Turn[OutputT]", restored)
-            else:
-                assert input is not None
-                submission = await session.submit(input, tools=tools, before_step=before_step)
-            if on_interaction is not None or pause_manual:
-                return await session._run_with_interactions(
-                    submission, on_interaction, return_state=return_state, pause_manual=pause_manual
+                if input is not None:
+                    raise ValueError("Use input=None to resume a pending manual checkpoint")
+                if on_interaction is None:
+                    error = InteractionRequired(
+                        "Resuming a pending manual checkpoint requires on_interaction "
+                        "or Agent.session()"
+                    )
+                    error.state = state
+                    raise error
+                if tools is not None or before_step is not None:
+                    raise ValueError(
+                        "Cannot change tools or before_step on an already admitted turn"
+                    )
+            elif input is None:
+                raise TypeError("input is required unless resuming a pending manual checkpoint")
+
+            declared, mcp_tools, native_agents = _split_tools(
+                self.tools, self.programmatic_tool_calling
+            )
+            pause_manual = tuple(
+                tool
+                for tool in declared
+                if on_interaction is None
+                and before_step is None
+                and tool._bind is None
+                and (tools is None or tool in tools or tool.ref in tools)
+            )
+            # Restore persisted defaults before judging an omitted selection.
+            if (
+                pause_manual
+                and (state is None or tools is not None)
+                and (
+                    self.programmatic_tool_calling
+                    or isinstance(self.output_type, PromptedOutput)
+                    or environment is not None
+                    or native_agents is not None
+                    or before_step is not None
+                    or (
+                        mcp_tools
+                        and (
+                            (tools is None and state is None)
+                            or (tools is not None and _split_tools(tools, available=self.tools)[1])
+                        )
+                    )
                 )
-            result = await submission.get_result()
-            if return_state:
-                result = replace(result, state=await session.save_state())
-            return result
+            ):
+                raise InteractionRequired(
+                    "Pausing for manual replies requires Python/manual tools, plain output or "
+                    "native strict output, "
+                    "no environment, children or before_step. "
+                    "Pass on_interaction or use Agent.session() for live replies."
+                )
+            # Capture before opening. An override may expose the Session and its
+            # observations, including when it delegates to the original method.
+            session_factory = self.session
+            if parent_trace is not None:
+                options["parent_trace"] = _trace_context(parent_trace)
+            if trace_options is not None:
+                options["trace_options"] = trace_options
+            if state is not None:
+                options["state"] = state
+            if provider is not None:
+                options["provider"] = provider
+            if model is not None:
+                options["model"] = model
+            if model_settings is not None:
+                options["model_settings"] = model_settings
+            if environment is not None:
+                options["environment"] = environment
+            async with session_factory(
+                context=cast(SessionContextT, context),
+                **options,
+            ) as session:
+                if pause_manual:
+                    # A delegating factory may change the opening roster or its
+                    # default operation. Check the same effective selection that
+                    # submit will capture, before it admits work or starts MCP.
+                    opening = session._opening_agent
+                    assert opening is not None
+                    effective = session._default_tools if tools is None else tools
+                    selected, selected_mcp, _ = _split_tools(
+                        opening.tools if effective is None else effective,
+                        opening.programmatic_tool_calling,
+                        available=None if effective is None else session._bindings,
+                        ceiling=opening.tools,
+                        environment=session._executor,
+                        native_agents=None if effective is None else session._native_agents,
+                    )
+                    if any(tool is eligible for tool in selected for eligible in pause_manual) and (
+                        opening.programmatic_tool_calling
+                        or session._default_output.mode == "prompted"
+                        or session._executor is not None
+                        or session._native_agents is not None
+                        or session._storage is not None
+                        or selected_mcp
+                        or any(isinstance(tool, WebSearch) for tool in opening.tools)
+                    ):
+                        raise InteractionRequired(
+                            "Pausing for manual replies requires Python/manual tools, "
+                            "plain output or "
+                            "native strict output, "
+                            "no local storage, environment, children or before_step. "
+                            "Pass on_interaction or use Agent.session() for live replies."
+                        )
+                session._fail_unhandled_questions = on_interaction is None and not pause_manual
+                if resume_manual:
+                    restored = session.restored_turn
+                    if restored is None:
+                        raise NativeError("Restored manual checkpoint has no pending submission")
+                    submission = cast("Turn[OutputT]", restored)
+                else:
+                    assert input is not None
+                    submission = await session.submit(input, tools=tools, before_step=before_step)
+                if on_interaction is not None or pause_manual:
+                    return await session._run_with_interactions(
+                        submission,
+                        on_interaction,
+                        return_state=return_state,
+                        pause_manual=pause_manual,
+                    )
+                result = await submission.get_result()
+                if return_state:
+                    result = replace(result, state=await session.save_state())
+                return result
+        finally:
+            options.pop("trace_options", None)
+            del trace_options
 
     @overload
     def run_sync(
@@ -935,6 +977,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -953,6 +996,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -972,6 +1016,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -992,6 +1037,7 @@ class Agent(Generic[ContextT, OutputT]):
         state: SessionState | None = None,
         return_state: bool = False,
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1004,33 +1050,39 @@ class Agent(Generic[ContextT, OutputT]):
         retry cleanup. Explicit providers remain the caller's responsibility and
         are not attached to the error.
         """
+        options: dict[str, Any] = {}
         try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            options: dict[str, Any] = {}
-            if state is not None:
-                options["state"] = state
-            if return_state is not False:
-                options["return_state"] = return_state
-            if on_interaction is not None:
-                options["on_interaction"] = on_interaction
-            if provider is not None:
-                options["provider"] = provider
-            if model is not None:
-                options["model"] = model
-            if model_settings is not None:
-                options["model_settings"] = model_settings
-            if environment is not None:
-                options["environment"] = environment
-            if parent_trace is not None:
-                options["parent_trace"] = _trace_context(parent_trace)
-            return _SyncRun().run(
-                self.run(
-                    input,
-                    context=cast(SessionContextT, context),
-                    tools=tools,
-                    before_step=before_step,
-                    **options,
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                if parent_trace is not None:
+                    options["parent_trace"] = _trace_context(parent_trace)
+                if trace_options is not None:
+                    options["trace_options"] = trace_options
+                if state is not None:
+                    options["state"] = state
+                if return_state is not False:
+                    options["return_state"] = return_state
+                if on_interaction is not None:
+                    options["on_interaction"] = on_interaction
+                if provider is not None:
+                    options["provider"] = provider
+                if model is not None:
+                    options["model"] = model
+                if model_settings is not None:
+                    options["model_settings"] = model_settings
+                if environment is not None:
+                    options["environment"] = environment
+                return _SyncRun().run(
+                    self.run(
+                        input,
+                        context=cast(SessionContextT, context),
+                        tools=tools,
+                        before_step=before_step,
+                        **options,
+                    )
                 )
-            )
-        raise RuntimeError("run_sync cannot run inside an event loop; await agent.run()")
+            raise RuntimeError("run_sync cannot run inside an event loop; await agent.run()")
+        finally:
+            options.pop("trace_options", None)
+            del trace_options
