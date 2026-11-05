@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+from fnmatch import fnmatchcase
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -518,7 +519,7 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
     caller = yaml.load(
         (ROOT / ".github/workflows/native-python-push.yml").read_text(), Loader=yaml.BaseLoader
     )
-    assert caller["on"] == {"push": {"branches-ignore": ["main", "feat/codex-harness"]}}
+    assert caller["on"] == {"push": {"branches": ["ci/native-bundle/**"]}}
     assert caller["jobs"]["native-only"]["uses"] == "./.github/workflows/tests.yml"
     assert caller["jobs"]["native-only"]["with"] == {"native_only": "true"}
     assert (
@@ -551,7 +552,10 @@ def test_native_only_push_routes_through_the_existing_global_pipeline() -> None:
 @pytest.mark.parametrize(
     ("repository", "event", "branch", "deleted", "native_push", "tests"),
     [
-        ("openai/openai-agents-python", "push", "feature", False, True, True),
+        ("openai/openai-agents-python", "push", "feature", False, False, True),
+        ("openai/openai-agents-python", "push", "ci/native-bundle/seed", False, True, True),
+        ("openai/openai-agents-python", "push", "ci/native-bundle/seed", True, False, False),
+        ("example/fork", "push", "ci/native-bundle/seed", False, False, True),
         ("openai/openai-agents-python", "push", "feature", True, False, False),
         ("example/fork", "push", "feature", False, False, True),
         ("openai/openai-agents-python", "push", "main", False, False, True),
@@ -574,7 +578,9 @@ def test_push_routing_excludes_deletion_and_foreign_repositories(
         "github.event.repository.default_branch": "main",
         "github.event.deleted": deleted,
     }
-    triggered = event == "push" and branch not in caller["on"]["push"]["branches-ignore"]
+    triggered = event == "push" and any(
+        fnmatchcase(branch, pattern) for pattern in caller["on"]["push"]["branches"]
+    )
     assert (triggered and _condition(caller["jobs"]["native-only"]["if"], values)) is native_push
     assert _condition(suite["jobs"]["changes"]["if"], values) is tests
 
