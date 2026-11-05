@@ -455,7 +455,9 @@ Pass `writable_roots` when constructing the local Environment or a compatible Li
 
 Use a supported local executor or Linux WSS executor to change write grants between turns. With macOS WSS, choose the write roots in the Environment when opening the Session. The SDK cannot confirm that processes from earlier remote commands have exited. You can resubmit an equivalent grant if the paths pass validation.
 
-In a Session without `NativeAgents`, wait for the active turn and any descendant or background executor work to settle. Collect the results of any yielded tool cells before changing the roots. Then supply the complete replacement list on the next root turn. If a current writable root uses a symlink, the path must still resolve to the same directory when you submit it again. When adding a directory to the current root list, pass the canonical executor path from your application's configuration. Use the same rule when restoring a grant you removed. If the Session uses `NativeAgents`, set its write roots when opening it.
+In a Session without `NativeAgents`, wait for the active turn and any descendant or background executor work to settle. Collect the results of any yielded tool cells before changing the roots. Then supply the complete replacement list on the next root turn. If the Session uses `NativeAgents`, set its write roots when opening it.
+
+If a current writable root uses a symlink, that path must still resolve to the same directory when you submit it again. To add a directory, pass its canonical executor path from your application's configuration. Use the same rule when restoring a grant you removed.
 
 ```python
 # After earlier work settles.
