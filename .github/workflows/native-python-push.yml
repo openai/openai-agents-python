@@ -2,7 +2,7 @@ name: Native products for SDK pull requests
 
 on:
   push:
-    branches-ignore: [main, feat/codex-harness]
+    branches-ignore: [main, feat/codex-harness, ci/benchmark-python-macos-opt1-20261105]
 
 permissions:
   contents: read
