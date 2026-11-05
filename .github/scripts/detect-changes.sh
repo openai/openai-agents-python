@@ -114,7 +114,7 @@ fi
 
 case "$mode" in
   code)
-    pattern='^(docs/(.*\.md|sdk/topics\.json)$|README\.md$|mkdocs\.yml$|\.github/release/|src/|tests/|integration_tests/|examples/|packages/codex/|\.github/actions/|\.agents/skills/code-change-verification/|\.github/scripts/|\.github/workflows/(tests|codex-python|codex-python-qualify|native-python-push|docs|publish|repo-skills|release-please|release-candidate|release-readiness|release-readiness-refresh)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
+    pattern='^(docs/sdk/(testing\.md|providers\.md|execution\.md|topics\.json)$|README\.md$|mkdocs\.yml$|\.github/release/|src/|tests/|integration_tests/|examples/|packages/codex/|\.github/actions/|\.agents/skills/code-change-verification/|\.github/scripts/|\.github/workflows/(tests|codex-python|codex-python-qualify|native-python-push|docs|publish|repo-skills|release-please|release-candidate|release-readiness|release-readiness-refresh)\.yml$|release-please-config\.json$|\.release-please-manifest\.json$|pyproject\.toml$|uv\.lock$|Makefile$|pyrightconfig\.json$)'
     ;;
   docs)
     pattern='^(docs/|mkdocs\.yml$|uv\.lock$|\.github/workflows/(docs|tests)\.yml$)'
@@ -131,6 +131,17 @@ run=false
 while IFS= read -r -d '' path; do
   if [[ "$path" =~ $pattern ]]; then
     run=true
+  elif [[ "$mode" = code && "$path" = docs/*.md ]]; then
+    # Ordinary pages need site/import checks, not a native platform matrix.
+    # Check both revisions so removing or moving an executable guide still runs
+    # its regression checks. The explicit pages in the code pattern above are
+    # executed by test_docs_code.py and test_documented_executor_examples.py.
+    if git --literal-pathspecs grep -F -q -e '<!-- docs-check: run -->' \
+        "$base_sha" "$head_sha" -- "$path"; then
+      run=true
+    elif [ "$?" -gt 1 ]; then
+      unknown_changes
+    fi
   elif [ "$mode" = "docs-only" ]; then
     run=false
     break
