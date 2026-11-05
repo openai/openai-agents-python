@@ -1320,6 +1320,47 @@ async def _release_environment(lease: _EnvironmentLease) -> None:
         lease.detach_borrower()
 
 
+def _validate_storage_opening(
+    storage: LocalStorage | CustomStorage | None,
+    state: SessionState | None,
+    resume: str | None,
+    reconciled_calls: Sequence[ReconciledCall],
+) -> tuple[ReconciledCall, ...]:
+    if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
+        raise TypeError("storage must be LocalStorage or CustomStorage")
+    if state is not None and (storage is not None or resume is not None):
+        raise ValueError("Portable state cannot be combined with native local storage or resume")
+    if resume is not None:
+        if storage is None:
+            raise ValueError("resume requires the original LocalStorage profile")
+        if not isinstance(resume, str) or not resume:
+            raise TypeError("resume must be a nonempty native Session ID")
+    reconciliation = tuple(reconciled_calls)
+    if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
+        raise TypeError("reconciled_calls must contain ReconciledCall records")
+    if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
+        raise ValueError("reconciled_calls requires a LocalStorage resume")
+    return reconciliation
+
+
+def _configure_storage_runtime(
+    runtime: dict[str, Any],
+    storage: LocalStorage | CustomStorage | None,
+    resume: str | None,
+    goals: bool,
+) -> None:
+    if isinstance(storage, CustomStorage):
+        runtime["ephemeral"] = False
+        if resume is not None:
+            runtime["_sdk_resume_thread_id"] = resume
+    elif storage is not None:
+        runtime.update(native_thread_store=str(storage.path), ephemeral=False)
+        if resume is not None:
+            runtime["_sdk_resume_thread_id"] = resume
+        if goals:
+            runtime["native_goal_store"] = str(storage.path)
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -1347,22 +1388,7 @@ class Session(Generic[ContextT, OutputT]):
         _captured_api_key: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
-        if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
-            raise TypeError("storage must be LocalStorage or CustomStorage")
-        if state is not None and (storage is not None or resume is not None):
-            raise ValueError(
-                "Portable state cannot be combined with native local storage or resume"
-            )
-        if resume is not None:
-            if storage is None:
-                raise ValueError("resume requires the original LocalStorage profile")
-            if not isinstance(resume, str) or not resume:
-                raise TypeError("resume must be a nonempty native Session ID")
-        reconciliation = tuple(reconciled_calls)
-        if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
-            raise TypeError("reconciled_calls must contain ReconciledCall records")
-        if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
-            raise ValueError("reconciled_calls requires a LocalStorage resume")
+        reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
         if state is not None and (model is not None or model_settings is not None):
             raise ValueError(
                 "Opening model and model_settings overrides cannot be used with state; "
@@ -1676,16 +1702,7 @@ class Session(Generic[ContextT, OutputT]):
                         else _expected_codex_login_binding
                     ),
                 }
-            if isinstance(storage, CustomStorage):
-                runtime["ephemeral"] = False
-                if resume is not None:
-                    runtime["_sdk_resume_thread_id"] = resume
-            elif storage is not None:
-                runtime.update(native_thread_store=str(storage.path), ephemeral=False)
-                if resume is not None:
-                    runtime["_sdk_resume_thread_id"] = resume
-                if goals:
-                    runtime["native_goal_store"] = str(storage.path)
+            _configure_storage_runtime(runtime, storage, resume, goals)
             if executor is not None:
                 native_environment = executor._to_native()
                 native_environment["local_mcp"] = any(
