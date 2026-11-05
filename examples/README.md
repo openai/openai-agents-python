@@ -7,7 +7,7 @@ These examples use the SDK preview. Follow the [installation guide](../docs/sdk/
 | [basic.py](basic.py) | One answer through Agent and function_tool. |
 | [typed_context.py](typed_context.py) | Application context and a Pydantic output model. |
 | [conversation.py](conversation.py) | Two turns, streamed observations and a saved conversation. |
-| [validated_artifact.py](validated_artifact.py) | Application memory and an XML result policy that validates an artifact before writing it. |
+| [validated_artifact.py](validated_artifact.py) | Application memory and a tool callback that validates XML before writing an artifact. |
 
 ## More examples
 
@@ -16,7 +16,7 @@ If an example imports `agents`, install the matching preview wheel and any extra
 | Entry point | What it shows | Prerequisites |
 | --- | --- | --- |
 | [conversation.py](conversation.py) | Multiple turns, observations and saved state using `Turn.get_result()`. | Current SDK and model credentials. |
-| [validated_artifact.py](validated_artifact.py) | A result policy using the current `ToolOutput` factories. | Current SDK and model credentials. |
+| [validated_artifact.py](validated_artifact.py) | A tool callback that returns validation errors through `ToolOutput` so the model can retry. | Current SDK and model credentials. |
 | [callback_quota.py](callback_quota.py) | Scoped function policies with a fresh application quota for each run. | Current SDK and model credentials; grants no native tool permissions. |
 | [vercel_stream.py](vercel_stream.py) | Passive Turn observations as Vercel UI text and tool-progress frames. | Current SDK; the application supplies its HTTP response and owns the Session. |
 | [AG-UI](ag_ui/README.md) | Passive Turn observations using the pinned AG-UI event/SSE contract. | Current SDK and the pinned dependency listed in its README. |

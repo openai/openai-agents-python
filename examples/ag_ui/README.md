@@ -1,6 +1,6 @@
 # AG-UI passive Turn stream
 
-This application example uses the Python events and server-sent event (SSE) format in `ag-ui-protocol==0.1.9`. It uses `ag_ui.core.Event` models and `ag_ui.encoder.EventEncoder`. It adds no SDK integration or namespace. Compatibility covers only the subset below, not later AG-UI versions, every browser client, or the entire protocol.
+This example converts Turn observations to Python events and server-sent event (SSE) frames with `ag-ui-protocol==0.1.9`. It uses `ag_ui.core.Event` models and `ag_ui.encoder.EventEncoder`. The application owns this conversion. The tested subset appears below. Later AG-UI versions and browser clients need separate verification.
 
 ## Install and stream
 
