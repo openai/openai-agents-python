@@ -1,0 +1,193 @@
+# Temporary experiment only; never merge or use as a production native donor.
+name: Experimental Python Codex macOS runner
+on:
+  push:
+    branches: [ci/benchmark-python-macos-codex-runner-20261105]
+permissions:
+  contents: read
+jobs:
+  benchmark:
+    name: Experimental macOS native build and installed-wheel qualification
+    runs-on: macos-15-xlarge
+    timeout-minutes: 100
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTUP_TOOLCHAIN: 1.95.0
+      OPENAI_AGENTS_NATIVE_TIMINGS: "1"
+      OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - name: Select shared Cargo directories
+        run: |
+          echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/agents-native-target" >> "$GITHUB_ENV"
+          echo "UV_CACHE_DIR=$RUNNER_TEMP/agents-native-uv" >> "$GITHUB_ENV"
+          # Match Maturin's macOS environment before compiling shared dependencies.
+          if [[ "$RUNNER_OS" == macOS ]]; then
+            echo "MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}" >> "$GITHUB_ENV"
+            echo "RUSTFLAGS=${RUSTFLAGS:+$RUSTFLAGS }-C link-arg=-undefined -C link-arg=dynamic_lookup" >> "$GITHUB_ENV"
+          fi
+      - name: Configure Linux dependency registries
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p "$CARGO_HOME"
+          if [[ -e "$CARGO_HOME/config" || -e "$CARGO_HOME/config.toml" ]]; then
+            echo "Unexpected Cargo configuration in fresh CI directory." >&2
+            exit 1
+          fi
+          cat > "$CARGO_HOME/config.toml" <<'TOML'
+          [source.crates-io]
+          replace-with = "socket-firewall"
+
+          [source.socket-firewall]
+          registry = "sparse+https://openai.firewall.socket.dev/cargo/"
+          TOML
+          {
+            for variable in NPM_CONFIG_REGISTRY npm_config_registry PNPM_CONFIG_REGISTRY pnpm_config_registry COREPACK_NPM_REGISTRY YARN_NPM_REGISTRY_SERVER BUN_CONFIG_REGISTRY; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/npm/'
+            done
+            for variable in UV_DEFAULT_INDEX UV_INDEX_URL PIP_INDEX_URL; do
+              printf '%s=%s\n' "$variable" 'https://openai.firewall.socket.dev/pypi/simple/'
+            done
+          } >> "$GITHUB_ENV"
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
+        with:
+          enable-cache: false
+      - name: Install native build tools
+        uses: ./.github/actions/setup-native
+      - name: Report Codex runner and Cargo scheduling
+        run: |
+          sw_vers
+          uname -a
+          python - <<'PYTHON'
+          import os
+          import subprocess
+          for name in ("hw.ncpu", "hw.activecpu", "hw.memsize", "hw.model"):
+              print(name + "=" + subprocess.check_output(["sysctl", "-n", name], text=True).strip(), flush=True)
+          print("CARGO_BUILD_JOBS=" + os.environ.get("CARGO_BUILD_JOBS", "unset; Cargo default"), flush=True)
+          print("CARGO_PROFILE_RELEASE_OPT_LEVEL=" + os.environ.get("CARGO_PROFILE_RELEASE_OPT_LEVEL", "unset; existing release default"), flush=True)
+          PYTHON
+          printf '%s\n' 'fn main() { println!("rust_available_parallelism={}", std::thread::available_parallelism().unwrap()); }' > "$RUNNER_TEMP/cargo-parallelism.rs"
+          rustc --crate-name cargo_parallelism "$RUNNER_TEMP/cargo-parallelism.rs" -o "$RUNNER_TEMP/cargo-parallelism"
+          "$RUNNER_TEMP/cargo-parallelism"
+          rustc -vV
+          cargo -V
+      - name: Prepare the source distribution
+        # Use one stable source path for Cargo, the wheel and the test executor.
+        run: |
+          uv build --sdist
+          python - <<'PYTHON'
+          import os
+          import tarfile
+          from pathlib import Path
+          source = Path(os.environ["RUNNER_TEMP"]) / "agents-native-source"
+          source.mkdir()
+          archive_path, = Path("dist").glob("openai_agents-*.tar.gz")
+          with tarfile.open(archive_path) as archive:
+              archive.extractall(source, filter="data")
+          extracted, = source.iterdir()
+          project = source / "project"
+          extracted.rename(project)
+          with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+              output.write(f"OPENAI_AGENTS_BUILD_SOURCE={project.resolve()}\n")
+          PYTHON
+      - name: Build the SDK and native runtime together
+        run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
+      - name: Build the shared test executor
+        run: |
+          python - <<'PYTHON'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          fixture = Path("tests/fixtures/exec_server.rs")
+          (root / fixture).parent.mkdir(parents=True, exist_ok=True)
+          shutil.copy2(Path("packages/codex") / fixture, root / fixture)
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import build_environment, cargo_build_options
+          environment = build_environment(root)
+          options, build_target = cargo_build_options(root, environment)
+          subprocess.run(["cargo", "build", "--release", "--locked", "--timings", *options, "--example", "exec-server-fixture"], cwd=root, env=environment, check=True)
+          target = Path(environment["CARGO_TARGET_DIR"])
+          if not target.is_absolute():
+              target = root / target
+          if build_target:
+              target /= Path(build_target).stem
+          name = "exec-server-fixture" + (".exe" if os.name == "nt" else "")
+          shutil.copy2(target / "release" / "examples" / name, Path("dist") / name)
+          PYTHON
+      - name: Verify macOS executable symbol resolution
+        if: runner.os == 'macOS'
+        run: |
+          python - <<'PYTHON'
+          import subprocess
+          import sys
+          import tempfile
+          from pathlib import Path
+          from zipfile import ZipFile
+
+          sys.path.insert(0, str(Path("packages/codex/scripts").resolve()))
+          from native_helpers import native_helpers
+
+          wheel, = Path("dist").glob("openai_agents-*.whl")
+          expected = {f"agents/bin/{name}" for name in native_helpers("darwin")}
+          with tempfile.TemporaryDirectory(prefix="agents-macos-symbols-") as directory:
+              with ZipFile(wheel) as archive:
+                  members = [info.filename for info in archive.infolist()
+                             if info.filename.startswith("agents/bin/") and not info.is_dir()]
+                  if set(members) != expected or len(members) != len(expected):
+                      raise SystemExit("Wheel executable inventory differs from native_helpers")
+                  products = []
+                  for member in sorted(expected):
+                      product = Path(directory) / Path(member).name
+                      product.write_bytes(archive.read(member))
+                      products.append(product)
+              products.append(Path("dist/exec-server-fixture"))
+              for product in products:
+                  if not product.is_file():
+                      raise SystemExit(f"Missing native executable: {product}")
+                  result = subprocess.run(["xcrun", "nm", "-m", "-u", str(product)],
+                                          capture_output=True, text=True, check=True)
+                  if "(dynamically looked up)" in result.stdout:
+                      raise SystemExit(f"Deferred symbols in {product.name}:\n{result.stdout}")
+                  print(f"Verified linked imports: {product.name}")
+          PYTHON
+      - name: Test native macOS Unix socket policy with the installed wheel
+        if: runner.os == 'macOS'
+        run: |
+          stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
+          mkdir -p "$stage/tests/qualification" "$stage/home"
+          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
+          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
+          uv venv --seed --python "$(command -v python)" "$stage/venv"
+          uv export --frozen --group dev --no-emit-workspace --no-hashes \
+            --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
+          python="$stage/venv/bin/python"
+          "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
+          fixture="$GITHUB_WORKSPACE/dist/exec-server-fixture"
+          chmod +x "$fixture"
+          cd "$stage"
+          env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
+            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
+      - name: Share experimental measurements and packages
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: experimental-python-macos-codex-runner-evidence
+          path: |
+            ${{ runner.temp }}/agents-native-target/cargo-timings/*.html
+            dist/
+          if-no-files-found: warn
+          retention-days: 3
