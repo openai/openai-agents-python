@@ -562,7 +562,31 @@ async def test_cleanup_failure_never_publishes_success_or_private_error(
     assert "synthetic-private-credential" not in str(final.task)
 
 
-async def test_multiple_manual_requests_rejected_without_continuation(tmp_path, responses):
+@pytest.mark.parametrize("staggered", [False, True])
+async def test_multiple_manual_requests_rejected_without_continuation(
+    tmp_path, responses, monkeypatch, staggered
+):
+    import asyncio
+
+    from agents import Turn
+
+    first_observed = asyncio.Event()
+    observed = []
+    if staggered:
+        original = Turn.wait_for_request_or_result
+
+        async def observe_first(turn):
+            outcome = await original(turn)
+            observed.append([request.call_id for request in outcome.requests])
+            first_observed.set()
+            return outcome
+
+        async def before_event(event):
+            if event.get("item", {}).get("call_id") == "call-two":
+                await asyncio.wait_for(first_observed.wait(), 5)
+
+        monkeypatch.setattr(Turn, "wait_for_request_or_result", observe_first)
+        responses.before_event = before_event
     tools = [
         FunctionTool(name=name, description="Host decision", input_type=Approval, output_type=str)
         for name in ("first", "second")
@@ -573,9 +597,14 @@ async def test_multiple_manual_requests_rejected_without_continuation(tmp_path, 
     )
     executor = make_executor(tmp_path, responses, tools)
     final, _ = await invoke(executor, request_context())
+    if staggered:
+        assert observed == [["call-one"]]
     assert final.task.status.state == p.TASK_STATE_FAILED
     binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
-    assert executor.store.read(binding).checkpoint is None
+    saved = executor.store.read(binding)
+    assert saved.status == "failed" and saved.acknowledges(final.task)
+    assert saved.checkpoint is None and saved.challenge is None
+    assert await executor.recover(binding, call_context()) == saved
     assert len(responses.requests) == 1
 
 
