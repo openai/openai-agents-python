@@ -366,10 +366,10 @@ index 0000000000000000000000000000000000000000..a70e5faf6d3b77f8fa6d90f9c92276ae
 +    }
 +}
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee776062fc1 100644
+index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..8460f66ff7ad0585e72285614a871a45b8837177 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -1463,6 +1463,16 @@ async fn run_auto_compact(
+@@ -1463,6 +1463,26 @@ async fn run_auto_compact(
      phase: CompactionPhase,
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
@@ -380,13 +380,23 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee7
 +        .iter()
 +        .any(|contributor| contributor.prepares_request(&turn_context.extension_data))
 +    {
-+        return Err(CodexErr::Fatal("automatic compaction is unsupported for an operation with prepare_request; shorten the input or start a new operation".into()));
++        let err = CodexErr::Fatal("automatic compaction is unsupported for an operation with prepare_request; shorten the input or start a new operation".into());
++        // The guard bypasses the compact task that normally reports mid-turn failures.
++        if matches!(phase, CompactionPhase::MidTurn) {
++            sess.track_turn_codex_error(turn_context.as_ref(), &err);
++            sess.send_event(
++                turn_context.as_ref(),
++                EventMsg::Error(err.to_error_event(None)),
++            )
++            .await;
++        }
++        return Err(err);
 +    }
 +
      if matches!(phase, CompactionPhase::PreTurn)
          && crate::guardian::is_basic_session_source(&turn_context.session_source)
          && !crate::guardian::should_compact_guardian_input(sess)?
-@@ -1606,6 +1616,7 @@ pub(crate) fn build_prompt(
+@@ -1606,6 +1626,7 @@ pub(crate) fn build_prompt(
          parallel_tool_calls: true,
          tool_admission: None,
          sampling_stop: None,
@@ -394,7 +404,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee7
          base_instructions,
          output_schema: turn_context.final_output_json_schema.clone(),
          output_schema_strict: !crate::guardian::is_basic_session_source(
-@@ -1657,6 +1668,7 @@ async fn run_sampling_request(
+@@ -1657,6 +1678,7 @@ async fn run_sampling_request(
      );
      let max_retries = turn_context.provider.info().stream_max_retries();
      let mut retry_state = ResponsesStreamRetryState::default();
@@ -402,7 +412,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee7
      let mut initial_input = Some(input);
      let mut original_input = None;
      let mut executed_tool_calls_by_output = HashMap::new();
-@@ -1689,6 +1701,27 @@ async fn run_sampling_request(
+@@ -1689,6 +1711,27 @@ async fn run_sampling_request(
          let responses_metadata = sess
              .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
              .await;
@@ -430,7 +440,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee7
          if crate::guardian::is_basic_session_source(&turn_context.session_source) {
              crate::guardian::prepare_guardian_prompt(
                  &sess,
-@@ -1698,6 +1731,33 @@ async fn run_sampling_request(
+@@ -1698,6 +1741,33 @@ async fn run_sampling_request(
              )
              .await?;
          }
@@ -464,7 +474,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee7
          let err = match try_run_sampling_request(
              tool_runtime.clone(),
              Arc::clone(&sess),
-@@ -1706,7 +1766,7 @@ async fn run_sampling_request(
+@@ -1706,7 +1776,7 @@ async fn run_sampling_request(
              client_session,
              &responses_metadata,
              Arc::clone(&turn_diff_tracker),
@@ -473,7 +483,7 @@ index 3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158..855d6ec9183d773543983ece7bbe7ee7
              cancellation_token.child_token(),
          )
          .await
-@@ -1762,6 +1822,7 @@ async fn run_sampling_request(
+@@ -1762,6 +1832,7 @@ async fn run_sampling_request(
              ));
          }
          retry??;
