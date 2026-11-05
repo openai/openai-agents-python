@@ -1239,17 +1239,45 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                     ) as creation_scope:
                         initial = await session.submit("Create child")
                     assert (await initial.get_result()).final_output == "root complete"
-                    await model.entered["alpha"].wait()
                     [first] = await handles(session, 1)
+                    initial_wait = asyncio.create_task(first.get_result())
+                    entered_wait = asyncio.create_task(model.entered["alpha"].wait())
+                    ready, _ = await asyncio.wait(
+                        (initial_wait, entered_wait), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if initial_wait in ready:
+                        entered_wait.cancel()
+                        await asyncio.gather(entered_wait, return_exceptions=True)
+                        try:
+                            await initial_wait
+                        except Exception as error:
+                            raise AssertionError(
+                                (
+                                    mode,
+                                    len(model.requests),
+                                    seen,
+                                    "child failed before its response hold",
+                                )
+                            ) from error
+                        raise AssertionError(
+                            (
+                                mode,
+                                len(model.requests),
+                                seen,
+                                "child completed before its response hold",
+                            )
+                        )
                     with telemetry.trace(
                         "unrelated child caller",
                         options=telemetry.TraceOptions(
                             trace_id="f" * 32, include_sensitive_data=True
                         ),
                     ):
-                        await first.steer(steer)
-                        model.release["alpha"].set()
-                        assert (await first.get_result()).final_output == "alpha complete"
+                        try:
+                            await first.steer(steer)
+                        finally:
+                            model.release["alpha"].set()
+                        assert (await initial_wait).final_output == "alpha complete"
                         [child] = [child async for child in session.subagents()]
                         later = await child.start(fresh)
                         assert later.turn_id != first.turn_id
