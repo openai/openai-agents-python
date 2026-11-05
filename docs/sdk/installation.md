@@ -6,8 +6,6 @@ Install the SDK preview from a Python wheel, which includes the Python package a
 
 [0.24.0-alpha.6](https://github.com/openai/openai-agents-python/releases/tag/v0.24.0-alpha.6) is available as a GitHub prerelease with prebuilt wheels. The release includes checksums in `SHA256SUMS`.
 
-The supervised worker controls in these guides, including `Environment.local()` and `Turn.wait_for_attention()`, require a preview wheel newer than alpha.6 that includes those APIs. Check the wheel's release notes before using the [supervised worker recipe](recipes.md#run-supervised-workers).
-
 The SDK preview will stay off PyPI until general availability. The `openai-agents` package currently on PyPI is the previous SDK and does not provide the API in these guides.
 
 ## Requirements
@@ -80,13 +78,15 @@ Expect `0.24.0-alpha.6` or its equivalent Python packaging spelling, `0.24.0a6`.
 
 Use documentation and example files from the same release as the installed wheel. You can copy a self-contained example into your application.
 
-The wheel does not include example files. To run an example project:
+The wheel does not include example files. To run an example included in `0.24.0-alpha.6`:
 
 1. Download and extract the [0.24.0-alpha.6 source archive](https://github.com/openai/openai-agents-python/archive/refs/tags/v0.24.0-alpha.6.zip).
 2. Keep your wheel's Python environment activated. In your shell, change to the extracted directory that contains `examples/`.
 3. Follow the example's setup notes and run its command from that directory.
 
-You do not need to build the SDK.
+You do not need to build the SDK to run examples from that release.
+
+The local execution and supervised worker examples on the development branch use APIs that alpha.6 does not include, such as `Environment.local()` and `Turn.wait_for_attention()`. To try these examples, [build from this branch](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) or install a newer release whose notes include these APIs. Use the example files that match that build. The alpha.6 install commands on this page do not enable these APIs.
 
 To upgrade, download a newer compatible preview wheel and install it in the same environment with `python -m pip install --upgrade` followed by the wheel's path. Read that release's notes for changes before upgrading.
 

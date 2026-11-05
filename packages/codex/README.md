@@ -8,13 +8,17 @@ Install a prebuilt preview wheel with pip. The [installation guide](https://gith
 
 ## Agent and Session API
 
-Use the [Agent and Session guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md) from the same release as your installed wheel.
+Use guides from the same release as your installed wheel. The links below describe the development branch; for a published wheel, select its release tag on GitHub before following the API examples. Start with [Build agents with Codex](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/index.md).
 
 | Guide | Use it to |
 | --- | --- |
 | [Agent configuration](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/configuration.md) | Choose a model, provider and typed output. |
-| [Sessions and state](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/sessions.md) | Continue turns, stream observations, compact and save. |
-| [Tools](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/tools.md) | Declare Python, manual, MCP and executor tools. |
+| [Sessions](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/sessions.md) | Continue turns and stream observations. |
+| [State and recovery](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/state.md) | Compact, save, and restore conversations. |
+| [Tools](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/tools.md) | Declare Python functions and MCP tools. |
+| [Execution](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/execution.md) | Run commands and edit workspace files. |
+| [Delegation](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/delegation.md) | Configure and control native children. |
+| [Approvals and manual results](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/approvals.md) | Answer live requests and recover external jobs. |
 | [API reference](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/reference.md) | Find supported calls and defaults. |
 
 For SDK development and source builds, see [CONTRIBUTING.md](../../CONTRIBUTING.md). See the [maintenance guide](MAINTAINING.md) for native builds and artifact checks.
