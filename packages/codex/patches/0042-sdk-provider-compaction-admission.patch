@@ -1,0 +1,141 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 4a621198c22f522486601cabd5b65521bbe53dd3..01b45b6ba43ca7edc55a80b2d44719afc1cccd8b 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1780,7 +1780,7 @@ impl ModelClientSession {
+                 client_setup.api_auth,
+             )
+             .with_telemetry(Some(request_telemetry), Some(sse_telemetry));
+-            crate::model_request::wait_if_sampling_stopped(prompt.tool_admission.as_deref()).await;
++            crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = client.stream_request(request, options).await;
+ 
+@@ -2093,7 +2093,7 @@ impl ModelClientSession {
+                     ),
+                 ],
+             );
+-            crate::model_request::wait_if_sampling_stopped(prompt.tool_admission.as_deref()).await;
++            crate::model_request::wait_if_sampling_stopped(prompt.sampling_stop.as_deref()).await;
+             crate::model_request::admit_request(&interceptors).map_err(CodexErr::InvalidRequest)?;
+             let stream_result = websocket_connection
+                 .stream_request(
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index e7162e45b6434dea9cba490c0bcb50b7271cd53d..6188306e2ae26a96b758f2359697dc4ad4654b36 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -1,4 +1,5 @@
+ pub use codex_api::ResponseEvent;
++use codex_extension_api::TurnSamplingStop;
+ use codex_protocol::error::Result;
+ use codex_protocol::models::BaseInstructions;
+ use codex_protocol::models::ContentItem;
+@@ -30,6 +31,9 @@ pub struct Prompt {
+     /// Retained executable plan and owner; never serialized to the provider.
+     pub(crate) tool_admission: Option<Arc<dyn codex_extension_api::ModelToolAdmission>>,
+ 
++    /// Stops new provider requests for this turn, including prompts without tools.
++    pub(crate) sampling_stop: Option<Arc<TurnSamplingStop>>,
++
+     /// Whether parallel tool calls are permitted for this prompt.
+     pub(crate) parallel_tool_calls: bool,
+ 
+@@ -50,6 +54,7 @@ impl Default for Prompt {
+             input: Vec::new(),
+             tools: Arc::default(),
+             tool_admission: None,
++            sampling_stop: None,
+             parallel_tool_calls: false,
+             base_instructions: BaseInstructions::default(),
+             output_schema: None,
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 1bf878b5ae6c0fdfe832a4249180257a5af8c188..59bee0fec40f983672f626b31111a7175917206b 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -260,6 +260,11 @@ async fn run_compact_task_inner_impl(
+     // Reuse one client session so turn-scoped state (sticky routing and websocket incremental
+     // request tracking) survives retries within this compact turn.
+     let mut client_session = sess.services.model_client.new_session();
++    let sampling_stop = if matches!(compaction_metadata.trigger(), CompactionTrigger::Auto) {
++        crate::model_request::turn_sampling_stop(&turn_context.extension_data)
++    } else {
++        None
++    };
+     let compaction_response = loop {
+         // Clone is required because of the loop
+         let mut turn_input = history
+@@ -272,6 +277,7 @@ async fn run_compact_task_inner_impl(
+         let prompt = Prompt {
+             input: turn_input,
+             base_instructions: sess.get_prompt_base_instructions().await,
++            sampling_stop: sampling_stop.clone(),
+             cyber_access_program: turn_context.cyber_access_program,
+             ..Default::default()
+         };
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 0d81a7ddd209f2ba02c06de762c3077dc9444d4a..c302aac22a6b055739501c55033aec814eb7a248 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -97,6 +97,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+             Arc::clone(&turn_context.extension_data),
+             Arc::clone(tool_router),
+         )),
++        sampling_stop: crate::model_request::turn_sampling_stop(&turn_context.extension_data),
+         parallel_tool_calls: true,
+         base_instructions,
+         output_schema: None,
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 946079da4beb0585d02f98098560f552b77a08ab..760467f597fc37e165ed88ba8136dc7029a1752a 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -12,14 +12,12 @@ use codex_protocol::models::ResponseItem;
+ use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+-pub(crate) fn turn_sampling_stopped(turn_store: &ExtensionData) -> bool {
+-    turn_store
+-        .get::<TurnSamplingStop>()
+-        .is_some_and(|stop| stop.requested())
++pub(crate) fn turn_sampling_stop(turn_store: &ExtensionData) -> Option<Arc<TurnSamplingStop>> {
++    turn_store.get::<TurnSamplingStop>()
+ }
+ 
+-pub(crate) async fn wait_if_sampling_stopped(admission: Option<&dyn ModelToolAdmission>) {
+-    if admission.is_some_and(|admission| turn_sampling_stopped(admission.turn_store())) {
++pub(crate) async fn wait_if_sampling_stopped(stop: Option<&TurnSamplingStop>) {
++    if stop.is_some_and(TurnSamplingStop::requested) {
+         // Keep the native interrupt responsible for aborting the task and joining cleanup.
+         std::future::pending::<()>().await;
+     }
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 370c005e078edb96645b2ef623f6a28bc857fc4b..3f6d7f1b5e8aa17fab6106d4d1afe7f9ade57158 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1488,7 +1488,9 @@ async fn run_auto_compact(
+         return Ok(());
+     }
+ 
+-    if crate::model_request::turn_sampling_stopped(&turn_context.extension_data) {
++    if crate::model_request::turn_sampling_stop(&turn_context.extension_data)
++        .is_some_and(|stop| stop.requested())
++    {
+         // The native interrupt still owns task cancellation and cleanup.
+         cancellation_token.cancelled().await;
+         return Err(CodexErr::TurnAborted);
+@@ -1603,6 +1605,7 @@ pub(crate) fn build_prompt(
+         },
+         parallel_tool_calls: true,
+         tool_admission: None,
++        sampling_stop: None,
+         base_instructions,
+         output_schema: turn_context.final_output_json_schema.clone(),
+         output_schema_strict: !crate::guardian::is_basic_session_source(
+@@ -1681,6 +1684,8 @@ async fn run_sampling_request(
+             Arc::clone(&step_context.turn.extension_data),
+             Arc::clone(&step_context.tool_router),
+         ));
++        prompt.sampling_stop =
++            crate::model_request::turn_sampling_stop(&step_context.turn.extension_data);
+         let responses_metadata = sess
+             .responses_metadata(step_context.as_ref(), CodexResponsesRequestKind::Turn)
+             .await;

@@ -1,0 +1,56 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 01b45b6ba43ca7edc55a80b2d44719afc1cccd8b..2015061550d4acbed80ea2eefe1c86094f9a2fc5 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1775,7 +1775,10 @@
+             }
+             inference_trace_attempt.record_started(&request);
+             let client = ApiResponsesClient::new(
+-                transport,
++                crate::model_request::SamplingStopTransport {
++                    inner: transport,
++                    stop: prompt.sampling_stop.clone(),
++                },
+                 client_setup.api_provider,
+                 client_setup.api_auth,
+             )
+diff --git a/codex-rs/core/src/model_request.rs b/codex-rs/core/src/model_request.rs
+index 760467f597fc37e165ed88ba8136dc7029a1752a..3ce210281399ccbbc33ced4584805fbd7c39b714 100644
+--- a/codex-rs/core/src/model_request.rs
++++ b/codex-rs/core/src/model_request.rs
+@@ -1,5 +1,11 @@
+ //! Compose request-scoped response interceptors before tracing and response bookkeeping.
+ use crate::tools::router::ToolRouter;
++use codex_client::HttpTransport;
++use codex_client::Request;
++use codex_client::ReqwestTransport;
++use codex_client::Response;
++use codex_client::StreamResponse;
++use codex_client::TransportError;
+ use codex_extension_api::ExtensionData;
+ use codex_extension_api::ModelRequestContributor;
+ use codex_extension_api::ModelRequestInput;
+@@ -20,5 +26,23 @@
+     if stop.is_some_and(TurnSamplingStop::requested) {
+         // Keep the native interrupt responsible for aborting the task and joining cleanup.
+         std::future::pending::<()>().await;
++    }
++}
++
++// Responses HTTP retries invoke the transport again without returning to the
++// outer model-request admission check. Retain the exact turn's stop at that boundary.
++pub(crate) struct SamplingStopTransport {
++    pub(crate) inner: ReqwestTransport,
++    pub(crate) stop: Option<Arc<TurnSamplingStop>>,
++}
++
++impl HttpTransport for SamplingStopTransport {
++    async fn execute(&self, request: Request) -> Result<Response, TransportError> {
++        self.inner.execute(request).await
++    }
++
++    async fn stream(&self, request: Request) -> Result<StreamResponse, TransportError> {
++        wait_if_sampling_stopped(self.stop.as_deref()).await;
++        self.inner.stream(request).await
+     }
+ }
