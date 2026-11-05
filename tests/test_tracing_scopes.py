@@ -115,6 +115,8 @@ def native(monkeypatch: pytest.MonkeyPatch) -> NativeTracing:
     monkeypatch.setattr(telemetry, "_native_tracing", lambda: value)
     monkeypatch.setattr(telemetry, "_processors", {})
     monkeypatch.setattr(telemetry, "_processor_task", None)
+    monkeypatch.setattr(telemetry, "_processor_starting", False)
+    monkeypatch.setattr(telemetry, "_processor_closing", False)
     monkeypatch.setattr(telemetry, "_processor_serial", 0)
     monkeypatch.setattr(telemetry, "_active_processor_ids", set())
     monkeypatch.setattr(telemetry, "_retired_routes", {})
@@ -2318,4 +2320,259 @@ async def test_eager_processor_pump_waits_for_committed_routes(
         assert telemetry._active_processor_ids == {"python-0"}
         assert set(telemetry._processors) == {"python-0"}
     finally:
+        await _stop_processor_pump()
+
+
+@pytest.mark.parametrize("register", [False, True])
+def test_live_loops_share_one_processor_startup(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, register: bool
+) -> None:
+    import threading
+    from time import monotonic
+
+    first_factory = threading.Event()
+    contender_reached = threading.Event()
+    release_factory = threading.Event()
+    stop = threading.Event()
+    finished = [threading.Event(), threading.Event()]
+    failures = []
+    created = []
+    owners = []
+    seen = []
+    lock = threading.RLock()
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread().name == "trace-contender":
+                contender_reached.set()
+            lock.acquire()
+
+        def __exit__(self, *args):
+            lock.release()
+
+    monkeypatch.setattr(telemetry, "_processor_lock", ObservedLock())
+    processor = SimpleNamespace(on_trace_event=lambda event: seen.append(event["sequence"]))
+    telemetry.add_trace_processor(processor)  # Synchronous registration has no pump.
+    native.batches.put_nowait(
+        {"events": [{"sequence": 1, "processor_ids": ["python-0"]}], "through_sequence": 1}
+    )
+
+    def serve(index: int) -> None:
+        async def run() -> None:
+            loop = asyncio.get_running_loop()
+
+            def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
+                if work.cr_code is telemetry._pump_processors.__code__:
+                    created.append(index)
+                    if index == 0:
+                        first_factory.set()
+                        assert release_factory.wait(2)
+                    else:
+                        contender_reached.set()
+                return asyncio.Task(work, loop=loop, **kwargs)
+
+            loop.set_task_factory(factory)
+            try:
+                if index == 0 and register:
+                    telemetry.add_trace_processor(processor)
+                else:
+                    with telemetry.trace("concurrent scope"):
+                        pass
+                owners.append(telemetry._processor_task)
+                finished[index].set()
+                await asyncio.to_thread(stop.wait, 3)
+            finally:
+                loop.set_task_factory(None)
+                pumps = [
+                    task
+                    for task in asyncio.all_tasks()
+                    if task.get_coro().cr_code is telemetry._pump_processors.__code__
+                ]
+                for task in pumps:
+                    task.cancel()
+                await asyncio.gather(*pumps, return_exceptions=True)
+
+        try:
+            asyncio.run(run())
+        except BaseException as error:
+            failures.append(error)
+            finished[index].set()
+
+    threads = [
+        threading.Thread(
+            target=serve, args=(i,), name="trace-owner" if i == 0 else "trace-contender"
+        )
+        for i in range(2)
+    ]
+    try:
+        threads[0].start()
+        assert first_factory.wait(2)
+        threads[1].start()
+        assert contender_reached.wait(2)
+        release_factory.set()
+        assert all(event.wait(2) for event in finished)
+        assert failures == []
+        assert created == [0] and owners[0] is owners[1]
+        # The retained owner remains live while both loops are alive.
+        deadline = monotonic() + 2
+        while not native.acks and monotonic() < deadline:
+            stop.wait(0.005)
+        assert native.acks == [(1, 0)] and seen == [1]
+    finally:
+        release_factory.set()
+        stop.set()
+        for thread in threads:
+            if thread.ident is not None:
+                thread.join(3)
+                assert not thread.is_alive()
+        for route in telemetry._processors.values():
+            route.close()
+    assert failures == []
+
+
+async def test_reentrant_factory_reuses_startup_and_rejects_registration(
+    native: NativeTracing,
+) -> None:
+    loop = asyncio.get_running_loop()
+    original = loop.get_task_factory()
+    created = []
+
+    def factory(loop: Any, work: Any, **kwargs: Any) -> Any:
+        if work.cr_code is telemetry._pump_processors.__code__:
+            created.append(work)
+            telemetry._ensure_processor_pump()
+            with pytest.raises(RuntimeError, match="startup or shutdown"):
+                telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
+        return asyncio.Task(work, loop=loop, **kwargs)
+
+    loop.set_task_factory(factory)
+    try:
+        telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
+    finally:
+        loop.set_task_factory(original)
+    try:
+        assert len(created) == 1 and len(native.routes) == 1
+        assert telemetry._processor_serial == 1
+    finally:
+        await _stop_processor_pump()
+
+
+async def test_shutdown_excludes_restart_while_joined_cleanup_is_pending(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stopped, release = asyncio.Event(), asyncio.Event()
+    telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
+    owner = telemetry._processor_task
+    original_stop = telemetry._stop_processor_task
+
+    async def stop(task: asyncio.Task[None]) -> None:
+        await original_stop(task)
+        stopped.set()
+        await release.wait()
+
+    async def shutdown(budget: int) -> None:
+        pass
+
+    monkeypatch.setattr(telemetry, "_stop_processor_task", stop)
+    original_import = telemetry.importlib.import_module
+    monkeypatch.setattr(native, "shutdown_telemetry", shutdown, raising=False)
+    monkeypatch.setattr(
+        telemetry.importlib,
+        "import_module",
+        lambda name, package=None: (
+            native if name == "agents._native" else original_import(name, package)
+        ),
+    )
+    retiring = asyncio.create_task(telemetry.shutdown(timeout_ms=20))
+    try:
+        await asyncio.wait_for(stopped.wait(), 1)
+        assert owner is not None and owner.done()
+        telemetry._ensure_processor_pump()
+        assert telemetry._processor_task is owner
+        with pytest.raises(RuntimeError, match="startup or shutdown"):
+            telemetry.add_trace_processor(SimpleNamespace(on_trace_event=lambda event: None))
+    finally:
+        release.set()
+        await retiring
+    assert telemetry._processor_task is None and telemetry._processors == {}
+
+
+async def test_foreign_pump_waits_for_native_route_publication(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    staged, reader_lookup, release = threading.Event(), threading.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    original_lock = threading.RLock()
+    old = telemetry._ProcessorRoute(SimpleNamespace(on_trace_event=lambda event: None))
+    monkeypatch.setattr(telemetry, "_processors", {"existing": old})
+    monkeypatch.setattr(telemetry, "_active_processor_ids", {"existing"})
+    seen = []
+    failures = []
+
+    class ObservedLock:
+        def __enter__(self):
+            if threading.current_thread() is threading.main_thread() and staged.is_set():
+                reader_lookup.set()
+            original_lock.acquire()
+
+        def __exit__(self, *args):
+            original_lock.release()
+
+    monkeypatch.setattr(telemetry, "_processor_lock", ObservedLock())
+    telemetry._ensure_processor_pump()
+    original_drain = native.drain_trace_events
+    read_count = 0
+
+    async def drain(count: int) -> str:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 1:
+            while not staged.is_set():
+                await asyncio.sleep(0)
+            return json.dumps(
+                {"events": [{"sequence": 1, "processor_ids": ["python-0"]}], "through_sequence": 1}
+            )
+        return await original_drain(count)
+
+    def publish(encoded: str) -> int:
+        native.routes.append(json.loads(encoded))
+        staged.set()
+        # Model the GIL release of a custom/native implementation after route
+        # acceptance but before Python has published its matching route object.
+        assert release.wait(2)
+        return 1
+
+    monkeypatch.setattr(native, "drain_trace_events", drain)
+    monkeypatch.setattr(native, "set_trace_routes", publish)
+
+    def register() -> None:
+        try:
+            telemetry.add_trace_processor(
+                SimpleNamespace(on_trace_event=lambda event: seen.append(event["sequence"]))
+            )
+        except BaseException as error:
+            failures.append(error)
+
+    # A coordinator releases native publication only after the existing reader
+    # reaches the route lookup. This remains deterministic with the GIL released.
+    def coordinate() -> None:
+        assert reader_lookup.wait(2)
+        release.set()
+
+    writer = threading.Thread(target=register)
+    coordinator = threading.Thread(target=coordinate)
+    writer.start()
+    coordinator.start()
+    try:
+        await asyncio.wait_for(_wait_for_ack(native, 1), 3)
+        assert failures == [] and seen == [1] and native.acks == [(1, 0)]
+        assert telemetry._processor_task is not None
+        assert telemetry._processor_task.get_loop() is loop
+    finally:
+        release.set()
+        await asyncio.to_thread(writer.join, 2)
+        await asyncio.to_thread(coordinator.join, 2)
+        assert not writer.is_alive() and not coordinator.is_alive()
         await _stop_processor_pump()

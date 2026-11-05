@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from threading import Event, Lock
+from threading import Event, Lock, RLock
 from time import monotonic
 from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
@@ -183,7 +183,7 @@ async def configure(
     from .session import _join
 
     async def initialize() -> None:
-        global _engine_options
+        global _engine_options, _processor_closing
         message = None
         try:
             await native.configure_telemetry(private.encoded)
@@ -207,9 +207,11 @@ async def configure(
             private.encoded = ""
         if message is not None:
             raise RuntimeError(message)
-        _engine_options = snapshot
-        if processors:
-            _set_processors(processors, replace=False)
+        with _processor_lock:
+            _engine_options = snapshot
+            _processor_closing = False
+            if processors:
+                _set_processors(processors, replace=False)
 
     # Cancellation must join native initialization and publish a success before
     # another Session can use this process. A failure never replaces the snapshot.
@@ -233,24 +235,34 @@ async def shutdown(*, timeout_ms: int | None = None) -> None:
 
     async def cleanup() -> None:
         global _processor_task
-        processor_task = _processor_task
+        with _processor_lock:
+            processor_task = _processor_task
         try:
             if processor_task is not None and not processor_task.done():
                 await _stop_processor_task(processor_task)
         finally:
-            if _processor_task is processor_task:
-                _processor_task = None
-            try:
-                for processor in _processors.values():
-                    processor.close()
-            finally:
-                _processors.clear()
-                _active_processor_ids.clear()
-                _retired_routes.clear()
+            with _processor_lock:
+                if _processor_task is processor_task:
+                    _processor_task = None
+                try:
+                    for processor in _processors.values():
+                        processor.close()
+                finally:
+                    _processors.clear()
+                    _active_processor_ids.clear()
+                    _retired_routes.clear()
 
     async def retire() -> None:
+        global _processor_closing
+        with _processor_lock:
+            if _processor_starting:
+                raise RuntimeError("Trace processor startup is in progress")
         try:
-            _ensure_processor_pump()
+            with _processor_lock:
+                try:
+                    _ensure_processor_pump()
+                finally:
+                    _processor_closing = True
             if budget is None:
                 await native.shutdown_telemetry()
             else:
@@ -700,6 +712,9 @@ class FlushResult:
 
 _processors: dict[str, _ProcessorRoute] = {}
 _processor_task: asyncio.Task[None] | None = None
+_processor_lock = RLock()
+_processor_starting = False
+_processor_closing = False
 _processor_serial = 0
 _active_processor_ids: set[str] = set()
 _retired_routes: dict[str, int] = {}
@@ -741,82 +756,108 @@ def _clear_current() -> Iterator[None]:
 
 
 def _ensure_processor_pump() -> None:
-    global _processor_task
+    global _processor_task, _processor_starting
     if _in_processor.get():
         return
     try:
-        asyncio.get_running_loop()
+        loop = asyncio.get_running_loop()
     except RuntimeError:
         return
-    if _processors and (
-        _processor_task is None or _processor_task.done() or _processor_task.get_loop().is_closed()
-    ):
-        _processor_task = _create_task(_pump_processors())
+    with _processor_lock:
+        if _processor_starting or _processor_closing:
+            return
+        if _processors and (
+            _processor_task is None
+            or _processor_task.done()
+            or _processor_task.get_loop().is_closed()
+        ):
+            _processor_starting = True
+            ready = loop.create_future()
+            try:
+                _processor_task = _create_task(_pump_processors(ready))
+                ready.set_result(None)
+            except BaseException:
+                ready.cancel()
+                raise
+            finally:
+                _processor_starting = False
 
 
 def _set_processors(processors: Sequence[TraceProcessor], *, replace: bool) -> None:
-    global _processor_serial, _processor_task, _active_processor_ids
+    global _processor_serial, _processor_task, _active_processor_ids, _processor_starting
     values = tuple(processors)
     _validate_processors(values)
-    active_count = len(values) if replace else len(_active_processor_ids) + len(values)
-    if active_count > _MAX_PROCESSOR_WORKERS:
-        raise RuntimeError("At most 16 active Python trace processors are supported")
-    if len(_processors) + len(values) > 64:
-        raise RuntimeError(
-            "Trace processor route capacity exhausted; flush completed records before adding routes"
-        )
-    ids = [f"python-{_processor_serial + i}" for i in range(len(values))]
-    routes = {
-        identifier: _ProcessorRoute(value) for identifier, value in zip(ids, values, strict=True)
-    }
-    native = _native_tracing()
-    reserved: asyncio.Task[None] | None = None
-    ready: asyncio.Future[None] | None = None
-    try:
+    with _processor_lock:
+        if _processor_starting or _processor_closing:
+            raise RuntimeError("Trace processor startup or shutdown is in progress")
+        _processor_starting = True
         try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-        if (
-            loop is not None
-            and not _in_processor.get()
-            and (_processors or routes)
-            and (
-                _processor_task is None
-                or _processor_task.done()
-                or _processor_task.get_loop().is_closed()
-            )
-        ):
-            ready = loop.create_future()
-            reserved = _create_task(_pump_processors(ready))
-        cutoff = native.set_trace_routes(json.dumps({"processor_ids": ids, "replace": replace}))
-    except BaseException:
-        if ready is not None:
-            ready.cancel()
-        if reserved is not None:
-            reserved.cancel()
-        raise
-    if replace:
-        _retired_routes.update((identifier, cutoff) for identifier in _active_processor_ids)
-        _active_processor_ids = set(ids)
-    else:
-        _active_processor_ids.update(ids)
-    _processor_serial += len(values)
-    _processors.update(routes)
-    _retire_routes(_processor_acknowledged)
-    if reserved is not None:
-        _processor_task = reserved
-        assert ready is not None
-        ready.set_result(None)
+            active_count = len(values) if replace else len(_active_processor_ids) + len(values)
+            if active_count > _MAX_PROCESSOR_WORKERS:
+                raise RuntimeError("At most 16 active Python trace processors are supported")
+            if len(_processors) + len(values) > 64:
+                raise RuntimeError(
+                    "Trace processor route capacity exhausted; "
+                    "flush completed records before adding routes"
+                )
+            ids = [f"python-{_processor_serial + i}" for i in range(len(values))]
+            routes = {
+                identifier: _ProcessorRoute(value)
+                for identifier, value in zip(ids, values, strict=True)
+            }
+            native = _native_tracing()
+            reserved: asyncio.Task[None] | None = None
+            ready: asyncio.Future[None] | None = None
+            try:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if (
+                    loop is not None
+                    and not _in_processor.get()
+                    and (_processors or routes)
+                    and (
+                        _processor_task is None
+                        or _processor_task.done()
+                        or _processor_task.get_loop().is_closed()
+                    )
+                ):
+                    ready = loop.create_future()
+                    reserved = _create_task(_pump_processors(ready))
+                cutoff = native.set_trace_routes(
+                    json.dumps({"processor_ids": ids, "replace": replace})
+                )
+            except BaseException:
+                if ready is not None:
+                    ready.cancel()
+                if reserved is not None:
+                    reserved.cancel()
+                raise
+            if replace:
+                _retired_routes.update((identifier, cutoff) for identifier in _active_processor_ids)
+                _active_processor_ids = set(ids)
+            else:
+                _active_processor_ids.update(ids)
+            _processor_serial += len(values)
+            _processors.update(routes)
+            _retire_routes(_processor_acknowledged)
+            if reserved is not None:
+                _processor_task = reserved
+                assert ready is not None
+                ready.set_result(None)
+        finally:
+            _processor_starting = False
 
 
 def _retire_routes(through_sequence: int) -> None:
-    for identifier, cutoff in tuple(_retired_routes.items()):
-        if cutoff <= through_sequence:
-            route = _processors.pop(identifier, None)
-            if route is not None:
-                route.close()
-            del _retired_routes[identifier]
+    with _processor_lock:
+        for identifier, cutoff in tuple(_retired_routes.items()):
+            if cutoff <= through_sequence:
+                route = _processors.pop(identifier, None)
+                if route is not None:
+                    route.close()
+                del _retired_routes[identifier]
 
 
 def add_trace_processor(processor: TraceProcessor) -> None:
@@ -1023,8 +1064,6 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
     if ready is not None:
         # Eager task factories must not drain before route publication commits.
         await ready
-        if not _processors:
-            return
     from .session import _join
 
     global _processor_acknowledged
@@ -1042,15 +1081,16 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                 for identifier in event.get("processor_ids", []):
                     routes.setdefault(identifier, []).append(snapshot)
             for identifier, events in routes.items():
-                processor = _processors.get(identifier)
-                if processor is None or (
-                    processor.pending is not None and not processor.pending.done()
-                ):
-                    continue
-                try:
-                    delivery = processor.submit(events)
-                except Exception:
-                    continue
+                with _processor_lock:
+                    processor = _processors.get(identifier)
+                    if processor is None or (
+                        processor.pending is not None and not processor.pending.done()
+                    ):
+                        continue
+                    try:
+                        delivery = processor.submit(events)
+                    except Exception:
+                        continue
                 deliveries.append(delivery)
                 await delivery.wait()
         finally:
@@ -1070,10 +1110,13 @@ async def _pump_processors(ready: asyncio.Future[None] | None = None) -> None:
                 for delivery in deliveries
                 for record in delivery.deliveries
             )
-            if batch["through_sequence"]:
-                native.ack_trace_events(batch["through_sequence"], selected - completed)
-                _processor_acknowledged = max(_processor_acknowledged, batch["through_sequence"])
-                _retire_routes(_processor_acknowledged)
+            with _processor_lock:
+                if batch["through_sequence"]:
+                    native.ack_trace_events(batch["through_sequence"], selected - completed)
+                    _processor_acknowledged = max(
+                        _processor_acknowledged, batch["through_sequence"]
+                    )
+                    _retire_routes(_processor_acknowledged)
         if not batch["events"]:
             await asyncio.sleep(0.01)
 

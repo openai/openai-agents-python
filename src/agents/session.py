@@ -13,7 +13,15 @@ import re
 import sys
 import weakref
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Future
 from contextlib import AbstractAsyncContextManager, contextmanager, suppress
 from contextvars import ContextVar, copy_context
@@ -2762,7 +2770,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
         writable_roots: Sequence[str | PathLike[str]] | None = None,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2776,7 +2784,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
         writable_roots: Sequence[str | PathLike[str]] | None = None,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2802,7 +2810,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue", "steer"] = "reject",
         writable_roots: Sequence[str | PathLike[str]] | None = None,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -3881,7 +3889,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         enqueue: bool = False,
         writable_roots: tuple[str, ...] | None = None,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:

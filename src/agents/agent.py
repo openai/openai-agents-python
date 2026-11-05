@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from contextvars import ContextVar
 from copy import copy
@@ -488,7 +488,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -506,7 +506,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -524,7 +524,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -542,7 +542,7 @@ class Agent(Generic[ContextT, OutputT]):
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -666,7 +666,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -684,7 +684,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -703,7 +703,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -723,7 +723,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -903,7 +903,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[None] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -921,7 +921,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[object] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -940,7 +940,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -960,7 +960,7 @@ class Agent(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[SessionContextT] | None = None,
         state: SessionState | None = None,
         return_state: bool = False,
-        trace_options: TraceOptions | None = None,
+        trace_options: TraceOptions | Mapping[str, Any] | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
