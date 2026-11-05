@@ -19,6 +19,8 @@ from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
 
 import agents
 from agents import (
@@ -749,9 +751,10 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
     agent = Agent(instructions="Use the selected tools.", provider=provider)
     storage = LocalStorage(tmp_path / "profile")
     network = NetworkPolicy(
-        allowed_domains=["allowed.example.invalid"],
+        allowed_domains=["127.0.0.1"],
         denied_domains=["blocked.example.invalid"],
         allow_all_unix_sockets=True,
+        allow_local_binding=True,
     )
     selected = Environment.local(
         cwd=work, writable_roots=[first, second], tools=["exec_command"], network=network
@@ -764,6 +767,19 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
         ),
         "8.8.8.8": "domain is not on the allowlist for the current sandbox mode",
     }
+    hits: list[str] = []
+
+    async def handle_peer(request: web.Request) -> web.Response:
+        hits.append(request.path)
+        return web.Response(text=f"boundary peer {request.path}")
+
+    app = web.Application()
+    app.router.add_get("/{stage}", handle_peer)
+    curl = (
+        'test -n "$HTTP_PROXY" && curl --silent --show-error --max-time 3 '
+        '--proxy "$HTTP_PROXY" '
+        "--noproxy ''"
+    )
 
     def command(*, allow: tuple[Path, ...], deny: tuple[Path, ...]) -> str:
         parts = ["set -e", 'test -n "$HTTP_PROXY"']
@@ -777,13 +793,16 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
     async def run_turn(session, call_id, cmd, **settings):
         start = len(responses.requests)
         responses.respond(function_call("exec_command", {"cmd": cmd, "login": False}, call_id))
+        allowed_call = f"{call_id}-allow"
+        target = shlex.quote(str(peer.make_url(f"/{call_id}")))
+        responses.respond(
+            function_call(
+                "exec_command", {"cmd": f"{curl} --fail {target}", "login": False}, allowed_call
+            )
+        )
         # Core reports a blocked request as a tool failure, so probe each host separately.
         for host in denials:
-            probe = (
-                'test -n "$HTTP_PROXY" && curl --silent --show-error --max-time 3 '
-                '--proxy "$HTTP_PROXY" '
-                f"--noproxy '' --output /dev/null http://{host}/"
-            )
+            probe = f"{curl} --output /dev/null http://{host}/"
             responses.respond(
                 function_call("exec_command", {"cmd": probe, "login": False}, f"{call_id}-{host}")
             )
@@ -791,15 +810,18 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
         turn = await session.submit(call_id, **settings)
         assert (await turn.get_result()).final_output == call_id
         assert "Process exited with code 0" in tool_output(responses.requests[start + 1], call_id)
+        allowed = tool_output(responses.requests[start + 2], allowed_call)
+        assert "Process exited with code 0" in allowed
+        assert f"boundary peer /{call_id}" in allowed
         for request, (host, reason) in zip(
-            responses.requests[start + 2 :], denials.items(), strict=True
+            responses.requests[start + 3 :], denials.items(), strict=True
         ):
             output = tool_output(request, f"{call_id}-{host}")
             assert output.startswith("exec_command failed: ProcessFailed")
             assert host in output and f"was blocked: {reason}" in output
         return turn.turn_id
 
-    async with timeout(120), provider:
+    async with timeout(120), provider, TestServer(app, host="127.0.0.1") as peer:
         async with agent.session(storage=storage, environment=selected) as session:
             session_id = session.id
             before = await run_turn(
@@ -844,7 +866,7 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
             assert receipts[before]["network_sandbox"] == receipts[after]["network_sandbox"]
             assert receipts[before]["network_policy"] == receipts[after]["network_policy"]
             assert receipts[after]["network_policy"]["domains"] == {
-                "allowed.example.invalid": "allow",
+                "127.0.0.1": "allow",
                 "blocked.example.invalid": "deny",
             }
 
@@ -879,6 +901,7 @@ async def test_turn_write_policy_and_reopen_checks_the_applied_policy(
                 command(allow=(work,), deny=(first, second, third)),
                 writable_roots=[],
             )
+    assert hits == ["/original", "/replacement", "/inherited", "/cleared"]
 
 
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires native Unix")
