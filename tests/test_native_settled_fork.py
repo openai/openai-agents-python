@@ -557,7 +557,25 @@ async def test_fork_refuses_idle_child_terminal_until_current_environment_retire
                 await (await source.submit("Retire the child's process")).get_result()
             ).final_output == ("root complete")
             output = tool_output(peer.requests[-1], "release-child")
-            assert "child finished" in output and "Process exited with code 0" in output
+            output_parts = [output]
+            for attempt in range(10):
+                running = re.search(r"Process running with session ID (\d+)", output)
+                if running is None:
+                    break
+                # Poll the release command; do not start it again.
+                call_id = f"poll-release-child-{attempt}"
+                peer.action = function_call(
+                    "write_stdin",
+                    {"session_id": int(running[1]), "chars": "", "yield_time_ms": 1000},
+                    call_id,
+                )
+                assert (
+                    await (await source.submit("Wait for the release command")).get_result()
+                ).final_output == "root complete"
+                output = tool_output(peer.requests[-1], call_id)
+                output_parts.append(output)
+            assert "child finished" in "".join(output_parts)
+            assert "Process exited with code 0" in output
             # Retiring the process does not make a descendant graph copyable.
             before = len(executor.requests)
             model_requests = (len(peer.requests), len(peer.child_requests["alpha"]))

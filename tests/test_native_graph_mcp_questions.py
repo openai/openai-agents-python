@@ -172,7 +172,11 @@ async def test_child_form_is_not_answerable_and_native_successor_survives(
             assert (
                 await (await session.submit("Start alpha successor")).get_result()
             ).final_output == "root complete"
-            successor = await captured_turn(session, alpha.child_id)
+            # Follow-up acceptance can precede the child snapshot's new turn.
+            while (successor := await captured_turn(session, alpha.child_id)) is None or (
+                successor.turn_id == alpha.turn_id
+            ):
+                await asyncio.sleep(0)
             assert successor is not None and successor.turn_id != alpha.turn_id
             assert (await successor.get_result()).final_output == "alpha complete"
             prompts = [e for e in observed.events if e["msg"]["type"] == "elicitation_request"]

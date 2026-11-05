@@ -1,0 +1,827 @@
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history.rs b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+index b32ef6d20c8d0c9fa26cd121e630641fa871aa24..8b42fde1c5c5b874a1de766661065156447eb65f 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+@@ -4349,6 +4349,7 @@ mod tests {
+                 started_at: Some(10),
+                 last_agent_message: None,
+                 error: Some(ErrorEvent {
++                    response_integrity_reason: None,
+                     misalignment: None,
+                     message: "Selected model is at capacity. Please try a different model.".into(),
+                     codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+@@ -4744,6 +4745,7 @@ mod tests {
+                 questions: None,
+             }),
+             EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "rollback failed".into(),
+                 codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+@@ -4789,6 +4791,7 @@ mod tests {
+                 time_to_first_token_ms: None,
+             }),
+             EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "request-level failure".into(),
+                 codex_error_info: Some(CodexErrorInfo::BadRequest),
+@@ -4843,6 +4846,7 @@ mod tests {
+                 ..Default::default()
+             }),
+             EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "stream failure".into(),
+                 codex_error_info: Some(CodexErrorInfo::ResponseStreamDisconnected {
+@@ -4907,6 +4911,7 @@ mod tests {
+                 started_at: Some(10),
+                 last_agent_message: None,
+                 error: Some(ErrorEvent {
++                    response_integrity_reason: None,
+                     misalignment: None,
+                     message: "Selected model is at capacity. Please try a different model.".into(),
+                     codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs b/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs
+index 729f673e29166f41c89c42b2394bf0bf46d23dca..5c22fc30159ca240125d08532c99040fc81f727d 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs
+@@ -74,6 +74,7 @@ fn projects_turn_lifecycle_without_prior_builder_state() {
+ #[test]
+ fn projects_failed_turn_completion_as_snapshot() {
+     let error = ErrorEvent {
++        response_integrity_reason: None,
+         misalignment: None,
+         message: "request failed".to_string(),
+         codex_error_info: None,
+diff --git a/codex-rs/cli/src/doctor.rs b/codex-rs/cli/src/doctor.rs
+index b9f26e9d8693870e15a5f4a1e3fdb19a0f885cff..427aa8d3b81681b6898ca2fc24a8e95478e5619c 100644
+--- a/codex-rs/cli/src/doctor.rs
++++ b/codex-rs/cli/src/doctor.rs
+@@ -2446,6 +2446,7 @@ fn websocket_error_detail(err: &ApiError) -> String {
+         | ApiError::RateLimitExceeded { .. }
+         | ApiError::RateLimit(_)
+         | ApiError::InvalidRequest { .. }
++        | ApiError::ResponseIntegrity { .. }
+         | ApiError::InvalidPrompt { .. }
+         | ApiError::CyberPolicy { .. }
+         | ApiError::BioPolicy { .. }
+diff --git a/codex-rs/codex-api/src/api_bridge.rs b/codex-rs/codex-api/src/api_bridge.rs
+index fce0f0cdd0ed3af1607e6907653e63d6d4134dc4..7e74ac094c260a5ddcaffa3a779bfd9c17654e0c 100644
+--- a/codex-rs/codex-api/src/api_bridge.rs
++++ b/codex-rs/codex-api/src/api_bridge.rs
+@@ -36,6 +36,7 @@ pub fn map_api_error(err: ApiError) -> CodexErr {
+         | ApiError::FlexUnavailable
+         | ApiError::RateLimit(_)
+         | ApiError::InvalidRequest { .. }
++        | ApiError::ResponseIntegrity { .. }
+         | ApiError::InvalidPrompt { .. }
+         | ApiError::CyberPolicy { .. }
+         | ApiError::BioPolicy { .. }
+@@ -84,6 +85,10 @@ fn map_api_error_details(err: ApiError) -> CodexErr {
+             })
+         }
+         ApiError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
++        ApiError::ResponseIntegrity { reason } => CodexErr::InvalidRequest(
++            "Native model response ended without complete supported output".to_string(),
++        )
++        .with_response_integrity_reason(reason),
+         ApiError::InvalidPrompt { message } => {
+             CodexErr::new(CodexErrorDetails::InvalidPrompt { message })
+         }
+diff --git a/codex-rs/codex-api/src/api_bridge_tests.rs b/codex-rs/codex-api/src/api_bridge_tests.rs
+index 9c4cd1be080d828ed4bb751ea00ff929c2f46d1a..5444282b7086c6030e28da8a365645581e6fa54e 100644
+--- a/codex-rs/codex-api/src/api_bridge_tests.rs
++++ b/codex-rs/codex-api/src/api_bridge_tests.rs
+@@ -772,3 +772,39 @@ fn map_api_error_extracts_identity_auth_details_from_headers() {
+     );
+     assert_eq!(err.identity_error_code.as_deref(), Some("token_expired"));
+ }
++
++#[test]
++fn map_response_integrity_reason_preserves_existing_invalid_request_semantics() {
++    use codex_protocol::error::ResponseIntegrityReason;
++    for reason in [
++        ResponseIntegrityReason::UndecodableOutputItem,
++        ResponseIntegrityReason::ProviderOwnedToolReceipt,
++        ResponseIntegrityReason::UnfinishedAssistantItem,
++        ResponseIntegrityReason::MissingSupportedTerminalOutput,
++    ] {
++        let message = "Native model response ended without complete supported output";
++        let typed = ApiError::ResponseIntegrity { reason };
++        let plain = ApiError::InvalidRequest {
++            message: message.to_string(),
++        };
++        assert_eq!(typed.to_string(), plain.to_string());
++        let plain = map_api_error(plain);
++        let mapped = map_api_error(typed);
++        assert!(
++            matches!(mapped.details(), CodexErrorDetails::InvalidRequest(value) if value == message)
++        );
++        assert_eq!(mapped.to_string(), plain.to_string());
++        assert_eq!(
++            mapped.to_codex_protocol_error(),
++            plain.to_codex_protocol_error()
++        );
++        assert_eq!(mapped.retry_delay(1), None);
++        assert_eq!(mapped.retry_after(), None);
++        assert_eq!(mapped.response_integrity_reason(), Some(reason));
++        assert_eq!(
++            mapped.to_error_event(None).response_integrity_reason,
++            Some(reason)
++        );
++        assert_eq!(plain.response_integrity_reason(), None);
++    }
++}
+diff --git a/codex-rs/codex-api/src/endpoint/responses_websocket.rs b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+index 68fd5a0af08232b9a174369e0b2e8257bedc1678..58d43f7af9e4a3a29dd410436b5f3295249bd4ce 100644
+--- a/codex-rs/codex-api/src/endpoint/responses_websocket.rs
++++ b/codex-rs/codex-api/src/endpoint/responses_websocket.rs
+@@ -1437,4 +1437,71 @@ mod tests {
+             }
+         );
+     }
++    #[tokio::test]
++    async fn websocket_undecodable_item_retains_typed_reason_and_stops_before_completion() {
++        for kind in ["response.output_item.added", "response.output_item.done"] {
++            let (tx_command, mut rx_command) = mpsc::channel(1);
++            let (tx_message, rx_message) = mpsc::unbounded_channel();
++            let pump_task =
++                tokio::spawn(async move {
++                    let Some(WsCommand::Send { tx_result, .. }) = rx_command.recv().await else {
++                        panic!("missing response.create");
++                    };
++                    tx_result.send(Ok(())).unwrap();
++                    tx_message.send(Ok(Message::Text(json!({
++                    "type": kind,
++                    "item": {"type":"message", "id":"private-item-id", "role":"assistant",
++                        "content":[{"type":"refusal", "refusal":"private-refusal-payload"}]}
++                }).to_string().into()))).unwrap();
++                    tx_message.send(Ok(Message::Text(json!({
++                    "type":"response.completed", "response":{"id":"must-not-be-observed"}
++                }).to_string().into()))).unwrap();
++                });
++            let mut stream = WsStream {
++                tx_command,
++                rx_message,
++                pump_task,
++                upgrade_rate_limits: None,
++            };
++            let (tx_event, mut rx_event) = mpsc::channel(8);
++            let (_tx_interrupt, rx_interrupt) = oneshot::channel();
++            let context = ResponsesWebsocketTimingLogContext {
++                model: "test-model".to_string(),
++                session_id: None,
++                thread_id: None,
++                turn_id: None,
++                traceparent: None,
++                previous_response_id: None,
++                request_start_ms: None,
++                warmup: false,
++                connection_reused: false,
++            };
++            let error = run_websocket_response_stream(
++                &mut stream,
++                tx_event,
++                "{}".to_string(),
++                Duration::from_secs(1),
++                None,
++                None,
++                &context,
++                rx_interrupt,
++            )
++            .await
++            .unwrap_err();
++            assert!(matches!(
++                &error,
++                ApiError::ResponseIntegrity {
++                    reason: codex_protocol::error::ResponseIntegrityReason::UndecodableOutputItem
++                }
++            ));
++            assert!(!format!("{error:?}").contains("private"));
++            assert!(rx_event.recv().await.is_none());
++            let error = crate::map_api_error(error);
++            assert_eq!(
++                error.to_error_event(None).response_integrity_reason,
++                Some(codex_protocol::error::ResponseIntegrityReason::UndecodableOutputItem)
++            );
++            assert_eq!(error.retry_delay(1), None);
++        }
++    }
+ }
+diff --git a/codex-rs/codex-api/src/error.rs b/codex-rs/codex-api/src/error.rs
+index 2834137129e73709ed4349bd2bcd2b3ec97d4e93..e243324ff9fdf598c8bda13155ae33a2a33eb967 100644
+--- a/codex-rs/codex-api/src/error.rs
++++ b/codex-rs/codex-api/src/error.rs
+@@ -36,6 +36,10 @@ pub enum ApiError {
+     RateLimit(String),
+     #[error("invalid request: {message}")]
+     InvalidRequest { message: String },
++    #[error("invalid request: Native model response ended without complete supported output")]
++    ResponseIntegrity {
++        reason: codex_protocol::error::ResponseIntegrityReason,
++    },
+     #[error("invalid prompt: {message}")]
+     InvalidPrompt { message: String },
+     #[error("cyber policy: {message}")]
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index d670ff1eccfd5dcf10951f37c3d66bc8e125af49..72189a41fbb967f64061bb66615aaa463661bdb6 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -435,9 +435,9 @@ pub fn process_responses_event(
+                 .item
+                 .and_then(|value| serde_json::from_value::<ResponseItem>(value).ok())
+                 .ok_or_else(|| {
+-                    ResponsesEventError::Api(ApiError::InvalidRequest {
+-                        message: "Native model response ended without complete supported output"
+-                            .to_string(),
++                    ResponsesEventError::Api(ApiError::ResponseIntegrity {
++                        reason:
++                            codex_protocol::error::ResponseIntegrityReason::UndecodableOutputItem,
+                     })
+                 })?;
+             return Ok(Some(if event.kind == "response.output_item.done" {
+@@ -737,7 +737,9 @@ async fn process_sse_with_treatment(
+                 let error = error.into_api_error();
+                 if matches!(
+                     error,
+-                    ApiError::FlexUnavailable | ApiError::InvalidRequest { .. }
++                    ApiError::FlexUnavailable
++                        | ApiError::InvalidRequest { .. }
++                        | ApiError::ResponseIntegrity { .. }
+                 ) {
+                     let _ = tx_event.send(Err(error)).await;
+                     return;
+@@ -929,8 +931,12 @@ mod tests {
+             let error = process_responses_event(invalid)
+                 .unwrap_err()
+                 .into_api_error();
+-            assert_matches!(&error, ApiError::InvalidRequest { message }
+-                if message == "Native model response ended without complete supported output");
++            assert_matches!(
++                &error,
++                ApiError::ResponseIntegrity {
++                    reason: codex_protocol::error::ResponseIntegrityReason::UndecodableOutputItem
++                }
++            );
+             assert!(!format!("{error:?}").contains("private"));
+         }
+     }
+@@ -942,8 +948,13 @@ mod tests {
+                 let error = process_responses_event(serde_json::from_value(event).unwrap())
+                     .unwrap_err()
+                     .into_api_error();
+-                assert_matches!(error, ApiError::InvalidRequest { message }
+-                    if message == "Native model response ended without complete supported output");
++                assert_matches!(
++                    error,
++                    ApiError::ResponseIntegrity {
++                        reason:
++                            codex_protocol::error::ResponseIntegrityReason::UndecodableOutputItem
++                    }
++                );
+             }
+         }
+     }
+@@ -1005,8 +1016,13 @@ mod tests {
+                 let results = collect_legacy_events(&[body.as_bytes()]).await;
+                 assert_eq!(results.len(), 2);
+                 assert_matches!(&results[0], Ok(ResponseEvent::OutputTextDelta(text)) if text == "earlier commentary");
+-                assert_matches!(&results[1], Err(ApiError::InvalidRequest { message })
+-                    if message == "Native model response ended without complete supported output");
++                assert_matches!(
++                    &results[1],
++                    Err(ApiError::ResponseIntegrity {
++                        reason:
++                            codex_protocol::error::ResponseIntegrityReason::UndecodableOutputItem
++                    })
++                );
+                 assert!(!format!("{:?}", results[1]).contains("private-refusal-payload"));
+             }
+         }
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 9c70ba9f1e57bb5371cddb966157bb8483e5dc36..f256cdbee29c9994cadab422d478ccd938f09745 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -579,6 +579,7 @@ async fn on_event_updates_status_from_task_complete() {
+         (None, AgentStatus::Completed(Some("done".to_string()))),
+         (
+             Some(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "denied".to_string(),
+                 codex_error_info: None,
+@@ -602,6 +603,7 @@ async fn on_event_updates_status_from_task_complete() {
+ #[tokio::test]
+ async fn on_event_updates_status_from_error() {
+     let status = agent_status_from_event(&EventMsg::Error(ErrorEvent {
++        response_integrity_reason: None,
+         misalignment: None,
+         message: "boom".to_string(),
+         codex_error_info: None,
+diff --git a/codex-rs/core/src/guardian/review_session_tests.rs b/codex-rs/core/src/guardian/review_session_tests.rs
+index fe6323b7ae10bb324336a763295d30286d8aaca5..23a93b3012081f62e2b10f1fc8d8ac49b4e8102a 100644
+--- a/codex-rs/core/src/guardian/review_session_tests.rs
++++ b/codex-rs/core/src/guardian/review_session_tests.rs
+@@ -811,6 +811,7 @@ async fn wait_for_guardian_review_ignores_prior_turn_errors() {
+         .send(Event {
+             id: "prior-turn".to_string(),
+             msg: EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "stale guardian error".to_string(),
+                 codex_error_info: None,
+@@ -857,6 +858,7 @@ async fn wait_for_guardian_review_preserves_structured_session_error() {
+         .send(Event {
+             id: "current-turn".to_string(),
+             msg: EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "temporary failure".to_string(),
+                 codex_error_info: Some(CodexErrorInfo::ServerOverloaded),
+diff --git a/codex-rs/core/src/hook_runtime.rs b/codex-rs/core/src/hook_runtime.rs
+index 30c4162ffc06307dc0a73189cb4b7944b6a949c2..694831320281c45e91879a147ee547030c323d7a 100644
+--- a/codex-rs/core/src/hook_runtime.rs
++++ b/codex-rs/core/src/hook_runtime.rs
+@@ -666,6 +666,7 @@ pub(crate) async fn run_legacy_after_agent_hook(
+         return false;
+     };
+     let event = EventMsg::Error(codex_protocol::protocol::ErrorEvent {
++        response_integrity_reason: None,
+         misalignment: None,
+         message,
+         codex_error_info: Some(CodexErrorInfo::Other),
+diff --git a/codex-rs/core/src/realtime_conversation.rs b/codex-rs/core/src/realtime_conversation.rs
+index 4c9269ee218c56a271fd8e8cbcce22a8aad8d3a1..394311e2539561de8a89a7c34c354594b5f1e8d8 100644
+--- a/codex-rs/core/src/realtime_conversation.rs
++++ b/codex-rs/core/src/realtime_conversation.rs
+@@ -2722,6 +2722,7 @@ async fn send_conversation_error(
+     sess.send_event_raw(Event {
+         id: sub_id,
+         msg: EventMsg::Error(ErrorEvent {
++            response_integrity_reason: None,
+             misalignment: None,
+             message,
+             codex_error_info: Some(codex_error_info),
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index dbaa1091216719e825d6601aa0368401c648e3a7..6d9ef6062d18204471842512af5b0c01baa04bf1 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -276,6 +276,7 @@ pub async fn set_thread_memory_mode(sess: &Arc<Session>, sub_id: String, mode: T
+         let event = Event {
+             id: sub_id,
+             msg: EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: err.to_string(),
+                 codex_error_info: Some(CodexErrorInfo::Other),
+@@ -368,6 +369,7 @@ pub async fn shutdown(sess: &Arc<Session>, sub_id: String) -> bool {
+         let event = Event {
+             id: sub_id.clone(),
+             msg: EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: "Failed to shutdown thread persistence".to_string(),
+                 codex_error_info: Some(CodexErrorInfo::Other),
+@@ -417,6 +419,7 @@ pub async fn review(
+             let event = Event {
+                 id: sub_id,
+                 msg: EventMsg::Error(ErrorEvent {
++                    response_integrity_reason: None,
+                     misalignment: None,
+                     message: err.to_string(),
+                     codex_error_info: Some(CodexErrorInfo::Other),
+@@ -496,6 +499,7 @@ pub(super) async fn submission_loop(
+                         sess.send_event_raw(Event {
+                             id: sub.id.clone(),
+                             msg: EventMsg::Error(ErrorEvent {
++                                response_integrity_reason: None,
+                                 misalignment: None,
+                                 message: err.to_string(),
+                                 codex_error_info: Some(CodexErrorInfo::Other),
+@@ -594,6 +598,7 @@ pub(super) async fn submission_loop(
+                                 sess.send_event_raw(Event {
+                                     id: sub.id.clone(),
+                                     msg: EventMsg::Error(ErrorEvent {
++                                        response_integrity_reason: None,
+                                         misalignment: None,
+                                         message,
+                                         codex_error_info: Some(CodexErrorInfo::BadRequest),
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 756c097d715fb612a8ed2fd4884f80a1a1c80e54..875832829ce57613b9ae25e1e1ebf2228f55f483 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -13596,3 +13596,62 @@ async fn rejected_mcp_refresh_then_corrected_user_config_blocks_ordinary_replace
+         "rejection must not permit same-name ordinary-auth replacement in this session"
+     );
+ }
++
++#[tokio::test]
++async fn response_integrity_reason_tracks_the_originating_terminal_error_event() {
++    use codex_protocol::error::ResponseIntegrityReason;
++    let (session, turn_context, _rx) = make_session_and_context_with_rx().await;
++    let make_error = || CodexErr::InvalidRequest("fixed safe message".to_string());
++    let first = make_error()
++        .with_response_integrity_reason(ResponseIntegrityReason::UndecodableOutputItem)
++        .to_error_event(None);
++    session
++        .send_event(&turn_context, EventMsg::Error(first.clone()))
++        .await;
++    assert_eq!(
++        turn_context
++            .terminal_error
++            .lock()
++            .await
++            .as_ref()
++            .unwrap()
++            .response_integrity_reason,
++        Some(ResponseIntegrityReason::UndecodableOutputItem)
++    );
++    let second = make_error()
++        .with_response_integrity_reason(ResponseIntegrityReason::UnfinishedAssistantItem)
++        .to_error_event(None);
++    assert_eq!(first.codex_error_info, second.codex_error_info);
++    session
++        .send_event(&turn_context, EventMsg::Error(second))
++        .await;
++    assert_eq!(
++        turn_context
++            .terminal_error
++            .lock()
++            .await
++            .as_ref()
++            .unwrap()
++            .response_integrity_reason,
++        Some(ResponseIntegrityReason::UnfinishedAssistantItem)
++    );
++    let ordinary = make_error().to_error_event(None);
++    assert_eq!(first.codex_error_info, ordinary.codex_error_info);
++    session
++        .send_event(&turn_context, EventMsg::Error(ordinary))
++        .await;
++    assert_eq!(
++        turn_context
++            .terminal_error
++            .lock()
++            .await
++            .as_ref()
++            .unwrap()
++            .response_integrity_reason,
++        None
++    );
++    assert_eq!(
++        first.response_integrity_reason,
++        Some(ResponseIntegrityReason::UndecodableOutputItem)
++    );
++}
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 22f848a788512f008c73326694901f640343ea45..8efea5400ed3845692bae56ef665db7c8fe2eb02 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -823,6 +823,7 @@ pub(crate) async fn run_turn(
+                 )
+                 .await;
+                 let event = EventMsg::Error(ErrorEvent {
++                    response_integrity_reason: None,
+                     misalignment: None,
+                     message: "Invalid image in your last message. Please remove it and try again."
+                         .to_string(),
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index 0b00915161474caaa30191035ba8477d249e5adb..6d147216956f1636bd25f481d0456e2dd230774b 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -1243,6 +1243,7 @@ impl Session {
+                 self.send_event_raw(Event {
+                     id: sub_id,
+                     msg: EventMsg::Error(ErrorEvent {
++                        response_integrity_reason: None,
+                         misalignment: None,
+                         message: message.clone(),
+                         codex_error_info: Some(CodexErrorInfo::BadRequest),
+diff --git a/codex-rs/core/src/session/turn_input.rs b/codex-rs/core/src/session/turn_input.rs
+index f6e5c4895d8ec8b287c7787741b93f2cc1d649d9..fd96affecc06569b5ec7930a207b2cf3df5944bc 100644
+--- a/codex-rs/core/src/session/turn_input.rs
++++ b/codex-rs/core/src/session/turn_input.rs
+@@ -667,6 +667,7 @@ impl Session {
+                 self.send_event_raw(Event {
+                     id: submission_id,
+                     msg: EventMsg::Error(ErrorEvent {
++                        response_integrity_reason: None,
+                         misalignment: None,
+                         message: format!("failed to submit turn input: {reason:?}"),
+                         codex_error_info: Some(CodexErrorInfo::BadRequest),
+diff --git a/codex-rs/core/src/session/turn_input_tests.rs b/codex-rs/core/src/session/turn_input_tests.rs
+index e76b3e26840285d02e12a918191ecb8cabe70cd2..0a0038aa7b49fe40c27f780a0972498be0ef55fa 100644
+--- a/codex-rs/core/src/session/turn_input_tests.rs
++++ b/codex-rs/core/src/session/turn_input_tests.rs
+@@ -712,6 +712,7 @@ async fn admission_revalidates_constraints_before_committing(kind: TurnStartKind
+     assert_eq!(
+         errors,
+         vec![ErrorEvent {
++            response_integrity_reason: None,
+             misalignment: None,
+             message: expected_message,
+             codex_error_info: Some(CodexErrorInfo::BadRequest),
+diff --git a/codex-rs/core/src/tasks/user_shell.rs b/codex-rs/core/src/tasks/user_shell.rs
+index a58d3dbb598fa7bd2cd065f5a5c809f603b72015..f4407de283b720f3992c72488687e13c125b95b1 100644
+--- a/codex-rs/core/src/tasks/user_shell.rs
++++ b/codex-rs/core/src/tasks/user_shell.rs
+@@ -365,6 +365,7 @@ async fn send_user_shell_error(session: &Session, turn_context: &TurnContext, me
+         .send_event(
+             turn_context,
+             EventMsg::Error(ErrorEvent {
++                response_integrity_reason: None,
+                 misalignment: None,
+                 message: message.to_string(),
+                 codex_error_info: None,
+diff --git a/codex-rs/core/tests/suite/guardian_subagent_notification_tests.rs b/codex-rs/core/tests/suite/guardian_subagent_notification_tests.rs
+index 495ae98065285d62c425bf2cb7e9a9db555e7024..086edf42b95ce52255afdbf94d840f3f723d2709 100644
+--- a/codex-rs/core/tests/suite/guardian_subagent_notification_tests.rs
++++ b/codex-rs/core/tests/suite/guardian_subagent_notification_tests.rs
+@@ -166,6 +166,7 @@ async fn guardian_circuit_breaker_notifies_parent(action: CircuitBreakAction) ->
+         (
+             TurnAbortReason::Interrupted,
+             (action == CircuitBreakAction::Strict).then_some(ErrorEvent {
++                response_integrity_reason: None,
+                 message: warning.clone(),
+                 codex_error_info: Some(CodexErrorInfo::TooManyDenials),
+                 misalignment: None,
+diff --git a/codex-rs/ext/guardian-reviewer/src/review.rs b/codex-rs/ext/guardian-reviewer/src/review.rs
+index f1d80af0720b59a1cb24cb62d693c735eaf348da..cb22f90e5499326535b66484e9530f57f3e06b45 100644
+--- a/codex-rs/ext/guardian-reviewer/src/review.rs
++++ b/codex-rs/ext/guardian-reviewer/src/review.rs
+@@ -148,6 +148,7 @@ impl<H: ReviewHost> SynchronousApprovalReviewer for ReviewRequest<'_, H> {
+                                     message: message.clone(),
+                                 }),
+                                 ErrorEvent {
++                                    response_integrity_reason: None,
+                                     message,
+                                     codex_error_info: Some(CodexErrorInfo::TooManyDenials),
+                                     misalignment: None,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+index 25b50494c751174119c9d92ee034967100e81b7a..48779913923468f3e03c7451964738c791f7f62c 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
+@@ -52,7 +52,9 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
+             ApiError::UsageNotIncluded => "usage_not_included",
+             ApiError::Retryable { .. } => "retryable_api_error",
+             ApiError::RateLimitExceeded { .. } | ApiError::RateLimit(_) => "rate_limit",
+-            ApiError::InvalidRequest { .. } | ApiError::InvalidPrompt { .. } => "invalid_request",
++            ApiError::InvalidRequest { .. }
++            | ApiError::ResponseIntegrity { .. }
++            | ApiError::InvalidPrompt { .. } => "invalid_request",
+             ApiError::CyberPolicy { .. }
+             | ApiError::BioPolicy { .. }
+             | ApiError::MisalignmentPolicyViolation { .. } => "policy_error",
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
+index 2affc8c3df1bcb8e51f1a7e83404dbf0568bb5f7..f3c9b710ebc3c14d8f03104b87a3e31d72518d39 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
+@@ -173,6 +173,7 @@ impl SamplingExecution {
+                 | ApiError::UsageNotIncluded
+                 | ApiError::RateLimit(_)
+                 | ApiError::InvalidRequest { .. }
++                | ApiError::ResponseIntegrity { .. }
+                 | ApiError::InvalidPrompt { .. }
+                 | ApiError::MisalignmentPolicyViolation { .. }
+                 | ApiError::CyberPolicy { .. }
+diff --git a/codex-rs/protocol/src/error.rs b/codex-rs/protocol/src/error.rs
+index be922daf5cb1514ca6823d1ef55745e5be5749a8..a077d7efabeae9529e11a9ffc9c7e128f8b61c1d 100644
+--- a/codex-rs/protocol/src/error.rs
++++ b/codex-rs/protocol/src/error.rs
+@@ -71,10 +71,21 @@ pub enum SandboxErr {
+     LandlockRestrict,
+ }
+ 
++/// Content-free cause of a rejected model output item or terminal response.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum ResponseIntegrityReason {
++    UndecodableOutputItem,
++    ProviderOwnedToolReceipt,
++    UnfinishedAssistantItem,
++    MissingSupportedTerminalOutput,
++}
++
+ pub struct CodexErr {
+     details: CodexErrorDetails,
+     retry_after: Option<RetryAfter>,
+     api_rate_limits: Option<Box<ApiRateLimits>>,
++    response_integrity_reason: Option<ResponseIntegrityReason>,
+ }
+ 
+ /// The semantic category and diagnostic payload for a [`CodexErr`].
+@@ -242,6 +253,7 @@ impl From<CodexErrorDetails> for CodexErr {
+             details,
+             retry_after: None,
+             api_rate_limits: None,
++            response_integrity_reason: None,
+         }
+     }
+ }
+@@ -307,6 +319,7 @@ macro_rules! codex_err_unit_constructors {
+                 details: CodexErrorDetails::$variant,
+                 retry_after: None,
+                 api_rate_limits: None,
++                response_integrity_reason: None,
+             };
+         )*
+     };
+@@ -328,6 +341,17 @@ macro_rules! codex_err_tuple_constructors {
+ }
+ 
+ impl CodexErr {
++    /// Cause attached to this exact error, absent on ordinary native failures.
++    pub fn response_integrity_reason(&self) -> Option<ResponseIntegrityReason> {
++        self.response_integrity_reason
++    }
++
++    /// Retain a typed integrity cause without changing error or retry semantics.
++    pub fn with_response_integrity_reason(mut self, reason: ResponseIntegrityReason) -> Self {
++        self.response_integrity_reason = Some(reason);
++        self
++    }
++
+     codex_err_unit_constructors!(
+         TurnAborted,
+         SessionBudgetExceeded,
+@@ -524,6 +548,7 @@ impl CodexErr {
+             None => error_message,
+         };
+         ErrorEvent {
++            response_integrity_reason: self.response_integrity_reason,
+             message,
+             codex_error_info: Some(self.to_codex_protocol_error()),
+             misalignment: match &self.details {
+diff --git a/codex-rs/protocol/src/error_tests.rs b/codex-rs/protocol/src/error_tests.rs
+index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..a01036f32ea8eca1241d9c9797c391e73b1d7bdc 100644
+--- a/codex-rs/protocol/src/error_tests.rs
++++ b/codex-rs/protocol/src/error_tests.rs
+@@ -755,3 +755,102 @@ fn usage_limit_reached_with_promo_message() {
+         assert_eq!(err.to_string(), expected);
+     });
+ }
++
++#[test]
++fn response_integrity_reason_follows_only_its_error_and_live_event() {
++    use crate::protocol::ErrorEvent;
++    use crate::protocol::TurnCompleteEvent;
++    let message = "Native model response ended without complete supported output";
++    for reason in [
++        ResponseIntegrityReason::UndecodableOutputItem,
++        ResponseIntegrityReason::ProviderOwnedToolReceipt,
++        ResponseIntegrityReason::UnfinishedAssistantItem,
++        ResponseIntegrityReason::MissingSupportedTerminalOutput,
++    ] {
++        let plain = CodexErr::InvalidRequest(message.to_string());
++        let annotated =
++            CodexErr::InvalidRequest(message.to_string()).with_response_integrity_reason(reason);
++        assert_eq!(annotated.to_string(), plain.to_string());
++        assert_eq!(format!("{annotated:?}"), format!("{plain:?}"));
++        assert_eq!(
++            annotated.to_codex_protocol_error(),
++            plain.to_codex_protocol_error()
++        );
++        assert_eq!(annotated.retry_delay(1), plain.retry_delay(1));
++        assert_eq!(annotated.retry_after(), None);
++        assert_eq!(annotated.response_integrity_reason(), Some(reason));
++        let event = annotated.to_error_event(None);
++        assert_eq!(event.response_integrity_reason, Some(reason));
++        assert_eq!(event.clone().response_integrity_reason, Some(reason));
++        assert_eq!(plain.to_error_event(None).response_integrity_reason, None);
++        let wire = serde_json::to_value(&event).unwrap();
++        assert_eq!(
++            wire,
++            serde_json::to_value(plain.to_error_event(None)).unwrap()
++        );
++        let restored: ErrorEvent = serde_json::from_value(wire).unwrap();
++        assert_eq!(restored.response_integrity_reason, None);
++        let terminal = TurnCompleteEvent {
++            turn_id: "owned-turn".into(),
++            last_agent_message: None,
++            error: Some(event),
++            started_at: None,
++            completed_at: None,
++            duration_ms: None,
++            time_to_first_token_ms: None,
++        };
++        assert_eq!(
++            terminal.clone().error.unwrap().response_integrity_reason,
++            Some(reason)
++        );
++        let restored: TurnCompleteEvent =
++            serde_json::from_value(serde_json::to_value(&terminal).unwrap()).unwrap();
++        assert_eq!(restored.error.unwrap().response_integrity_reason, None);
++    }
++}
++
++#[test]
++fn response_integrity_reason_survives_retry_advice_without_changing_retry_policy() {
++    let reason = ResponseIntegrityReason::UndecodableOutputItem;
++    let error = CodexErr::InvalidRequest("fixed message".into())
++        .with_response_integrity_reason(reason)
++        .with_retry_after(RetryAfter::from_delay(Duration::ZERO).unwrap());
++    assert_eq!(error.response_integrity_reason(), Some(reason));
++    assert!(error.retry_after().is_some());
++    assert_eq!(error.retry_delay(1), None);
++    assert_eq!(CodexErr::Timeout.response_integrity_reason(), None);
++}
++
++#[test]
++fn response_integrity_reason_has_only_the_four_safe_wire_values() {
++    for (reason, value) in [
++        (
++            ResponseIntegrityReason::UndecodableOutputItem,
++            "undecodable_output_item",
++        ),
++        (
++            ResponseIntegrityReason::ProviderOwnedToolReceipt,
++            "provider_owned_tool_receipt",
++        ),
++        (
++            ResponseIntegrityReason::UnfinishedAssistantItem,
++            "unfinished_assistant_item",
++        ),
++        (
++            ResponseIntegrityReason::MissingSupportedTerminalOutput,
++            "missing_supported_terminal_output",
++        ),
++    ] {
++        assert_eq!(serde_json::to_value(reason).unwrap(), value);
++        assert_eq!(
++            serde_json::from_value::<ResponseIntegrityReason>(serde_json::json!(value)).unwrap(),
++            reason
++        );
++    }
++    assert!(
++        serde_json::from_value::<ResponseIntegrityReason>(serde_json::json!(
++            "private-provider-detail"
++        ))
++        .is_err()
++    );
++}
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index cbf161ccbbc68d330d97d2dcf4d5ad4f62dbbece..2eb1a223d10146b674319ae4037cd1f85a5250e4 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -2081,6 +2081,11 @@ impl fmt::Debug for MisalignmentSteer {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+ pub struct ErrorEvent {
++    /// Live SDK diagnostics follow this originating error; never persist in rollouts.
++    #[serde(skip)]
++    #[schemars(skip)]
++    #[ts(skip)]
++    pub response_integrity_reason: Option<crate::error::ResponseIntegrityReason>,
+     pub message: String,
+     #[serde(default)]
+     pub codex_error_info: Option<CodexErrorInfo>,
+@@ -5922,6 +5927,7 @@ mod tests {
+     #[test]
+     fn rollback_failed_error_does_not_affect_turn_status() {
+         let event = ErrorEvent {
++            response_integrity_reason: None,
+             misalignment: None,
+             message: "rollback failed".into(),
+             codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+@@ -5932,6 +5938,7 @@ mod tests {
+     #[test]
+     fn active_turn_not_steerable_error_does_not_affect_turn_status() {
+         let event = ErrorEvent {
++            response_integrity_reason: None,
+             misalignment: None,
+             message: "cannot steer a review turn".into(),
+             codex_error_info: Some(CodexErrorInfo::ActiveTurnNotSteerable {
+@@ -5944,6 +5951,7 @@ mod tests {
+     #[test]
+     fn generic_error_affects_turn_status() {
+         let event = ErrorEvent {
++            response_integrity_reason: None,
+             misalignment: None,
+             message: "generic".into(),
+             codex_error_info: Some(CodexErrorInfo::Other),
+@@ -5954,6 +5962,7 @@ mod tests {
+     #[test]
+     fn misalignment_explanation_and_steer_are_never_serialized_into_error_events() {
+         let event = ErrorEvent {
++            response_integrity_reason: None,
+             message: "This request violated the misalignment policy.".to_string(),
+             codex_error_info: Some(CodexErrorInfo::MisalignmentPolicyViolation),
+             misalignment: Some(MisalignmentErrorDetails {
+diff --git a/codex-rs/response-debug-context/src/lib.rs b/codex-rs/response-debug-context/src/lib.rs
+index e02ec6bc93d308bd39d52b8737789c08dd674d37..7465286b4fd15a6f4c1172587e46731ac0124efa 100644
+--- a/codex-rs/response-debug-context/src/lib.rs
++++ b/codex-rs/response-debug-context/src/lib.rs
+@@ -84,9 +84,9 @@ pub fn telemetry_api_error_message(error: &ApiError) -> String {
+         ApiError::Retryable { .. } => "retryable error".to_string(),
+         ApiError::RateLimitExceeded { .. } => "rate limit exceeded".to_string(),
+         ApiError::RateLimit(_) => "rate limit".to_string(),
+-        ApiError::InvalidRequest { .. } | ApiError::InvalidPrompt { .. } => {
+-            "invalid request".to_string()
+-        }
++        ApiError::InvalidRequest { .. }
++        | ApiError::ResponseIntegrity { .. }
++        | ApiError::InvalidPrompt { .. } => "invalid request".to_string(),
+         ApiError::CyberPolicy { .. } => "cyber policy".to_string(),
+         ApiError::BioPolicy { .. } => "bio policy".to_string(),
+         ApiError::MisalignmentPolicyViolation { .. } => "misalignment policy violation".to_string(),
