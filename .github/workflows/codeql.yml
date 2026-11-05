@@ -18,7 +18,7 @@ jobs:
     # CodeQL code-scanning rule: Alerts = All, Security alerts = All on each protected branch.
     # A successful analysis job does not mean that no alerts were found.
     name: CodeQL (${{ matrix.language }})
-    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && matrix.language == 'rust' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && matrix.language == 'rust' && '{"group":"codex-runners","labels":"codex-linux-x64-xl"}' || '"ubuntu-latest"') }}
     timeout-minutes: ${{ matrix.language == 'rust' && 180 || 45 }}
     permissions:
       contents: read

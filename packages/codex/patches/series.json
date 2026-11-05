@@ -189,9 +189,25 @@
       "sha256": "e4b910cb9e9c649d04d63fedc46c21cd75ae7da921511c19a943d82fd13f6f02"
     },
     {
-      "path": "0046-terminal-authentication-retry.patch",
+      "path": "0046-native-history-durability.patch",
+      "sha256": "2d34645a3030982a41fed43d7a31aa4a8933bd6be604c737cc79ce4293134288"
+    },
+    {
+      "path": "0047-native-history-write-reconciliation.patch",
+      "sha256": "e8da877bf23d570c3cde2bc5a776e7cf5945b854245288137ab765376baa6647"
+    },
+    {
+      "path": "0048-native-tree-finalization-before-store-close.patch",
+      "sha256": "637dc7d1c29d6f98bba7cf43c885a0d3830e267c6524d675baa2b9d0d192823f"
+    },
+    {
+      "path": "0049-native-metadata-durability.patch",
+      "sha256": "10136a8852249737dbf7974c579cb84faf0d36fc495fcbaeeafe66a3dfa7e3d6"
+    },
+    {
+      "path": "0050-terminal-authentication-retry.patch",
       "sha256": "4f12eb2d9794fec908b2e78425641bf4d22e66de089f4523321c57c60f44f2bb"
     }
   ],
-  "result_tree": "38b4b5a17f4a813465103bc807d87502f3a12660"
+  "result_tree": "7602853ae2cd238bb771c6f331ba1706d2391e9b"
 }

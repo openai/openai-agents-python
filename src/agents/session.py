@@ -42,6 +42,7 @@ from .agent import (
     _copy_model_settings,
     _SyncRun,
 )
+from .canonical_storage import CustomStorage
 from .executor import Environment, EnvironmentSource, ExecutorContext, _writable_roots
 from .history import RecordedTurn
 from .input import UserInput, _native_input
@@ -1320,6 +1321,47 @@ async def _release_environment(lease: _EnvironmentLease) -> None:
         lease.detach_borrower()
 
 
+def _validate_storage_opening(
+    storage: LocalStorage | CustomStorage | None,
+    state: SessionState | None,
+    resume: str | None,
+    reconciled_calls: Sequence[ReconciledCall],
+) -> tuple[ReconciledCall, ...]:
+    if storage is not None and not isinstance(storage, (LocalStorage, CustomStorage)):
+        raise TypeError("storage must be LocalStorage or CustomStorage")
+    if state is not None and (storage is not None or resume is not None):
+        raise ValueError("Portable state cannot be combined with native local storage or resume")
+    if resume is not None:
+        if storage is None:
+            raise ValueError("resume requires the original LocalStorage profile")
+        if not isinstance(resume, str) or not resume:
+            raise TypeError("resume must be a nonempty native Session ID")
+    reconciliation = tuple(reconciled_calls)
+    if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
+        raise TypeError("reconciled_calls must contain ReconciledCall records")
+    if reconciliation and (resume is None or not isinstance(storage, LocalStorage)):
+        raise ValueError("reconciled_calls requires a LocalStorage resume")
+    return reconciliation
+
+
+def _configure_storage_runtime(
+    runtime: dict[str, Any],
+    storage: LocalStorage | CustomStorage | None,
+    resume: str | None,
+    goals: bool,
+) -> None:
+    if isinstance(storage, CustomStorage):
+        runtime["ephemeral"] = False
+        if resume is not None:
+            runtime["_sdk_resume_thread_id"] = resume
+    elif storage is not None:
+        runtime.update(native_thread_store=str(storage.path), ephemeral=False)
+        if resume is not None:
+            runtime["_sdk_resume_thread_id"] = resume
+        if goals:
+            runtime["native_goal_store"] = str(storage.path)
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -1335,7 +1377,7 @@ class Session(Generic[ContextT, OutputT]):
         *,
         context: ContextT | None = None,
         state: SessionState | None = None,
-        storage: LocalStorage | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         environment: EnvironmentSource[ContextT] | None = None,
         provider: NativeProvider | None = None,
@@ -1347,22 +1389,7 @@ class Session(Generic[ContextT, OutputT]):
         _captured_api_key: str | None = None,
         _expected_codex_login_binding: str | None = None,
     ) -> Session[ContextT, OutputT]:
-        if storage is not None and not isinstance(storage, LocalStorage):
-            raise TypeError("storage must be a LocalStorage")
-        if state is not None and (storage is not None or resume is not None):
-            raise ValueError(
-                "Portable state cannot be combined with native local storage or resume"
-            )
-        if resume is not None:
-            if storage is None:
-                raise ValueError("resume requires the original LocalStorage profile")
-            if not isinstance(resume, str) or not resume:
-                raise TypeError("resume must be a nonempty native Session ID")
-        reconciliation = tuple(reconciled_calls)
-        if any(not isinstance(receipt, ReconciledCall) for receipt in reconciliation):
-            raise TypeError("reconciled_calls must contain ReconciledCall records")
-        if reconciliation and resume is None:
-            raise ValueError("reconciled_calls requires a LocalStorage resume")
+        reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
         if state is not None and (model is not None or model_settings is not None):
             raise ValueError(
                 "Opening model and model_settings overrides cannot be used with state; "
@@ -1444,10 +1471,29 @@ class Session(Generic[ContextT, OutputT]):
             continuation = saved.native_continuation
             if manual_restore:
                 restored_model_settings = _manual_restore_model_settings(saved)
+        if isinstance(storage, LocalStorage) and programmatic_tool_calling:
+            raise ValueError(
+                "LocalStorage does not support code mode: nested tool identities "
+                "do not yet have durable intent and result receipts"
+            )
         tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
+        if isinstance(storage, CustomStorage) and (
+            native_agents is not None
+            or goals
+            or programmatic_tool_calling
+            or checklist
+            or mcp_tools
+            or environment is not None
+            or any(isinstance(tool, WebSearch) for tool in available)
+            or any(tool._bind is None for tool in tools)
+        ):
+            raise ValueError(
+                "CustomStorage preview does not support children, goals, checklist, "
+                "code mode, manual tools, native tools or environments"
+            )
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
         web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
@@ -1644,6 +1690,7 @@ class Session(Generic[ContextT, OutputT]):
                     "the tools provided to complete the user's request accurately."
                 ),
             }
+
             if codex_login is not None:
                 runtime["_sdk_codex_login"] = {
                     "codex_home": (
@@ -1656,12 +1703,7 @@ class Session(Generic[ContextT, OutputT]):
                         else _expected_codex_login_binding
                     ),
                 }
-            if storage is not None:
-                runtime.update(native_thread_store=str(storage.path), ephemeral=False)
-                if resume is not None:
-                    runtime["_sdk_resume_thread_id"] = resume
-                if goals:
-                    runtime["native_goal_store"] = str(storage.path)
+            _configure_storage_runtime(runtime, storage, resume, goals)
             if executor is not None:
                 native_environment = executor._to_native()
                 native_environment["local_mcp"] = any(
@@ -1981,6 +2023,11 @@ class Session(Generic[ContextT, OutputT]):
                         api_key=None if codex_login is not None else (opening.api_key or ""),
                         provider_lease=provider_lease,
                         **(
+                            {"canonical_store": storage.backend}
+                            if isinstance(storage, CustomStorage)
+                            else {}
+                        ),
+                        **(
                             {
                                 "initial_checkpoint": checkpoint,
                                 "initial_specs_json": native_specs,
@@ -2138,25 +2185,26 @@ class Session(Generic[ContextT, OutputT]):
                                 "Native local history has an active descendant; "
                                 "its runtime cannot be restored"
                             )
-                    missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
-                    supplied = {
-                        (call.thread_id, call.turn_id, call.call_id) for call in reconciliation
-                    }
-                    prior = {
-                        (session.id, item["turn_id"], item["call_id"])
-                        for item in recorded_items
-                        if item["type"] == "function_call_output" and "reconciliation" in item
-                    }
-                    if (
-                        len(supplied) != len(reconciliation)
-                        or not missing <= supplied <= missing | prior
-                    ):
-                        raise ValueError("Reconciliation must cover every unresolved call once")
-                    await session._publish_startup(
-                        thread._reconcile_local_calls(
-                            json.dumps([asdict(call) for call in reconciliation])
+                    if isinstance(storage, LocalStorage):
+                        missing = {(call.thread_id, call.turn_id, call.call_id) for call in unknown}
+                        supplied = {
+                            (call.thread_id, call.turn_id, call.call_id) for call in reconciliation
+                        }
+                        prior = {
+                            (session.id, item["turn_id"], item["call_id"])
+                            for item in recorded_items
+                            if item["type"] == "function_call_output" and "reconciliation" in item
+                        }
+                        if (
+                            len(supplied) != len(reconciliation)
+                            or not missing <= supplied <= missing | prior
+                        ):
+                            raise ValueError("Reconciliation must cover every unresolved call once")
+                        await session._publish_startup(
+                            thread._reconcile_local_calls(
+                                json.dumps([asdict(call) for call in reconciliation])
+                            )
                         )
-                    )
                 if (
                     web_search is not None
                     and web_search.route == "hosted"
@@ -2312,7 +2360,7 @@ class Session(Generic[ContextT, OutputT]):
         _start_readers: bool = True,
     ) -> None:
         self._provider_lease: Any = None
-        self._storage: LocalStorage | None = None
+        self._storage: LocalStorage | CustomStorage | None = None
         self._environment_lease: _EnvironmentLease | None = None
         self._owned_provider: NativeProvider | None = None
         self._agent: Agent[ContextT, OutputT] | None = None
@@ -3371,55 +3419,62 @@ class Session(Generic[ContextT, OutputT]):
             if not self._native._check_manual_tool(request._grant):
                 raise InteractionExpiredError("Manual tool reply expired during validation")
             raise ValueError("Manual tool result failed validation")
-        if (
-            state.stopping
-            or state.failure.done()
-            or self._closing
-            or self._closed
-            or self._broken
-            or (self._environment_lease is not None and self._environment_lease.interrupted)
-            or self._sealed_checkpoint is not None
-            or not self._native._respond_manual_tool(request._grant, output)
-        ):
-            raise InteractionExpiredError("Manual tool reply is expired or already delivered")
-        self._observations.notify()
-        if isinstance(state, _Submission) and state.restored_pending:
-            assert state.handle is not None
-            observation_route = state.handle.submission_id
 
-            async def continue_restored_turn() -> None:
-                try:
-                    # Core may already have queued recovery when this callback
-                    # is cancelled. Retain its mutation ownership through the
-                    # admission acknowledgement before retirement can pass it.
-                    with _private_task(self._native._continue_manual(observation_route)) as (
-                        admitting,
-                        admitted,
-                    ):
-                        receipt = json.loads(await _join(admitting, outcome=admitted))
-                    if receipt["status"] == "pending":
-                        return
-                    if receipt["status"] == "not_pending":
-                        # A concurrently submitted last reply already recovered
-                        # this frame. Its owned task validates the receipt.
-                        state.restored_pending = False
-                        return
-                    if receipt["status"] != "started" or receipt["turn_id"] != request.turn_id:
-                        raise NativeError("Native manual continuation was not resumed")
-                    state.restored_pending = False
-                except BaseException as error:
-                    if not state.stopping and not state.failure.done():
-                        state.failure.set_result(error)
-                    raise
-                finally:
-                    state.changed.set()
+        async def deliver_and_continue() -> Turn[Any]:
+            if (
+                state.stopping
+                or state.failure.done()
+                or self._closing
+                or self._closed
+                or self._broken
+                or (self._environment_lease is not None and self._environment_lease.interrupted)
+                or self._sealed_checkpoint is not None
+                or not await self._native._respond_manual_tool(request._grant, output)
+            ):
+                raise InteractionExpiredError("Manual tool reply is expired or already delivered")
+            self._observations.notify()
+            if isinstance(state, _Submission) and state.restored_pending:
+                submission = state
+                assert submission.handle is not None
+                observation_route = submission.handle.submission_id
 
-            continuation = asyncio.create_task(continue_restored_turn())
-            state.add_callback(continuation)
-            await _join(continuation)
-        if isinstance(state, _Submission):
-            state.changed.set()
-        return handle
+                async def continue_restored_turn() -> None:
+                    try:
+                        # Core may already have queued recovery when this callback
+                        # is cancelled. Retain its mutation ownership through the
+                        # admission acknowledgement before retirement can pass it.
+                        with _private_task(self._native._continue_manual(observation_route)) as (
+                            admitting,
+                            admitted,
+                        ):
+                            receipt = json.loads(await _join(admitting, outcome=admitted))
+                        if receipt["status"] == "pending":
+                            return
+                        if receipt["status"] == "not_pending":
+                            # A concurrently submitted last reply already recovered
+                            # this frame. Its owned task validates the receipt.
+                            submission.restored_pending = False
+                            return
+                        if receipt["status"] != "started" or receipt["turn_id"] != request.turn_id:
+                            raise NativeError("Native manual continuation was not resumed")
+                        submission.restored_pending = False
+                    except BaseException as error:
+                        if not submission.stopping and not submission.failure.done():
+                            submission.failure.set_result(error)
+                        raise
+                    finally:
+                        submission.changed.set()
+
+                continuation = asyncio.create_task(continue_restored_turn())
+                submission.add_callback(continuation)
+                await _join(continuation)
+            if isinstance(state, _Submission):
+                state.changed.set()
+            return handle
+
+        with _private_task(deliver_and_continue()) as (delivery, delivered):
+            state.add_callback(delivery)
+            return cast(Turn[Any], await _join(delivery, outcome=delivered))
 
     async def compact(self, *, summary: str | None = None) -> None:
         """Compact native conversation context and wait for owned settlement.
@@ -4237,6 +4292,8 @@ class Session(Generic[ContextT, OutputT]):
         allowed_mcp: tuple[_MCP[Any], ...],
         specs: str,
     ) -> None:
+        if isinstance(self._storage, CustomStorage) and candidate.manual_slots():
+            raise ValueError("CustomStorage preview does not support manual tools")
         assert self._opening_agent is not None
         if self._native_agents is not None:
             children = json.loads(await self._native.call("list_subagents"))

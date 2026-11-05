@@ -1,0 +1,194 @@
+diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
+index 012d2baa51a4908914e427936a443aaee43902eb..f4c1140dbc6b2577fa8a6a1b7177afd934b2030b 100644
+--- a/codex-rs/thread-store/src/live_thread.rs
++++ b/codex-rs/thread-store/src/live_thread.rs
+@@ -233,13 +233,15 @@ impl LiveThread {
+             .await
+             .observe_appended_items(items.as_slice());
+         if let Some(update) = update {
+-            self.thread_store
++            let result = self
++                .thread_store
+                 .record_thread_metadata(UpdateThreadMetadataParams {
+                     thread_id: self.thread_id,
+                     patch: update.patch.clone(),
+                     include_archived: true,
+                 })
+-                .await?;
++                .await;
++            self.retain_canonical_result(result)?;
+             self.metadata_sync
+                 .lock()
+                 .await
+@@ -315,12 +317,13 @@ impl LiveThread {
+         Ok(())
+     }
+ 
+-    fn retain_canonical_result(&self, result: ThreadStoreResult<()>) -> ThreadStoreResult<()> {
++    fn retain_canonical_result<T>(&self, result: ThreadStoreResult<T>) -> ThreadStoreResult<T> {
+         if result.is_err() {
+             self.canonical_history_failed.store(true, Ordering::Release);
+         }
+-        result?;
+-        self.check_canonical_history()
++        let value = result?;
++        self.check_canonical_history()?;
++        Ok(value)
+     }
+ 
+     pub async fn shutdown(&self) -> ThreadStoreResult<()> {
+@@ -389,8 +392,10 @@ impl LiveThread {
+         mode: ThreadMemoryMode,
+         include_archived: bool,
+     ) -> ThreadStoreResult<()> {
++        self.check_canonical_history()?;
+         self.flush_pending_metadata_update().await?;
+-        self.thread_store
++        let result = self
++            .thread_store
+             .update_thread_metadata(UpdateThreadMetadataParams {
+                 thread_id: self.thread_id,
+                 patch: ThreadMetadataPatch {
+@@ -399,7 +404,8 @@ impl LiveThread {
+                 },
+                 include_archived,
+             })
+-            .await?;
++            .await;
++        self.retain_canonical_result(result)?;
+         Ok(())
+     }
+ 
+@@ -412,15 +418,17 @@ impl LiveThread {
+         patch: ThreadMetadataPatch,
+         include_archived: bool,
+     ) -> ThreadStoreResult<StoredThread> {
++        self.check_canonical_history()?;
+         self.flush_pending_metadata_update().await?;
+-        let updated = self
++        let result = self
+             .thread_store
+             .update_thread_metadata(UpdateThreadMetadataParams {
+                 thread_id: self.thread_id,
+                 patch,
+                 include_archived,
+             })
+-            .await?;
++            .await;
++        let updated = self.retain_canonical_result(result)?;
+         match updated {
+             Some(thread) => Ok(thread),
+             None => {
+@@ -471,16 +479,21 @@ impl LiveThread {
+         let Some(update) = update else {
+             return Ok(());
+         };
++        self.check_canonical_history()?;
+         let params = UpdateThreadMetadataParams {
+             thread_id: self.thread_id,
+             patch: update.patch.clone(),
+             include_archived: true,
+         };
+-        if context == PersistContext::Standard {
+-            self.thread_store.update_thread_metadata(params).await?;
++        let result = if context == PersistContext::Standard {
++            self.thread_store
++                .update_thread_metadata(params)
++                .await
++                .map(|_| ())
+         } else {
+-            self.thread_store.record_thread_metadata(params).await?;
+-        }
++            self.thread_store.record_thread_metadata(params).await
++        };
++        self.retain_canonical_result(result)?;
+         self.metadata_sync
+             .lock()
+             .await
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index fe88afa56361f7d07c0e54e73f7caa718f5c1b0d..6c1c7b903efca5b28ae076e0a7641490b91e9ba6 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -891,6 +891,82 @@ mod tests {
+         );
+     }
+ 
++    #[tokio::test]
++    async fn live_thread_retains_canonical_metadata_failure_after_successful_history_flush() {
++        for path in ["direct", "memory"] {
++            let home = TempDir::new().expect("temp dir");
++            let config = test_config(home.path());
++            let runtime = codex_state::StateRuntime::init(
++                config.sqlite.clone(),
++                config.default_model_provider_id.clone(),
++            )
++            .await
++            .expect("state db");
++            let store = Arc::new(LocalThreadStore::new(config, Some(runtime.clone())));
++            let id = ThreadId::new();
++            let mut params = create_thread_params(id);
++            params.history_mode = ThreadHistoryMode::Paginated;
++            let live = LiveThread::create(store.clone(), params)
++                .await
++                .expect("live thread");
++            live.persist(PersistContext::Standard)
++                .await
++                .expect("initial persistence");
++            live.append_items(&[user_message_item("accepted user input")])
++                .await
++                .expect("accept input");
++            // Materialize history without consuming the LiveThread's pending metadata.
++            store
++                .persist_thread(id, PersistContext::Standard)
++                .await
++                .expect("persist history");
++            store.flush_thread(id).await.expect("flush history");
++            live.flush()
++                .await
++                .expect("commit staged metadata before fault");
++            runtime.close().await;
++            let result = match path {
++                "direct" => live
++                    .update_metadata(
++                        ThreadMetadataPatch {
++                            memory_mode: Some(ThreadMemoryMode::Enabled),
++                            ..Default::default()
++                        },
++                        false,
++                    )
++                    .await
++                    .map(|_| ()),
++                "memory" => {
++                    live.update_memory_mode(ThreadMemoryMode::Enabled, false)
++                        .await
++                }
++                _ => unreachable!(),
++            };
++            result.expect_err(&format!("canonical metadata update fails in {path}"));
++            store
++                .flush_thread(id)
++                .await
++                .expect("primary history flush still succeeds");
++            live.clone()
++                .flush()
++                .await
++                .expect_err("clone retains metadata failure");
++            live.append_items(&[user_message_item("must not run")])
++                .await
++                .expect_err("later append refused");
++            live.persist(PersistContext::Standard)
++                .await
++                .expect_err("later durable boundary refused");
++            live.shutdown()
++                .await
++                .expect_err("shutdown retains first failure");
++            assert!(
++                !store.live_recorders.lock().await.contains_key(&id),
++                "shutdown releases writer after {path}"
++            );
++        }
++    }
++
+     #[tokio::test]
+     async fn live_writer_lifecycle_writes_and_closes() {
+         let home = TempDir::new().expect("temp dir");

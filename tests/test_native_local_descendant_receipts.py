@@ -263,6 +263,23 @@ async def start(peer, executor, directory, mode, depth, *, identity="", no_child
     )
 
 
+def canonical_completed_activity(
+    directory: Path, identity: str, child: str
+) -> list[dict[str, Any]]:
+    rollouts = list((directory / "profile").rglob(f"*{identity}.jsonl"))
+    assert len(rollouts) == 1, rollouts
+    records = [json.loads(line) for line in rollouts[0].read_text().splitlines() if line.strip()]
+    return [
+        row["payload"]
+        for row in records
+        if row.get("type") == "event_msg"
+        and row.get("payload", {}).get("type") == "item_completed"
+        and row["payload"].get("item", {}).get("type") == "SubAgentActivity"
+        and row["payload"]["item"].get("kind") == "completed"
+        and row["payload"]["item"].get("agent_thread_id") == child
+    ]
+
+
 @pytest.mark.parametrize("depth", [1, 2], ids=["child", "grandchild"])
 @pytest.mark.parametrize("known", [False, True], ids=["unknown", "receipted"])
 @pytest.mark.parametrize(
@@ -296,6 +313,15 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
             if item["type"] == "function_call" and item["status"] in ("in_progress", "incomplete")
         ]
         assert not unfinished, rows[1]
+        direct_child = next(
+            item["subagent_id"]
+            for item in rows[1]["root_items"]
+            if item["type"] == "create_subagent_call"
+        )
+        if known:
+            # Child handles settle before their parent completion notification.
+            # Close must retain that accepted canonical event as well as effects.
+            assert len(canonical_completed_activity(tmp_path, rows[0]["opened"], direct_child)) == 1
         origin = "/root/alpha" if depth == 1 else "/root/alpha/grandchild"
         old_effect = "source:" + origin + "\n"
         assert (tmp_path / "effects").read_text() == old_effect
@@ -315,6 +341,7 @@ async def test_local_descendant_admission_checks_receipts_without_resuming_work(
             assert new[0]["pid"] != rows[0]["pid"] and new[1]["output"] == "destination finished"
             assert (tmp_path / "effects").read_text() == old_effect + "destination:fresh\n"
             assert len(peer.requests) == original_count + 2
+            assert len(canonical_completed_activity(tmp_path, rows[0]["opened"], direct_child)) == 1
         else:
             assert code != 0 and new and new[0]["error"] == "RuntimeError", (new, err)
             assert "cannot reconcile descendant calls" in new[0]["message"]
