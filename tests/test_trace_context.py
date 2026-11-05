@@ -509,20 +509,39 @@ async def _policy_isolation_case() -> dict[str, Any]:
 
     restrictive = asyncio.create_task(run_owned("restrictive", True, False))
     permissive = asyncio.create_task(run_owned("permissive", False, True))
+
+    async def callers_closed() -> None:
+        await asyncio.gather(*(event.wait() for event in closed.values()))
+
+    barrier = asyncio.create_task(callers_closed())
+    owners = (restrictive, permissive)
     try:
-        # Two native engines can start slowly on loaded macOS runners.
-        await asyncio.wait_for(
-            asyncio.gather(*(event.wait() for event in [*entered.values(), *closed.values()])), 30
+        # Both policies must be retained after admission and caller-scope close.
+        # Callback scheduling need not let both tools enter before either returns.
+        ready, _ = await asyncio.wait(
+            (barrier, *owners), timeout=30, return_when=asyncio.FIRST_COMPLETED
         )
-    except BaseException:
+        for owner in owners:
+            if owner in ready:
+                # Surface setup/tool failures instead of hiding them in timeout cleanup.
+                owner.result()
+                raise AssertionError("Policy owner finished before the callbacks were released")
+        if barrier not in ready:
+            raise TimeoutError(
+                {
+                    label: {"entered": entered[label].is_set(), "closed": closed[label].is_set()}
+                    for label in labels
+                }
+            )
+        await barrier
         release.set()
-        restrictive.cancel()
-        permissive.cancel()
-        await asyncio.gather(restrictive, permissive, return_exceptions=True)
-        raise
-    else:
+        results = await asyncio.gather(*owners)
+    finally:
         release.set()
-    results = await asyncio.gather(restrictive, permissive)
+        for waiter in (barrier, *owners):
+            if not waiter.done():
+                waiter.cancel()
+        await asyncio.gather(barrier, *owners, return_exceptions=True)
     async with ScriptedResponses(
         [tool_call("observe", {"key": "fresh"}, call_id="fresh")], [text("done")]
     ) as peer:
