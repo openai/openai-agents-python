@@ -1000,13 +1000,14 @@ class Agent(Generic[ContextT, OutputT]):
                 options["model_settings"] = model_settings
             if environment is not None:
                 options["environment"] = environment
+            if prepare_request is not None:
+                options["prepare_request"] = prepare_request
             return _SyncRun().run(
                 self.run(
                     input,
                     context=cast(SessionContextT, context),
                     tools=tools,
                     before_step=before_step,
-                    prepare_request=prepare_request,
                     **options,
                 )
             )
