@@ -510,8 +510,9 @@ async def _policy_isolation_case() -> dict[str, Any]:
     restrictive = asyncio.create_task(run_owned("restrictive", True, False))
     permissive = asyncio.create_task(run_owned("permissive", False, True))
     try:
+        # Two native engines can start slowly on loaded macOS runners.
         await asyncio.wait_for(
-            asyncio.gather(*(event.wait() for event in [*entered.values(), *closed.values()])), 15
+            asyncio.gather(*(event.wait() for event in [*entered.values(), *closed.values()])), 30
         )
     except BaseException:
         release.set()

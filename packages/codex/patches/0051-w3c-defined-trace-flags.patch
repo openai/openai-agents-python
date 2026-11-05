@@ -87,18 +87,19 @@ index dccc2da3cde466c70ea3688d17dfcd355dbba29c..ab3bba5718370c2c85af009fd854cc1d
      dispatch_span
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..49b3a9e9b9e5350b1adb270959b8c9711a3b9f1d 100644
+index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..84f3ec915659521495c77777b49a2c3fe62746f1 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -98,7 +98,6 @@ use codex_network_proxy::normalize_host;
+@@ -97,8 +97,6 @@ use codex_network_proxy::NetworkProxyAuditMetadata;
+ use codex_network_proxy::normalize_host;
  use codex_otel::auth_storage::AuthStorageOriginator;
  use codex_otel::current_span_trace_id;
- use codex_otel::current_span_w3c_trace_context;
+-use codex_otel::current_span_w3c_trace_context;
 -use codex_otel::set_parent_from_w3c_trace_context;
  use codex_prompts::render_model_instructions;
  use codex_protocol::ResponseUsageMetadata;
  use codex_protocol::SessionId;
-@@ -520,8 +519,9 @@ impl Session {
+@@ -520,8 +518,9 @@ impl Session {
          args: SessionSpawnArgs,
      ) -> BoxFuture<'static, CodexResult<(Arc<Self>, SessionIo)>> {
          let tree_shutdown = args.agent_control.runtime().shutdown.clone();
@@ -109,7 +110,7 @@ index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..49b3a9e9b9e5350b1adb270959b8c971
                  Some(trace) => {
                      if codex_otel::context_from_w3c_trace_context(&trace).is_some() {
                          Some(trace)
-@@ -533,9 +533,14 @@ impl Session {
+@@ -533,9 +532,14 @@ impl Session {
                  None => None,
              };
              let thread_spawn_span = info_span!("thread_spawn", otel.name = "thread_spawn");
@@ -126,7 +127,7 @@ index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..49b3a9e9b9e5350b1adb270959b8c971
              let spawn = Self::spawn_internal(SessionSpawnArgs {
                  parent_trace,
                  ..args
-@@ -1013,6 +1018,7 @@ impl SessionIo {
+@@ -1013,6 +1017,7 @@ impl SessionIo {
              turn_extension_init,
          } = op.into();
          let sub = Submission {
@@ -134,7 +135,7 @@ index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..49b3a9e9b9e5350b1adb270959b8c971
              id: id.clone(),
              op,
              turn_extension_init,
-@@ -1028,7 +1034,13 @@ impl SessionIo {
+@@ -1028,7 +1033,13 @@ impl SessionIo {
      /// Use sparingly: prefer `submit()` so submission IDs are generated consistently.
      pub(crate) async fn submit_with_id(&self, mut sub: Submission) -> CodexResult<()> {
          if sub.trace.is_none() {
@@ -149,7 +150,7 @@ index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..49b3a9e9b9e5350b1adb270959b8c971
          }
          self.tx_sub
              .send(sub)
-@@ -1054,6 +1066,7 @@ impl SessionIo {
+@@ -1054,6 +1065,7 @@ impl SessionIo {
          } = request.into();
          let trace = request.trace.take();
          self.submit_with_id(Submission {
@@ -157,7 +158,7 @@ index 83f0c7cfb4907197ac3f499c3b4300f72ba124d1..49b3a9e9b9e5350b1adb270959b8c971
              id,
              op: Op::TurnInput {
                  request: Box::new(request),
-@@ -1080,6 +1093,7 @@ impl SessionIo {
+@@ -1080,6 +1092,7 @@ impl SessionIo {
      ) -> CodexResult<TurnInputSubmission> {
          let (reply_tx, reply_rx) = oneshot::channel();
          self.submit_with_id(Submission {
