@@ -1388,13 +1388,21 @@ impl NativeThread {
         })
     }
 
-    fn _validate_local_executor_policy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn _reconcile_local_calls<'py>(
+        &self,
+        py: Python<'py>,
+        receipts_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let inner = self.current()?;
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            local_reconciliation::validate_executor_policy(&inner)
-                .await
-                .map_err(py_error)
+            async_bridge::retain_writer_operation(async move {
+                let _context_operation = _context_operation;
+                local_reconciliation::reconcile(&inner, &receipts_json)
+                    .await
+                    .map_err(py_error)
+            })
+            .await
         })
     }
 
@@ -1881,15 +1889,26 @@ impl NativeThread {
                         };
                         // Child results use the same canonical receipt gate;
                         // they never enter an SDK manual continuation.
-                        if let Some(store) = &inner.engine.local_checklist_store {
+                        if inner.engine.local_checklist_store.is_some() {
                             let id = codex_protocol::ThreadId::from_string(&request.reply.thread)
                                 .map_err(py_error)?;
                             let item =
                                 python_tools::PythonOutput(response.clone()).receipt(&request);
-                            store
-                                .commit_sdk_receipt(id, &request, item, false)
-                                .await
-                                .map_err(py_error)?;
+                            return async_bridge::retain_writer_operation(async move {
+                                let _operation = _context_operation;
+                                let _mutation = _mutation;
+                                let store = inner
+                                    .engine
+                                    .local_checklist_store
+                                    .as_ref()
+                                    .expect("selected local writer");
+                                store
+                                    .commit_sdk_receipt(id, &request, item, false)
+                                    .await
+                                    .map_err(py_error)?;
+                                Ok(sender.send(response).is_ok())
+                            })
+                            .await;
                         }
                         return Ok(sender.send(response).is_ok());
                     }

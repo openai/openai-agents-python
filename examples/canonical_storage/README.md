@@ -1,6 +1,6 @@
 # Application-owned native storage preview
 
-`CanonicalStorage` lets your application supply the authoritative storage backend for a native Session. This example uses the persistent `SQLiteThreadStore` reference adapter. Native Codex still owns model requests, turns and tool dispatch. Each commit stores the native thread metadata and ordered canonical history, including the original thread, turn and call identities and recorded tool results. An in-memory projection serves native reads; the SDK acknowledges a write only after the application backend commits it. A backend failure never selects another store.
+`CustomStorage` lets your application supply the authoritative storage backend for a native Session. This example uses the persistent `SQLiteSessionStore` reference adapter. Native Codex still owns model requests, turns and tool dispatch. Each commit stores the native thread metadata and ordered canonical history, including the original thread, turn and call identities and recorded tool results. An in-memory projection serves native reads; the SDK acknowledges a write only after the application backend commits it. A backend failure never selects another store.
 
 Install the matching SDK preview and provide your current model credentials through the normal provider configuration. Run from the repository root:
 
@@ -13,15 +13,15 @@ Use the Session ID printed by the first process. Both processes must use the sam
 
 ## Backend contract
 
-Pass `CanonicalStorage(backend)` to `Agent.session(storage=...)`. The backend implements the public `CanonicalThreadStore` protocol. Methods are synchronous and run on native worker threads. They must be thread-safe and must not call back into the SDK.
+Pass `CustomStorage(backend)` to `Agent.session(storage=...)`. The backend implements the public `SessionStore` protocol. Methods are synchronous and run on native worker threads. They must be thread-safe and must not call back into the SDK.
 
 | Method | Required behavior |
 | --- | --- |
-| `acquire(thread_id) -> token` | Acquire exclusive writer ownership. Return a new fencing token; stale owners must lose write authority. |
-| `read(thread_id, token) -> str or None` | Under that ownership, read the complete authoritative snapshot. Return `None` only when no committed snapshot exists. |
-| `commit(thread_id, token, expected_revision, write_id, payload)` | Atomically check the token and previous revision, then durably replace the opaque snapshot. An identical accepted write ID and payload is an idempotent success. |
-| `flush(thread_id, token)` | Confirm every accepted canonical write is durable and readable. |
-| `release(thread_id, token)` | Release ownership after success or failure while retaining committed history. Release must be idempotent for the same token after success. The SDK retains the token when release fails so cleanup can retry; implementations should release locally owned resources even on failure. |
+| `acquire(session_id) -> token` | Acquire exclusive writer ownership. Return a new fencing token; stale owners must lose write authority. |
+| `read(session_id, token) -> str or None` | Under that ownership, read the complete authoritative snapshot. Return `None` only when no committed snapshot exists. |
+| `commit(session_id, token, expected_revision, write_id, payload)` | Atomically check the token and previous revision, then durably replace the opaque snapshot. An identical accepted write ID and payload is an idempotent success. |
+| `flush(session_id, token)` | Confirm every accepted canonical write is durable and readable. |
+| `release(session_id, token)` | Release ownership after success or failure while retaining committed history. Release must be idempotent for the same token after success. The SDK retains the token when release fails so cleanup can retry; implementations should release locally owned resources even on failure. |
 
 The SDK acquires ownership before reading resume history or selecting a saved model. It holds ownership through initialization, execution and close. Failed initialization and close release the writer. It reconciles a lost commit acknowledgment by reading back the exact payload under the same ownership, then repeating that same write identity and requiring a successful durable acknowledgment. A readable snapshot alone does not prove durability. If either check fails, the Session fails and must close. Commits use a stable writer token plus revision as their write identity. Backends must enforce the token at the atomic commit boundary.
 
@@ -50,4 +50,4 @@ This preview supports root Sessions with automatic Python tools. It rejects nati
 
 Snapshots check native schema version 1, the Python SDK family and the pinned Codex revision. These checks do not prove compatibility with a different SDK binding revision. Snapshots are opaque backend values. Do not edit their JSON or assume compatibility across SDK versions or between Python and JavaScript. Keep the matching SDK build when reopening saved history; upgrade and migration qualification are separate work. The application owns storage access, encryption, retention and backups.
 
-`SQLiteThreadStore` uses SQLite transactions with `synchronous=FULL`, local POSIX file locks, and database fencing tokens. Process death releases the OS lock. A new owner replaces the token before reading history. Committed snapshots survive process death. Host-loss durability depends on the filesystem and disk honoring `fsync`. Network filesystems, cross-host writers and Windows are unsupported. Do not delete lock files to recover ownership; closing the writer or terminating its process releases its lock safely. The reference adapter rewrites the whole snapshot on each canonical mutation, so it favors correctness and a small contract over large-history throughput.
+`SQLiteSessionStore` uses SQLite transactions with `synchronous=FULL`, local POSIX file locks, and database fencing tokens. Process death releases the OS lock. A new owner replaces the token before reading history. Committed snapshots survive process death. Host-loss durability depends on the filesystem and disk honoring `fsync`. Network filesystems, cross-host writers and Windows are unsupported. Do not delete lock files to recover ownership; closing the writer or terminating its process releases its lock safely. The reference adapter rewrites the whole snapshot on each canonical mutation, so it favors correctness and a small contract over large-history throughput.

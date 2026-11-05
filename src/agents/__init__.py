@@ -16,9 +16,9 @@ if TYPE_CHECKING:
         NativeProvider as NativeProvider,
     )
     from .canonical_storage import (
-        CanonicalStorage as CanonicalStorage,
-        CanonicalThreadStore as CanonicalThreadStore,
-        SQLiteThreadStore as SQLiteThreadStore,
+        CustomStorage as CustomStorage,
+        SessionStore as SessionStore,
+        SQLiteSessionStore as SQLiteSessionStore,
     )
     from .executor import (
         Environment as Environment,
@@ -64,6 +64,11 @@ if TYPE_CHECKING:
     from .rate_limits import (
         ApiRateLimits as ApiRateLimits,
         ApiRateLimitWindow as ApiRateLimitWindow,
+    )
+    from .recovery import (
+        LocalRecoveryRequired as LocalRecoveryRequired,
+        ReconciledCall as ReconciledCall,
+        UncertainCall as UncertainCall,
     )
     from .schema import (
         NativeOutput as NativeOutput,
@@ -153,9 +158,12 @@ _MODULES = {
     "OutputValidationError": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
-    "CanonicalStorage": ".canonical_storage",
-    "CanonicalThreadStore": ".canonical_storage",
-    "SQLiteThreadStore": ".canonical_storage",
+    "CustomStorage": ".canonical_storage",
+    "SessionStore": ".canonical_storage",
+    "SQLiteSessionStore": ".canonical_storage",
+    "LocalRecoveryRequired": ".recovery",
+    "ReconciledCall": ".recovery",
+    "UncertainCall": ".recovery",
     "ApiRateLimits": ".rate_limits",
     "ApiRateLimitWindow": ".rate_limits",
     "InputImage": ".input",

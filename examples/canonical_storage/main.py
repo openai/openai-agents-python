@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from pathlib import Path
 
-from agents import Agent, CanonicalStorage, NativeProvider, SQLiteThreadStore, function_tool
+from agents import Agent, CustomStorage, NativeProvider, SQLiteSessionStore, function_tool
 
 
 @function_tool
@@ -20,7 +20,7 @@ async def main() -> None:
     parser.add_argument("--base-url", help="Optional current provider endpoint")
     parser.add_argument("--prompt", default="Check order example-123 using the tool.")
     options = parser.parse_args()
-    storage = CanonicalStorage(SQLiteThreadStore(options.database))
+    storage = CustomStorage(SQLiteSessionStore(options.database))
     async with NativeProvider(base_url=options.base_url) as provider:
         agent = Agent(
             instructions="Use the order tool when asked.",

@@ -30,7 +30,7 @@ Later examples with `await` or `async with` are fragments for an async function 
 
 ## Submit and wait for work
 
-`submit()` returns a handle to the root `Turn`. Use `await turn.get_result()` in the event loop where you opened the Session. The call waits for that root's accepted work and native continuations, including accepted steering.
+`submit()` returns a handle to the root `Turn`. Use `await turn.get_result()` in the event loop where you opened the Session. The call waits for that root's work and its native continuations.
 
 The handle has these lifetime rules:
 
@@ -48,7 +48,46 @@ If root work is active, choose how to submit a new prompt:
 
 You can also use `await turn.steer(prompt)` for a captured root. Accepted steering may start a native continuation after a model step ends. `await turn.get_result()` waits for that continuation too. Do not resubmit input the root has retained.
 
-For conversations that delegate work, see [native child turns](#native-child-turns).
+#### Steer one exact root turn
+
+Use `turn.steer_exact()` when a supervisor must target the native root turn it observed. Take the ID from `TurnStarted` on that root's event stream. The fragment below observes a captured `turn`.
+
+```python
+from contextlib import aclosing
+
+from agents import StaleTurnError
+from agents.observation import TurnStarted
+
+async with aclosing(turn.events()) as events:
+    async for event in events:
+        if isinstance(event, TurnStarted):
+            try:
+                receipt = await turn.steer_exact(
+                    "Keep the output in the assigned workspace.",
+                    expected_turn_id=event.turn_id,
+                )
+            except StaleTurnError:
+                # The observed native turn is no longer active.
+                break
+            print(receipt.turn_id, receipt.input_id)
+            break
+```
+
+A `SteeringReceipt` confirms that the exact native turn accepted the input. The model may finish before it reads that input. Strict steering never starts a continuation, and cancelling the wait can leave acceptance unknown. Keep one steering mode per native root turn. To submit new work after a stale target, make a separate application decision.
+
+For child work, see [native child turns](#native-child-turns).
+
+### Wait for a decision or a result
+
+Use `await turn.wait_for_attention()` when the application needs to act only on live requests or a settled outcome. Ordinary tool activity stays on the observation stream.
+
+| Return value | What the application receives |
+| --- | --- |
+| `Completed` | The turn's final output and available usage. |
+| `PendingRequests` | Live requests owned by this root. Respond to each exact request. Use `session.interactions()` to include child requests. |
+| `TurnNeedsAttention` | A settled interruption, lost connection, blocking quota, or temporary rate limit. The `reason` distinguishes these outcomes. |
+
+Other failures still raise. If a connection is lost, check retained history and your application's records of tool effects before continuing. To set a deadline, [bound the wait and stop owned work](troubleshooting.md#bound-a-wait-and-stop-owned-work).
 
 ## Stream observations
 
@@ -118,16 +157,17 @@ Choose storage before opening the Session. Start with an ordinary Session for a 
 | Continue talking while the Session stays open | `async with agent.session()` | The live Session, which owns the conversation until it closes. |
 | Save a portable snapshot and restore it in a new Session | `SessionState` from `await session.save_state()` | The checkpoint in trusted storage, serialized with `state.to_json()` when needed. |
 | Reopen a native conversation from a local profile directory | [`LocalStorage`](reference.md#localstorage) | The profile directory and `session.id`; reopen with the same profile and `resume=saved_id`. |
-| Supply an application-owned canonical native backend | `CanonicalStorage(backend)` | See the [persistent adapter example and contract](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage) for the preview scope, lifecycle and recovery procedure. |
 
 The storage choices have these limits:
 
 - Portable checkpoints do not copy workspace files or live processes.
-- A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`. Persistent code mode (`programmatic_tool_calling=True`) is rejected before opening because individual nested tool identities lack durable intent and result receipts. Nonpersistent code mode remains available.
+- A `LocalStorage` Session has one native writer at a time and cannot export portable state with `save_state()`, `suspend()`, or `fork()`.
 - Do not combine `storage` or `resume` with portable `state`.
 - Both restore methods require current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [compact, save and restore](#compact-save-and-restore).
+
+The SDK rejects a local working directory or writable root that overlaps the session store. For example, put the worker in `worker/workspace` and keep its session history in `worker/history`.
 
 ## Reopen a conversation from local storage
 
@@ -166,11 +206,37 @@ This script demonstrates closing and reopening within one application process. T
 
 ### Recover after interruption
 
-Local storage retains history, but it cannot recover every interrupted conversation. Reopening fails with `RuntimeError` if the saved history contains a function call with an unknown outcome. For example, the process may have crashed after an external effect but before recording its result. Reopening also fails if a saved active child's runtime cannot be restored. No new model request starts in either case.
+A process can stop after a tool applies an effect and before the SDK records its result. If a retained root tool call has an unknown outcome, an ordinary reopen raises `LocalRecoveryRequired` before any new model request. Inspect `error.calls`, `error.turns`, and `error.items`. Each uncertain call identifies the original thread, turn, and call, along with its name and arguments.
 
-A successful `LocalThreadStore` append records canonical items and flushes the native writer to the OS-readable file; internal enqueue alone only accepts queued work. Successful persistence and flush acknowledge the same process-death boundary. The runtime requires that boundary before tool dispatch or dependent work. These boundaries cover process death; they do not promise survival of host or power loss. Search indexes and telemetry are rebuildable and do not replace canonical history. The first canonical storage failure remains visible through turn completion and close, even if a later operation succeeds.
+Check each effect against trusted application records or the system that owns the effect. Keep the conversation closed if you cannot confirm an outcome. The SDK supports explicit reconciliation of retained root calls with a missing result. An unresolved child call or an active child whose runtime cannot be restored causes a `RuntimeError` on reopen.
 
-Before starting another conversation, preserve the profile and check your application's records to find which external effects occurred. Repeating `resume` does not resolve an unknown outcome. `LocalStorage` provides no public operation to repair that saved history, and checking external effects does not repair it. The separate `CanonicalStorage.reconcile()` preview applies only to application-supplied canonical backends.
+Suppose `call` is the only unresolved root call. Your application journal confirms that the tool recorded a handoff. Reopen the original profile with a matching result.
+
+```python
+confirmation = call.reconcile(
+    outcome="applied",
+    result="The application journal confirms the handoff.",
+)
+async with agent.session(
+    storage=profile, resume=saved_id, reconciled_calls=[confirmation]
+) as session:
+    receipts = [
+        item
+        async for item in session.items()
+        if item["type"] == "function_call_output"
+        and item["turn_id"] == call.turn_id
+        and item["call_id"] == call.call_id
+        and item.get("reconciliation") == "applied"
+    ]
+    if len(receipts) != 1:
+        raise RuntimeError("The confirmed result is missing from history.")
+    turn = await session.submit("Continue from the confirmed handoff.")
+    result = await turn.get_result()
+```
+
+Supply one matching confirmation per unresolved call. Use `outcome="not_applied"` only after you verify that the call had no effect and that earlier work cannot still apply it. Include only result text the model may read. The SDK writes the result for the original call without running that call again. If reopening is interrupted, inspect history again before sending more work. The SDK accepts an identical confirmation for a reconciliation it already recorded.
+
+The SDK rejects later reuse of a reconciled call ID. A new call ID can still request the same business effect. Deduplicate effects and publication with a durable application key that identifies the operation across calls and process restarts.
 
 ## Compact, save and restore
 
@@ -225,9 +291,17 @@ This example assumes an idle checkpoint. Resume a pending manual turn before upd
 
 If saving fails, the run fails. Unfinished child work can prevent saving. Live processes do not transfer, and saving does not undo completed effects.
 
+### Restore executor policy
+
+For a portable checkpoint with a local executor or a WSS Environment that sets `writable_roots`, restore requires a matching executor policy, including the strict write mode. If the saved WSS Environment omitted `writable_roots`, restore can use a different working directory. Keep that implicit write mode when restoring a pending manual checkpoint or a checkpoint with a managed network policy. To restore an idle WSS checkpoint saved with `writable_roots=None` and `network=None`, use a WSS Environment with both settings still set to `None`, or omit the Environment. The SDK skips the executor policy digest check for this case. To use `Environment.local(...)` or explicit `writable_roots` instead, open a new Session without this checkpoint.
+
+When reopening with `LocalStorage`, check which executor the latest receipt recorded. For a local executor or a WSS Environment with explicit write roots, supply the same working directory, last applied write roots and network policy. Include any replacement made with `submit(writable_roots=...)`.
+
+For an implicit WSS Environment (`writable_roots=None`), you can reopen in a different working directory if the rest of the executor policy matches. You can also omit the Environment to reopen for model-only work, including when the recorded executor used a managed network policy.
+
 ### Network policy and offline executors
 
-Restore requires the current application to supply the saved normalized `Environment.network` policy, even if no command used the network. The checkpoint stores only a policy digest and cannot grant access.
+Restoring a portable checkpoint requires the current application to supply the saved normalized `Environment.network` policy, even if no command used the network. The checkpoint stores only a policy digest and cannot grant access.
 
 - A missing digest matches an omitted Environment or `network=None`, preserving older checkpoints.
 - An explicit empty `NetworkPolicy()` differs from no policy.
@@ -465,7 +539,19 @@ Event timing depends on the tool family:
 
 An MCP result policy can edit the output body, but cannot clear a server's `isError: true` flag. The model receives the accepted body, but `ToolFinished` still reports the failure. A failed tool can still lead to a successful final answer. Check the tool status and submission outcome separately.
 
-Cancelling an observer does not cancel the tool call. Native cancellation may produce no MCP end event. Use `await turn.get_result()` for the exact turn's final outcome. An error or cancellation does not prove that no external effect occurred or that an effect was undone.
+Cancelling an observer leaves tool work running. Native cancellation may produce no MCP end event. Use `await turn.get_result()` for the exact turn's final outcome. Check your application records to learn which effects occurred before an error or cancellation.
+
+### Inspect completed execution
+
+By default, `ExecutionItemCompleted` from `agents.observation` reports the kind, status, and IDs of a completed command, patch, or MCP call in `event.item`.
+
+For a trusted reader, pass `include_execution_details=True` to `session.events()` or `turn.events()`. Command details include `argv`, `cwd`, and `exit_code`. Patch details include the changes. MCP details include the arguments and accepted result.
+
+Match the event item's native `thread_id`, `turn_id`, and `call_id` to the typed completion from `session.items()`. If another row uses the event item's `id`, the typed history item can have a different `id` as its history cursor.
+
+`session.items()` retains provider `function_call` and `function_call_output` rows alongside typed execution items. After an SDK upgrade, the same retained history can yield additional provider rows. After an `EventGap` or a reopen, read the retained items. Pass `subagent_id` to read a child's history.
+
+Execution items carry a call ID and a status when the runtime records them. Command records can include the original `argv`, working directory, exit code, and output. Patch records can include the changes and output. MCP records can include arguments and the result or error. Core can shorten command output and MCP results in history. An interrupted call can lack a completion item. When a field or completion is missing, treat that evidence as unknown and check your application records before assuming the outcome.
 
 ## Failures and recovery
 
@@ -480,6 +566,7 @@ Cancelling an observer does not cancel the tool call. Native cancellation may pr
 | `InteractionExpiredError` | A request no longer carries reply authority. Inspect current live requests. |
 | `TurnStoppedError` | The root stopped and its owned cleanup finished. Earlier effects remain possible. |
 | `CapabilityError` | The operation requires capabilities that this Session has not been granted. |
+| `LocalRecoveryRequired` | Local history contains recorded calls with unknown outcomes. Check [local recovery](#recover-after-interruption) before reopening. |
 
 These types are public imports from `agents`. `InteractionRequired` can carry a supported manual checkpoint; see [manual continuation](tools.md#continue-a-one-shot-manual-request).
 
@@ -539,6 +626,16 @@ While idle, use separate calls for each category:
 The update waits for native acceptance. If you cancel the call, it waits until the update finishes. An accepted change remains applied. If the SDK cannot confirm whether the update took effect, the Session rejects further work. Exit its async context to finish cleanup, then open a new Session.
 
 For instruction matching and trust during restore, see [store and trust checkpoint data](#store-and-trust-checkpoint-data).
+
+### Check applied instructions and settings
+
+Pass `instruction_files=[Path("method.md")]` to `agent.session()` to load trusted UTF-8 files as part of the application instructions. The SDK reads these paths on the application host. Choose them in trusted code. When restoring a portable checkpoint, supply matching instructions and file content.
+
+Read `recorded_turn.get("receipt")` from `session.turns()` to inspect the settings the runtime selected for the turn's latest recorded model sampling attempt. The receipt can identify the model, reasoning effort, Codex revision and source tree, whether user configuration applied, and the selected executor and approval policy. The executor entry shows the selected environment ID, transport, working directory, explicit write roots and network settings. The receipt lists loaded instruction file paths, source categories and SHA-256 hashes, along with the hash of the developer instructions.
+
+Live Sessions and trusted `LocalStorage` report these details for each executor the step selected. When the latest recorded receipt lists a local executor or a WSS Environment with explicit write roots, the SDK compares its full native policy on `LocalStorage` reopen. An implicit WSS Environment follows the [relocation and model-only reopen rules](#restore-executor-policy). In `receipt["executors"]`, `[]` means the observed step selected no executor. After portable restore, `None` means the checkpoint withheld executor policy details. The other recorded settings remain available.
+
+Use the file hash to check the version of a method file the runtime loaded. The receipt describes the runtime's settings. The provider can still reject or route the request. To verify later tool reads or external effects, use their records separately. Treat missing receipts or fields as unknown.
 
 ### Select tools before each model step
 

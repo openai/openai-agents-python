@@ -19,10 +19,11 @@ from typing_extensions import TypedDict, TypeVar
 
 if TYPE_CHECKING:
     from ._function_tools import Tool
-    from .canonical_storage import CanonicalStorage
+    from .canonical_storage import CustomStorage
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .recovery import ReconciledCall
     from .schema import OutputSpec
     from .session import (
         Completed,
@@ -478,7 +479,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: None = None,
         state: SessionState | None = None,
-        storage: LocalStorage | CanonicalStorage | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -486,6 +487,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -494,7 +496,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: object = None,
         state: SessionState | None = None,
-        storage: LocalStorage | CanonicalStorage | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -502,6 +504,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -510,7 +513,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: ContextT,
         state: SessionState | None = None,
-        storage: LocalStorage | CanonicalStorage | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -518,6 +521,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -526,7 +530,7 @@ class Agent(Generic[ContextT, OutputT]):
         *,
         context: SessionContextT | None = None,
         state: SessionState | None = None,
-        storage: LocalStorage | CanonicalStorage | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
         resume: str | None = None,
         provider: NativeProvider | None = None,
         model: str | None = None,
@@ -534,6 +538,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -575,8 +580,8 @@ class Agent(Generic[ContextT, OutputT]):
         Load checkpoints only from trusted application storage: their history
         includes instructions. Unverifiable histories are rejected.
 
-        With ``storage=CanonicalStorage(backend)``, use an application-owned
-        canonical native backend. See CanonicalThreadStore for its exclusive
+        With ``storage=CustomStorage(backend)``, use an application-owned
+        canonical native backend. See SessionStore for its exclusive
         ownership and commit contract. This preview supports root Sessions;
         child agents, goals, checklist, code mode, manual and native tools,
         and environments are rejected.
@@ -584,10 +589,13 @@ class Agent(Generic[ContextT, OutputT]):
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
-        provider. Missing tool receipts are rejected as unknown effects, not
-        replayed. Local storage rejects code mode because nested tool identities
-        lack durable intent and result receipts. Local storage and portable
-        ``state`` cannot be combined.
+        provider. An unknown root tool outcome raises LocalRecoveryRequired.
+        Check the effect using application records and pass reconciled_calls
+        on reopen. The SDK records those outcomes without running those
+        calls. An unknown descendant tool outcome raises RuntimeError because
+        descendant calls cannot be reconciled. Local storage and portable
+        ``state`` cannot be combined. Local storage rejects code mode because
+        individual nested tool identities lack durable intent and result receipts.
 
         Pass instruction_files to load trusted UTF-8 files as application
         instructions. Use files and parent directories that untrusted actors
@@ -607,6 +615,7 @@ class Agent(Generic[ContextT, OutputT]):
             model_settings=model_settings,
             tool_selection=tools,
             instruction_files=instruction_files,
+            reconciled_calls=reconciled_calls,
         )
         try:
             yield session

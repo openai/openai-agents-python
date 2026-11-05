@@ -16,24 +16,27 @@ import pytest
 
 from agents import (
     Agent,
-    CanonicalStorage,
+    CustomStorage,
     LocalStorage,
     NativeAgents,
     NativeGoals,
     NativeProvider,
-    SQLiteThreadStore,
+    SQLiteSessionStore,
     ToolContext,
+    ToolOutput,
+    ToolOutputImage,
+    ToolOutputText,
     function_tool,
 )
 from tests._asyncio import timeout
 from tests.native_fixtures import assistant_output, function_call, responses as responses
 
 pytestmark = pytest.mark.skipif(
-    os.name != "posix", reason="SQLiteThreadStore reference adapter requires POSIX locking"
+    os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
 )
 
 
-class FaultStore(SQLiteThreadStore):
+class FaultStore(SQLiteSessionStore):
     """Inject one operation failure while retaining SQLite ownership and CAS."""
 
     def __init__(self, path: Path, mode: str):
@@ -92,7 +95,7 @@ async def _worker() -> None:
 
         signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
     store = FaultStore(directory / "canonical.sqlite", mode)
-    storage = CanonicalStorage(store) if backend == "custom" else LocalStorage(directory / "local")
+    storage = CustomStorage(store) if backend == "custom" else LocalStorage(directory / "local")
     effect_started = asyncio.Event()
 
     @function_tool
@@ -180,7 +183,7 @@ async def _worker() -> None:
         }:
             # Probe before this process exits, so OS cleanup cannot hide a
             # missing explicit release in initialization or close.
-            probe = SQLiteThreadStore(directory / "canonical.sqlite")
+            probe = SQLiteSessionStore(directory / "canonical.sqlite")
             token = probe.acquire(identity)
             try:
                 assert probe.read(identity, token) is not None
@@ -230,7 +233,7 @@ def _responses(snapshot):
 
 
 def _snapshot(directory: Path, identity: str):
-    store = SQLiteThreadStore(directory / "canonical.sqlite")
+    store = SQLiteSessionStore(directory / "canonical.sqlite")
     token = store.acquire(identity)
     try:
         value = store.read(identity, token)
@@ -312,7 +315,7 @@ async def test_failed_commits_stop_effects_and_dependent_model(responses, tmp_pa
         # Application reconciliation uses the authoritative fsynced effect,
         # preserving the original turn and call identity without running a tool.
         responses.replies.clear()
-        storage = CanonicalStorage(SQLiteThreadStore(tmp_path / "canonical.sqlite"))
+        storage = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
         await storage.reconcile(
             _row(rows, "opened"),
             turn_id=next(
@@ -488,7 +491,7 @@ async def test_graceful_stop_cannot_relabel_an_inflight_effect_as_a_known_result
             for item in _responses(saved)
             if item.get("type") == "function_call" and item["call_id"] == "inflight-call"
         )
-        await CanonicalStorage(SQLiteThreadStore(tmp_path / "canonical.sqlite")).reconcile(
+        await CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite")).reconcile(
             identity,
             turn_id=original_call["internal_chat_message_metadata_passthrough"]["turn_id"],
             call_id="inflight-call",
@@ -555,7 +558,7 @@ async def test_custom_unsupported_state_rejects_before_acquisition_or_effects(
     acquisitions = []
     effects = []
 
-    class ObservedStore(SQLiteThreadStore):
+    class ObservedStore(SQLiteSessionStore):
         def acquire(self, thread_id):
             acquisitions.append(thread_id)
             return super().acquire(thread_id)
@@ -575,8 +578,8 @@ async def test_custom_unsupported_state_rejects_before_acquisition_or_effects(
         provider=provider,
     )
     async with provider:
-        with pytest.raises(ValueError, match="CanonicalStorage preview does not support"):
-            async with agent.session(storage=CanonicalStorage(backend)):
+        with pytest.raises(ValueError, match="CustomStorage preview does not support"):
+            async with agent.session(storage=CustomStorage(backend)):
                 pytest.fail("Unsupported custom storage combination opened")
     assert acquisitions == []
     assert effects == []
@@ -663,6 +666,152 @@ async def test_builtin_local_write_failure_gates_native_work(responses, tmp_path
             successor_err,
         )
         assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("initial_failure", ["read", "commit"])
+async def test_failed_initialization_retries_release_before_another_owner_opens(
+    responses, tmp_path, initial_failure
+):
+    class FailedInitializationStore(SQLiteSessionStore):
+        identity = None
+        release_attempts = 0
+
+        def acquire(self, thread_id):
+            self.identity = thread_id
+            return super().acquire(thread_id)
+
+        def read(self, thread_id, token):
+            if initial_failure == "read":
+                raise OSError("injected initial read failure")
+            return super().read(thread_id, token)
+
+        def commit(self, thread_id, token, expected_revision, write_id, payload):
+            raise OSError("injected initial commit failure")
+
+        def release(self, thread_id, token):
+            self.release_attempts += 1
+            if self.release_attempts == 1:
+                raise OSError("injected release failure before relinquishing ownership")
+            return super().release(thread_id, token)
+
+    store = FailedInitializationStore(tmp_path / "canonical.sqlite")
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-initialization")
+    agent = Agent(instructions="Opening must fail before work starts.", provider=provider)
+    with pytest.raises(RuntimeError, match="Canonical storage failed"):
+        async with timeout(15), provider:
+            with pytest.raises(RuntimeError, match="Canonical storage failed"):
+                async with agent.session(storage=CustomStorage(store)):
+                    pytest.fail("Failed canonical initialization unexpectedly succeeded")
+            assert store.identity is not None
+            # Keep the failed backend alive in this process: process death and
+            # destruction of its lock descriptors cannot rescue the successor.
+            successor = SQLiteSessionStore(tmp_path / "canonical.sqlite")
+            token = successor.acquire(store.identity)
+            try:
+                assert successor.read(store.identity, token) is None
+            finally:
+                successor.release(store.identity, token)
+            assert store.release_attempts >= 2
+    assert responses.requests == []
+    assert not (tmp_path / "effects").exists()
+
+
+@pytest.mark.parametrize("kind", ["error", "image", "mixed"])
+async def test_typed_reconciliation_preserves_normal_callback_receipt_and_model_input(
+    responses, tmp_path, kind
+):
+    image = (
+        "data:image/png;base64,"
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+    )
+    output = {
+        "error": ToolOutput.error("externally confirmed failure"),
+        "image": ToolOutput.image(image),
+        "mixed": ToolOutput([ToolOutputText("verified image"), ToolOutputImage(image)]),
+    }[kind]
+    normal_effects = []
+
+    @function_tool
+    async def record(key: str) -> ToolOutput:
+        """Return the authoritative typed application result."""
+        normal_effects.append(key)
+        return output
+
+    normal = tmp_path / "ordinary"
+    normal.mkdir()
+    responses.respond(function_call("record", {"key": "once"}, "normal-call"))
+    responses.respond(assistant_output("ordinary callback finished"))
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-typed-result")
+    agent = Agent(
+        instructions="Record the result once.",
+        model="gpt-5.1-codex",
+        tools=[record],
+        provider=provider,
+    )
+    async with (
+        timeout(30),
+        provider,
+        agent.session(
+            storage=CustomStorage(SQLiteSessionStore(normal / "canonical.sqlite"))
+        ) as session,
+    ):
+        assert (await (await session.submit("record once")).get_result()).final_output == (
+            "ordinary callback finished"
+        )
+        normal_id = session.id
+    assert normal_effects == ["once"]
+    [normal_receipt] = [
+        item
+        for item in _responses(_snapshot(normal, normal_id))
+        if item.get("type") == "function_call_output" and item["call_id"] == "normal-call"
+    ]
+    [normal_model_receipt] = [
+        item
+        for item in responses.requests[1]["input"]
+        if item.get("type") == "function_call_output" and item["call_id"] == "normal-call"
+    ]
+
+    uncertain = tmp_path / "uncertain"
+    uncertain.mkdir()
+    responses.respond(function_call("record", {"key": "once"}, "uncertain-call"))
+    code, rows, err = await _collect(await _start(responses, uncertain, "unknown"))
+    assert code == 67, (rows, err)
+    identity = _row(rows, "opened")
+    assert _row(rows, "pid") != os.getpid()
+    before = len(responses.requests)
+    assert (uncertain / "effects").read_text() == "unknown:once\n"
+    saved = _snapshot(uncertain, identity)
+    [call] = [
+        item
+        for item in _responses(saved)
+        if item.get("type") == "function_call" and item["call_id"] == "uncertain-call"
+    ]
+    assert not any(item.get("type") == "function_call_output" for item in _responses(saved))
+    turn_id = call["internal_chat_message_metadata_passthrough"]["turn_id"]
+    await CustomStorage(SQLiteSessionStore(uncertain / "canonical.sqlite")).reconcile(
+        identity, turn_id=turn_id, call_id="uncertain-call", output=output
+    )
+    [reconciled] = [
+        item
+        for item in _responses(_snapshot(uncertain, identity))
+        if item.get("type") == "function_call_output" and item["call_id"] == "uncertain-call"
+    ]
+    assert reconciled["output"] == normal_receipt["output"]
+    assert reconciled["internal_chat_message_metadata_passthrough"]["turn_id"] == turn_id
+    assert len(responses.requests) == before
+    responses.respond(assistant_output("reconciled typed result"))
+    code, resumed, err = await _collect(await _start(responses, uncertain, "destination", identity))
+    assert code == 0 and _row(resumed, "output") == "reconciled typed result", (resumed, err)
+    assert _row(resumed, "pid") != _row(rows, "pid")
+    assert len(responses.requests) == before + 1
+    [resumed_model_receipt] = [
+        item
+        for item in responses.requests[-1]["input"]
+        if item.get("type") == "function_call_output" and item["call_id"] == "uncertain-call"
+    ]
+    assert resumed_model_receipt["output"] == normal_model_receipt["output"]
+    assert (uncertain / "effects").read_text() == "unknown:once\n"
+    assert normal_effects == ["once"]
 
 
 if __name__ == "__main__":

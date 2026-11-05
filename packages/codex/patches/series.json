@@ -175,7 +175,11 @@
     {
       "path": "0047-native-tree-finalization-before-store-close.patch",
       "sha256": "637dc7d1c29d6f98bba7cf43c885a0d3830e267c6524d675baa2b9d0d192823f"
+    },
+    {
+      "path": "0048-native-metadata-durability.patch",
+      "sha256": "10136a8852249737dbf7974c579cb84faf0d36fc495fcbaeeafe66a3dfa7e3d6"
     }
   ],
-  "result_tree": "b1023a9fd1e7880f06a6759ada91bd80cce29d4b"
+  "result_tree": "01b460554e32851a4ad4e3d60d16f5a02caffbb1"
 }

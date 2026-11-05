@@ -535,6 +535,7 @@ class FunctionCallOutputItem(TypedDict):
     status: FunctionCallStatus
     output: str | list[InputText | InputImage] | None
     error: str | None
+    reconciliation: NotRequired[Literal["applied", "not_applied"]]
 
 
 class McpCallItem(TypedDict):

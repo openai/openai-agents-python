@@ -323,11 +323,12 @@ impl CanonicalStore {
                         .into(),
                 });
             }
-            let item: ResponseItem = serde_json::from_value(serde_json::json!({
-                "type": "function_call_output", "call_id": call_id, "output": output,
-                "internal_chat_message_metadata_passthrough": { "turn_id": turn_id }
-            }))
-            .map_err(|_| failure())?;
+            let response =
+                serde_json::from_str::<codex_protocol::dynamic_tools::DynamicToolResponse>(output)
+                    .map_err(|_| ThreadStoreError::InvalidRequest {
+                        message: "Reconciliation requires valid tool output".into(),
+                    })?;
+            let item = crate::python_tools::PythonOutput(response).receipt_for(turn_id, call_id);
             snapshot.items.push(RolloutItem::ResponseItem(
                 codex_history::ResponseItemEnvelope::new(item),
             ));
@@ -432,7 +433,17 @@ impl ThreadStore for CanonicalStore {
                     Ok(())
                 }
                 Err(error) => {
-                    let _ = self.release(id, &token);
+                    if self.release(id, &token).is_err() {
+                        self.failed.store(true, Ordering::Release);
+                        writers.insert(
+                            id,
+                            Writer {
+                                token,
+                                snapshot: None,
+                                failed: true,
+                            },
+                        );
+                    }
                     Err(error)
                 }
             }
