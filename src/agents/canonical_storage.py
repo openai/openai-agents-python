@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import sys
 import threading
 import uuid
 from collections.abc import Iterator
@@ -86,11 +87,12 @@ class SQLiteSessionStore:
 
     SQLite synchronous=FULL commits survive process death. Host-loss durability
     depends on the filesystem honoring fsync. OS locks release on process death;
-    database fencing tokens reject stale owners. One live writer Session may
-    use each database, including when opened through symlink or hard-link aliases.
-    Use separate database files for concurrent Sessions. Network filesystems and
-    shared cross-host access are unsupported. Database files are owner-only;
-    the application owns encryption and backups of sensitive conversation data.
+    database fencing tokens reject stale owners. Distinct Sessions may share
+    a database. Symlinks resolve once to the same per-session lock path;
+    hard-linked databases are unsupported. Do not replace database or lock files
+    during live use. Network filesystems and cross-host access are unsupported.
+    Database files are owner-only; the application owns encryption and backups
+    of sensitive conversation data.
     """
 
     def __init__(self, path: Path):
@@ -102,7 +104,8 @@ class SQLiteSessionStore:
         self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._mutex = threading.RLock()
         self._owners: dict[str, tuple[str, int, int]] = {}
-        descriptor = self._lock_database()
+        self._database_identity: tuple[int, int] | None = None
+        descriptor = self._open_database(create=True)
         try:
             with self._connect() as connection:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
@@ -117,15 +120,25 @@ class SQLiteSessionStore:
         finally:
             os.close(descriptor)
 
-    def _lock_database(self) -> int:
-        import fcntl
-
-        # Lock the database inode, rather than a path-derived sidecar. flock is
-        # independent of SQLite's byte-range locks and follows every file alias.
-        descriptor = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+    def _open_database(self, *, create: bool = False) -> int:
+        if sys.platform == "win32":
+            raise RuntimeError("SQLiteSessionStore requires POSIX file locking")
+        flags = os.O_RDWR | os.O_NOFOLLOW
+        if create:
+            flags |= os.O_CREAT
+        descriptor = os.open(self.path, flags, 0o600)
         try:
+            info = os.fstat(descriptor)
+            if info.st_nlink != 1:
+                raise ValueError("SQLiteSessionStore does not support hard-linked database files")
+            identity = (info.st_dev, info.st_ino)
+            current = self.path.stat(follow_symlinks=False)
+            if identity != (current.st_dev, current.st_ino) or (
+                self._database_identity is not None and identity != self._database_identity
+            ):
+                raise RuntimeError("SQLiteSessionStore database file changed")
+            self._database_identity = identity
             os.fchmod(descriptor, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             for suffix in ("-journal", "-wal", "-shm"):
                 try:
                     self.path.with_name(self.path.name + suffix).chmod(0o600)
@@ -138,13 +151,17 @@ class SQLiteSessionStore:
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        connection = sqlite3.connect(self.path, timeout=5)
+        descriptor = self._open_database()
+        connection = None
         try:
+            connection = sqlite3.connect(self.path, timeout=5)
             connection.execute("PRAGMA synchronous=FULL")
             with connection:
                 yield connection
         finally:
-            connection.close()
+            if connection is not None:
+                connection.close()
+            os.close(descriptor)
 
     def _check(self, session_id: str, token: str) -> None:
         owner = self._owners.get(session_id)
@@ -152,11 +169,23 @@ class SQLiteSessionStore:
             raise RuntimeError("Canonical storage writer is stale or closed")
 
     def acquire(self, session_id: str) -> str:
+        if sys.platform == "win32":
+            raise RuntimeError("SQLiteSessionStore requires POSIX file locking")
+        import fcntl
+        import hashlib
+
         with self._mutex:
             if session_id in self._owners:
                 raise RuntimeError("Canonical storage already has a writer")
-            descriptor = self._lock_database()
+            database = self._open_database()
+            os.close(database)
+            lock_path = self.path.with_name(
+                self.path.name + "." + hashlib.sha256(session_id.encode()).hexdigest() + ".lock"
+            )
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
             try:
+                os.fchmod(descriptor, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 token = uuid.uuid4().hex
                 with self._connect() as connection:
                     connection.execute(

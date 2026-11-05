@@ -31,14 +31,14 @@ The native runtime commits and flushes tool intent before dispatch. Python callb
 
 ## Recovery
 
-Close a failed Session before recovery. A missing receipt blocks reopening for automatic model or tool work, including repeated reopen attempts. Check the external system using the original turn and call IDs. When authoritative records establish the actual outcome, record its serialized function result through the public profile:
+Close a failed Session before recovery. A missing receipt blocks reopening for automatic model or tool work, including repeated reopen attempts. Check the external system using the original turn and call IDs. When authoritative records establish the actual outcome, record its result through the public profile. Pass a string or a `ToolOutput` for error, image or mixed content; reconciliation uses the same conversion as an ordinary callback:
 
 ```python
 await storage.reconcile(
     session_id,
     turn_id=original_turn_id,
     call_id=original_call_id,
-    output=verified_serialized_result,
+    output=verified_result,
 )
 ```
 
@@ -50,4 +50,4 @@ This preview supports root Sessions with automatic Python tools. It rejects nati
 
 Snapshots check native schema version 1, the Python SDK family and the pinned Codex revision. These checks do not prove compatibility with a different SDK binding revision. Snapshots are opaque backend values. Do not edit their JSON or assume compatibility across SDK versions or between Python and JavaScript. Keep the matching SDK build when reopening saved history; upgrade and migration qualification are separate work. The application owns storage access, encryption, retention and backups.
 
-`SQLiteSessionStore` uses SQLite transactions with `synchronous=FULL`, local POSIX file locks, and database fencing tokens. Process death releases the OS lock. A new owner replaces the token before reading history. Committed snapshots survive process death. Host-loss durability depends on the filesystem and disk honoring `fsync`. Network filesystems, cross-host writers and Windows are unsupported. Do not delete lock files to recover ownership; closing the writer or terminating its process releases its lock safely. The reference adapter rewrites the whole snapshot on each canonical mutation, so it favors correctness and a small contract over large-history throughput.
+`SQLiteSessionStore` uses SQLite transactions with `synchronous=FULL`, local POSIX file locks, and database fencing tokens. Process death releases the OS lock. A new owner replaces the token before reading history. Committed snapshots survive process death. Host-loss durability depends on the filesystem and disk honoring `fsync`. Distinct Session IDs can share one database. Symlinks resolve once to the canonical database path; hard-linked databases are rejected. Do not replace the database or its lock files while Sessions are open. Network filesystems, cross-host writers and Windows are unsupported. Do not delete lock files to recover ownership; closing the writer or terminating its process releases its lock safely. The reference adapter rewrites the whole snapshot on each canonical mutation, so it favors correctness and a small contract over large-history throughput.

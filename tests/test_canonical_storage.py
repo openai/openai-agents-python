@@ -46,7 +46,7 @@ def test_sqlite_canonical_store_retains_committed_history(tmp_path: Path) -> Non
     reopened.release("thread", next_token)
 
 
-@pytest.mark.parametrize("alias", ["same", "symlink", "hardlink"])
+@pytest.mark.parametrize("alias", ["same", "symlink"])
 def test_sqlite_excludes_competing_process_and_releases_writer(tmp_path: Path, alias: str) -> None:
     path = tmp_path / "history.sqlite"
     store = SQLiteSessionStore(path)
@@ -54,8 +54,6 @@ def test_sqlite_excludes_competing_process_and_releases_writer(tmp_path: Path, a
     alias_path = path if alias == "same" else tmp_path / (alias + ".sqlite")
     if alias == "symlink":
         alias_path.symlink_to(path)
-    elif alias == "hardlink":
-        os.link(path, alias_path)
     context = multiprocessing.get_context("spawn")
     result = context.Queue()
     contender = context.Process(target=_attempt, args=(str(alias_path), "thread", result))
@@ -154,18 +152,29 @@ def test_reference_adapter_secures_existing_database(tmp_path: Path) -> None:
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-def test_reference_adapter_isolates_concurrent_sessions_by_database(tmp_path: Path) -> None:
+def test_reference_adapter_allows_distinct_sessions_in_one_database(tmp_path: Path) -> None:
     first = SQLiteSessionStore(tmp_path / "first.sqlite")
     same_database = SQLiteSessionStore(tmp_path / "first.sqlite")
     token = first.acquire(session_id="first-session")
     try:
-        with pytest.raises(OSError):
-            same_database.acquire(session_id="different-session")
+        same_token = same_database.acquire(session_id="different-session")
+        try:
+            first_payload = json.dumps({"revision": 1, "write_id": "first", "items": ["one"]})
+            other_payload = json.dumps({"revision": 1, "write_id": "other", "items": ["two"]})
+            first.commit("first-session", token, 0, "first", first_payload)
+            same_database.commit("different-session", same_token, 0, "other", other_payload)
+            assert (
+                same_database.read(session_id="different-session", token=same_token)
+                == other_payload
+            )
+            assert first.read(session_id="first-session", token=token) == first_payload
+        finally:
+            same_database.release(session_id="different-session", token=same_token)
         other = SQLiteSessionStore(tmp_path / "other.sqlite")
         other_token = other.acquire(session_id="other-session")
         try:
             assert other.read(session_id="other-session", token=other_token) is None
-            assert first.read(session_id="first-session", token=token) is None
+            assert first.read(session_id="first-session", token=token) == first_payload
         finally:
             other.release(session_id="other-session", token=other_token)
     finally:
@@ -263,3 +272,74 @@ def test_reference_adapter_secures_existing_wal_files(tmp_path: Path) -> None:
         assert all(stat.S_IMODE(sidecar.stat().st_mode) == 0o600 for sidecar in sidecars)
     finally:
         connection.close()
+
+
+def test_reference_adapter_rejects_hardlinks_before_initialization(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "history.sqlite"
+    path.touch(mode=0o600)
+    alias = tmp_path / "hardlink.sqlite"
+    os.link(path, alias)
+    for candidate in (path, alias):
+        with pytest.raises(ValueError, match="hard-linked"):
+            SQLiteSessionStore(candidate)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT name FROM sqlite_master").fetchall() == []
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 0
+
+
+def test_reference_adapter_rejects_new_hardlinks_before_fencing(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    token = store.acquire("session")
+    os.link(path, tmp_path / "hardlink.sqlite")
+    try:
+        with pytest.raises(ValueError, match="hard-linked"):
+            store.acquire("different-session")
+        with sqlite3.connect(path) as connection:
+            assert connection.execute("SELECT id, token FROM canonical_threads").fetchall() == [
+                ("session", token)
+            ]
+    finally:
+        (tmp_path / "hardlink.sqlite").unlink()
+        store.release("session", token)
+
+
+def test_reference_adapter_rejects_database_replacement_before_fencing(tmp_path: Path) -> None:
+    import sqlite3
+
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    old = tmp_path / "old.sqlite"
+    path.rename(old)
+    SQLiteSessionStore(path)
+    with pytest.raises(RuntimeError, match="database file changed"):
+        store.acquire("session")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT id FROM canonical_threads").fetchall() == []
+
+
+def test_reference_adapter_allows_a_different_process_session_in_the_same_database(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    token = store.acquire("first-session")
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    contender = context.Process(target=_attempt, args=(str(path), "other-session", result))
+    try:
+        contender.start()
+        contender.join(10)
+        assert contender.exitcode == 0
+        assert result.get(timeout=5) == "acquired"
+        assert store.read("first-session", token) is None
+    finally:
+        if contender.is_alive():
+            contender.kill()
+            contender.join(5)
+        store.release("first-session", token)
+        result.close()
