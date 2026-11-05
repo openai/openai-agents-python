@@ -8,11 +8,11 @@ permissions:
   contents: read
 jobs:
   benchmark:
-    name: Cold Windows python 16 cores sample 1
+    name: Cold Windows python 64 cores sample 1
     runs-on:
       group: codex-runners
-      labels: codex-windows-x64
-    timeout-minutes: 180
+      labels: codex-windows-x64-xl
+    timeout-minutes: '180'
     defaults:
       run:
         shell: bash
@@ -21,7 +21,7 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: '1'
       OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
-      CARGO_BUILD_JOBS: '16'
+      CARGO_BUILD_JOBS: '64'
       BENCHMARK_SAMPLE: '1'
       BENCHMARK_SOURCE_SHA: 0f3e347486770c9ad17ed92c0e3ff0d19c32cb34
     steps:
@@ -29,7 +29,7 @@ jobs:
       with:
         persist-credentials: 'false'
         ref: 0f3e347486770c9ad17ed92c0e3ff0d19c32cb34
-    - name: Record machine and begin low-rate sampling
+    - name: Record machine and verify pinned cold inputs
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -43,6 +43,10 @@ jobs:
         }
         @{ logical_cpus = [int]($cpu | Measure-Object NumberOfLogicalProcessors -Sum).Sum; ram_kib = $os.TotalVisibleMemorySize; cargo_jobs = $env:CARGO_BUILD_JOBS; source_sha = (git rev-parse HEAD); sample = $env:BENCHMARK_SAMPLE } | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP/benchmark-machine.json"
         Get-Content "$env:RUNNER_TEMP/benchmark-machine.json"
+    - name: Begin pilot-only sampling
+      if: env.BENCHMARK_SAMPLE == '1'
+      shell: pwsh
+      run: |
         $script = @'
         while ($true) {
           $cpu = Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'"
@@ -160,7 +164,7 @@ jobs:
         )
         PYTHON
     - name: Stop sampler
-      if: always()
+      if: always() && env.BENCHMARK_SAMPLE == '1'
       shell: pwsh
       run: |
         $path = "$env:RUNNER_TEMP/benchmark-sampler.pid"
@@ -169,7 +173,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: experimental-windows-python-16-sample-1
+        name: experimental-windows-python-64-sample-1
         path: |
           ${{ runner.temp }}/benchmark-machine.json
           ${{ runner.temp }}/benchmark-samples.jsonl
