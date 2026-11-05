@@ -1,5 +1,5 @@
 diff --git a/codex-rs/otel/src/trace_context.rs b/codex-rs/otel/src/trace_context.rs
-index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7cf098f4d00e9cfc81aae4db5af4f02257162542 100644
+index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7494beb60bfbc733b4b3130f5c9f59ebcd171e15 100644
 --- a/codex-rs/otel/src/trace_context.rs
 +++ b/codex-rs/otel/src/trace_context.rs
 @@ -9,7 +9,10 @@ use std::sync::RwLock;
@@ -75,16 +75,30 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7cf098f4d00e9cfc81aae4db5af4f022
  }
  
  pub fn traceparent_context_from_env() -> Option<Context> {
-@@ -131,8 +173,25 @@ pub(crate) fn context_from_trace_headers(
+@@ -130,9 +172,38 @@ pub(crate) fn context_from_trace_headers(
+     traceparent: Option<&str>,
      tracestate: Option<&str>,
  ) -> Option<Context> {
-     let traceparent = traceparent?;
+-    let traceparent = traceparent?;
++    let traceparent = traceparent?.trim();
++    // The pinned parser accepts short, zero-padded hex IDs. Validate W3C
++    // field widths here, while leaving value/version validation to it.
++    let mut fields = traceparent.split('-');
++    let (version, trace_id, parent_id, raw_flags) = (
++        fields.next()?,
++        fields.next()?,
++        fields.next()?,
++        fields.next()?,
++    );
++    if version.len() != 2 || trace_id.len() != 32 || parent_id.len() != 16 || raw_flags.len() != 2 {
++        return None;
++    }
 +    // W3C Level 2 defines bit 0 as sampled and bit 1 as random trace ID.
 +    // Let the pinned propagator validate all other header syntax using its
 +    // supported sampling bit, then restore the complete defined flags.
-+    let flags = match traceparent.split('-').nth(3) {
-+        Some("02") => Some(0x02),
-+        Some("03") => Some(0x03),
++    let flags = match raw_flags {
++        "02" => Some(0x02),
++        "03" => Some(0x03),
 +        _ => None,
 +    };
 +    let normalized = flags.and_then(|flags| {
@@ -102,7 +116,7 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7cf098f4d00e9cfc81aae4db5af4f022
      if let Some(tracestate) = tracestate {
          headers.insert("tracestate".to_string(), tracestate.to_string());
      }
-@@ -142,7 +201,20 @@ pub(crate) fn context_from_trace_headers(
+@@ -142,7 +213,20 @@ pub(crate) fn context_from_trace_headers(
      if !context.span().span_context().is_valid() {
          return None;
      }
@@ -124,7 +138,7 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7cf098f4d00e9cfc81aae4db5af4f022
  }
  
  fn load_traceparent_context() -> Option<Context> {
-@@ -368,6 +440,131 @@ mod tests {
+@@ -368,6 +452,134 @@ mod tests {
          assert!(span_context.is_remote());
      }
  
@@ -238,12 +252,15 @@ index 8ce0f99a4bb0c4145be276aea94f1a0fa5626e35..7cf098f4d00e9cfc81aae4db5af4f022
 +                assert_eq!(&header[53..], format!("{flags:02x}"));
 +                assert_ne!(&header[36..52], "4444444444444444");
 +            }
-+            let fresh = tracing::info_span!("fresh");
++            let invalid = tracing::info_span!("invalid");
 +            super::set_parent_from_context(
-+                &fresh,
++                &invalid,
 +                span.context()
 +                    .with_remote_span_context(opentelemetry::trace::SpanContext::empty_context()),
 +            );
++            assert!(super::span_w3c_trace_context(&invalid).is_none());
++            let fresh = tracing::info_span!("fresh");
++            super::set_parent_from_context(&fresh, opentelemetry::Context::new());
 +            let header = super::span_w3c_trace_context(&fresh)
 +                .unwrap()
 +                .traceparent
