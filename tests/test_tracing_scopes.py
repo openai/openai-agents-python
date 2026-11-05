@@ -440,6 +440,199 @@ async def test_processor_invocation_suppresses_detached_scopes_and_bare_operatio
         assert not scope.context.disabled
 
 
+@pytest.mark.parametrize(
+    "entry", ["trace", "span", "capture", "session", "run", "run_sync", "submit"]
+)
+@pytest.mark.parametrize("invalid", ["parent", "unknown"])
+async def test_invalid_options_clear_all_sdk_forwarding_frames(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch, entry: str, invalid: str
+) -> None:
+    from agents import Agent
+    from agents.schema import _prepare_spec
+    from agents.session import Session, _ToolCatalog
+
+    secret = "synthetic-private-invalid-options"
+    options: Any = {
+        "export_credentials": telemetry.TraceExportCredentials(headers={"authorization": secret}),
+        invalid: "invalid",
+    }
+    agent = Agent(instructions="test")
+    session = None
+
+    async def read_events(self: Any) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(Session, "_read_events", read_events)
+
+    def retains(value: Any) -> bool:
+        if isinstance(value, telemetry.TraceScope):
+            value = getattr(value, "_options", None)
+        if isinstance(value, telemetry.TraceOptions):
+            value = value.export_credentials
+        if isinstance(value, telemetry.TraceExportCredentials):
+            return secret in value.headers.values()
+        return isinstance(value, dict) and any(retains(item) for item in value.values())
+
+    try:
+        with pytest.raises((TypeError, ValueError)) as caught:
+            if entry in ("trace", "span"):
+                getattr(telemetry, entry)("invalid", options=options)
+            elif entry == "capture":
+                telemetry._capture(options)
+            elif entry == "session":
+                async with agent.session(trace_options=options):
+                    pytest.fail("Invalid options opened a Session")
+            elif entry == "run":
+                await agent.run("test", trace_options=options)
+            elif entry == "run_sync":
+                await asyncio.to_thread(agent.run_sync, "test", trace_options=options)
+            else:
+                session = Session(
+                    None,
+                    SimpleNamespace(id="test"),
+                    None,
+                    _ToolCatalog(0, ()),
+                    (),
+                    None,
+                    _prepare_spec(str),
+                    "test",
+                    _start_readers=False,
+                )
+                session._opening_agent = agent
+                await session.submit("test", trace_options=options)
+        pending = [caught.value]
+        seen: set[int] = set()
+        while pending:
+            error = pending.pop()
+            if id(error) in seen:
+                continue
+            seen.add(id(error))
+            pending.extend(
+                link for link in (error.__context__, error.__cause__) if link is not None
+            )
+            traceback = error.__traceback__
+            while traceback is not None:
+                frame = traceback.tb_frame
+                if Path(frame.f_code.co_filename).is_relative_to(Path(telemetry.__file__).parent):
+                    assert not any(retains(value) for value in frame.f_locals.values()), (
+                        frame.f_code.co_name
+                    )
+                traceback = traceback.tb_next
+        assert options["export_credentials"].headers["authorization"] == secret
+        assert not native.starts
+    finally:
+        if session is not None:
+            session._reader.cancel()
+            await asyncio.gather(session._reader, return_exceptions=True)
+
+
+def test_rejected_pump_factory_unwinds_admission_and_closes_coroutine(
+    native: NativeTracing,
+) -> None:
+    import inspect
+
+    async def exercise() -> None:
+        class Processor:
+            def on_trace_event(self, event: Any) -> None:
+                pass
+
+        work: list[Any] = []
+        failure = RuntimeError("factory rejected")
+
+        def reject(loop: Any, coroutine: Any, **kwargs: Any) -> Any:
+            work.append(coroutine)
+            raise failure
+
+        with telemetry.trace("parent") as parent:
+            telemetry._processors["registered"] = telemetry._ProcessorRoute(Processor())
+            loop = asyncio.get_running_loop()
+            original = loop.get_task_factory()
+            loop.set_task_factory(reject)
+            try:
+                with pytest.raises(RuntimeError, match="factory rejected") as caught:
+                    telemetry.trace("unpublished").start()
+                assert caught.value is failure
+                assert telemetry.current_context() is parent.context
+                assert native.ends[-1][1]["status"] == "error"
+                assert native.ends[-1][0] in native.released
+                assert telemetry._processor_task is None
+                assert len(work) == 1 and inspect.getcoroutinestate(work[0]) == inspect.CORO_CLOSED
+            finally:
+                loop.set_task_factory(original)
+
+    asyncio.run(exercise())
+
+
+def test_falsey_exceptions_record_scope_and_capture_errors(native: NativeTracing) -> None:
+    class FalseyError(Exception):
+        def __bool__(self) -> bool:
+            return False
+
+    with pytest.raises(FalseyError):
+        with telemetry.trace("falsey"):
+            raise FalseyError()
+    captured = telemetry._capture(telemetry.TraceOptions())
+    captured.close(FalseyError())
+    assert [outcome["status"] for _, outcome in native.ends] == ["error", "error"]
+
+
+async def test_shutdown_rejects_processor_reentrancy_without_mutation(
+    native: NativeTracing,
+) -> None:
+    token = telemetry._in_processor.set(True)
+    try:
+        with pytest.raises(RuntimeError, match="inside a trace processor"):
+            await telemetry.shutdown(timeout_ms=20)
+        assert not native.acks and telemetry._processor_task is None
+    finally:
+        telemetry._in_processor.reset(token)
+
+
+async def test_shutdown_joins_a_live_foreign_loop_pump(
+    native: NativeTracing, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import threading
+
+    loop = asyncio.new_event_loop()
+    running = threading.Event()
+
+    def serve() -> None:
+        asyncio.set_event_loop(loop)
+        loop.call_soon(running.set)
+        loop.run_forever()
+        loop.close()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    assert await asyncio.to_thread(running.wait, 2)
+
+    async def start() -> asyncio.Task[Any]:
+        return asyncio.create_task(asyncio.Event().wait())
+
+    task = await asyncio.wrap_future(asyncio.run_coroutine_threadsafe(start(), loop))
+    telemetry._processor_task = task
+    calls: list[int] = []
+
+    async def shutdown(budget: int) -> None:
+        calls.append(budget)
+
+    original = telemetry.importlib.import_module
+    monkeypatch.setattr(native, "shutdown_telemetry", shutdown, raising=False)
+    monkeypatch.setattr(
+        telemetry.importlib,
+        "import_module",
+        lambda name, package=None: native if name == "agents._native" else original(name, package),
+    )
+    try:
+        await telemetry.shutdown(timeout_ms=20)
+        assert calls == [20] and task.cancelled()
+        assert telemetry._processor_task is None and not telemetry._processors
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, 2)
+        assert not thread.is_alive()
+
+
 def test_invalid_json_rejected_before_credential_registration(native: NativeTracing) -> None:
     with pytest.raises(ValueError):
         with telemetry.trace(

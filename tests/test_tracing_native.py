@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestServer
-from pydantic import BaseModel
+from pydantic import BaseModel, field_serializer, model_validator
 
 from agents import (
     Agent,
@@ -132,6 +132,8 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "mcp_policy",
         "terminal_queue",
         "host_contexts",
+        "manual_validation_context",
+        "closed_session_context",
     ],
 )
 def test_native_tracing_contract(case: str) -> None:
@@ -220,11 +222,109 @@ async def _native_case(case: str) -> None:
                     await _mcp_policy(fixture, provider, recorder)
                 elif case == "host_contexts":
                     await _host_contexts(recorder)
+                elif case == "manual_validation_context":
+                    await _manual_validation_context(fixture, provider)
+                elif case == "closed_session_context":
+                    await _closed_session_context(fixture, provider)
                 else:
                     raise AssertionError(case)
             finally:
                 await provider.aclose()
                 await telemetry.shutdown(timeout_ms=5000)
+
+
+async def _closed_session_context(fixture: ResponsesFixture, provider: NativeProvider) -> None:
+    import weakref
+
+    _answer(fixture, "done")
+    with telemetry.trace("opening") as opening:
+        opening_ref = weakref.ref(opening.context)
+        async with Agent(instructions="Answer.", provider=provider).session() as session:
+            with telemetry.trace(
+                "turn caller", options=telemetry.TraceOptions(detached=True)
+            ) as caller:
+                caller_ref = weakref.ref(caller.context)
+                turn = await session.submit("one")
+                assert (await turn.get_result()).final_output == "done"
+    del opening, caller
+    await asyncio.sleep(0)
+    gc.collect()
+    assert session._closed and turn is not None
+    assert opening_ref() is None and caller_ref() is None
+
+
+async def _manual_validation_context(fixture: ResponsesFixture, provider: NativeProvider) -> None:
+    for mode in ("metadata", "disabled", "unscoped"):
+        trace_id = "a" * 32 if mode != "unscoped" else None
+        seen: list[str] = []
+
+        def observe(
+            stage: str, trace_id: str | None = trace_id, mode: str = mode, seen: list[str] = seen
+        ) -> None:
+            context = telemetry.current_context()
+            if trace_id is None:
+                assert context is None
+            else:
+                assert context is not None and context.trace_id == trace_id
+                assert context.disabled == (mode == "disabled")
+                assert not context.include_sensitive_data
+            with telemetry.span(
+                stage, options=telemetry.TraceOptions(include_sensitive_data=True)
+            ) as child:
+                if trace_id is not None:
+                    assert child.context.trace_id == trace_id
+                    assert child.context.disabled == (mode == "disabled")
+                    assert not child.context.include_sensitive_data
+            seen.append(stage)
+
+        class Input(BaseModel):
+            key: str
+
+            @model_validator(mode="after")
+            def validate_input(self) -> Any:
+                observe("input")
+                return self
+
+        class Output(BaseModel):
+            answer: str
+
+            @model_validator(mode="after")
+            def validate_output(self) -> Any:
+                observe("output")
+                return self
+
+            @field_serializer("answer")
+            def serialize_answer(self, value: str) -> str:
+                observe("serializer")
+                return value
+
+        manual = FunctionTool(
+            name="manual", description="Read a key.", input_type=Input, output_type=Output
+        )
+        fixture.respond(function_call("manual", {"key": "synthetic"}, f"manual-{mode}"))
+        _answer(fixture, "done")
+        options = (
+            None
+            if trace_id is None
+            else telemetry.TraceOptions(
+                trace_id=trace_id, disabled=mode == "disabled", include_sensitive_data=False
+            )
+        )
+        async with Agent(instructions="Use manual.", tools=[manual], provider=provider).session(
+            trace_options=options
+        ) as session:
+            turn = await session.submit("read")
+            with telemetry.trace(
+                "unrelated consumer", options=telemetry.TraceOptions(detached=True)
+            ) as consumer:
+                async for event in session.interactions():
+                    request = manual.match(event)
+                    if request is not None:
+                        await request.respond({"answer": "accepted"})
+                        break
+                assert telemetry.current_context() is consumer.context
+            assert (await turn.get_result()).final_output == "done"
+        assert seen == ["input", "output", "serializer"]
 
 
 async def _host_contexts(recorder: Recorder) -> None:

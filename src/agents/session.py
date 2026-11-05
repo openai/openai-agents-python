@@ -100,7 +100,16 @@ from .recovery import LocalRecoveryRequired, ReconciledCall, UncertainCall
 from .schema import OutputSpec, OutputValidationError, _prepare_spec, _PreparedOutput
 from .state import ChecklistState, CheckpointStatus, LocalStorage, NativeGoal, SessionState
 from .subagents import Subagent, _subagent
-from .telemetry import TraceOptions, TraceScope, _activate, _capture, _CapturedTrace, _owned_span
+from .telemetry import (
+    TraceOptions,
+    TraceScope,
+    _activate,
+    _capture,
+    _CapturedTrace,
+    _clear_current,
+    _create_task,
+    _owned_span,
+)
 from .tools import (
     Checklist,
     NativeGoals,
@@ -1270,7 +1279,7 @@ class _EnvironmentLease:
         self._sync_run: _SyncRun | None = None
         self._woke_borrower = False
         self.interrupted = False
-        self._owner = asyncio.create_task(self._hold(source))
+        self._owner = _create_task(self._hold(source))
 
     async def _hold(self, source: AbstractAsyncContextManager[Environment[Any]]) -> None:
         # Manager timeouts and task groups cancel this task, distinct from
@@ -2219,7 +2228,7 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     )
                     active.tracing = _capture(fallback=_tracing_context)
-                    active.task = asyncio.create_task(session._execute(active, [], admitted=True))
+                    active.task = _create_task(session._execute(active, [], admitted=True))
                 session._start_readers()
                 opening.disown(session)
                 session._environment_lease = lease
@@ -2367,7 +2376,7 @@ class Session(Generic[ContextT, OutputT]):
         self._rate_limit_parent: Session[Any, Any] | None = None
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
-        self._reader = asyncio.create_task(self._read_events())
+        self._reader = _create_task(self._read_events())
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
             self._start_readers()
@@ -2375,14 +2384,15 @@ class Session(Generic[ContextT, OutputT]):
     def _start_readers(self) -> None:
         self._start_interception()
         if any(server.transform_result is not None for server in self._mcp_tools):
-            self._mcp_reader = asyncio.create_task(self._read_mcp_results())
+            self._mcp_reader = _create_task(self._read_mcp_results())
 
     def _start_interception(self) -> None:
         if self._interception is not None:
             self._interception.refresh()
         elif _has_interceptors(self):
             self._interception = _NativeInterception(self)
-            self._interception.start()
+            with _clear_current():
+                self._interception.start()
 
     @property
     def id(self) -> str:
@@ -2829,57 +2839,60 @@ class Session(Generic[ContextT, OutputT]):
         A before_step callback cannot be recovered from portable state, so its
         operation refuses suspension before consuming live requests.
         """
-        self._check_open()
-        self._check_callback_operation("start work in its own Session")
-        self._check_graph_admission()
-        self._check_root_admission()
-        if if_busy not in ("reject", "queue", "steer"):
-            raise ValueError("if_busy must be 'reject', 'queue', or 'steer'")
-        if if_busy == "steer" and (
-            output_type is not None
-            or tools is not None
-            or before_step is not None
-            or writable_roots is not None
-            or trace_options is not None
-        ):
-            raise TypeError("if_busy='steer' cannot override the new turn's settings")
-        if self._mutation is not None or self._checkpoint_task is not None:
-            raise SessionBusyError("Session is changing or saving its state")
-        if if_busy == "steer" and self._active is not None:
-            captured = self.active_turn
-            if captured is None:
-                raise SessionBusyError("Cannot steer private Session work")
-            await self._steer(captured, input)
-            return captured
-        output = self._default_output if output_type is None else _prepare_spec(output_type)
-        parts = _native_input(input)
-        roots = None
-        if writable_roots is not None:
-            if self._executor is None:
-                raise CapabilityError("Writable roots require a Session Environment")
-            if self._native_agents is not None:
-                raise CapabilityError("Writable roots cannot change with NativeAgents")
-            roots = _writable_roots(writable_roots)
-        if output.mode == "prompted":
-            parts.append(
-                {
-                    "type": "text",
-                    "text": "Return only JSON that matches this output schema: "
-                    + json.dumps(output.schema, sort_keys=True, separators=(",", ":"))
-                    + "\nUse this format only for this request, including its automatic "
-                    "continuations and tool results. This output format instruction "
-                    "does not apply to later requests.",
-                }
+        try:
+            self._check_open()
+            self._check_callback_operation("start work in its own Session")
+            self._check_graph_admission()
+            self._check_root_admission()
+            if if_busy not in ("reject", "queue", "steer"):
+                raise ValueError("if_busy must be 'reject', 'queue', or 'steer'")
+            if if_busy == "steer" and (
+                output_type is not None
+                or tools is not None
+                or before_step is not None
+                or writable_roots is not None
+                or trace_options is not None
+            ):
+                raise TypeError("if_busy='steer' cannot override the new turn's settings")
+            if self._mutation is not None or self._checkpoint_task is not None:
+                raise SessionBusyError("Session is changing or saving its state")
+            if if_busy == "steer" and self._active is not None:
+                captured = self.active_turn
+                if captured is None:
+                    raise SessionBusyError("Cannot steer private Session work")
+                await self._steer(captured, input)
+                return captured
+            output = self._default_output if output_type is None else _prepare_spec(output_type)
+            parts = _native_input(input)
+            roots = None
+            if writable_roots is not None:
+                if self._executor is None:
+                    raise CapabilityError("Writable roots require a Session Environment")
+                if self._native_agents is not None:
+                    raise CapabilityError("Writable roots cannot change with NativeAgents")
+                roots = _writable_roots(writable_roots)
+            if output.mode == "prompted":
+                parts.append(
+                    {
+                        "type": "text",
+                        "text": "Return only JSON that matches this output schema: "
+                        + json.dumps(output.schema, sort_keys=True, separators=(",", ":"))
+                        + "\nUse this format only for this request, including its automatic "
+                        "continuations and tool results. This output format instruction "
+                        "does not apply to later requests.",
+                    }
+                )
+            return await self._start(
+                parts,
+                output,
+                tools=tools,
+                before_step=before_step,
+                enqueue=if_busy != "reject",
+                writable_roots=roots,
+                trace_options=trace_options,
             )
-        return await self._start(
-            parts,
-            output,
-            tools=tools,
-            before_step=before_step,
-            enqueue=if_busy != "reject",
-            writable_roots=roots,
-            trace_options=trace_options,
-        )
+        finally:
+            del trace_options
 
     async def _steer(
         self, turn: Turn[Any], input: UserInput, *, expected_turn_id: str | None = None
@@ -2983,7 +2996,7 @@ class Session(Generic[ContextT, OutputT]):
         self._check_graph_admission()
         if self._mutation is not None or self._checkpoint_task is not None:
             raise RuntimeError("Session is changing or saving its state")
-        pending = asyncio.create_task(
+        pending = _create_task(
             self._admit_child_input(child_id, instance_id, incarnation, input, turn)
         )
         self._child_admissions.add(pending)
@@ -3029,7 +3042,7 @@ class Session(Generic[ContextT, OutputT]):
         if self._closing or self._broken or self._graph_interrupts:
             state.stop_continuation()
         elif state.continuation is None:
-            driver = asyncio.create_task(self._continue_child_after_settlement(state, receipt))
+            driver = _create_task(self._continue_child_after_settlement(state, receipt))
             state.continuation = driver
             driver.add_done_callback(self._child_continuation_finished)
         return _child_turn(self, receipt)
@@ -3142,7 +3155,13 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     return None
                 if invocation not in state.manual_inputs:
-                    arguments = entry.input_adapter.validate_python(message["arguments"])
+                    with (
+                        _clear_current(),
+                        _owned_span(
+                            "manual input validation", "validation", message.get("tracing_context")
+                        ),
+                    ):
+                        arguments = entry.input_adapter.validate_python(message["arguments"])
                     if (
                         state.stopping
                         or state.failure.done()
@@ -3345,21 +3364,25 @@ class Session(Generic[ContextT, OutputT]):
         token = _invocation.set(scope)
         output: str | None = None
         try:
-            value = entry.output_adapter.validate_python(result)
-            if not self._native._check_manual_tool(request._grant):
-                raise InteractionExpiredError("Manual tool reply expired during validation")
-            text = (
-                value
-                if isinstance(value, str)
-                else entry.output_adapter.dump_json(
-                    value, warnings="error" if expected_json is not None else True
-                ).decode()
-            )
-            if expected_json is not None and text != expected_json:
-                raise ValueError("Manual tool result differs from its verified projection")
-            response = value if isinstance(value, ToolOutput) else ToolOutput.text(text)
-            response._validate()
-            output = json.dumps(response.to_native())
+            with (
+                _clear_current(),
+                _owned_span("manual output validation", "validation", request._tracing_context),
+            ):
+                value = entry.output_adapter.validate_python(result)
+                if not self._native._check_manual_tool(request._grant):
+                    raise InteractionExpiredError("Manual tool reply expired during validation")
+                text = (
+                    value
+                    if isinstance(value, str)
+                    else entry.output_adapter.dump_json(
+                        value, warnings="error" if expected_json is not None else True
+                    ).decode()
+                )
+                if expected_json is not None and text != expected_json:
+                    raise ValueError("Manual tool result differs from its verified projection")
+                response = value if isinstance(value, ToolOutput) else ToolOutput.text(text)
+                response._validate()
+                output = json.dumps(response.to_native())
         except Exception:
             pass
         finally:
@@ -3413,7 +3436,7 @@ class Session(Generic[ContextT, OutputT]):
                 finally:
                     state.changed.set()
 
-            continuation = asyncio.create_task(continue_restored_turn())
+            continuation = _create_task(continue_restored_turn())
             state.add_callback(continuation)
             await _join(continuation)
         if isinstance(state, _Submission):
@@ -3569,7 +3592,7 @@ class Session(Generic[ContextT, OutputT]):
             self._engine = engine
             self._native = thread
             engine = thread = None
-            self._reader = asyncio.create_task(self._read_events())
+            self._reader = _create_task(self._read_events())
             self._sealing = False
             self._start_readers()
         except BaseException as error:
@@ -3850,92 +3873,97 @@ class Session(Generic[ContextT, OutputT]):
         trace_options: TraceOptions | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
-        self._check_open()
-        self._check_graph_admission()
-        self._check_root_admission()
-        if (
-            self._mutation is not None
-            or (self._active is not None or self._pending)
-            and (not enqueue or input is None)
-            or self._active is not None
-            and self.active_turn is None
-        ):
-            raise SessionBusyError("Session already has an active submission or mutation")
-        if self._checkpoint_task is not None:
-            raise RuntimeError("Session is saving a checkpoint")
-        if output.max_retries and self._storage is not None:
-            raise CapabilityError(
-                "LocalStorage cannot retain prompted-output repair receipts; "
-                "use a separate ephemeral Session or max_retries=0"
-            )
-        if before_step is not None and not callable(before_step):
-            raise TypeError("before_step must be callable")
-        if tools is None:
-            tools = self._default_tools
-        slots = None
-        mcp = None
-        operation_refs = None
-        if input is not None:
-            assert self._opening_agent is not None
-            opening = self._opening_agent.tools
-            python, mcp, _ = _split_tools(
-                opening if tools is None else tools,
-                self._opening_agent.programmatic_tool_calling,
-                available=None if tools is None else self._bindings,
-                ceiling=opening,
-                environment=self._executor,
-                native_agents=None if tools is None else self._native_agents,
-            )
-            if tools is not None:
-                operation_refs = _selected_tool_refs(
-                    tools,
-                    python,
-                    mcp,
-                    programmatic_tool_calling=self._opening_agent.programmatic_tool_calling,
-                    environment=self._executor,
-                    native_agents=self._native_agents,
-                )
-            for selected_tool in python:
-                selected_tool._check_context(self._context)
-            for server in mcp:
-                server._check_context(self._context)
-            if tools is not None or before_step is not None:
-                indices = []
-                for tool in python:
-                    slot = next(
-                        (
-                            i
-                            for i, captured in enumerate(self._bound_tools)
-                            if captured.name == tool.name
-                        ),
-                        None,
-                    )
-                    if slot is None or slot in indices:
-                        raise CapabilityError("Operation tools must select distinct captured slots")
-                    indices.append(slot)
-                slots = tuple(indices)
-        state = _Submission(
-            output,
-            before_step=before_step,
-            operation_slots=slots,
-            operation_mcp=mcp,
-            operation_refs=operation_refs,
-            writable_roots=writable_roots,
-            tracing=_capture(trace_options, self._trace_context),
-        )
-        if input is not None:
-            issued = _root_turn(self, None, uuid4().hex, state.completion)
-            state.issued = issued
-            self._pending.append((state, input))
-            self._promote()
-            return issued
-        self._active = state
-        state.task = asyncio.create_task(self._execute(state, input))
         try:
-            return await asyncio.shield(state.accepted)
-        except asyncio.CancelledError as error:
-            await _close_after_error(error, self._aclose)
-            raise
+            self._check_open()
+            self._check_graph_admission()
+            self._check_root_admission()
+            if (
+                self._mutation is not None
+                or (self._active is not None or self._pending)
+                and (not enqueue or input is None)
+                or self._active is not None
+                and self.active_turn is None
+            ):
+                raise SessionBusyError("Session already has an active submission or mutation")
+            if self._checkpoint_task is not None:
+                raise RuntimeError("Session is saving a checkpoint")
+            if output.max_retries and self._storage is not None:
+                raise CapabilityError(
+                    "LocalStorage cannot retain prompted-output repair receipts; "
+                    "use a separate ephemeral Session or max_retries=0"
+                )
+            if before_step is not None and not callable(before_step):
+                raise TypeError("before_step must be callable")
+            if tools is None:
+                tools = self._default_tools
+            slots = None
+            mcp = None
+            operation_refs = None
+            if input is not None:
+                assert self._opening_agent is not None
+                opening = self._opening_agent.tools
+                python, mcp, _ = _split_tools(
+                    opening if tools is None else tools,
+                    self._opening_agent.programmatic_tool_calling,
+                    available=None if tools is None else self._bindings,
+                    ceiling=opening,
+                    environment=self._executor,
+                    native_agents=None if tools is None else self._native_agents,
+                )
+                if tools is not None:
+                    operation_refs = _selected_tool_refs(
+                        tools,
+                        python,
+                        mcp,
+                        programmatic_tool_calling=self._opening_agent.programmatic_tool_calling,
+                        environment=self._executor,
+                        native_agents=self._native_agents,
+                    )
+                for selected_tool in python:
+                    selected_tool._check_context(self._context)
+                for server in mcp:
+                    server._check_context(self._context)
+                if tools is not None or before_step is not None:
+                    indices = []
+                    for tool in python:
+                        slot = next(
+                            (
+                                i
+                                for i, captured in enumerate(self._bound_tools)
+                                if captured.name == tool.name
+                            ),
+                            None,
+                        )
+                        if slot is None or slot in indices:
+                            raise CapabilityError(
+                                "Operation tools must select distinct captured slots"
+                            )
+                        indices.append(slot)
+                    slots = tuple(indices)
+            state = _Submission(
+                output,
+                before_step=before_step,
+                operation_slots=slots,
+                operation_mcp=mcp,
+                operation_refs=operation_refs,
+                writable_roots=writable_roots,
+                tracing=_capture(trace_options, self._trace_context),
+            )
+            if input is not None:
+                issued = _root_turn(self, None, uuid4().hex, state.completion)
+                state.issued = issued
+                self._pending.append((state, input))
+                self._promote()
+                return issued
+            self._active = state
+            state.task = _create_task(self._execute(state, input))
+            try:
+                return await asyncio.shield(state.accepted)
+            except asyncio.CancelledError as error:
+                await _close_after_error(error, self._aclose)
+                raise
+        finally:
+            del trace_options
 
     def _discard_pending(self, error: BaseException) -> None:
         while self._pending:
@@ -3966,7 +3994,7 @@ class Session(Generic[ContextT, OutputT]):
             state, parts = self._pending.popleft()
             self._active = state
             self._last_turn = state.issued
-            state.task = asyncio.create_task(self._execute(state, parts))
+            state.task = _create_task(self._execute(state, parts))
 
     def _check_idle_update(self) -> None:
         self._check_open()
@@ -4318,7 +4346,7 @@ class Session(Generic[ContextT, OutputT]):
         self._mcp_tools = mcp_tools
         self._start_interception()
         if self._mcp_reader is None and any(s.transform_result is not None for s in mcp_tools):
-            self._mcp_reader = asyncio.create_task(self._read_mcp_results())
+            self._mcp_reader = _create_task(self._read_mcp_results())
 
     def _owned_submission(self, turn: Turn[Any]) -> _Submission | None:
         """Find only the active native owner or admission reserved by this Turn."""
@@ -4384,7 +4412,7 @@ class Session(Generic[ContextT, OutputT]):
         assert submission._completion is not None
         result = submission._result
         if result is None:
-            result = asyncio.create_task(self._wait_continuations(submission))
+            result = _create_task(self._wait_continuations(submission))
             # A cancelled passive waiter need not be present at settlement.
             result.add_done_callback(lambda task: None if task.cancelled() else task.exception())
             object.__setattr__(submission, "_result", result)
@@ -4406,7 +4434,7 @@ class Session(Generic[ContextT, OutputT]):
 
         # This task joins only the captured Turn. Cancelling the private waiter
         # has the same passive semantics as Turn.result, including on child turns.
-        completion = asyncio.create_task(self._wait(submission))
+        completion = _create_task(self._wait(submission))
         try:
             while True:
                 signal = self._observations.changed
@@ -5370,7 +5398,7 @@ class Session(Generic[ContextT, OutputT]):
             # must recheck the settled owned continuation without a new event.
             self._observations.notify()
         if continuation is not None:
-            continuation.task = asyncio.create_task(self._execute(continuation, []))
+            continuation.task = _create_task(self._execute(continuation, []))
         self._finish_failed_observations()
         self._promote()
 
@@ -5659,7 +5687,7 @@ class Session(Generic[ContextT, OutputT]):
                     submission_id=state.handle.submission_id,
                 )
             )
-            state.task = asyncio.create_task(self._settle_child_callbacks(state))
+            state.task = _create_task(self._settle_child_callbacks(state))
         if request is not None and not state.stopping and not state.completion.done():
             # Retain every native identity until settlement, without retaining
             # tool arguments or results. A later completed call cannot stand in
@@ -7604,7 +7632,7 @@ class Session(Generic[ContextT, OutputT]):
         ):
             self._closing = True
             self._discard_pending(TurnStoppedError("Session closed before queued admission"))
-            self._close_task = asyncio.create_task(self._close())
+            self._close_task = _create_task(self._close())
         await _join(self._close_task)
 
     async def _exit_scope(self) -> None:

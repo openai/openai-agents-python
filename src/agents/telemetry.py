@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock
 from time import monotonic
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
 from typing_extensions import ReadOnly, TypedDict
 
@@ -224,34 +224,64 @@ async def shutdown(*, timeout_ms: int | None = None) -> None:
     """
     if _engine_options is None:
         raise RuntimeError("Configure telemetry successfully before shutdown")
-    native = importlib.import_module("agents._native")
-    from .session import _join
+    from .session import _close_after_error, _join
 
     budget = None if timeout_ms is None else _timeout(timeout_ms)
+    if _in_processor.get():
+        raise RuntimeError("Telemetry shutdown cannot run inside a trace processor callback")
+    native = importlib.import_module("agents._native")
+
+    async def cleanup() -> None:
+        global _processor_task
+        processor_task = _processor_task
+        try:
+            if processor_task is not None and not processor_task.done():
+                await _stop_processor_task(processor_task)
+        finally:
+            if _processor_task is processor_task:
+                _processor_task = None
+            try:
+                for processor in _processors.values():
+                    processor.close()
+            finally:
+                _processors.clear()
+                _active_processor_ids.clear()
+                _retired_routes.clear()
 
     async def retire() -> None:
-        global _processor_task
         try:
             _ensure_processor_pump()
             if budget is None:
                 await native.shutdown_telemetry()
             else:
                 await native.shutdown_telemetry(budget)
-        finally:
-            processor_task = _processor_task
-            if processor_task is not None and not processor_task.done():
-                processor_task.cancel()
-                await asyncio.gather(processor_task, return_exceptions=True)
-            _processor_task = None
-            for processor in _processors.values():
-                processor.close()
-            _processors.clear()
-            _active_processor_ids.clear()
-            _retired_routes.clear()
+        except BaseException as error:
+            await _close_after_error(error, cleanup)
+            raise
+        else:
+            await cleanup()
 
-    # Own native retirement and Python cleanup together, including a failure
-    # or repeated cancellation of the caller waiting for terminal shutdown.
-    await _join(asyncio.create_task(retire()))
+    await _join(_create_task(retire()))
+
+
+async def _stop_processor_task(task: asyncio.Task[None]) -> None:
+    async def stop() -> None:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    owner = task.get_loop()
+    if owner is asyncio.get_running_loop():
+        await stop()
+        return
+    if not owner.is_running():
+        raise RuntimeError("The trace processor loop must remain running during shutdown")
+    work = stop()
+    try:
+        stopped = asyncio.run_coroutine_threadsafe(work, owner)
+    except BaseException:
+        work.close()
+        raise
+    await asyncio.wrap_future(stopped)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -334,27 +364,31 @@ def _native_tracing() -> Any:
 
 
 def _options(value: TraceOptions | Mapping[str, Any] | None) -> TraceOptions:
-    if value is None:
-        return TraceOptions()
-    if isinstance(value, Mapping):
-        try:
-            value = TraceOptions(**value)
-        except (TypeError, ValueError):
-            raise ValueError("Invalid trace options") from None
-    if not isinstance(value, TraceOptions):
-        raise TypeError("trace_options must be TraceOptions or a mapping")
-    if value.parent is not None and not isinstance(value.parent, SpanContext):
-        raise TypeError("parent must be SpanContext or None")
-    for flag in (value.disabled, value.include_sensitive_data):
-        if flag is not None and not isinstance(flag, bool):
-            raise TypeError("trace policy flags must be bool or None")
-    if not isinstance(value.detached, bool):
-        raise TypeError("detached must be bool")
-    if value.export_credentials is not None and not isinstance(
-        value.export_credentials, TraceExportCredentials
-    ):
-        raise TypeError("export_credentials must be TraceExportCredentials")
-    return value
+    flag: Any = None
+    try:
+        if value is None:
+            return TraceOptions()
+        if isinstance(value, Mapping):
+            try:
+                value = TraceOptions(**value)
+            except (TypeError, ValueError):
+                raise ValueError("Invalid trace options") from None
+        if not isinstance(value, TraceOptions):
+            raise TypeError("trace_options must be TraceOptions or a mapping")
+        if value.parent is not None and not isinstance(value.parent, SpanContext):
+            raise TypeError("parent must be SpanContext or None")
+        for flag in (value.disabled, value.include_sensitive_data):
+            if flag is not None and not isinstance(flag, bool):
+                raise TypeError("trace policy flags must be bool or None")
+        if not isinstance(value.detached, bool):
+            raise TypeError("detached must be bool")
+        if value.export_credentials is not None and not isinstance(
+            value.export_credentials, TraceExportCredentials
+        ):
+            raise TypeError("export_credentials must be TraceExportCredentials")
+        return value
+    finally:
+        del value, flag
 
 
 class TraceScope:
@@ -375,7 +409,10 @@ class TraceScope:
         self._name = name
         self._restrictions = _restrictions
         self._kind = kind
-        self._options = _options(options)
+        try:
+            self._options = _options(options)
+        finally:
+            del options
         self._context: SpanContext | None = None
         self._span_handle: str | None = None
         self._token: Token[SpanContext | None] | None = None
@@ -440,6 +477,19 @@ class TraceScope:
             self._context = SpanContext(_handle=handle, **data)
             self._span_handle = handle
             admitted = True
+            self._token = _current.set(self._context)
+            try:
+                _ensure_processor_pump()
+            except BaseException as error:
+                try:
+                    self.__exit__(type(error), error, error.__traceback__)
+                except BaseException as cleanup:
+                    from .session import _error_contexts, _retain_cleanup_error
+
+                    _retain_cleanup_error(error, cleanup, _error_contexts(error.__context__))
+                finally:
+                    self._context = None
+                raise
         except BaseException:
             self._options = replace(value, export_credentials=None)
             del self, value
@@ -449,8 +499,6 @@ class TraceScope:
                 native.release_trace_credentials(credential)
             if handle is not None and not admitted:
                 native.release_trace_span(handle)
-        self._token = _current.set(self._context)
-        _ensure_processor_pump()
         return self
 
     def set_outcome(self, *, status: str, category: str | None = None) -> None:
@@ -472,11 +520,15 @@ class TraceScope:
             self._token = None
         self._ended = True
         status = (
-            "cancelled" if isinstance(exc, asyncio.CancelledError) else "error" if exc else "ok"
+            "cancelled"
+            if isinstance(exc, asyncio.CancelledError)
+            else "error"
+            if exc is not None
+            else "ok"
         )
         outcome = self._outcome or {
             "status": status,
-            "category": status if exc else None,
+            "category": status if exc is not None else None,
             "data": {},
         }
         native = _native_tracing()
@@ -491,12 +543,18 @@ class TraceScope:
 
 def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None = None) -> TraceScope:
     """Start a workflow scope on entry, metadata-only unless explicitly enabled."""
-    return TraceScope(name, "workflow", options)
+    try:
+        return TraceScope(name, "workflow", options)
+    finally:
+        del options
 
 
 def span(name: str, *, options: TraceOptions | Mapping[str, Any] | None = None) -> TraceScope:
     """Start a custom native span on entry, inheriting active restrictions."""
-    return TraceScope(name, "custom", options)
+    try:
+        return TraceScope(name, "custom", options)
+    finally:
+        del options
 
 
 class _CapturedTrace:
@@ -525,7 +583,7 @@ class _CapturedTrace:
                     scope.set_outcome(status="cancelled", category="cancelled")
                 elif category is not None:
                     scope.set_outcome(status="error", category=category)
-                scope.__exit__(type(error) if error else None, error, None)
+                scope.__exit__(type(error) if error is not None else None, error, None)
 
 
 def _capture(
@@ -647,6 +705,30 @@ def _validate_processors(processors: Sequence[TraceProcessor]) -> None:
         raise TypeError("Processors must define on_trace_event")
 
 
+_TaskT = TypeVar("_TaskT")
+
+
+def _create_task(work: Coroutine[Any, Any, _TaskT]) -> asyncio.Task[_TaskT]:
+    """Create an SDK owner without retaining the application's trace context."""
+    token = _current.set(None)
+    try:
+        return asyncio.create_task(work)
+    except BaseException:
+        work.close()
+        raise
+    finally:
+        _current.reset(token)
+
+
+@contextmanager
+def _clear_current() -> Iterator[None]:
+    token = _current.set(None)
+    try:
+        yield
+    finally:
+        _current.reset(token)
+
+
 def _ensure_processor_pump() -> None:
     global _processor_task
     if _in_processor.get():
@@ -658,11 +740,7 @@ def _ensure_processor_pump() -> None:
     if _processors and (
         _processor_task is None or _processor_task.done() or _processor_task.get_loop().is_closed()
     ):
-        token = _current.set(None)
-        try:
-            _processor_task = asyncio.create_task(_pump_processors())
-        finally:
-            _current.reset(token)
+        _processor_task = _create_task(_pump_processors())
 
 
 def _set_processors(processors: Sequence[TraceProcessor], *, replace: bool) -> None:
