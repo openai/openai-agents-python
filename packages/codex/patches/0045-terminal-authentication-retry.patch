@@ -408,3 +408,15 @@ index 8fb8ae872d245c4af84c5170ed67e644b88b2dcf..b141edc9d03bb3b6e38880696e933fb8
 +        }
 +    }
 +}
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 181e430fc839d812563fa94a7f7ea898dac910ec..5fba04f110f917f3b76e9b0a1a796b5df591dd39 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -6222,6 +6222,7 @@ mod tests {
+     fn turn_context_item_serializes_network_when_present() -> Result<()> {
+         let item = TurnContextItem {
+             turn_id: None,
++            sdk_receipt: None,
+             root_turn_id: None,
+             disabled_plugin_ids: None,
+             cwd: test_path_buf("/tmp").abs(),
