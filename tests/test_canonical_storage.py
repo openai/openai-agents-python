@@ -3,6 +3,8 @@
 import json
 import multiprocessing
 import os
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -343,3 +345,202 @@ def test_reference_adapter_allows_a_different_process_session_in_the_same_databa
             contender.join(5)
         store.release("first-session", token)
         result.close()
+
+
+@contextmanager
+def _foreign_owner(path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Use a real foreign UID as root; otherwise alter only stat metadata's UID."""
+    current_uid = os.geteuid()
+    if current_uid == 0:
+        os.chown(path, current_uid + 1, -1)
+        try:
+            yield
+        finally:
+            os.chown(path, current_uid, -1)
+        return
+    # Unprivileged test hosts cannot chown a fixture to another UID. Keep real
+    # files, access modes, I/O and SQLite; simulate just the ownership metadata.
+    target = path.stat()
+    real_fstat = os.fstat
+    real_lstat = Path.lstat
+
+    def foreign_uid(info: os.stat_result) -> os.stat_result:
+        if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+            fields = list(info)
+            fields[4] = current_uid + 1
+            return os.stat_result(fields)
+        return info
+
+    def fstat(descriptor: int) -> os.stat_result:
+        return foreign_uid(real_fstat(descriptor))
+
+    def lstat(candidate: Path) -> os.stat_result:
+        return foreign_uid(real_lstat(candidate))
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", fstat)  # Dedicated session lock descriptors.
+        patch.setattr(Path, "lstat", lstat)  # SQLite owns database and sidecar descriptors.
+        yield
+
+
+@pytest.mark.parametrize("stage", ["initialization", "acquisition", "connection"])
+def test_reference_adapter_rejects_foreign_owner_database_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
+) -> None:
+    import stat
+
+    path = tmp_path / "history.sqlite"
+    store = None if stage == "initialization" else SQLiteSessionStore(path)
+    existing_token = (
+        store.acquire("existing") if store is not None and stage == "connection" else None
+    )
+    path.touch(exist_ok=True)
+    path.chmod(0o644)
+    before = path.read_bytes()
+    locks = list(tmp_path.glob("*.lock"))
+    try:
+        with _foreign_owner(path, monkeypatch):
+            with pytest.raises(PermissionError, match="effective user"):
+                if store is None:
+                    SQLiteSessionStore(path)
+                elif existing_token is not None:
+                    store.commit(
+                        "existing",
+                        existing_token,
+                        0,
+                        "write",
+                        json.dumps({"revision": 1, "write_id": "write", "items": ["synthetic"]}),
+                    )
+                else:
+                    token = store.acquire("session")
+                    store.release("session", token)
+            assert path.read_bytes() == before
+            assert stat.S_IMODE(path.stat().st_mode) == 0o644
+            assert list(tmp_path.glob("*.lock")) == locks
+    finally:
+        if store is not None and existing_token is not None:
+            store.release("existing", existing_token)
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"])
+def test_reference_adapter_rejects_foreign_owner_sidecar_without_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, suffix: str
+) -> None:
+    import stat
+
+    path = tmp_path / "history.sqlite"
+    SQLiteSessionStore(path)
+    path.chmod(0o644)
+    before = path.read_bytes()
+    sidecar = path.with_name(path.name + suffix)
+    sidecar.touch(mode=0o644)
+    with _foreign_owner(sidecar, monkeypatch):
+        with pytest.raises(PermissionError, match="effective user"):
+            SQLiteSessionStore(path)
+        assert path.read_bytes() == before
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+        assert stat.S_IMODE(sidecar.stat().st_mode) == 0o644
+        assert sidecar.read_bytes() == b""
+
+
+def test_reference_adapter_rejects_foreign_owner_lock_without_fencing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import hashlib
+    import stat
+
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    path.chmod(0o644)
+    before = path.read_bytes()
+    lock = path.with_name(path.name + "." + hashlib.sha256(b"session").hexdigest() + ".lock")
+    lock.touch(mode=0o644)
+    with _foreign_owner(lock, monkeypatch):
+        with pytest.raises(PermissionError, match="effective user"):
+            token = store.acquire("session")
+            store.release("session", token)
+        assert path.read_bytes() == before
+        assert stat.S_IMODE(path.stat().st_mode) == 0o644
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o644
+        assert lock.read_bytes() == b""
+
+
+def test_reference_adapter_repairs_same_owner_lock_permissions(tmp_path: Path) -> None:
+    import hashlib
+    import stat
+
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    lock = path.with_name(path.name + "." + hashlib.sha256(b"session").hexdigest() + ".lock")
+    lock.touch(mode=0o666)
+    lock.chmod(0o666)
+    token = store.acquire("session")
+    try:
+        assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+        assert store.read("session", token) is None
+    finally:
+        store.release("session", token)
+
+
+def _attempt_sqlite_writer(path: str, result: multiprocessing.Queue) -> None:
+    import sqlite3
+
+    connection = sqlite3.connect(path, timeout=0)
+    try:
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+        except sqlite3.OperationalError as error:
+            if "locked" not in str(error):
+                raise
+            result.put("busy")
+        else:
+            result.put("acquired")
+            connection.rollback()
+    finally:
+        connection.close()
+
+
+def _sqlite_writer_result(path: Path) -> str:
+    context = multiprocessing.get_context("spawn")
+    result = context.Queue()
+    contender = context.Process(target=_attempt_sqlite_writer, args=(str(path), result))
+    try:
+        contender.start()
+        contender.join(10)
+        assert contender.exitcode == 0
+        return result.get(timeout=5)
+    finally:
+        if contender.is_alive():
+            contender.kill()
+            contender.join(5)
+        result.close()
+
+
+@pytest.mark.parametrize("journal_mode", ["WAL", "DELETE"])
+def test_reference_adapter_preserves_another_connection_writer_lock(
+    tmp_path: Path, journal_mode: str
+) -> None:
+    import sqlite3
+
+    path = tmp_path / "history.sqlite"
+    store = SQLiteSessionStore(path)
+    token = store.acquire("session")
+    connection = sqlite3.connect(path)
+    try:
+        assert (
+            connection.execute("PRAGMA journal_mode=" + journal_mode).fetchone()[0].upper()
+            == journal_mode
+        )
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("UPDATE canonical_threads SET write_id='held' WHERE id='session'")
+        assert _sqlite_writer_result(path) == "busy"
+        # Public adapter reads include file ownership and permission admission.
+        # They must not release another SQLite connection's process-owned locks.
+        assert store.read("session", token) is None
+        assert _sqlite_writer_result(path) == "busy"
+        connection.rollback()
+        assert _sqlite_writer_result(path) == "acquired"
+    finally:
+        connection.rollback()
+        connection.close()
+        store.release("session", token)

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import stat
 import sys
 import threading
 import uuid
@@ -91,8 +92,9 @@ class SQLiteSessionStore:
     a database. Symlinks resolve once to the same per-session lock path;
     hard-linked databases are unsupported. Do not replace database or lock files
     during live use. Network filesystems and cross-host access are unsupported.
-    Database files are owner-only; the application owns encryption and backups
-    of sensitive conversation data.
+    Database, sidecar and lock files must belong to the effective user. Keep
+    their directory under trusted application control. Files are owner-only;
+    the application owns encryption and backups of sensitive conversation data.
     """
 
     def __init__(self, path: Path):
@@ -105,63 +107,70 @@ class SQLiteSessionStore:
         self._mutex = threading.RLock()
         self._owners: dict[str, tuple[str, int, int]] = {}
         self._database_identity: tuple[int, int] | None = None
-        descriptor = self._open_database(create=True)
-        try:
-            with self._connect() as connection:
-                version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1):
-                    raise RuntimeError("Unsupported canonical storage schema")
-                connection.execute(
-                    "CREATE TABLE IF NOT EXISTS canonical_threads "
-                    "(id TEXT PRIMARY KEY, token TEXT, revision INTEGER NOT NULL DEFAULT 0, "
-                    "write_id TEXT, payload TEXT)"
-                )
-                connection.execute("PRAGMA user_version=1")
-        finally:
-            os.close(descriptor)
+        self._check_database(create=True)
+        with self._connect() as connection:
+            version = connection.execute("PRAGMA user_version").fetchone()[0]
+            if version not in (0, 1):
+                raise RuntimeError("Unsupported canonical storage schema")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS canonical_threads "
+                "(id TEXT PRIMARY KEY, token TEXT, revision INTEGER NOT NULL DEFAULT 0, "
+                "write_id TEXT, payload TEXT)"
+            )
+            connection.execute("PRAGMA user_version=1")
 
-    def _open_database(self, *, create: bool = False) -> int:
+    def _check_database(self, *, create: bool = False) -> None:
         if sys.platform == "win32":
             raise RuntimeError("SQLiteSessionStore requires POSIX file locking")
-        flags = os.O_RDWR | os.O_NOFOLLOW
         if create:
-            flags |= os.O_CREAT
-        descriptor = os.open(self.path, flags, 0o600)
-        try:
-            info = os.fstat(descriptor)
+            try:
+                descriptor = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+            except FileExistsError:
+                pass
+            else:
+                os.close(descriptor)
+        files = [(self.path, self.path.lstat())]
+        for suffix in ("-journal", "-wal", "-shm"):
+            sidecar = self.path.with_name(self.path.name + suffix)
+            try:
+                files.append((sidecar, sidecar.lstat()))
+            except FileNotFoundError:
+                pass
+        for _, info in files:
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("SQLiteSessionStore requires regular database and sidecar files")
+            if info.st_uid != os.geteuid():
+                raise PermissionError(
+                    "SQLiteSessionStore files must be owned by the effective user"
+                )
             if info.st_nlink != 1:
                 raise ValueError("SQLiteSessionStore does not support hard-linked database files")
-            identity = (info.st_dev, info.st_ino)
-            current = self.path.stat(follow_symlinks=False)
-            if identity != (current.st_dev, current.st_ino) or (
-                self._database_identity is not None and identity != self._database_identity
-            ):
-                raise RuntimeError("SQLiteSessionStore database file changed")
-            self._database_identity = identity
-            os.fchmod(descriptor, 0o600)
-            for suffix in ("-journal", "-wal", "-shm"):
-                try:
-                    self.path.with_name(self.path.name + suffix).chmod(0o600)
-                except FileNotFoundError:
-                    pass
-            return descriptor
-        except BaseException:
-            os.close(descriptor)
-            raise
+        info = files[0][1]
+        identity = (info.st_dev, info.st_ino)
+        if self._database_identity is not None and identity != self._database_identity:
+            raise RuntimeError("SQLiteSessionStore database file changed")
+        self._database_identity = identity
+        # The directory is trusted and stable. SQLite must own its existing
+        # file descriptors: closing our own descriptor for the same inode would
+        # release another connection's process-owned POSIX locks.
+        self.path.chmod(0o600)
+        for sidecar, _ in files[1:]:
+            try:
+                sidecar.chmod(0o600)
+            except FileNotFoundError:
+                # SQLite may remove its own journal or WAL files normally.
+                pass
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        descriptor = self._open_database()
-        connection = None
+        self._check_database()
+        connection = sqlite3.connect(self.path, timeout=5)
         try:
-            connection = sqlite3.connect(self.path, timeout=5)
             connection.execute("PRAGMA synchronous=FULL")
             with connection:
                 yield connection
         finally:
-            if connection is not None:
-                connection.close()
-            os.close(descriptor)
+            connection.close()
 
     def _check(self, session_id: str, token: str) -> None:
         owner = self._owners.get(session_id)
@@ -177,13 +186,28 @@ class SQLiteSessionStore:
         with self._mutex:
             if session_id in self._owners:
                 raise RuntimeError("Canonical storage already has a writer")
-            database = self._open_database()
-            os.close(database)
             lock_path = self.path.with_name(
                 self.path.name + "." + hashlib.sha256(session_id.encode()).hexdigest() + ".lock"
             )
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+            descriptor = None
             try:
+                # Inspect a pre-existing lock before repairing any permissions
+                # or allowing SQLite to change canonical history.
+                try:
+                    descriptor = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+                except FileNotFoundError:
+                    pass
+                if descriptor is not None and os.fstat(descriptor).st_uid != os.geteuid():
+                    raise PermissionError(
+                        "SQLiteSessionStore files must be owned by the effective user"
+                    )
+                self._check_database()
+                if descriptor is None:
+                    descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                    if os.fstat(descriptor).st_uid != os.geteuid():
+                        raise PermissionError(
+                            "SQLiteSessionStore files must be owned by the effective user"
+                        )
                 os.fchmod(descriptor, 0o600)
                 fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 token = uuid.uuid4().hex
@@ -196,7 +220,8 @@ class SQLiteSessionStore:
                 self._owners[session_id] = (token, descriptor, os.getpid())
                 return token
             except BaseException:
-                os.close(descriptor)
+                if descriptor is not None:
+                    os.close(descriptor)
                 raise
 
     def read(self, session_id: str, token: str) -> str | None:
