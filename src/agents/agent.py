@@ -941,7 +941,11 @@ class Agent(Generic[ContextT, OutputT]):
                         environment=session._executor,
                         native_agents=None if effective is None else session._native_agents,
                     )
-                    if prepare_request is not None and any(tool._bind is None for tool in selected):
+                    if (
+                        prepare_request is not None
+                        and before_step is None
+                        and any(tool._bind is None for tool in selected)
+                    ):
                         raise InteractionRequired(
                             "Running manual tools with prepare_request requires on_interaction. "
                             "Use Agent.session() to reply to requests directly."

@@ -1057,3 +1057,88 @@ async def test_run_editor_uses_falsy_provider_override(responses, synchronous):
     )
     assert result.final_output == "overridden"
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("synchronous", [False, True])
+@pytest.mark.parametrize(
+    "selection", ["empty", "eager", "default", "manual", "handled", "later-manual"]
+)
+async def test_run_editor_checks_manual_tools_after_before_step(
+    responses: ResponsesFixture, synchronous: bool, selection: str
+) -> None:
+    manual = FunctionTool(
+        name="lookup", description="Lookup", input_type=LookupArgs, output_type=str
+    )
+    effects: list[str] = []
+    steps: list[int] = []
+    rosters: list[list[str]] = []
+
+    @function_tool
+    def eager() -> str:
+        effects.append("eager")
+        return "eager result"
+
+    agent = Agent(
+        model="gpt-5.5",
+        instructions="Answer.",
+        tools=[manual, eager],
+        provider=provider(responses),
+    )
+
+    def before_step(turn: Any, *, step_index: int) -> Any:
+        steps.append(step_index)
+        if selection == "empty":
+            return []
+        if selection == "eager" or selection == "later-manual" and step_index == 0:
+            return [eager.ref]
+        if selection == "default":
+            return None
+        return [manual.ref]
+
+    def edit(turn: Any, request: PreparedRequest, **indices: int) -> None:
+        rosters.append([tool["name"] for tool in request["tools"]])
+
+    async def answer(question: Any) -> Any:
+        request = manual.match(question)
+        assert request is not None and request.arguments.key == "one"
+        return request.reply("manual result")
+
+    options: dict[str, Any] = {"before_step": before_step, "prepare_request": edit}
+    if selection == "handled":
+        options["on_interaction"] = answer
+    if selection in {"eager", "later-manual"}:
+        responses.respond(function_call("eager", {}, "effect"))
+    elif selection != "empty":
+        responses.respond(function_call("lookup", {"key": "one"}, "manual"))
+    responses.respond(assistant_output("done"))
+
+    async def run() -> Any:
+        if synchronous:
+            return await asyncio.to_thread(agent.run_sync, "answer", **options)
+        return await agent.run("answer", **options)
+
+    if selection in {"default", "manual", "later-manual"}:
+        with pytest.raises(InteractionRequired):
+            await run()
+        if selection == "later-manual":
+            assert steps == [0, 1]
+            assert rosters == [["eager"]]
+            assert len(responses.requests) == 1
+            assert effects == ["eager"]
+            return
+        assert steps == [0]
+        assert rosters == []
+        assert responses.requests == []
+        assert effects == []
+        return
+
+    result = await run()
+    assert result.final_output == "done"
+    expected = [] if selection == "empty" else ["eager" if selection == "eager" else "lookup"]
+    assert rosters == [expected] * (1 if selection == "empty" else 2)
+    assert steps == list(range(len(rosters)))
+    assert len(responses.requests) == len(rosters)
+    assert [
+        [tool["name"] for tool in request.get("tools", [])] for request in responses.requests
+    ] == rosters
+    assert effects == (["eager"] if selection == "eager" else [])

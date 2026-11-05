@@ -6277,19 +6277,23 @@ class Session(Generic[ContextT, OutputT]):
             # The event reader already owns decoded JSON; detach once more before
             # application entry and capture the return on its actual executor.
             snapshot = cast(PreparedRequest, deepcopy(message["data"]))
-            reply = await _call_callback(
-                _capturing_callback(
-                    state.prepare_request,
-                    lambda: (
-                        self._active is state and not state.stopping and not state.failure.done()
+            context = state.tracing.context if state.tracing is not None else None
+            with _activate(context):
+                reply = await _call_callback(
+                    _capturing_callback(
+                        state.prepare_request,
+                        lambda: (
+                            self._active is state
+                            and not state.stopping
+                            and not state.failure.done()
+                        ),
                     ),
-                ),
-                active,
-                self.active_turn or state.handle,
-                snapshot,
-                preparation_index=index,
-                recovery_attempt=message["recovery_attempt"],
-            )
+                    active,
+                    self.active_turn or state.handle,
+                    snapshot,
+                    preparation_index=index,
+                    recovery_attempt=message["recovery_attempt"],
+                )
             if not active():
                 return
             failed = False
@@ -6407,6 +6411,22 @@ class Session(Generic[ContextT, OutputT]):
                 ToolRef(item["name"], item["namespace"] or "functions")
                 for item in message["candidates"]
             }
+            if (
+                self._fail_unhandled_questions
+                and isinstance(state, _Submission)
+                and state.prepare_request is not None
+                and any(
+                    isinstance(tool, FunctionTool)
+                    and tool._bind is None
+                    and ToolRef(tool.name, "functions") in refs
+                    and ToolRef(tool.name, "functions") in candidates
+                    for tool in self._bindings
+                )
+            ):
+                raise InteractionRequired(
+                    "Running manual tools with prepare_request requires on_interaction. "
+                    "Use Agent.session() to reply to requests directly."
+                )
             # Search is an existing discovery helper over selected leaves. It
             # cannot restore an excluded runtime or a cached leaf from another step.
             search = ToolRef("tool_search", "functions")
