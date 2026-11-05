@@ -14,6 +14,7 @@ These examples use scripted responses and need no API key. Tools still execute, 
 | --- | --- |
 | [`typed_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/typed_tools.py) | Validates nested Python input and returns typed results as JSON. Python enforces bounds the native schema can omit. Invalid input prevents a write; invalid output cannot undo one. |
 | [`inspect_requests`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/inspect_requests.py) | Prints native declarations, original arguments, arguments after preparation, and the model-visible result. Scripted selection does not measure prompt quality. |
+| [`prepared_request`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/prepared_request.py) | Edits the next sampling request after a tool result while retaining execution policies. Uses APIs added after alpha.6; follow the [matching-source setup](installation.md#examples-and-upgrades) and [request-editing limits](configuration.md#edit-the-next-sampling-request). |
 | [`concurrent_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/concurrent_tools.py) | Two Sessions share one quota unit through an event-loop lock. The quota does not work across threads or processes. |
 | [`safe_effects`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/safe_effects.py) | A fake writer records one write for duplicate calls. Deduplication lasts only in memory. |
 | [`specialist_agents`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/specialist_agents.py) | A function tool calls a separate Agent with explicit catalog context and tools, then returns a typed summary. This nested Session is not a native child for tracking or checkpoints. Python closures can still share permissions and resources. |
@@ -84,6 +85,7 @@ Use these guides for the rules behind each recipe:
 | Save or resume a conversation | [Storage choices](state.md#choose-how-to-store-a-conversation) and [capture readiness](state.md#check-support-and-capture-readiness) |
 | Stream to a browser or stop work | [Stream observations](sessions.md#stream-observations) and [cancel joined work](sessions.md#interrupt-work) |
 | Validate tool inputs and results | [Python tools](tools.md#python-functions), [argument inspection](tools.md#inspect-python-policy-arguments), and [structured output](configuration.md#structured-output) |
+| Edit the next model request | [Prepared sampling requests](configuration.md#edit-the-next-sampling-request), available in a matching development build |
 | Call tools from generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) |
 | Run an MCP server locally | [Start a stdio server](mcp.md#start-a-stdio-server) |
 | Manage conversation context and application memory | [History and compaction](state.md#compact-conversation-context) |

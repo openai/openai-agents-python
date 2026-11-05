@@ -38,6 +38,7 @@ These programs use the current SDK and model credentials:
 | --- | --- | --- |
 | Own native Session storage | [Application-owned storage](canonical_storage/README.md) | A persistent POSIX reference adapter, writer ownership, and verified tool-result recovery. |
 | Test application behavior | [Task recipe chooser](../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
+| Edit a sampling request after a tool result | [prepared_request.py](recipes/prepared_request.py) | Synthetic Responses HTTP; requires a development build newer than alpha.6. Follow [matching-source setup](../docs/sdk/installation.md#examples-and-upgrades) and [request-editing limits](../docs/sdk/configuration.md#edit-the-next-sampling-request). |
 | Build a browser application | [Service and browser starter](web_starter/README.md) | Request ownership, approvals, bounded admission, typed results, and authorized artifact downloads. Install its pinned browser dependencies. |
 | Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | The application supplies its HTTP response and owns the Session. |
 | Stream AG-UI events | [AG-UI guide](ag_ui/README.md) | Install the pinned dependency in its README. |

@@ -18,7 +18,7 @@ An open Session keeps its captured configuration. Change instructions or native 
 
 ## Choose tools and workspace access
 
-Declare tools on the Agent or when opening the Session. The Session records Python and manual tool names, together with each MCP server name and raw tool name. Those names limit later updates and turn selections. [Idle updates](tools.md#replace-tools-between-turns) can replace the registered callbacks or MCP connections, including endpoints and credentials. Temporary selections use the accepted bindings and cannot redefine them.
+Declare tools on the Agent or when opening the Session. The Session records Python and manual tool names, together with each MCP server name and raw tool name. Those names limit later updates and turn selections. [Idle updates](tools.md#replace-tools-between-turns) can replace the registered callbacks or MCP connections, including endpoints and credentials. Temporary selections use the accepted bindings and cannot redefine them. The fixed Apps registration from `HostedVerificationMCP` or `ChatGPTAppsMCP` requires a new Session for replacement; see [service-specific integrations](mcp.md#service-specific-integrations).
 
 Pass `environment=...` to `agent.session()` or a one-shot method for a [local workspace](execution.md#local-execution) or a [remote workspace](execution.md#remote-execution). One Agent can open Sessions in different environments. Environment settings and saved state cannot add tool names.
 
@@ -219,6 +219,30 @@ Live manual replies and idle restore support structured output. An explicit Sess
 
 Automatic one-shot checkpoints support native strict output but exclude `PromptedOutput`. See [saving a settled manual request](state.md#save-a-settled-manual-request) for output matching, active repair and `before_step` limits, and [automatic checkpoint limits](state.md#automatic-checkpoint-limits) for one-shot restrictions.
 
+## Edit the next sampling request
+
+`prepare_request` requires a development build newer than `0.24.0-alpha.6`. Follow the [matching-source setup](installation.md#examples-and-upgrades) before using it.
+
+Pass `prepare_request=callback` to `agent.run()`, `agent.run_sync()`, or `session.submit()` to edit a detached copy of the next model request. Use this callback to change sampling instructions, input, or selected tool descriptions and parameter schemas after inspecting a tool result. Use [`before_step`](sessions.md#update-tools-instructions-and-model-settings) to select tools, and [tool policies](tools.md#inspect-or-change-tool-values) to change execution arguments or results.
+
+The synchronous or asynchronous callback receives `callback(turn, request, *, preparation_index, recovery_attempt)`. `request` is a `PreparedRequest` imported from `agents`, with `instructions`, `input`, and `tools`. Return the complete edited value, or `None` to use the original request. Mutating the copy and returning `None` discards the edits. The SDK captures returned JSON when the callback settles.
+
+`input` contains native ResponseItem JSON, including JSON strings for function arguments. Preserve call identities when processing tool results. Optional fields that native serialization omits must remain omitted; explicit nulls or unsupported schema keywords can fail validation before dispatch. Each selected tool keeps its namespace, name, kind, strictness, and loading mode. Only its `description` and `parameters` can change.
+
+These edits affect sampling. Canonical conversation history, admitted tool routing, Python validators, and approval policies remain authoritative. Expanding a sampled enum does not authorize the new value. Ordinary MCP tools still rely on the server or application policy for argument validation.
+
+### Choose a supported request-editing profile
+
+Use an explicitly HTTP provider, such as `NativeProvider(supports_websockets=False)`, and a standard Responses model such as `gpt-5.5`. Lite models and WebSockets are unsupported. Select only eager ordinary Python, manual, or MCP tools with `defer_loading=False`. Request editing does not support native children, hosted tools, an Environment, or programmatic tool calling.
+
+The callback must tolerate repeated preparation and avoid business effects. HTTP retries reuse the captured edit. Native stream recovery invokes the callback again; `preparation_index` can advance without a tool result, and `recovery_attempt` identifies recovery. Inspect input and call identities instead of using the index as evidence that a tool completed. Cancellation joins callback settlement before later work starts, so a blocking callback can delay cancellation.
+
+Native output and `PromptedOutput(max_retries=0)` are supported. Separate prompted-output corrections cannot carry this callback. One-shot manual tools require `on_interaction`; without it the run cannot create an automatic pending checkpoint.
+
+An active edited operation cannot suspend or export portable state. Save after it settles. Automatic compaction needed before or during sampling fails before the hidden compaction request; earlier tool effects remain. Shorten the input or start a new operation without the editor after checking those effects. Compaction due after completion does not discard the completed answer.
+
+The complete synthetic [prepared-request recipe](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/prepared_request.py) edits a request after a real Python tool result and checks the outgoing instructions, input, and schema. From the matching source root, run `python -m examples.recipes.prepared_request`. It needs no model key and uses a local HTTP Responses peer.
+
 ## Telemetry
 
 Configure exporters, startup, shutdown, and content controls in the [observability guide](observability.md#configure-telemetry).
@@ -239,6 +263,8 @@ These limits apply:
 - The Code Mode host grants no shell tools or workspace access by itself. For native workspace execution, pass an [Environment](execution.md) with executor tools selected to the Session or one-shot run.
 - A manual call waits for an application reply in the live Session. Pending code cells cannot be saved as portable checkpoints.
 - `exec` and `wait` are reserved function names.
+
+In development builds after alpha.6, `LocalStorage` rejects `programmatic_tool_calling=True` before opening. Use an ephemeral Session for code mode; see [storage support limits](state.md#choose-how-to-store-a-conversation) and the [matching-source setup](installation.md#examples-and-upgrades).
 
 Restore uses the current Agent declaration. Set `programmatic_tool_calling=True` again if the restored conversation needs it. [Executor argument and result transforms](execution.md#executor-policies) also support direct calls without this option.
 

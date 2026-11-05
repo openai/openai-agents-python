@@ -52,7 +52,11 @@ Reconciliation acquires the same exclusive ownership and commits a result for th
 
 ## Supported state and limits
 
-This preview supports root Sessions with automatic Python tools. It rejects native tools (including MCP and web search), environments, child agents, goals, checklists, code mode and manual tools before opening native execution. Those features have additional state and receipt rules that this adapter does not yet persist. Portable `SessionState` and custom canonical storage cannot be combined. Thread listing, archival, forks and local rollout-path access are unsupported. Use `LocalStorage` for its other supported combinations. `LocalStorage` also rejects `programmatic_tool_calling=True`: individual nested tool identities lack durable intent and result receipts. The error occurs before storage acquisition or model/tool work. Nonpersistent code mode remains available. This is a deliberate restriction in the alpha preview.
+This preview supports root Sessions with automatic Python tools. Before opening native execution, it rejects native tools (including MCP and web search), environments, child agents, goals, checklists, code mode, and manual tools. The adapter does not yet persist the additional state and receipts those features require.
+
+Portable `SessionState` and custom canonical storage cannot be combined. Thread listing, archival, forks, and local rollout-path access are unsupported. Use `LocalStorage` for its other [supported combinations](../../docs/sdk/state.md#choose-how-to-store-a-conversation).
+
+In development builds after alpha.6, `LocalStorage` also rejects `programmatic_tool_calling=True`. Nested tool calls lack durable intent and result receipts, so the SDK rejects this combination before storage acquisition or model/tool work. Nonpersistent code mode remains available. Use the matching build and example files described in [setup](#set-up-and-run).
 
 Snapshots check native schema version 1, the Python SDK family and the pinned Codex revision. These checks do not prove compatibility with a different SDK binding revision. Snapshots are opaque backend values. Do not edit their JSON or assume compatibility across SDK versions or between Python and JavaScript. Keep the matching SDK build when reopening saved history; upgrade and migration qualification are separate work. The application owns storage access, encryption, retention and backups.
 

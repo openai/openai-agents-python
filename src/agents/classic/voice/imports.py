@@ -4,8 +4,8 @@ try:
     import websockets
 except ImportError as _e:
     raise ImportError(
-        "`numpy` + `websockets` are required to use voice. You can install them via the optional "
-        "dependency group: `pip install 'openai-agents[classic-voice]'`."
+        "`numpy` + `websockets` are required to use voice. From the matching source checkout, run "
+        "`python -m pip install '.[classic-voice]'`. See CLASSIC.md for source setup."
     ) from _e
 
 __all__ = ["np", "npt", "websockets"]

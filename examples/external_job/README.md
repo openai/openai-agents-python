@@ -8,21 +8,37 @@ Install the [matching SDK preview wheel](../../docs/sdk/installation.md), activa
 
 Set `THUMBNAIL_STATE_DIR` to an absolute private state path outside every model-visible mount. Its parent directory must already exist and be trusted by the host. Keep the database, SQLite sidecars, locks, and private receipts outside those mounts for the job's entire lifetime. The example trusts processes with the same operating-system user ID.
 
-The `run` command needs a local Responses endpoint. The commands below assume that endpoint listens on port `8080`; replace the port if needed. The example sends a fixed `local-only` credential to that endpoint and does not use `OPENAI_API_KEY`. The worker needs no model connection.
+The `run` command needs a local Responses endpoint. The example sends a fixed `local-only` credential to that endpoint and does not use `OPENAI_API_KEY`. The worker needs no model connection.
 
-Start the endpoint before running the job commands. The endpoint must request `render_thumbnail` and continue after receiving its result. For a complete synthetic model setup, see [the native test setup](../../tests/README.md) and [the external-job tests](../../tests/test_deferred_jobs_example.py).
+## Start the synthetic model endpoint
+
+In one terminal, keep the SDK environment activated and run from the repository root:
+
+```sh
+python -m examples.external_job.model
+```
+
+The command prints `MODEL_PORT=` followed by its selected port when the loopback server is ready. Keep a direct connection or proxy bypass for `127.0.0.1`. The server uses `ScriptedResponses` to request one blue thumbnail and finish after the resumed call returns its byte count. No API key or additional package is needed. It does not evaluate live model behavior.
+
+In a second terminal, activate the same environment and open the same repository root. Set `MODEL_PORT` to the number printed by the first terminal, then set `THUMBNAIL_STATE_DIR` to the private absolute path described above. Use a new, empty state directory for this demonstration; an already completed order would not consume the new model script.
+
+You can also supply your own local Responses endpoint. It must request `render_thumbnail` and continue after receiving its result.
 
 ## Render and resume an order
 
 Run these commands in order from the repository root:
 
 ```sh
-PYTHONPATH=. python -m examples.external_job run sample-01 --model-port 8080 --directory "$THUMBNAIL_STATE_DIR"
+PYTHONPATH=. python -m examples.external_job run sample-01 --model-port "$MODEL_PORT" --directory "$THUMBNAIL_STATE_DIR"
 PYTHONPATH=. python -m examples.external_job worker sample-01 --directory "$THUMBNAIL_STATE_DIR"
-PYTHONPATH=. python -m examples.external_job run sample-01 --model-port 8080 --directory "$THUMBNAIL_STATE_DIR"
+PYTHONPATH=. python -m examples.external_job run sample-01 --model-port "$MODEL_PORT" --directory "$THUMBNAIL_STATE_DIR"
 ```
 
 The first command prints `pending`. The worker stores a 32 by 32 image in the private application database and prints `Rendered.`. The final command restores the pending call, gives the model the image's byte count, and prints `completed`.
+
+After the final command, the first terminal prints `Verified thumbnail result; model endpoint closed.` and exits. The endpoint checks the actual returned byte count and serves only this one order. Start a fresh endpoint for another demonstration. To stop before completion, press Ctrl+C in the endpoint terminal; this closes the local server without deleting the order's private state.
+
+Keep the state directory if you want to inspect the saved order. After all three commands and the endpoint have exited, you can delete that application-chosen directory to remove the demonstration's database, image, checkpoints, and private receipts. Deletion prevents later resume.
 
 Reuse the order ID when retrying the same work. Choose a new ID to request another image. The SQLite journal authorizes each order and stores its checkpoint. The provider creates or finds the thumbnail under the same order ID.
 

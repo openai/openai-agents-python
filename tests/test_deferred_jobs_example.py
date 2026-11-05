@@ -374,3 +374,67 @@ async def test_identical_requests_have_independent_scoped_business_orders(
         assert db.execute("SELECT count(*) FROM orders WHERE finished IS NOT NULL").fetchone() == (
             3,
         )
+
+
+async def test_documented_model_endpoint_runs_three_cli_commands(tmp_path: Path) -> None:
+    root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, "PYTHONPATH": str(root)}
+    env.pop("OPENAI_API_KEY", None)
+    endpoint = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "examples.external_job.model",
+        cwd=root,
+        env=env,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        assert endpoint.stdout is not None
+        ready = await asyncio.wait_for(endpoint.stdout.readline(), 15)
+        assert ready.startswith(b"MODEL_PORT="), ready
+        port = int(ready.removeprefix(b"MODEL_PORT="))
+        directory = tmp_path / "private-state"
+        for command, expected in (
+            ("run", b"pending\n"),
+            ("worker", b"Rendered.\n"),
+            ("run", b"completed\n"),
+        ):
+            options = ["--model-port", str(port)] if command == "run" else []
+            child = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "examples.external_job",
+                command,
+                "sample-01",
+                *options,
+                "--directory",
+                str(directory),
+                cwd=root,
+                env=env,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(child.communicate(), 40)
+                assert child.returncode == 0, (stdout, stderr)
+                assert stdout == expected
+            finally:
+                if child.returncode is None:
+                    child.kill()
+                    await child.wait()
+        stdout, stderr = await asyncio.wait_for(endpoint.communicate(), 15)
+        assert endpoint.returncode == 0, (stdout, stderr)
+        assert stdout == b"Verified thumbnail result; model endpoint closed.\n"
+        with sqlite3.connect(directory / "orders.sqlite3") as db:
+            assert db.execute("SELECT order_id, length(image) FROM thumbnails").fetchall() == [
+                ("sample-01", 3085)
+            ]
+            (result,) = db.execute("SELECT result FROM orders").fetchone()
+            assert json.loads(result) == {"size_bytes": 3085}
+    finally:
+        if endpoint.returncode is None:
+            endpoint.kill()
+            await endpoint.wait()

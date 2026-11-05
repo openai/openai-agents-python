@@ -68,7 +68,8 @@
         "parallel",
         "concurrency",
         "FastAPI",
-        "supervised workers"
+        "supervised workers",
+        "prepared requests"
       ]
     },
     {
@@ -87,7 +88,10 @@
         "MCP servers",
         "MCP authentication",
         "HttpMCP",
-        "StdioMCP"
+        "StdioMCP",
+        "HostedVerificationMCP",
+        "ChatGPTAppsMCP",
+        "verification"
       ]
     },
     {
@@ -98,7 +102,11 @@
         "streaming",
         "Stop",
         "EventGap",
-        "Turn"
+        "Turn",
+        "submission_id",
+        "response history",
+        "request metadata",
+        "observation cursor"
       ]
     },
     {
@@ -111,7 +119,9 @@
         "save and restore",
         "compaction",
         "conversation history",
-        "manual suspend"
+        "manual suspend",
+        "CustomStorage",
+        "code mode limits"
       ]
     },
     {
@@ -124,7 +134,10 @@
         "write roots",
         "network policy",
         "remote executor",
-        "Docker"
+        "Docker",
+        "skills",
+        "capability_directories",
+        "result policies"
       ]
     },
     {
@@ -163,7 +176,9 @@
       "id": "configure",
       "path": "configuration.md",
       "aliases": [
-        "structured output"
+        "structured output",
+        "prepare_request",
+        "PreparedRequest"
       ]
     },
     {
@@ -175,7 +190,10 @@
         "trace",
         "tracing",
         "OpenTelemetry",
-        "TraceContext"
+        "TraceContext",
+        "TraceOptions",
+        "TraceProcessor",
+        "force_flush"
       ]
     },
     {
@@ -187,7 +205,8 @@
         "diagnose",
         "rate limits",
         "token budget",
-        "retry"
+        "retry",
+        "response_integrity_reason"
       ]
     },
     {

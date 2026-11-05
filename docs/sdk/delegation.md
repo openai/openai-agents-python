@@ -112,6 +112,8 @@ Model settings, instructions, and `NativeAgents` remain fixed for the Session. U
 
 Once work and callbacks finish, idle checkpoints can retain child conversations, task history, and older goals and checklists. To restore them, supply current `NativeAgents` and matching Python and manual tool definitions. Restore uses the current Agent's MCP declarations and creates fresh runtime resources.
 
+Restored child runtimes remain unloaded. To continue an active saved child, submit fresh input to the root asking the model to continue that named child with `followup_task`. The model can reload the child using its saved history. After the child starts, read a fresh `session.subagents()` snapshot or observe `session.events()` to obtain its new Turn. `Subagent.start()` cannot reload an unloaded child.
+
 Live child Turns do not transfer, and interrupted child work does not resume automatically. Saved goals and checklists grant no tools. See [save and restore](state.md#save-and-restore-a-portable-checkpoint).
 
 ## Native tool decisions

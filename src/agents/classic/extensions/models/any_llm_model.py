@@ -70,8 +70,8 @@ try:
     AnyLLM = importlib.import_module("any_llm").AnyLLM
 except ImportError as _e:
     raise ImportError(
-        "`any-llm-sdk` is required to use the AnyLLMModel. Install it via the optional "
-        "dependency group: `pip install 'openai-agents[classic-any-llm]'`. "
+        "`any-llm-sdk` is required to use the AnyLLMModel. From the matching source checkout, run "
+        "`python -m pip install '.[classic-any-llm]'`. See CLASSIC.md for source setup. "
         "`any-llm-sdk` currently requires Python 3.11+."
     ) from _e
 

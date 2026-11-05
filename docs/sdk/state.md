@@ -25,7 +25,11 @@ The storage choices have these limits:
 - Do not combine `storage` or `resume` with portable `state`.
 - Each restore method requires current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
-`CustomStorage` currently supports root Sessions with automatic Python tools. It cannot be combined with portable checkpoints and rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage) explains the synchronous `SessionStore` contract, the persistent SQLite reference adapter, and recovery of tool calls with unknown outcomes. Storage does not guarantee exactly-once external actions.
+In development builds after `0.24.0-alpha.6`, `LocalStorage` rejects `programmatic_tool_calling=True` before opening work. Nested code-mode tool calls do not yet have the durable intent and result receipts needed for safe local recovery. Use a nonpersistent Session for code mode, or check the limits for [eligible settled portable checkpoints](#check-manual-checkpoint-support).
+
+`CustomStorage`, also added after alpha.6, supports root Sessions with automatic Python tools. Use a [matching development build](installation.md#examples-and-upgrades). It rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
+
+For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage). Storage does not guarantee exactly-once external actions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 
@@ -295,6 +299,8 @@ async for recorded_turn in session.turns():
 ```
 
 Pass `subagent_id=child_id` to read a descendant's recorded items or turns, including restored outcomes. These reads do not start native work or create live `Turn` objects.
+
+For post-alpha.6 builds, [inspect response attempts](sessions.md#inspect-response-attempts) to interpret retained provider status and counters, and correlate them with live request observations. Provider completion and SDK acceptance are separate outcomes.
 
 ## Fork a conversation
 

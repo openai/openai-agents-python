@@ -185,7 +185,7 @@ Use the [MCP guide](mcp.md) to connect servers and control tool calls:
 
 ## Replace tools between turns
 
-While idle, call `await session.update(tools=new_tools)` to replace tool definitions. Later turns use the updated definitions, including replacement MCP endpoints and credentials.
+While idle, call `await session.update(tools=new_tools)` to replace tool definitions. Later turns use the updated definitions, including replacement endpoints and credentials for ordinary MCP declarations. [Service-specific verification and Apps registrations](mcp.md#service-specific-integrations) require a new Session to change their registration or credentials.
 
 Replacements must stay within the tools declared when the Session opened:
 

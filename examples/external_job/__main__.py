@@ -1,24 +1,25 @@
 """Render a thumbnail in a separate worker and resume the original tool call.
 
 Run these commands from a checkout containing the experimental helper. Supply the
-port of your local Responses endpoint. Set THUMBNAIL_STATE_DIR to the absolute
+port of your local Responses endpoint as MODEL_PORT. Set THUMBNAIL_STATE_DIR to the absolute
 path of a private local POSIX directory outside every model-visible mount. Its
 parent must already exist and be trusted by the host. Keep its
 database, SQLite sidecars, locks, and private receipts outside those mounts for
 the entire job lifetime. The host trusts the directory's parent and same-UID
 processes. The worker needs no model connection.
 
-    PYTHONPATH=. python -m examples.external_job run sample-01 --model-port 8080 --directory "$THUMBNAIL_STATE_DIR"
+    PYTHONPATH=. python -m examples.external_job run sample-01 --model-port "$MODEL_PORT" --directory "$THUMBNAIL_STATE_DIR"
     PYTHONPATH=. python -m examples.external_job worker sample-01 --directory "$THUMBNAIL_STATE_DIR"
-    PYTHONPATH=. python -m examples.external_job run sample-01 --model-port 8080 --directory "$THUMBNAIL_STATE_DIR"
+    PYTHONPATH=. python -m examples.external_job run sample-01 --model-port "$MODEL_PORT" --directory "$THUMBNAIL_STATE_DIR"
 
 The first run prints pending. The worker stores a 32 by 32 image in the private
 application database. The next run gives the model its byte count and prints
 completed. Reuse the order ID for a retry, or choose a new ID to order another
 image. This example requires a local POSIX filesystem and a Unix SQLite VFS
 that creates private files using the selected state directory's permissions.
-For a complete demo
-with a synthetic model, run pytest -q tests/test_deferred_jobs_example.py.
+For the synthetic endpoint launcher and complete two-terminal demo, see
+examples/external_job/README.md. Run pytest -q tests/test_deferred_jobs_example.py
+to check the workflow.
 """
 
 from __future__ import annotations
