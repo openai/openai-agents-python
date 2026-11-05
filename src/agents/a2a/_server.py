@@ -38,7 +38,10 @@ def _bytes(task: p.Task) -> bytes:
 
 
 def _part(value: dict[str, Any]) -> p.Part:
-    return p.Part(data=ParseDict(value, Value()))
+    data = ParseDict(value, Value())
+    if MessageToDict(data) != value:
+        raise ValueError("A2A data cannot represent this JSON value exactly")
+    return p.Part(data=data)
 
 
 @dataclass(frozen=True, kw_only=True)

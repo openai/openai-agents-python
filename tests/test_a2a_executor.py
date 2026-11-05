@@ -102,6 +102,40 @@ async def test_typed_result_limit_uses_serialized_size(tmp_path, responses):
     assert not stored.task.artifacts
 
 
+@pytest.mark.parametrize(
+    ("output_type", "value", "state"),
+    [
+        pytest.param(int, 9007199254740993, p.TASK_STATE_FAILED, id="rounded-integer"),
+        pytest.param(
+            list[list[int]],
+            [[9007199254740993]],
+            p.TASK_STATE_FAILED,
+            id="nested-rounded-integer",
+        ),
+        pytest.param(int, 9007199254740992, p.TASK_STATE_COMPLETED, id="exact-integer"),
+    ],
+)
+async def test_structured_numbers_are_exact_or_fail_before_publication(
+    tmp_path, responses, output_type, value, state
+):
+    responses.respond(assistant_output(json.dumps({"response": value})))
+    executor = make_executor(tmp_path, responses, output_type=output_type)
+
+    stored, _ = await invoke(executor, request_context())
+
+    assert stored.task.status.state == state
+    if state == p.TASK_STATE_COMPLETED:
+        assert MessageToDict(stored.task.artifacts[0].parts[0].data) == {"result": value}
+    else:
+        assert not stored.task.artifacts
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    record = executor.store.read(binding)
+    assert record.status == ("completed" if state == p.TASK_STATE_COMPLETED else "failed")
+    assert record.acknowledges(stored.task)
+    assert await executor.recover(binding, call_context()) == record
+    assert len(responses.requests) == 1
+
+
 class Approval(BaseModel):
     reason: str
 
