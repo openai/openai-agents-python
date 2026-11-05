@@ -13,7 +13,15 @@ import re
 import sys
 import weakref
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Iterator, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from concurrent.futures import Future
 from contextlib import AbstractAsyncContextManager, contextmanager, suppress
 from contextvars import ContextVar, copy_context
@@ -32,6 +40,7 @@ from ._function_tools import FunctionTool, Tool, ToolContext
 from ._history import project_history
 from ._native_async import _NativeCompletionError
 from ._projection import _error_code, project_execution_completion
+from ._trace_context import TraceContext, _native_trace_context, _trace_context
 from .agent import (
     Agent,
     ContextT,
@@ -522,6 +531,7 @@ class _Submission:
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None
     writable_roots: tuple[str, ...] | None = None
+    parent_trace: TraceContext | None = field(default=None, repr=False)
 
     def add_callback(self, task: asyncio.Task[None]) -> None:
         self.callbacks.add(task)
@@ -1342,7 +1352,9 @@ class Session(Generic[ContextT, OutputT]):
         instruction_files: Sequence[Path] = (),
         reconciled_calls: Sequence[ReconciledCall] = (),
         _captured_api_key: str | None = None,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
     ) -> Session[ContextT, OutputT]:
+        parent_trace = _trace_context(parent_trace)
         if storage is not None and not isinstance(storage, LocalStorage):
             raise TypeError("storage must be a LocalStorage")
         if state is not None and (storage is not None or resume is not None):
@@ -1801,6 +1813,11 @@ class Session(Generic[ContextT, OutputT]):
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
+                    **(
+                        {"parent_trace": parent_trace.to_headers()}
+                        if parent_trace is not None
+                        else {}
+                    ),
                     "config": config,
                     **(
                         {
@@ -2161,6 +2178,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
                     _check_mcp_receipt(receipt, mcp_tools, allowed_mcp, catalog.generation)
                 session._provider_lease = provider_lease
+                session._parent_trace = parent_trace
                 session._native_options = json.dumps(options)
                 if owned_provider:
                     session._owned_provider = provider
@@ -2173,6 +2191,7 @@ class Session(Generic[ContextT, OutputT]):
                     active = _Submission(
                         restored_output,
                         restored_pending=True,
+                        parent_trace=parent_trace,
                         operation_slots=operation_slots,
                         operation_mcp=mcp_tools,
                         operation_refs=restored_operation_refs,
@@ -2282,6 +2301,7 @@ class Session(Generic[ContextT, OutputT]):
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
         self._model_api_key: str | None = None
+        self._parent_trace: TraceContext | None = None
         self._native_options: str | None = None
         self._websockets_enabled = False
         self._engine = engine
@@ -2730,6 +2750,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
         writable_roots: Sequence[str | PathLike[str]] | None = None,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2743,6 +2764,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue"] = "reject",
         writable_roots: Sequence[str | PathLike[str]] | None = None,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2755,6 +2777,7 @@ class Session(Generic[ContextT, OutputT]):
         tools: None = None,
         before_step: None = None,
         writable_roots: None = None,
+        parent_trace: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -2767,8 +2790,13 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         if_busy: Literal["reject", "queue", "steer"] = "reject",
         writable_roots: Sequence[str | PathLike[str]] | None = None,
+        parent_trace: TraceContext | Mapping[str, str | None] | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
+
+        parent_trace overrides the Session parent for this new root and its
+        automatic continuations. None and omission inherit the Session parent.
+        Queued work captures its carrier now. Steering cannot change a parent.
 
         Omission inherits the Agent's output. Bare str selects plain text.
         PromptedOutput adds JSON guidance to this root's user input only.
@@ -2801,6 +2829,7 @@ class Session(Generic[ContextT, OutputT]):
         operation refuses suspension before consuming live requests.
         """
         self._check_open()
+        parent_trace = _trace_context(parent_trace)
         self._check_callback_operation("start work in its own Session")
         self._check_graph_admission()
         self._check_root_admission()
@@ -2811,6 +2840,7 @@ class Session(Generic[ContextT, OutputT]):
             or tools is not None
             or before_step is not None
             or writable_roots is not None
+            or parent_trace is not None
         ):
             raise TypeError("if_busy='steer' cannot override the new turn's settings")
         if self._mutation is not None or self._checkpoint_task is not None:
@@ -2848,6 +2878,7 @@ class Session(Generic[ContextT, OutputT]):
             before_step=before_step,
             enqueue=if_busy != "reject",
             writable_roots=roots,
+            parent_trace=parent_trace,
         )
 
     async def _steer(
@@ -3344,7 +3375,12 @@ class Session(Generic[ContextT, OutputT]):
                     # Core may already have queued recovery when this callback
                     # is cancelled. Retain its mutation ownership through the
                     # admission acknowledgement before retirement can pass it.
-                    with _private_task(self._native._continue_manual()) as (admitting, admitted):
+                    resume = (
+                        self._native._continue_manual(json.dumps(state.parent_trace.to_headers()))
+                        if state.parent_trace is not None
+                        else self._native._continue_manual()
+                    )
+                    with _private_task(resume) as (admitting, admitted):
                         receipt = json.loads(await _join(admitting, outcome=admitted))
                     if receipt["status"] == "pending":
                         return
@@ -3784,6 +3820,7 @@ class Session(Generic[ContextT, OutputT]):
         before_step: _BeforeStep[ContextT] | None = None,
         enqueue: bool = False,
         writable_roots: tuple[str, ...] | None = None,
+        parent_trace: TraceContext | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         self._check_open()
@@ -3857,6 +3894,7 @@ class Session(Generic[ContextT, OutputT]):
             operation_mcp=mcp,
             operation_refs=operation_refs,
             writable_roots=writable_roots,
+            parent_trace=parent_trace if parent_trace is not None else self._parent_trace,
         )
         if input is not None:
             issued = _root_turn(self, None, uuid4().hex, state.completion)
@@ -4938,7 +4976,13 @@ class Session(Generic[ContextT, OutputT]):
                     self._native_agents is not None and self._native_agents.before_step is not None,
                 )
                 if input is None:
-                    receipt = json.loads(await self._native._compact())
+                    receipt = json.loads(
+                        await self._native._compact(
+                            json.dumps(state.parent_trace.to_headers())
+                            if state.parent_trace is not None
+                            else None
+                        )
+                    )
                 else:
                     if self._environment_lease is not None and self._environment_lease.interrupted:
                         # Publication has settled; neither root nor continuation issued input.
@@ -4948,6 +4992,8 @@ class Session(Generic[ContextT, OutputT]):
                         "mode": "continue_if_idle" if state.continued_from else "start_if_idle",
                         "input": input,
                     }
+                    if state.parent_trace is not None:
+                        request["trace"] = state.parent_trace.to_headers()
                     if state.continued_from is not None:
                         request["expected_previous_turn_id"] = state.continued_from
                     if state.output.mode == "native":
@@ -5214,6 +5260,7 @@ class Session(Generic[ContextT, OutputT]):
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
                     operation_refs=state.operation_refs,
+                    parent_trace=state.parent_trace,
                 )
                 object.__setattr__(state.handle, "_continuation", continuation.accepted)
                 self._active = continuation
@@ -5327,7 +5374,9 @@ class Session(Generic[ContextT, OutputT]):
                 raise asyncio.CancelledError()
             if state.failure.done():
                 raise state.failure.result()
-            repair = await Session._open(declaration, _captured_api_key=self._model_api_key)
+            repair = await Session._open(
+                declaration, _captured_api_key=self._model_api_key, parent_trace=state.parent_trace
+            )
             repair._observations.repair_parent = (self._observations, handle.submission_id)
             repair._rate_limit_parent = self
             try:
@@ -6793,6 +6842,7 @@ class Session(Generic[ContextT, OutputT]):
                 message["callId"],
                 MappingProxyType(deepcopy(raw_arguments)),
                 MappingProxyType(deepcopy(kwargs)),
+                trace_context=_native_trace_context(message.get("_sdk_trace")),
                 call=ToolCallInfo(
                     tool=ToolRef(entry.name, entry.namespace),
                     session_id=self.id,
@@ -7514,6 +7564,7 @@ class Session(Generic[ContextT, OutputT]):
             self._owned_provider = None
         self._model_api_key = None
         self._native_options = None
+        self._parent_trace = None
         self._closed = True
 
     async def _close_session(self) -> None:

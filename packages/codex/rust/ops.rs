@@ -600,6 +600,7 @@ pub(crate) async fn interrupt_managed_root(
 }
 
 params!(RecoveryOptions {
+    trace: Option<W3cTraceContext>,
     #[serde(default)]
     output_schema: Option<serde_json::Map<String, Value>>,
 });
@@ -619,7 +620,7 @@ pub async fn recover_prepared(
             RecoverTurnRequest {
                 turn_id,
                 thread_settings: Default::default(),
-                trace: None,
+                trace: p.trace,
                 cyber_access_program: None,
                 final_output_json_schema: p.output_schema.map(Value::Object),
             },

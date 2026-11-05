@@ -549,6 +549,7 @@ pub(crate) fn prepare(thread: &crate::engine::ThreadState, owner: &Owner) -> Res
 pub(crate) async fn continue_if_ready(
     thread: &crate::engine::ThreadState,
     owner: &Owner,
+    trace: Option<codex_protocol::protocol::W3cTraceContext>,
 ) -> Result<Value> {
     let _operation = thread.engine.operation(false)?;
     let _mutation = thread.mutations.lock().await;
@@ -580,8 +581,8 @@ pub(crate) async fn continue_if_ready(
         frame.turn,
         frame.seen.into_iter().collect(),
         match frame.state["native_continuation"].get("output_schema") {
-            Some(schema) => serde_json::json!({"output_schema":schema}),
-            None => serde_json::json!({}),
+            Some(schema) => serde_json::json!({"output_schema":schema,"trace":trace}),
+            None => serde_json::json!({"trace":trace}),
         },
     )
     .await?;

@@ -1936,7 +1936,8 @@ impl PythonTools {
                 "namespace": entry.name.namespace, "tool": entry.name.name,
                 "arguments": arguments, "_sdk_python_tool": key.reply,
                 "_sdk_invocation": invocation, "_sdk_manual": entry.manual,
-                "_sdk_code_origin": code_origin, "_sdk_model": model
+                "_sdk_code_origin": code_origin, "_sdk_model": model,
+                "_sdk_trace": codex_otel::current_span_w3c_trace_context()
             }
         });
         let (sender, receiver) = oneshot::channel();
@@ -3954,7 +3955,7 @@ pub(crate) mod managed_tests {
             let recovery_state = resumed.clone();
             let manual = restored.manual.clone();
             let recovering = tokio::spawn(async move {
-                manual_checkpoint::continue_if_ready(&recovery_state, &manual).await.unwrap()
+                manual_checkpoint::continue_if_ready(&recovery_state, &manual, None).await.unwrap()
             });
             hold.entered.acquire().await.unwrap().forget();
             assert_eq!(provider.requests.lock().unwrap().len(), 2,
