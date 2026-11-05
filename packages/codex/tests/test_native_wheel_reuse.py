@@ -57,6 +57,8 @@ def hook_project(monkeypatch, tmp_path):
     (source / "new_module.py").write_text("new = True\n")
     (source / "session.py").write_text("native_session = 'current'\n")
     (source / "py.typed").write_text("")
+    (source.parents[1] / "LICENSE").write_text("Synthetic SDK license\n")
+    (source.parents[1] / ".gitignore").write_text("__pycache__/\n*.py[cod]\n")
     native = tmp_path / "variant/packages/codex"
     (native / ".upstream").mkdir(parents=True)
     revision = hashlib.sha1(b"commit " + str(len(COMMIT)).encode() + b"\0" + COMMIT).hexdigest()
@@ -554,6 +556,11 @@ def test_receipt_output_directory_must_be_absolute(monkeypatch, hook_project, sd
         "remove",
         "maturin",
         "build-system",
+        "sdk-license",
+        "packaging-exclusions",
+        "new-build-module",
+        "hatch",
+        "uv",
     ],
 )
 def test_stale_native_inputs_reject_before_payload_staging(
@@ -562,10 +569,25 @@ def test_stale_native_inputs_reject_before_payload_staging(
     hook, source = hook_project
     native = Path(hook.root) / "packages/codex"
     make_wheel(sdk_wheel, native_root=native)
-    if changed == "add":
+    if changed == "sdk-license":
+        (Path(hook.root) / "LICENSE").write_text("Updated synthetic SDK license\n")
+    elif changed == "packaging-exclusions":
+        path = Path(hook.root) / ".gitignore"
+        path.write_text(path.read_text() + "!packages/codex/scripts/argparse.pyc\n")
+    elif changed == "new-build-module":
+        (native / "scripts/argparse.py").write_text("# Additional build import\n")
+    elif changed == "add":
         (native / "rust/new.rs").write_text("new native module")
     elif changed == "remove":
         (native / "rust/helper.rs").unlink()
+    elif changed in {"hatch", "uv"}:
+        path = Path(hook.root) / "pyproject.toml"
+        setting = (
+            '[tool.hatch.build.hooks.custom]\npath="other.py"\n'
+            if changed == "hatch"
+            else '[tool.uv]\nbuild-constraint-dependencies=["maturin>=99"]\n'
+        )
+        path.write_text(path.read_text() + setting)
     elif changed in {"maturin", "build-system"}:
         path = Path(hook.root) / "pyproject.toml"
         text = path.read_text()

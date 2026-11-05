@@ -260,18 +260,29 @@ jobs:
               output.write("provenance=" + value + "\n")
               output.write("direct_manual=" + str(direct_manual).lower() + "\n")
           PYTHON
+      - name: Identify native build inputs
+        id: native-inputs
+        run: |
+          python - <<'PYTHON'
+          import os
+          import runpy
+          from pathlib import Path
+          identity = runpy.run_path('packages/codex/scripts/source_integrity.py')['native_bundle_identity'](Path('.'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('identity=' + identity + '\n')
+          PYTHON
       - name: Publish the native snapshot
         id: snapshot
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: native-snapshot-${{ runner.os }}-${{ runner.arch }}
+          name: native-snapshot-${{ runner.os }}-${{ runner.arch }}-${{ steps.native-inputs.outputs.identity }}
           path: |
             dist/*.whl
             dist/*.whl.pristine.json
             dist/exec-server-fixture*
             dist/native-provenance.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
       - name: Prepare Rust dependency cache
         if: github.event_name == 'push' && inputs.native_source_run == ''
         run: python .github/scripts/native-dependencies.py pack

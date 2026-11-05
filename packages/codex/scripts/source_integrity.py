@@ -456,3 +456,62 @@ def verify_rmcp_source(root: Path) -> dict:
     if version != identity["version"].removeprefix("="):
         raise SystemExit("RMCP source package version differs from its pinned dependency")
     return {**result, "source": identity}
+
+
+def native_inputs(native):
+    """Bind source-distribution inputs, not application Python or host cache paths."""
+    paths = [native / name for name in ("Cargo.toml", "Cargo.lock", "CODEX_REVISION")]
+    # The complete shipped directory can supply imports and build resources,
+    # including new modules that shadow standard-library imports.
+    paths.extend(
+        path
+        for path in sorted((native / "scripts").rglob("*"))
+        if "__pycache__" not in path.relative_to(native / "scripts").parts
+        and path.suffix not in {".pyc", ".pyo"}
+        and (path.is_symlink() or not path.is_dir())
+    )
+    series = patch_series(native)
+    paths.append(native / "patches/series.json")
+    paths.extend(native / "patches" / entry["path"] for entry in series["patches"])
+    rmcp_series = rmcp_patch_series(native)
+    paths.append(native / "rmcp-patches/series.json")
+    paths.extend(native / "rmcp-patches" / entry["path"] for entry in rmcp_series["patches"])
+    rust = sorted((native / "rust").rglob("*"))
+    if not rust:
+        raise ValueError("Native source inputs are missing; run a fresh native build")
+    paths.extend(path for path in rust if path.is_symlink() or not path.is_dir())
+    project = native.parents[1]
+    paths.extend(project / name for name in ("LICENSE", ".gitignore"))
+    inputs = {}
+    for path in paths:
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("Native source inputs must be regular files; run a fresh native build")
+        inputs[path.relative_to(project).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+    with (project / "pyproject.toml").open("rb") as source:
+        config = tomllib.load(source)
+    for name, value in (
+        ("tool.maturin", config["tool"]["maturin"]),
+        ("build-system", config["build-system"]),
+        ("tool.hatch", config.get("tool", {}).get("hatch", {})),
+        ("tool.uv", config.get("tool", {}).get("uv", {})),
+    ):
+        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        inputs["pyproject.toml::" + name] = hashlib.sha256(encoded).hexdigest()
+    return dict(sorted(inputs.items()))
+
+
+def native_bundle_identity(project):
+    """Name native artifacts by compiled inputs and their executable CI controls."""
+    inputs = native_inputs(project / "packages/codex")
+    for name in (
+        ".github/workflows/tests.yml",
+        ".github/workflows/native-python-push.yml",
+        ".github/workflows/codex-python.yml",
+        ".github/workflows/codex-python-qualify.yml",
+        ".github/actions/setup-native/action.yml",
+        ".github/scripts/download-native-snapshot.py",
+        ".github/scripts/native-dependencies.py",
+        "packages/codex/tests/fixtures/exec_server.rs",
+    ):
+        inputs[name] = hashlib.sha256((project / name).read_bytes()).hexdigest()
+    return hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()

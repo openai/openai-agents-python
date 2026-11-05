@@ -342,7 +342,17 @@ def test_qualification_repack_receives_verified_overlay_in_its_environment(
 
 @pytest.mark.parametrize(
     "scenario",
-    ["valid", "digest", "metadata", "missing", "traversal", "duplicate", "tool_error", "inventory"],
+    [
+        "valid",
+        "digest",
+        "metadata",
+        "name",
+        "missing",
+        "traversal",
+        "duplicate",
+        "tool_error",
+        "inventory",
+    ],
 )
 def test_snapshot_download_checks_exact_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
@@ -370,7 +380,14 @@ def test_snapshot_download_checks_exact_publication(
         "NATIVE_SOURCE_RUN": "123",
         "GITHUB_REPOSITORY": "openai/openai-agents-python",
         "NATIVE_ARTIFACTS": json.dumps(
-            {"Linux-X64": {"id": 456, "digest": digest, "provenance": {"source_sha": "fixture"}}}
+            {
+                "Linux-X64": {
+                    "id": 456,
+                    "digest": digest,
+                    "provenance": {"source_sha": "fixture"},
+                    "name": "native-snapshot-Linux-X64",
+                }
+            }
         ),
         "SNAPSHOT_DIRECTORY": str(tmp_path / "snapshot"),
     }.items():
@@ -383,7 +400,9 @@ def test_snapshot_download_checks_exact_publication(
         return json.dumps(
             {
                 "workflow_run": {"id": 999 if scenario == "metadata" else 123},
-                "name": "native-snapshot-Linux-X64",
+                "name": "different-native-snapshot"
+                if scenario == "name"
+                else "native-snapshot-Linux-X64",
                 "expired": False,
                 "digest": digest,
             }

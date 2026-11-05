@@ -150,7 +150,7 @@ jobs:
           name: native-provenance
           path: ${{ runner.temp }}/native-provenance.json
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 90
       - name: Select a qualified native build
         id: native-source
         if: >-
@@ -175,20 +175,20 @@ jobs:
           import runpy
           import subprocess
           import tempfile
+          import tarfile
           import urllib.parse
           import urllib.request
           from datetime import datetime
           from pathlib import Path
           from zipfile import ZipFile
-          try:
-              import tomllib
-          except ImportError:
-              import tomli as tomllib
 
           repo = os.environ['GITHUB_REPOSITORY']
           api = os.environ['GITHUB_API_URL'] + '/repos/' + repo + '/actions'
           headers = {'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json'}
           download_archive = runpy.run_path('.github/scripts/download-native-snapshot.py')['download_archive']
+          integrity = runpy.run_path('packages/codex/scripts/source_integrity.py')
+          native_inputs = integrity['native_inputs']
+          native_identity = integrity['native_bundle_identity'](Path('.'))
 
           def get(url):
               with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as response:
@@ -254,52 +254,36 @@ jobs:
                   prior = subprocess.run(['git', 'show', f'{source}:{path}'], capture_output=True)
                   if prior.returncode or prior.stdout != Path(path).read_bytes():
                       return False
-              changed = set(subprocess.check_output(
-                  ['git', 'diff', '--name-only', '--no-renames', '-z', source, 'HEAD', '--']
-              ).split(b'\0')) - {b''}
-              # Only version and test selection can differ in otherwise identical build settings.
-              for filename in ('pyproject.toml', 'uv.lock'):
-                  if filename.encode() not in changed:
-                      continue
-                  prior = subprocess.run(['git', 'show', f'{source}:{filename}'], capture_output=True, text=True)
-                  if prior.returncode or not Path(filename).is_file():
+              # Compare the same native closure that the wheel receipt validates.
+              # Python sources and dependencies are repacked and qualified afresh.
+              controls = ('.github/actions/setup-native/action.yml',
+                          '.github/scripts/download-native-snapshot.py',
+                          '.github/scripts/native-dependencies.py',
+                          'packages/codex/tests/fixtures/exec_server.rs')
+              for path in controls:
+                  prior = subprocess.run(['git', 'show', f'{source}:{path}'], capture_output=True)
+                  if prior.returncode or prior.stdout != Path(path).read_bytes():
                       return False
+              with tempfile.TemporaryDirectory(prefix='agents-native-inputs-') as directory:
+                  with tempfile.TemporaryFile() as archive:
+                      result = subprocess.run(['git', 'archive', source, 'packages/codex', 'pyproject.toml', 'LICENSE', '.gitignore'],
+                                              stdout=archive)
+                      if result.returncode:
+                          return False
+                      archive.seek(0)
+                      with tarfile.open(fileobj=archive) as tree:
+                          tree.extractall(directory, filter='data')
                   try:
-                      before, after = tomllib.loads(prior.stdout), tomllib.loads(Path(filename).read_text())
-                      for data in (before, after):
-                          if filename == 'pyproject.toml':
-                              data['project'].pop('version')
-                              data.get('tool', {}).get('pytest', {}).get('ini_options', {}).pop('testpaths', None)
-                          else:
-                              for package in data['package']:
-                                  if package['name'] == 'openai-agents' and package['source'] == {'editable': '.'}:
-                                      package.pop('version')
-                  except (KeyError, tomllib.TOMLDecodeError):
+                      before = native_inputs(Path(directory) / 'packages/codex')
+                      after = native_inputs(Path('packages/codex').resolve())
+                  except (OSError, ValueError, KeyError):
                       return False
-                  if before != after:
-                      return False
-                  changed.remove(filename.encode())
-              allowed = re.compile(
-                  rb'(?:src/agents/|packages/codex/src/_agents_codex/|packages/codex/tests/|packages/codex/examples/|tests/|examples/).+\.py\Z'
-                  rb'|(?:README|CHANGELOG-alpha|examples/README|packages/codex/examples/README|packages/codex/README|\.github/RELEASING|docs/.+)\.md\Z'
-                  rb'|(?:release-please-config|\.release-please-manifest|pyrightconfig)\.json\Z'
-                  rb'|(?:tests|packages/codex/tests)/fixtures/released_api_contract\.json\Z'
-                  rb'|(?:tests|packages/codex/tests)/(?:fixtures/(?:native_planning_receipt|vercel_ui_v1)|fixtures/classic/original_pending_approval(?:\.identity)?|vercel-client/package(?:-lock)?|pyright-negative)\.json\Z'
-                  rb'|(?:tests|packages/codex/tests)/(?:macos_trust_observer|fixtures/(?:detached_child|local_ingress_process))\.c\Z'
-                  rb'|(?:tests|packages/codex/tests)/qualification/(?:run_offline_ipc|offline_executor)\.sh\Z'
-                  rb'|(?:tests|packages/codex/tests)/vercel-client/read-stream\.mjs\Z'
-                  rb'|(?:examples|packages/codex/examples)/(?:web_starter/(?:client|browser-test)\.mjs|web_starter/package(?:-lock)?\.json|web_starter/index\.html|(?:web_starter|ag_ui)/requirements\.txt|evaluation/(?:config|cases)\.json)\Z'
-                  rb'|packages/codex/src/_agents_codex/py\.typed\Z'
-                  rb'|packages/codex/(?:AGENTS|MAINTAINING)\.md\Z'
-                  rb'|packages/codex/docs/.+\.md\Z'
-                  rb'|packages/codex/scripts/verify_installed\.py\Z'
-                  rb'|(?:Makefile|mkdocs\.yml|(?:tests|packages/codex/tests)/README\.md)\Z'
-                  rb'|\.github/workflows/alpha-install\.yml\Z'
-                  rb'|docs/assets/images/.+\.(?:png|jpg|jpeg|gif|svg|webp)\Z'
-              )
-              return all(allowed.fullmatch(path) or (dependencies and re.fullmatch(
-                  rb'packages/codex/rust/.+\.rs', path
-              )) for path in changed)
+              if dependencies:
+                  before = {path: digest for path, digest in before.items()
+                            if not (path.startswith('packages/codex/rust/') and path.endswith('.rs'))}
+                  after = {path: digest for path, digest in after.items()
+                           if not (path.startswith('packages/codex/rust/') and path.endswith('.rs'))}
+              return before == after
 
           def qualified(run, dependencies=False):
               if run['status'] != 'completed' or run['conclusion'] != 'success' or not compatible(run, dependencies):
@@ -390,29 +374,42 @@ jobs:
                       if publication.get('conclusion') != 'success':
                           continue
                       for artifact in artifacts:
-                          if (artifact['name'] == ('native-dependencies-' if dependencies else 'native-snapshot-') + identity and not artifact['expired']
+                          expected_name = ('native-dependencies-' + identity if dependencies else
+                                           'native-snapshot-' + identity + '-' + native_identity)
+                          if (artifact['name'] == expected_name and not artifact['expired']
                                   and timestamp(publication['started_at']) <= timestamp(artifact['created_at'])
                                   <= timestamp(publication['completed_at']) < earliest_sdk):
                               if not re.fullmatch(r'sha256:[0-9a-f]{64}', artifact['digest']):
                                   raise SystemExit('Invalid native snapshot digest')
-                              valid.append({'id': artifact['id'], 'digest': artifact['digest'], 'provenance': provenance})
+                              valid.append({'id': artifact['id'], 'digest': artifact['digest'], 'provenance': provenance,
+                                            **({} if dependencies else {'name': artifact['name']})})
                   if len(valid) != 1:
                       return None
                   selected[identity] = valid[0]
               return selected
 
-          # Search a bounded history. API errors fail visibly.
+          # Discover exact matching artifacts, including producers older than recent docs runs.
+          # API failures remain visible; an absent ready artifact never waits for a producer.
           def candidates():
+              query = urllib.parse.urlencode({'name': 'native-snapshot-Linux-X64-' + native_identity})
+              seen = set()
+              for artifact in records(api + '/artifacts?' + query, 'artifacts'):
+                  run_id = artifact['workflow_run']['id']
+                  if artifact['expired'] or run_id in seen:
+                      continue
+                  seen.add(run_id)
+                  yield get(api + '/runs/' + str(run_id))
+
+          def dependency_candidates():
               if os.environ.get('CURRENT_PR'):
                   query = urllib.parse.urlencode({'branch': os.environ['CURRENT_HEAD_REF'], 'event': 'push', 'status': 'success', 'per_page': 20})
                   yield from get(api + '/workflows/native-python-push.yml/runs?' + query)['workflow_runs']
               query = urllib.parse.urlencode({'branch': os.environ['SOURCE_BRANCH'], 'event': 'push', 'status': 'success', 'per_page': 20})
               yield from get(api + '/workflows/tests.yml/runs?' + query)['workflow_runs']
 
-          # Prefer a ready wheel. Only restore compiler dependencies when a fresh build is needed.
+          # Prefer ready native products; use the existing bounded dependency fallback on a miss.
           def select():
-              runs = list(candidates())
-              for dependencies in (False, True):
+              for dependencies, runs in ((False, candidates()), (True, dependency_candidates())):
                   for run in runs:
                       selected = qualified(run, dependencies)
                       if selected:

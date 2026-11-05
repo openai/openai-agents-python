@@ -55,10 +55,21 @@ jobs:
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884
         with:
           enable-cache: false
+      - name: Identify native build inputs
+        id: native-inputs
+        run: |
+          python - <<'PYTHON'
+          import os
+          import runpy
+          from pathlib import Path
+          identity = runpy.run_path('packages/codex/scripts/source_integrity.py')['native_bundle_identity'](Path('.'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              output.write('identity=' + identity + '\n')
+          PYTHON
       - name: Begin SDK qualification
         env:
           GH_TOKEN: ${{ github.token }}
-          NATIVE_ARTIFACTS: ${{ format('{{"{0}-{1}":{{"id":{2},"digest":"sha256:{3}","provenance":{4}}}}}', runner.os, runner.arch, inputs.artifact_id, inputs.artifact_digest, inputs.native_provenance) }}
+          NATIVE_ARTIFACTS: ${{ format('{{"{0}-{1}":{{"id":{2},"digest":"sha256:{3}","provenance":{4},"name":"native-snapshot-{0}-{1}-{5}"}}}}', runner.os, runner.arch, inputs.artifact_id, inputs.artifact_digest, inputs.native_provenance, steps.native-inputs.outputs.identity) }}
           NATIVE_SOURCE_RUN: ${{ github.run_id }}
           SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
         run: python .github/scripts/download-native-snapshot.py
