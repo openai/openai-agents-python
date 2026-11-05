@@ -450,70 +450,80 @@ class NativeA2AExecutor(AgentExecutor):
                 options["parent_trace"] = configured.parent_trace
             async with configured.agent.session(**options) as session:
                 live.session = session
-                if not live.canceled:
-                    turn = (
-                        session.restored_turn
-                        if previous is not None
-                        else await session.submit(prompt)
-                    )
-                    if turn is None:
-                        raise ValueError("Expected pending native root turn")
-                    if previous is not None:
-                        requests = await session.pending_interactions()
-                        request = next(
-                            (
-                                request
-                                for request in requests
-                                if isinstance(request, ActionRequested)
-                                and request.subagent_id is None
-                                and request.name == previous.tool_name
-                                and request.call_id == previous.call_id
-                            ),
-                            None,
-                        )
-                        if request is None:
-                            raise ValueError(
-                                "Checkpoint does not match the current manual declaration"
-                            )
-                        if not live.canceled:
-                            await request.respond(reply)
+                try:
                     if not live.canceled:
-                        progress = asyncio.create_task(
-                            self._progress(turn, binding, projection, queue)
+                        turn = (
+                            session.restored_turn
+                            if previous is not None
+                            else await session.submit(prompt)
                         )
-                        try:
-                            outcome = await turn.wait_for_request_or_result()
-                            if isinstance(outcome, PendingRequests):
-                                if (
-                                    len(outcome.requests) != 1
-                                    or not isinstance(outcome.requests[0], ActionRequested)
-                                    or outcome.requests[0].subagent_id is not None
-                                ):
-                                    raise ValueError(
-                                        "Only one settled root manual request is supported"
-                                    )
-                                request = outcome.requests[0]
-                                arguments = (
-                                    request.arguments.model_dump(mode="json")
-                                    if hasattr(request.arguments, "model_dump")
-                                    else request.arguments
+                        if turn is None:
+                            raise ValueError("Expected pending native root turn")
+                        if previous is not None:
+                            requests = await session.pending_interactions()
+                            request = next(
+                                (
+                                    request
+                                    for request in requests
+                                    if isinstance(request, ActionRequested)
+                                    and request.subagent_id is None
+                                    and request.name == previous.tool_name
+                                    and request.call_id == previous.call_id
+                                ),
+                                None,
+                            )
+                            if request is None:
+                                raise ValueError(
+                                    "Checkpoint does not match the current manual declaration"
                                 )
-                                _json(arguments, self.limits.message_bytes)
-                                checkpoint = (await session.suspend()).to_json()
-                                if len(checkpoint.encode()) > self.limits.checkpoint_bytes:
-                                    raise ValueError(
-                                        "Native checkpoint exceeds configured byte limit"
-                                    )
-                                captured = checkpoint, request.name, request.call_id, arguments
-                            else:
-                                result = await turn.get_result()
-                        except TurnStoppedError:
                             if not live.canceled:
-                                raise
-                        finally:
-                            progress.cancel()
-                            await asyncio.gather(progress, return_exceptions=True)
-            live.session = None
+                                await request.respond(reply)
+                        if not live.canceled:
+                            progress = asyncio.create_task(
+                                self._progress(turn, binding, projection, queue)
+                            )
+                            try:
+                                outcome = await turn.wait_for_request_or_result()
+                                if isinstance(outcome, PendingRequests):
+                                    if (
+                                        len(outcome.requests) != 1
+                                        or not isinstance(outcome.requests[0], ActionRequested)
+                                        or outcome.requests[0].subagent_id is not None
+                                    ):
+                                        raise ValueError(
+                                            "Only one settled root manual request is supported"
+                                        )
+                                    request = outcome.requests[0]
+                                    arguments = (
+                                        request.arguments.model_dump(mode="json")
+                                        if hasattr(request.arguments, "model_dump")
+                                        else request.arguments
+                                    )
+                                    _json(arguments, self.limits.message_bytes)
+                                    if not live.canceled:
+                                        # Later cancellation joins sealing and cleanup.
+                                        live.session = None
+                                        checkpoint = (await session.suspend()).to_json()
+                                        if len(checkpoint.encode()) > self.limits.checkpoint_bytes:
+                                            raise ValueError(
+                                                "Native checkpoint exceeds configured byte limit"
+                                            )
+                                        captured = (
+                                            checkpoint,
+                                            request.name,
+                                            request.call_id,
+                                            arguments,
+                                        )
+                                else:
+                                    result = await turn.get_result()
+                            except TurnStoppedError:
+                                if not live.canceled:
+                                    raise
+                            finally:
+                                progress.cancel()
+                                await asyncio.gather(progress, return_exceptions=True)
+                finally:
+                    live.session = None
         if live.canceled:
             return await self._commit(
                 lease,
@@ -619,9 +629,11 @@ class NativeA2AExecutor(AgentExecutor):
         live = self._live.get(binding)
         if live is not None:
             live.canceled = True
-            if live.session is not None:
-                await live.session.cancel_all()
-            await live.done.wait()
+            try:
+                if live.session is not None:
+                    await live.session.cancel_all()
+            finally:
+                await live.done.wait()
         async with self.store.own(binding) as lease:
             record = await self._load(lease, binding)
             if record is None or record.status in {"completed", "failed", "unknown"}:

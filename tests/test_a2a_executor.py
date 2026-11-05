@@ -274,3 +274,87 @@ async def test_multiple_manual_requests_rejected_without_continuation(tmp_path, 
     binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
     assert executor.store.read(binding).checkpoint is None
     assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("boundary", ["manual_ready", "suspend", "close", "close_failure"])
+async def test_cancel_joins_native_session_transition(tmp_path, responses, monkeypatch, boundary):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    from agents import Session, Turn
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    if boundary == "manual_ready":
+        owner, method = Turn, "wait_for_request_or_result"
+    else:
+        owner = Session
+        method = "_capture_checkpoint" if boundary == "suspend" else "_close_session"
+    original = getattr(owner, method)
+
+    async def held(instance, *args, **kwargs):
+        if boundary == "manual_ready":
+            outcome = await original(instance, *args, **kwargs)
+        entered.set()
+        await release.wait()
+        if boundary == "manual_ready":
+            return outcome
+        outcome = await original(instance, *args, **kwargs)
+        if boundary == "close_failure":
+            raise RuntimeError("synthetic-private-cleanup-error")
+        return outcome
+
+    monkeypatch.setattr(owner, method, held)
+    tools = []
+    if boundary in {"manual_ready", "suspend"}:
+        tools = [
+            FunctionTool(
+                name="approve", description="Host approval", input_type=Approval, output_type=str
+            )
+        ]
+        responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    else:
+        responses.respond(assistant_output("unpublished result"))
+    executor = make_executor(tmp_path, responses, tools)
+    context = request_context()
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    queue = EventQueueSource()
+    running = asyncio.create_task(invoke(executor, context))
+    canceling = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        canceling = asyncio.create_task(executor.cancel(context, queue))
+        await asyncio.sleep(0)
+        returned_before_join = canceling.done()
+        release.set()
+        settled, cancellation = await asyncio.wait_for(
+            asyncio.gather(running, canceling, return_exceptions=True), 5
+        )
+        assert not returned_before_join, repr(cancellation)
+        assert not isinstance(settled, BaseException), repr(settled)
+        saved = executor.store.read(binding)
+        stored, _ = settled
+        if boundary == "close_failure":
+            assert isinstance(cancellation, InvalidParamsError)
+            assert saved.status == "failed"
+            assert stored.task.status.state == p.TASK_STATE_FAILED
+        else:
+            assert cancellation is None, repr(cancellation)
+            assert saved.status == "canceled"
+            assert stored.task.status.state == p.TASK_STATE_CANCELED
+        assert saved.checkpoint is None and saved.challenge is None
+        assert saved.acknowledges(stored.task)
+        assert not stored.task.artifacts
+        assert "synthetic-private-cleanup-error" not in str(stored.task)
+        assert binding not in executor._live
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        for pending in (running, canceling):
+            if pending is not None and not pending.done():
+                pending.cancel()
+        await asyncio.gather(
+            *(pending for pending in (running, canceling) if pending is not None),
+            return_exceptions=True,
+        )
+        await queue.close(immediate=True)
