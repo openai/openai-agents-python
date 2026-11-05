@@ -25,6 +25,41 @@ use tokio::sync::{Mutex, mpsc};
 
 use crate::manual_checkpoint::UnsupportedManualState;
 
+/// Calls admitted to application Python code. Core cancellation text is not a
+/// receipt for the external effect these callbacks may already have produced.
+/// The engine and its extensions own this tracker for one Session lifetime;
+/// entries grow with that Session's canonical calls and drop with the engine.
+#[derive(Default)]
+pub(crate) struct ManagedCalls(std::sync::Mutex<HashSet<(String, String, String)>>);
+
+impl ManagedCalls {
+    pub(crate) fn register(&self, thread: &str, turn: &str, call: &str) {
+        self.0.lock().expect("managed calls poisoned").insert((
+            thread.into(),
+            turn.into(),
+            call.into(),
+        ));
+    }
+
+    pub(crate) fn owns_output(&self, thread: ThreadId, item: &RolloutItem) -> bool {
+        if let RolloutItem::ResponseItem(envelope) = item
+            && let ResponseItem::FunctionCallOutput {
+                call_id: Some(call),
+                internal_chat_message_metadata_passthrough: Some(metadata),
+                ..
+            } = &envelope.item
+            && let Some(turn) = &metadata.turn_id
+        {
+            return self.0.lock().expect("managed calls poisoned").contains(&(
+                thread.to_string(),
+                turn.clone(),
+                call.clone(),
+            ));
+        }
+        false
+    }
+}
+
 pub(crate) const LOCAL_CHECKLIST_DIRECTORY: &str = "sdk-checklists";
 pub(crate) const LOCAL_CHECKLIST_BUDGETS_DIRECTORY: &str = "budgets";
 
@@ -847,6 +882,7 @@ pub(crate) struct CompletionHold {
 /// Local checklist records have the lifetime of a native thread, including across
 /// new engines. Only a successful native live append can replace a record.
 pub struct LocalChecklistStore {
+    pub(crate) managed_calls: Arc<ManagedCalls>,
     inner: LocalThreadStore,
     graph: Arc<MemoryAgentGraph>,
     directory: PathBuf,
@@ -854,6 +890,7 @@ pub struct LocalChecklistStore {
     // exclusion; this gate only closes the append/shutdown race in this wrapper.
     writers: Mutex<HashMap<ThreadId, ChecklistWriter>>,
     resume_model: OnceLock<(ThreadId, Option<String>)>,
+    durability_failure: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -1236,6 +1273,24 @@ fn observe_turn(turn_id: &mut Option<String>, item: &RolloutItem) {
 }
 
 impl LocalChecklistStore {
+    pub(crate) fn check_durability(&self) -> ThreadStoreResult<()> {
+        if self
+            .durability_failure
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(ThreadStoreError::Internal { message: "Canonical thread persistence failed; close and reconcile saved history before reopening".into() });
+        }
+        Ok(())
+    }
+
+    fn retain_durability_failure<T>(&self, result: ThreadStoreResult<T>) -> ThreadStoreResult<T> {
+        if result.is_err() {
+            self.durability_failure
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
     pub(crate) async fn live_rollout_path(&self, id: ThreadId) -> ThreadStoreResult<PathBuf> {
         self.inner.live_rollout_path(id).await
     }
@@ -1279,7 +1334,9 @@ impl LocalChecklistStore {
             graph,
             directory,
             writers: Mutex::new(HashMap::new()),
+            managed_calls: Arc::new(ManagedCalls::default()),
             resume_model: OnceLock::new(),
+            durability_failure: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1365,6 +1422,8 @@ impl LocalChecklistStore {
             // Core ignores some append failures; this writer must refuse later
             // capture/close instead of accepting a synthetic cancelled result.
             writer.failure.get_or_insert_with(|| error.to_string());
+            self.durability_failure
+                .store(true, std::sync::atomic::Ordering::Release);
             return Err(error);
         }
         // Consume once at Core drain, or at the idle Core history injection
@@ -1979,6 +2038,9 @@ impl LocalChecklistStore {
         let mut receipt = None;
         if let Some(writer) = writers.get_mut(&id) {
             params.items.retain(|item| {
+                // Actual results enter through commit_sdk_receipt. Never let a
+                // synthesized cancellation claim the external effect settled.
+                let managed = self.managed_calls.owns_output(id, item);
                 if let RolloutItem::ResponseItem(envelope) = item
                     && let ResponseItem::FunctionCallOutput {
                         call_id: Some(call_id),
@@ -1989,9 +2051,9 @@ impl LocalChecklistStore {
                     } = &envelope.item
                     && let Some(turn) = &meta.turn_id
                 {
-                    return !writer.early.remove(&(turn.clone(), call_id.clone()));
+                    return !writer.early.remove(&(turn.clone(), call_id.clone())) && !managed;
                 }
-                true
+                !managed
             });
         }
         for item in &params.items {
@@ -2081,7 +2143,8 @@ impl ThreadStore for LocalChecklistStore {
                     self.inner
                         .persist_thread(id, PersistContext::Standard)
                         .await?;
-                    self.inner.flush_thread(id).await?;
+                    self.retain_durability_failure(self.inner.flush_thread(id).await)?;
+                    self.check_durability()?;
                     self.graph.admit(parent, id).await.map_err(checklist_error)
                 }
                 .await;
@@ -2217,14 +2280,17 @@ impl ThreadStore for LocalChecklistStore {
                 loss.suffix.push(params.items);
                 return Ok(());
             }
-            self.append_committed(params, &mut writers).await
+            self.check_durability()?;
+            let result = self.append_committed(params, &mut writers).await;
+            self.retain_durability_failure(result)
         })
     }
 
     fn persist_thread(&self, id: ThreadId, context: PersistContext) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let writers = self.writers.lock().await;
-            self.inner.persist_thread(id, context).await?;
+            self.retain_durability_failure(self.inner.persist_thread(id, context).await)?;
+            self.check_durability()?;
             if let Some(writer) = writers.get(&id) {
                 writer.check()?;
             }
@@ -2235,7 +2301,8 @@ impl ThreadStore for LocalChecklistStore {
     fn flush_thread(&self, id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
             let writers = self.writers.lock().await;
-            self.inner.flush_thread(id).await?;
+            self.retain_durability_failure(self.inner.flush_thread(id).await)?;
+            self.check_durability()?;
             if let Some(writer) = writers.get(&id) {
                 writer.check()?;
             }
@@ -2250,14 +2317,15 @@ impl ThreadStore for LocalChecklistStore {
                 && (writer.rebuilding.is_some() || writer.loss.is_some())
             {
                 writer.check()?;
-                return self.inner.flush_thread(id).await;
+                self.retain_durability_failure(self.inner.flush_thread(id).await)?;
+                return self.check_durability();
             }
             // Release the native OS writer even if an earlier append failed.
-            self.inner.shutdown_thread(id).await?;
+            self.retain_durability_failure(self.inner.shutdown_thread(id).await)?;
             if let Some(writer) = writers.remove(&id) {
                 writer.check()?;
             }
-            Ok(())
+            self.check_durability()
         })
     }
 
@@ -2517,7 +2585,10 @@ impl ThreadStore for LocalChecklistStore {
         &self,
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreFuture<'_, Option<StoredThread>> {
-        ThreadStore::update_thread_metadata(&self.inner, params)
+        Box::pin(async move {
+            self.check_durability()?;
+            self.retain_durability_failure(self.inner.update_thread_metadata(params).await)
+        })
     }
 
     fn move_thread_to_section(
@@ -3974,6 +4045,113 @@ mod graph_tests {
         )
         .await
         .expect("initialize selected local state")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn canonical_metadata_failure_remains_visible_after_successful_native_flush() {
+        let home = tempfile::TempDir::new().unwrap();
+        let config = local_config(home.path());
+        let db = state(&config).await;
+        let owner = LocalChecklistStore::new(
+            config.clone(),
+            LocalThreadStore::new(config.clone(), Some(db.clone())),
+            Arc::new(MemoryAgentGraph::local(db.clone())),
+        );
+        let id = ThreadId::new();
+        let params = CreateThreadParams {
+            creator_user_id: None,
+            creator_account_id: None,
+            session_id: id.into(),
+            thread_id: id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            thread_source: None,
+            originator: "sdk-metadata-durability".into(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Paginated,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            initial_window_id: id.to_string(),
+            runtime_workspace_roots: None,
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(home.path().to_path_buf()),
+                model_provider: "test-provider".into(),
+                memory_mode: ThreadMemoryMode::Disabled,
+            },
+        };
+        owner.create_thread(params.clone()).await.unwrap();
+        owner
+            .persist_thread(id, PersistContext::Standard)
+            .await
+            .unwrap();
+        owner.flush_thread(id).await.unwrap();
+
+        // Paginated metadata is canonical SQLite state. Its failure must remain
+        // visible even though the separately persisted native history can flush.
+        db.close().await;
+        owner
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id: id,
+                patch: ThreadMetadataPatch {
+                    memory_mode: Some(ThreadMemoryMode::Enabled),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect_err("canonical metadata update must fail");
+        owner.inner.flush_thread(id).await.unwrap();
+        owner
+            .flush_thread(id)
+            .await
+            .expect_err("flush must retain metadata failure");
+        owner
+            .append_items(AppendThreadItemsParams {
+                thread_id: id,
+                items: vec![RolloutItem::EventMsg(
+                    codex_protocol::protocol::EventMsg::UserMessage(
+                        codex_protocol::protocol::UserMessageEvent {
+                            message: "must wait for recovery".into(),
+                            ..Default::default()
+                        },
+                    ),
+                )],
+            })
+            .await
+            .expect_err("later appends require recovery");
+        owner
+            .shutdown_thread(id)
+            .await
+            .expect_err("close must retain metadata failure");
+        assert!(owner.inner.live_rollout_path(id).await.is_err());
+
+        // Failure belongs to this session's store, rather than a process-wide
+        // flag. A separate owner can still persist and close its own thread.
+        let healthy_home = tempfile::TempDir::new().unwrap();
+        let healthy_config = local_config(healthy_home.path());
+        let healthy_db = state(&healthy_config).await;
+        let healthy = LocalChecklistStore::new(
+            healthy_config.clone(),
+            LocalThreadStore::new(healthy_config, Some(healthy_db.clone())),
+            Arc::new(MemoryAgentGraph::local(healthy_db)),
+        );
+        let mut healthy_params = params;
+        let healthy_id = ThreadId::new();
+        healthy_params.thread_id = healthy_id;
+        healthy_params.session_id = healthy_id.into();
+        healthy_params.initial_window_id = healthy_id.to_string();
+        healthy.create_thread(healthy_params).await.unwrap();
+        healthy
+            .persist_thread(healthy_id, PersistContext::Standard)
+            .await
+            .unwrap();
+        healthy.flush_thread(healthy_id).await.unwrap();
+        healthy.shutdown_thread(healthy_id).await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

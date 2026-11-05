@@ -27,6 +27,8 @@ const MAX_BYTES: usize = 128 * 1024 * 1024;
 
 #[derive(Serialize)]
 struct Notice<'a> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tracing_context: Option<&'a str>,
     nonce: u64,
     generation: u64,
     thread_id: &'a str,
@@ -114,6 +116,9 @@ struct Route {
     owner: Weak<McpResultControl>,
     payload: Payload,
     _bytes: OwnedSemaphorePermit,
+    // Retain only the private trace context until exact physical return, never
+    // the issuer or its reply authority. Queue discard releases it as well.
+    _tracing: Option<codex_otel::sdk_trace::ContextLease>,
 }
 
 enum Payload {
@@ -475,11 +480,22 @@ impl McpResultControl {
     // Checked before bridge-owned strings/Values, including all escaped input,
     // result, metadata and identifiers. Upstream's original allocation is not
     // ours. Failure never exposes it or bypasses the unresolved result owner.
+    #[cfg(test)]
     fn enqueue(
         self: &Arc<Self>,
         state: &mut State,
         notice: &Notice<'_>,
         deadline: Instant,
+    ) -> Option<oneshot::Receiver<Option<CallToolResult>>> {
+        self.enqueue_with_context(state, notice, deadline, None)
+    }
+
+    fn enqueue_with_context(
+        self: &Arc<Self>,
+        state: &mut State,
+        notice: &Notice<'_>,
+        deadline: Instant,
+        tracing: Option<codex_otel::sdk_trace::ContextLease>,
     ) -> Option<oneshot::Receiver<Option<CallToolResult>>> {
         if state.revoked || state.pending.len() >= MAX_PENDING {
             return None;
@@ -512,6 +528,7 @@ impl McpResultControl {
                 owner: Arc::downgrade(self),
                 payload: Payload::Queued(wire),
                 _bytes: bytes,
+                _tracing: tracing,
             },
         );
         if self
@@ -886,7 +903,10 @@ impl ToolLifecycleContributor for McpResultContributor {
                     McpToolSource::SelectedPlugin => "selected_plugin",
                     McpToolSource::Other => "other",
                 };
+                let tracing = codex_otel::sdk_trace::ContextLease::capture();
+                let tracing_token = tracing.as_ref().map(|context| context.token().to_owned());
                 let notice = Notice {
+                    tracing_context: tracing_token.as_deref(),
                     nonce,
                     generation,
                     thread_id: &control.id,
@@ -901,7 +921,8 @@ impl ToolLifecycleContributor for McpResultContributor {
                     arguments: input.arguments,
                     result: &original,
                 };
-                let Some(rx) = control.enqueue(&mut state, &notice, deadline) else {
+                let Some(rx) = control.enqueue_with_context(&mut state, &notice, deadline, tracing)
+                else {
                     state
                         .unresolved
                         .get_mut(input.turn_id)
@@ -1146,6 +1167,7 @@ pub(crate) mod tests {
         result: &'a CallToolResult,
     ) -> Notice<'a> {
         Notice {
+            tracing_context: None,
             nonce,
             generation: 0,
             thread_id: "root",
@@ -1658,5 +1680,51 @@ pub(crate) mod tests {
         assert!(control.take_unresolved("old-turn"));
         assert!(!control.has_settled_failure("old-turn"));
         assert!(!control.take_unresolved("old-turn"));
+    }
+    #[tokio::test]
+    async fn handed_callback_retains_trace_lease_through_revocation_until_physical_release() {
+        let scope: Value = serde_json::from_str(
+            &codex_otel::sdk_trace::start_trace_span(
+                r#"{"name":"MCP lease test","kind":"workflow","disabled":true}"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let handle = scope["handle"].as_str().unwrap();
+        let context = codex_otel::sdk_trace::context(handle).unwrap();
+        let attached = context.attach();
+        let lease = codex_otel::sdk_trace::ContextLease::capture().unwrap();
+        let token = lease.token().to_owned();
+        drop(attached);
+        let args = json!({});
+        let result = withheld();
+        let control = Arc::new(McpResultControl::new("root".into(), true));
+        let nonce = control.channel.next_nonce.fetch_add(1, Ordering::Relaxed);
+        let mut message = notice(nonce, "turn", &args, &result);
+        message.tracing_context = Some(&token);
+        let _reply = control
+            .enqueue_with_context(
+                &mut control.state.lock().unwrap(),
+                &message,
+                Instant::now() + Duration::from_secs(30),
+                Some(lease),
+            )
+            .unwrap();
+        codex_otel::sdk_trace::release_trace_span(handle);
+        let wire: Value = serde_json::from_str(&control.next(Some(1)).await.unwrap()).unwrap();
+        assert_eq!(wire["tracing_context"], token);
+        let delivered_nonce = wire["nonce"].as_u64().unwrap();
+        assert_eq!(delivered_nonce, nonce);
+        assert!(control.handoff(delivered_nonce));
+        control.revoke();
+        assert!(
+            codex_otel::sdk_trace::context(&token).is_ok(),
+            "handed callback still owns its context"
+        );
+        assert!(control.release_family(delivered_nonce));
+        assert!(
+            codex_otel::sdk_trace::context(&token).is_err(),
+            "physical release must retire the token"
+        );
     }
 }

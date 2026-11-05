@@ -38,6 +38,60 @@ Each process owns a separate workspace and native `LocalStorage` history. A stat
 
 Each worker calls `Turn.steer_exact()` twice when the brief tool starts. The receipts confirm the native turn accepted the inputs. The worker denies approval requests and stops when an unattended run needs another decision. It uses `Turn.wait_for_attention()` to distinguish completion from interruption, connection loss, and provider limits.
 
+### Watch account quota in your application
+
+If your application already has a trusted account feed, pass a `QuotaWatch` to
+`supervise`. Feed it `account/rateLimits/read` results and
+`account/rateLimits/updated` notifications on the worker's event loop. Call
+`attach(account_id)` when you connect, reconnect, or switch accounts. Keep the
+returned binding with callbacks from that feed. A matching read establishes the
+account before the watcher accepts sparse updates.
+
+The example uses your application's `read_account_limits` helper. It returns
+the raw read and its arrival time. Use unrounded epoch seconds from the
+worker's local clock for reads and updates. The watcher accepts observations
+with timestamps strictly later than both the attachment and the last accepted
+observation. Equal timestamps leave the order ambiguous, so the watcher keeps
+the existing evidence. If your feed overlaps reads, discard superseded
+responses before forwarding them. Choose the maximum age for your feed. Here
+it is 30 seconds.
+
+```python
+from agents import PendingRequests
+from examples.supervised_worker.__main__ import supervise
+from examples.supervised_worker.quota import AccountQuotaAttention, Observation, QuotaWatch
+
+watch = QuotaWatch()
+binding = watch.attach(account_id)
+account_read, observed_at = await read_account_limits()
+watch.observe_read(Observation(binding, observed_at, observed_at + 30), account_read)
+
+outcome = await supervise(worker, turn, trace, timeout=60, quota=watch)
+if isinstance(outcome, AccountQuotaAttention):
+    # This application chooses to stop and join the live turn.
+    await turn.cancel()
+elif isinstance(outcome, PendingRequests):
+    await handle_requests(outcome.requests)  # Use your application's request handler.
+```
+
+Use `account_view()` to inspect the current binding, the raw read, and the
+latest available fields from the default bucket. Each observation records its
+source and local observation and expiry times. Check `is_current` before using
+a value. Sparse updates leave the other fields' expiry times in place. The raw
+read also carries any extra buckets from the service.
+
+Percentages, reset times, and the balance string are display values. The
+watcher wakes for a fresh explicit limit or spend-control stop. It also wakes
+when the backend denies ordinary usage and both credit flags are false. Missing
+facts leave the block unproven. API-key request and token limits stay separate
+in `Session.rate_limits()`.
+
+The worker still denies approvals. An account block or native question hands the live turn back to the application. The worker keeps observing the turn so it can steer when the brief tool starts.
+
+Keep the session open while you handle the question or wait for quota to recover. To resume, pass the same turn and trace to `wait_for_result_with_quota(turn, trace, watch)`. Cancelling that passive wait leaves the turn and its observer running. Call `turn.cancel()` to stop and join the turn, or close its session when done. A timeout or cancellation of the owning `supervise` call stops and joins the turn.
+
+The worker reports `connection_lost` when the native turn ends with a connection error. The native provider applies its own retry policy before it reports a terminal error. The application decides whether to reopen the session and send new input.
+
 ## Add trusted instructions and tools
 
 To select a trusted MCP server, pass `--mcp-url` with a server that exposes a `lookup` tool. To load a method file, pass `--instruction-file PATH`. Use the same trusted settings when reopening a worker.
