@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 
-from agents import Agent, NativeAgents, NativeRole, SessionState
+from agents import Agent, NativeAgents, NativeError, NativeRole, SessionState
 from agents.observation import UsageUpdated
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
@@ -182,3 +182,40 @@ async def test_child_metadata_uses_its_own_model_instead_of_the_parent_model(
                 assert parent.usage.model_context_window == 258_400
             finally:
                 peer.release["alpha"].set()
+
+
+async def test_compaction_overflow_reports_the_compactor_model(
+    responses: ResponsesFixture,
+) -> None:
+    responses.before_event = _report_usage
+    responses.respond(assistant_output("known"))
+    for _ in range(16):
+        responses.respond(
+            {
+                "type": "response.failed",
+                "response": {
+                    "id": "overflow",
+                    "error": {
+                        "code": "context_length_exceeded",
+                        "message": "context limit fixture",
+                    },
+                },
+            }
+        )
+    agent = Agent(model="gpt-5.5", instructions="Answer.", provider=provider(responses))
+    async with timeout(30), agent.session() as session:
+        await (await session.submit("one")).get_result()
+        await session.update(model="gpt-daybreak-red-latest")
+        turn = await session.submit("two")
+        with pytest.raises(NativeError, match="context window"):
+            await turn.get_result()
+        usage = [
+            event.usage
+            for event in await collect(turn.events())
+            if isinstance(event, UsageUpdated) and event.usage is not None
+        ]
+        assert usage
+        assert len(responses.requests) > 1
+        assert all(request["model"] == "gpt-5.5" for request in responses.requests)
+        assert usage[-1].total_token_usage.total_tokens == 258_400
+        assert usage[-1].model_context_window == 258_400

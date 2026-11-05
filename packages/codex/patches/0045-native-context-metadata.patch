@@ -1,28 +1,25 @@
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index 8c8be8ce432f68ab3fe4c87b0c159e09823396f2..571739e6cf1acf160bebb1db736dc8f354f4abd0 100644
+index 59bee0fec40f983672f626b31111a7175917206b..b109c77966021f181add7ad1367d6a3ef0aec9b3 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -316,7 +316,11 @@ async fn run_compact_task_inner_impl(
+@@ -319,7 +319,8 @@ async fn run_compact_task_inner_impl(
                      retries = 0;
                      continue;
                  }
 -                sess.set_total_tokens_full(turn_context.as_ref()).await;
-+                sess.set_total_tokens_full(
-+                    turn_context.as_ref(),
-+                    &replacement_step_context.settings,
-+                )
-+                .await;
++                sess.set_total_tokens_full(turn_context.as_ref(), &turn_context.initial_settings)
++                    .await;
                  return Err(e);
              }
              Err(e) => {
-@@ -382,8 +386,7 @@ async fn run_compact_task_inner_impl(
+@@ -385,8 +386,7 @@ async fn run_compact_task_inner_impl(
          },
      )
      .await;
 -    sess.recompute_token_usage(&replacement_step_context.turn)
 -        .await;
 +    sess.recompute_token_usage(&replacement_step_context).await;
- 
+
      sess.emit_turn_item_completed(&turn_context, compaction_item)
          .await;
 diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
