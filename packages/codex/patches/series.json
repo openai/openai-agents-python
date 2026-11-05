@@ -178,8 +178,8 @@
     },
     {
       "path": "0045-native-request-preparation.patch",
-      "sha256": "ee8538d17fa7deb81a5d3db1d8593e21f110277c03c59871e8adf735923302f6"
+      "sha256": "fd7bd10a56a6f17a31dddd732e8636e7b5446eae8cb262ea05947e54339e2bfc"
     }
   ],
-  "result_tree": "7647f506a3b2d5979749c71c36ab2a33ed9c0378"
+  "result_tree": "9a966068629793cdc7bfaa9d8791590a45c7e16f"
 }

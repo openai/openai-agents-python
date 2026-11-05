@@ -38,6 +38,11 @@ class PreparedRequest(TypedDict, closed=True):
     disappear and unsupported schema keywords are rejected before dispatch.
     Return the complete value or None to use the original request. Normal
     native transport formatting follows the callback.
+
+    If automatic compaction is due before or during sampling, the turn fails
+    before sending the compaction request. Shorten the input or start a new
+    operation without the editor. Earlier tool effects still apply. If
+    compaction is due after the turn completes, the caller receives the answer.
     """
 
     instructions: str
