@@ -4,7 +4,7 @@ The current SDK installs as `openai-agents` and imports as `agents`. Codex owns 
 
 ## Run native behavior tests
 
-Run these checks from the repository root. Build or install the matching `agents._native` extension through the repository's native build workflow before running native tests. A previously built `codex_agents._native` file is not a substitute. Tests import the binding normally and do not register an old binary under a new module name.
+Run these checks from the repository root. Before running native tests, [build from source](../packages/codex/MAINTAINING.md#build-from-this-source) or [install a qualified native wheel](../packages/codex/MAINTAINING.md#use-a-qualified-wheel-for-python-edits) that matches the checkout. A previously built `codex_agents._native` file is not a substitute. Tests import the binding normally and do not register an old binary under a new module name.
 
 Run a focused public behavior check:
 
@@ -15,6 +15,12 @@ uv run --no-sync pytest tests/test_native_agent.py
 The native modules cover typed tools and output, Session admission, cancellation, and cleanup. They also cover observations, images, tool replacement, trusted checkpoints, callback deadlines, and selected HTTP MCP tools. `tests/native_fixtures.py` owns the independent synthetic Responses server. Tests for the lower-level bindings under `packages/codex/tests` cover completion publication, cancellation, checkpoint identity, canonical history and build provenance.
 
 The synchronous callback tests hold a real worker behind an event. Cancellation, close, and deadlines must wait for that worker to finish. They do not undo application effects that already occurred. The SDK must not serialize the worker's late value or submit it to Codex. Tests should use observable transitions instead of elapsed time unless the timeout itself is the behavior under test.
+
+## Native sandbox coverage in Codex
+
+When running inside the Codex workspace sandbox, follow the canonical [code-change verification instructions](../.agents/skills/code-change-verification/SKILL.md#codex-execution-policy). Those instructions set `OPENAI_AGENTS_TEST_IN_CODEX_SANDBOX=1` and remove `OPENAI_API_KEY`. Keep that environment setting for focused checks too. Do not request broader sandbox permissions to run the checks.
+
+The test configuration skips `requires_native_linux_sandbox` tests inside the outer Codex sandbox and skips `requires_native_macos_sandbox` tests inside the macOS outer sandbox. Ordinary runs on the matching host platform keep those tests enabled. Use trusted native CI results for the skipped coverage, and report a gap when those results are unavailable. A passing local run with these skips does not verify native command isolation.
 
 ## Check public types
 

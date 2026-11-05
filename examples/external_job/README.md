@@ -4,11 +4,13 @@ Start a thumbnail request, render it in a separate worker, and resume the origin
 
 ## Set up the job
 
-Install the [matching SDK preview wheel](../../docs/sdk/installation.md) and open the repository root containing `agents.experimental.deferred` and these example files. Use a local POSIX filesystem with a Unix SQLite VFS that creates private files using the selected state directory's permissions.
+Install the [matching SDK preview wheel](../../docs/sdk/installation.md), activate its Python environment, and open the repository root containing `agents.experimental.deferred` and these example files. Use a local POSIX filesystem with a Unix SQLite VFS that creates private files using the selected state directory's permissions.
 
 Set `THUMBNAIL_STATE_DIR` to an absolute private state path outside every model-visible mount. Its parent directory must already exist and be trusted by the host. Keep the database, SQLite sidecars, locks, and private receipts outside those mounts for the job's entire lifetime. The example trusts processes with the same operating-system user ID.
 
-The `run` command needs a local Responses endpoint. The commands below assume that endpoint listens on port `8080`; replace the port if needed. The worker needs no model connection. The endpoint must request `render_thumbnail` and continue after receiving its result. For a complete synthetic model setup, see [the native test setup](../../tests/README.md) and `tests/test_deferred_jobs_example.py`.
+The `run` command needs a local Responses endpoint. The commands below assume that endpoint listens on port `8080`; replace the port if needed. The example sends a fixed `local-only` credential to that endpoint and does not use `OPENAI_API_KEY`. The worker needs no model connection.
+
+The endpoint must request `render_thumbnail` and continue after receiving its result. For a complete synthetic model setup, see [the native test setup](../../tests/README.md) and [the external-job tests](../../tests/test_deferred_jobs_example.py).
 
 ## Render and resume an order
 

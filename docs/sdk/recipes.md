@@ -34,6 +34,8 @@ These examples require `OPENAI_API_KEY`, make model requests, and can incur char
 
 ## Run supervised workers
 
+This example uses APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](installation.md#examples-and-upgrades) before running it.
+
 The [supervised worker example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/supervised_worker/README.md) runs two local processes with separate workspaces and native histories. Each worker owns its Session. A status client can disconnect, then read the same job and its accepted result from application storage.
 
 For an API-key worker that needs different write grants on different turns, use a supported local executor or Linux WSS executor. With macOS WSS, set the worker's write roots in its Environment before opening the Session. See [executor write roots](execution.md#replace-write-roots-between-turns).
@@ -62,7 +64,7 @@ Open `http://127.0.0.1:8080`, choose `alice`, send the request, and approve publ
 
 The starter separates display recovery from work cancellation:
 
-- Disconnecting stops the browser reader. **Stop** asks the worker to cancel work and wait for cleanup.
+- **Disconnect reader** stops the browser reader. **Stop work** asks the worker to cancel work and wait for cleanup.
 - Reload and `EventGap` recovery use authorized application snapshots, not replayed SDK observations.
 - After restart, unfinished receipts become `unknown`. The service does not retry their effects automatically.
 - Access to reports, checkpoints, and artifacts expires after five minutes. Stored data remains until the application deletes it.

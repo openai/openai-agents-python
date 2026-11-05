@@ -8,6 +8,8 @@ Before opening the Session, [configure an Environment](execution.md) with `exec_
 
 Add `NativeAgents()` to `Agent.tools` or the opening `agent.session(tools=[...])` call. The child uses the parent's provider and credentials, plus the configured Environment's connection and workspace policy.
 
+The first example waits for the root result and then closes the Session. If your application also needs results from children still running at that point, [observe those children](#observe-child-results) inside the open Session before leaving `async with`. Session exit stops the native tree.
+
 ```python
 from agents import Agent, NativeAgents
 
@@ -36,6 +38,12 @@ Set delegation limits on `NativeAgents`:
 
 - `max_depth=1` (default) permits direct children only. Larger positive values allow further delegation but do not add model capabilities.
 - `max_children=None` uses Codex's native limit. A positive value limits concurrent children across the tree, not the total created.
+
+### Select tools for each child step
+
+To narrow a child's tools before each model step, set `NativeAgents(before_step=select)`. The synchronous or asynchronous `select(child, *, step_index)` callback receives a `ChildInvocation` for that exact child instance and turn. Return `None` to use that child operation's default selection, a sequence to narrow the admitted tools, or `[]` to disable all model tools for that preparation. The selection cannot add tools or replace their definitions.
+
+`step_index` starts at zero for each child turn and counts preparations, which can end before a model request. Root turns use the separate [`before_step` callback on submission](sessions.md#select-tools-before-each-model-step).
 
 ### Shared tools and permissions
 

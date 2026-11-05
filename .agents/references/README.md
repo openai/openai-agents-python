@@ -9,7 +9,9 @@ Use this map to find the owner of an affected SDK boundary, then inspect the cur
 | Python function schemas, callbacks and typed context | `src/agents/_function_tools.py`, `src/agents/tools.py`; [tools](../../docs/sdk/tools.md) |
 | Manual tools and live replies | `src/agents/manual.py`; [manual tools](../../docs/sdk/approvals.md#manual-tool-results) |
 | Passive observations and accepted history | `src/agents/observation.py`, `src/agents/_projection.py`; [observation details](../../docs/sdk/sessions.md#observation-details) |
-| MCP, remote executors and native children | `src/agents/mcp.py`, `src/agents/executor.py`, `src/agents/native_agents.py`; [MCP](../../docs/sdk/tools.md#native-mcp) and [remote execution](../../docs/sdk/execution.md#remote-execution) |
+| MCP connections and result policies | `src/agents/mcp.py`; [native MCP](../../docs/sdk/tools.md#native-mcp) |
+| Local and remote executor policies | `src/agents/executor.py`; [execution](../../docs/sdk/execution.md) |
+| Native child declarations and controls | `src/agents/native_agents.py`, `src/agents/subagents.py`; [delegation](../../docs/sdk/delegation.md) |
 | Checkpoints and retained goal/checklist data | `src/agents/state.py`, `packages/codex/rust/checkpoint.rs`; [save and restore](../../docs/sdk/state.md#save-and-restore-a-portable-checkpoint) |
 | Embedded Codex and PyO3 bindings | `packages/codex/rust/`; [native maintainer guide](../../packages/codex/MAINTAINING.md) |
 

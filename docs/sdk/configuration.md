@@ -155,7 +155,9 @@ for repair in result.repair_attempts:
 
 Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
-Live manual replies and idle restore support structured output. Settled manual turns can be suspended with matching `PromptedOutput`, but pending `NativeOutput` or bare structured output cannot. See [saving a settled manual request](state.md#save-a-settled-manual-request) for fingerprint, active repair and `before_step` limits.
+Live manual replies and idle restore support structured output. An explicit Session can suspend a settled manual turn with `NativeOutput`, a bare structured output type, or `PromptedOutput`. Restore must match the saved output mode and schema, including the retry setting for prompted output.
+
+Automatic one-shot checkpoints support native strict output but exclude `PromptedOutput`. See [saving a settled manual request](state.md#save-a-settled-manual-request) for output matching, active repair and `before_step` limits, and [automatic checkpoint limits](state.md#automatic-checkpoint-limits) for one-shot restrictions.
 
 ## Telemetry
 
@@ -196,7 +198,7 @@ You write the application and function tools in Python. Model-generated cells ru
 These limits apply:
 
 - Python functions handle arguments and results. MCP result policies run before cells receive results.
-- The host grants no shell tools or local workspace. Pass `Environment` to the Session or one-shot run for remote execution.
+- The Code Mode host grants no shell tools or workspace access by itself. For native workspace execution, pass an [Environment](execution.md) with executor tools selected to the Session or one-shot run.
 - A manual call waits for an application reply in the live Session. Pending code cells cannot be saved as portable checkpoints.
 - `exec` and `wait` are reserved function names.
 

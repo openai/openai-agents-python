@@ -196,7 +196,7 @@ For questions your application asks, declare a `FunctionTool` with typed questio
 
 ### Continue a one-shot manual request
 
-For an ordinary Python/manual run with plain-text Agent output, `agent.run()` and `agent.run_sync()` can start without `on_interaction`. If the model never calls a manual tool, the run completes normally. If it calls one, the SDK waits for a supported settled manual boundary, then raises `InteractionRequired` with a portable checkpoint. Completed tool effects are not replayed on restore.
+For a Python/manual run with plain-text or native strict Agent output, `agent.run()` and `agent.run_sync()` can start without `on_interaction`. If the model never calls a manual tool, the run completes normally. If it calls one, the SDK waits for a supported settled manual boundary, then raises `InteractionRequired` with a portable checkpoint. Completed tool effects are not replayed on restore.
 
 ```python
 from agents import InteractionRequired
@@ -293,7 +293,7 @@ If credentials, definitions, or instructions changed, prepare and restore explic
 
 ### Recovery limits and duplicate prevention
 
-Prepare a root request before its first restore. Recovery supports plain-text and supported `PromptedOutput` roots. It cannot prepare pending native-schema output, requests using an Environment, native agents, programmatic tool calling, or child requests. Use live replies for those cases. See [saving a settled manual request](state.md#save-a-settled-manual-request).
+Prepare a root request before its first restore. `DeferredTools` supports plain-text and supported `PromptedOutput` roots. This helper rejects pending native-schema output, requests using an Environment, native agents, programmatic tool calling, and child requests. Use live replies for configurations the helper rejects. A settled root request with native strict output can also use [explicit Session suspension](state.md#save-a-settled-manual-request), with a matching output declaration on restore.
 
 The journal must let only one worker claim creation and must check current permissions, exact binding, and generation on every operation.
 

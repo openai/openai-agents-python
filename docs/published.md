@@ -6,7 +6,7 @@ Examples that call a live model need an OpenAI API key. The [scripted testing gu
 
 ## Set an OpenAI API key
 
-Set your API key in the shell where you run your agent.
+[Create an OpenAI API key](https://developers.openai.com/api/docs/quickstart#create-and-export-an-api-key) if you do not already have one. Replace `your-key` below with that key, and set it in the shell where you run your agent.
 
 On Linux or macOS:
 
