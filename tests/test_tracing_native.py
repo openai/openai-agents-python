@@ -1236,7 +1236,7 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                             disabled=mode == "origin_disabled",
                             include_sensitive_data=True,
                         ),
-                    ):
+                    ) as creation_scope:
                         initial = await session.submit("Create child")
                     assert (await initial.get_result()).final_output == "root complete"
                     await model.entered["alpha"].wait()
@@ -1259,10 +1259,31 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                         row[1:] == (origin_id, disabled, mode != "metadata") for row in seen
                     ), seen
                 assert (await telemetry.force_flush(timeout_ms=5000)).status == "success"
+                origin_events = [
+                    event for event in recorder.events if event["trace_id"] == origin_id
+                ]
+                caller_events = [
+                    event
+                    for event in origin_events
+                    if event["span_id"] == creation_scope.context.span_id
+                ]
+                # The independent caller workflow may record even when the
+                # session/child is disabled. It does not grant child export.
+                assert bool(caller_events) == (mode != "origin_disabled")
+                if caller_events:
+                    assert {event["lifecycle"] for event in caller_events} == {"start", "end"}
+                assert all(
+                    event["name"] == "child creation"
+                    and event["parent_span_id"] == creation_scope.context.parent_span_id
+                    for event in caller_events
+                )
                 if disabled:
-                    assert not any(event["trace_id"] == origin_id for event in recorder.events)
+                    assert origin_events == caller_events
                 else:
-                    assert any(event["trace_id"] == origin_id for event in recorder.events)
+                    assert any(
+                        event["span_id"] != creation_scope.context.span_id
+                        for event in origin_events
+                    )
                     assert fresh not in json.dumps(peer.records)
                     assert steer not in json.dumps(peer.records)
 
