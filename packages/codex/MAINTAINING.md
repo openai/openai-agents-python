@@ -94,7 +94,7 @@ PR Tests checks the latest 20 successful push runs for each eligible source. It 
 
 #### Keep native and SDK caches separate
 
-Native producers do not restore or save Actions caches, including Cargo targets, source trees, V8 bundles and Python build tools. Verified native snapshots provide reuse across runs; fresh job-local Cargo and uv directories provide reuse within one build. SDK-phase caches remain separate. Native-input or recipe changes require fresh production; local Python tests do not replace full platform qualification.
+Native producers do not restore or save Actions caches. They prefer verified native snapshots. If only local Rust source and permitted SDK files changed, they can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. They use the same donor, digest, publication and qualification checks as snapshots. They preserve dependency sources and timestamps, remove compiled `codex-agents-python` outputs, and require matching build environments. Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
 
 ## Keep the pin and source verifiable
 
