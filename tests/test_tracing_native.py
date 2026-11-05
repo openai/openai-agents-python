@@ -129,6 +129,7 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "manual_restore",
         "shutdown_budget",
         "mcp_policy",
+        "terminal_queue",
     ],
 )
 def test_native_tracing_contract(case: str) -> None:
@@ -156,6 +157,9 @@ def test_native_tracing_contract(case: str) -> None:
 
 
 async def _native_case(case: str) -> None:
+    if case == "terminal_queue":
+        await _shutdown_seals_queued_exports()
+        return
     fixture = ResponsesFixture()
     application = web.Application()
     application.router.add_post("/v1/responses", fixture.handle)
@@ -217,6 +221,61 @@ async def _native_case(case: str) -> None:
             finally:
                 await provider.aclose()
                 await telemetry.shutdown(timeout_ms=5000)
+
+
+async def _shutdown_seals_queued_exports() -> None:
+    entered, release, unexpected = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    batches: list[int] = []
+
+    async def receive(request: web.Request) -> web.Response:
+        payload = await request.json()
+        batches.append(
+            sum(
+                len(scope.get("spans", []))
+                for resource in payload.get("resourceSpans", [])
+                for scope in resource.get("scopeSpans", [])
+            )
+        )
+        if len(batches) == 1:
+            entered.set()
+            await release.wait()
+        else:
+            unexpected.set()
+        return web.json_response({})
+
+    application = web.Application()
+    application.router.add_post("/v1/traces", receive)
+    async with TestServer(application) as collector:
+        await telemetry.configure(
+            traces=telemetry.OtlpHttp(
+                endpoint=str(collector.make_url("/v1/traces")), protocol="json"
+            )
+        )
+        try:
+            for index in range(6):
+                credentials = telemetry.TraceExportCredentials(
+                    headers={"authorization": f"synthetic-private-{index}"}
+                )
+                with telemetry.trace(
+                    f"queued-{index}",
+                    options=telemetry.TraceOptions(export_credentials=credentials),
+                ):
+                    pass
+            await asyncio.wait_for(entered.wait(), 10)
+            try:
+                await asyncio.wait_for(telemetry.shutdown(timeout_ms=30), 2)
+            except RuntimeError as error:
+                message = str(error).lower()
+                assert "time budget" in message or message.startswith(
+                    "telemetry shutdown timed out waiting for"
+                )
+            assert batches == [1]
+            release.set()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(unexpected.wait(), 0.25)
+            assert batches == [1]
+        finally:
+            release.set()
 
 
 async def _mcp_policy(
