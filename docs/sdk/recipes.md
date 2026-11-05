@@ -2,32 +2,6 @@
 
 Install the [SDK preview wheel](installation.md) and use examples from the matching release. Most recipes use scripted model responses and need no API key. They test application behavior, not live model quality.
 
-## Find the rule before changing code
-
-Use these guides for the rules behind each recipe:
-
-| Task | Guide |
-| --- | --- |
-| Save or resume a conversation | [Storage choices](sessions.md#choose-how-to-store-a-conversation) and [capture readiness](sessions.md#check-support-and-capture-readiness) |
-| Stream to a browser or stop work | [Stream observations](sessions.md#stream-observations) and [cancel joined work](sessions.md#interrupt-work) |
-| Validate tool inputs and results | [Python tools](tools.md#python-functions), [argument inspection](tools.md#inspect-python-policy-arguments), and [structured output](configuration.md#structured-output) |
-| Call tools from generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) |
-| Run an MCP server locally | [Native MCP](tools.md#native-mcp) |
-| Manage conversation context and application memory | [History and compaction](sessions.md#compact-and-inspect-history) |
-| Delegate to another agent | [Native children](tools.md#native-children) |
-
-For PDFs or document search, extract text in application code and retrieve authorized excerpts. The SDK cannot accept PDFs or arbitrary files directly or provide authoritative native citation spans. Images require inline image data.
-
-## Human in the loop: approve the exact request
-
-Use [manual tool results](tools.md#manual-tool-results) when your application or a person supplies a tool answer. Use [application approval](tools.md#ask-for-application-approval) to decide whether an executor call may run.
-
-Before accepting a reply, verify that the authenticated caller can answer that exact pending request. A timeout or cancellation does not undo completed effects.
-
-## Rate limits and token budget
-
-Limit accepted and queued application work separately from provider rate limits. [Usage and deadlines](troubleshooting.md) report consumption and let you cancel work, but neither enforces a strict token or cost limit. Enforce strict limits outside the SDK.
-
 ## Runnable task examples
 
 Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. Run a module with `python -m examples.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
@@ -58,6 +32,16 @@ These examples require `OPENAI_API_KEY`, make model requests, and can incur char
 | [`retrieval`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/retrieval.py) | Searches tenant-scoped text and checks returned source IDs against retrieved IDs. A matching ID does not prove that the source supports the answer. |
 | [`programmatic_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/programmatic_tools.py) | Generated JavaScript aggregates regional sales and prints tool calls and history. Pending code cells and their runtime state need an open Session. |
 
+## Run supervised workers
+
+This example uses APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](installation.md#examples-and-upgrades) before running it.
+
+The [supervised worker example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/supervised_worker/README.md) runs two local processes with separate workspaces and native histories. Each worker owns its Session. A status client can disconnect, then read the same job and its accepted result from application storage.
+
+For an API-key worker that needs different write grants on different turns, use a supported local executor or Linux WSS executor. With macOS WSS, set the worker's write roots in its Environment before opening the Session. See [executor write roots](execution.md#replace-write-roots-between-turns).
+
+The worker checks the actual artifact and the retained command result before accepting a draft. It can request revisions in the same conversation. An explicit publish action uses the accepted record to write a local marker once. The example also shows how to reconcile a simulated handoff after a crash and how to measure session startup, first tool result, turn completion, and revision times separately.
+
 ## Start a local browser application
 
 The [browser starter](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/web_starter/README.md) combines tools, human approval, a typed result, and an authorized artifact download. It uses pinned aiohttp and a browser client. A FastAPI adaptation must preserve its identity, request, streaming, and cleanup rules.
@@ -80,12 +64,38 @@ Open `http://127.0.0.1:8080`, choose `alice`, send the request, and approve publ
 
 The starter separates display recovery from work cancellation:
 
-- Disconnecting stops the browser reader. **Stop** asks the worker to cancel work and wait for cleanup.
+- **Disconnect reader** stops the browser reader. **Stop work** asks the worker to cancel work and wait for cleanup.
 - Reload and `EventGap` recovery use authorized application snapshots, not replayed SDK observations.
 - After restart, unfinished receipts become `unknown`. The service does not retry their effects automatically.
 - Access to reports, checkpoints, and artifacts expires after five minutes. Stored data remains until the application deletes it.
 
 See the starter's README for work limits, cancellation deadlines, MCP credentials, and external-worker commands.
+
+## Check feature limits
+
+Use these guides for the rules behind each recipe:
+
+| Task | Guide |
+| --- | --- |
+| Save or resume a conversation | [Storage choices](state.md#choose-how-to-store-a-conversation) and [capture readiness](state.md#check-support-and-capture-readiness) |
+| Stream to a browser or stop work | [Stream observations](sessions.md#stream-observations) and [cancel joined work](sessions.md#interrupt-work) |
+| Validate tool inputs and results | [Python tools](tools.md#python-functions), [argument inspection](tools.md#inspect-python-policy-arguments), and [structured output](configuration.md#structured-output) |
+| Call tools from generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) |
+| Run an MCP server locally | [Native MCP](tools.md#native-mcp) |
+| Manage conversation context and application memory | [History and compaction](state.md#compact-conversation-context) |
+| Delegate to another agent | [Native children](delegation.md#native-children) |
+
+For PDFs or document search, extract text in application code and retrieve authorized excerpts. The SDK cannot accept PDFs or arbitrary files directly or provide authoritative native citation spans. Images require inline image data.
+
+## Human in the loop: approve the exact request
+
+Use [manual tool results](approvals.md#manual-tool-results) when your application or a person supplies a tool answer. Use [application approval](approvals.md#ask-for-application-approval) to decide whether an executor call may run.
+
+Before accepting a reply, verify that the authenticated caller can answer that exact pending request. A timeout or cancellation does not undo completed effects.
+
+## Rate limits and token budget
+
+Read the [API-key rate-limit snapshot](configuration.md#read-api-key-rate-limits) and set your own limits on accepted and queued work. Use [usage and deadlines](troubleshooting.md) to report consumption and stop work. Enforce strict token or cost limits in your application.
 
 ## Keep each data store's lifetime explicit
 
@@ -93,8 +103,8 @@ Choose retention, access, and deletion rules for each store:
 
 | Store | Lifetime and limits |
 | --- | --- |
-| Model conversation context | The native Session owns it. `compact(summary=...)` replaces context and preserves canonical history. `compact()` asks the model for a summary and lets the runtime replace history. Neither selectively deletes facts. See [compaction](sessions.md#compact-and-inspect-history). |
-| Public projected history | A filtered view of native history, with no separate retention policy or general selective deletion. It is not a complete UI transcript. See [history and context](sessions.md#compact-and-inspect-history). |
+| Model conversation context | The native Session owns it. `compact(summary=...)` replaces context and preserves canonical history. `compact()` asks the model for a summary and lets the runtime replace history. Neither selectively deletes facts. See [compaction](state.md#compact-conversation-context). |
+| Public projected history | A filtered view of native history, with no separate retention policy or general selective deletion. It is not a complete UI transcript. See [history and context](state.md#compact-conversation-context). |
 | Portable checkpoint | Trusted application storage can retain old facts. Restoring requires current configuration. Deleting a database fact does not rewrite checkpoints. |
 | Application memory | The application controls storage, access, expiry, and deletion. The recipe stores one fact per user but has no identity provider or automatic expiry. |
 | Workspace artifacts | Application or executor storage controls files. Checkpoints do not copy or delete them. |

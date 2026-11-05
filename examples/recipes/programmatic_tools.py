@@ -12,7 +12,7 @@ approvals, unanswered questions and unfinished result policies prevent saving.
 Children must finish with no live processes or pending decisions. Supported root
 manual suspension can retain settled root and child VM values; active
 continuations cannot be captured.
-See docs/sdk/sessions.md#compact-save-and-restore for the full save contract.
+See docs/sdk/state.md#save-and-restore-a-portable-checkpoint for the full save contract.
 """
 
 import asyncio

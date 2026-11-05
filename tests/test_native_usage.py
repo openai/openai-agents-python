@@ -12,7 +12,8 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 from typing_extensions import assert_type
 
-from agents import Agent, Completed, Session, Turn, TurnStoppedError, function_tool
+from agents import Agent, Completed, Session, SessionState, Turn, TurnStoppedError, function_tool
+from agents._history import project_history
 from agents.observation import UsageUpdated
 from agents.usage import TokenUsage, TokenUsageInfo
 from tests._asyncio import timeout
@@ -107,6 +108,21 @@ async def test_native_multiple_responses_turns_and_repeated_rate_observations(
         assert len(responses.requests) == 3
         assert tool_output(responses.requests[1], "lookup-a") == "resolved-A"
         assert "first" in json.dumps(responses.requests[2]["input"])
+        turns = {turn["id"]: turn async for turn in session.turns()}
+        assert turns[first.turn_id]["usage"] == {
+            "input_tokens": 34,
+            "input_tokens_details": {"cached_tokens": 6, "cache_write_tokens": 8},
+            "output_tokens": 14,
+            "output_tokens_details": {"reasoning_tokens": 4},
+            "total_tokens": 48,
+        }
+        assert turns[second.turn_id]["usage"] == {
+            "input_tokens": 17,
+            "input_tokens_details": {"cached_tokens": 3, "cache_write_tokens": 4},
+            "output_tokens": 7,
+            "output_tokens_details": {"reasoning_tokens": 2},
+            "total_tokens": 24,
+        }
 
         # Native defers a rate observation until completion. No new usage
         # leaves its previous counts intact, even on successive submissions.
@@ -176,6 +192,9 @@ async def test_missing_native_usage_does_not_become_zero(responses: ResponsesFix
             event for event in await collect(handle.events()) if isinstance(event, UsageUpdated)
         ]
         assert observed and all(event.usage is None for event in observed)
+        turns = [turn async for turn in session.turns()]
+        assert len(turns) == 1
+        assert turns[0]["usage"] is None
         assert len(responses.requests) == 1
 
 
@@ -194,6 +213,9 @@ async def test_native_restore_retains_total_and_separate_roots_do_not_share_usag
             assert saved_result.usage is not None
             assert saved_result.usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
             state = await original.save_state()
+            saved_turns = [turn async for turn in original.turns()]
+            assert saved_turns[0]["usage"] is not None
+            assert saved_turns[0]["usage"]["input_tokens_details"]["cache_write_tokens"] == 4
             async with agent.session() as unrelated:
                 other_handle = await unrelated.submit("independent")
                 other = await (other_handle).get_result()
@@ -201,6 +223,7 @@ async def test_native_restore_retains_total_and_separate_roots_do_not_share_usag
                 assert other.usage is not None
                 assert other.usage.total_token_usage == TokenUsage(17, 3, 4, 7, 2, 24)
         async with agent.session(state=state) as restored:
+            assert [turn async for turn in restored.turns()] == saved_turns
             resumed_handle = await restored.submit("continue")
             resumed = await (resumed_handle).get_result()
             assert resumed.usage is not None
@@ -210,6 +233,41 @@ async def test_native_restore_retains_total_and_separate_roots_do_not_share_usag
         assert len(responses.requests) == 3
         assert "remember this" not in json.dumps(responses.requests[1]["input"])
         assert "remember this" in json.dumps(responses.requests[2]["input"])
+
+
+@pytest.mark.parametrize("cache_write", [None, 0, 4])
+def test_recorded_cache_writes_preserve_missing_values_and_state(cache_write: int | None) -> None:
+    native_usage = {"input_tokens": 17, "cached_input_tokens": 3, "total_tokens": 24}
+    if cache_write is not None:
+        native_usage["cache_write_input_tokens"] = cache_write
+    turns, _ = project_history(
+        [
+            {"type": "event_msg", "payload": {"type": "task_started", "turn_id": "turn"}},
+            {
+                "type": "token_usage_record",
+                "payload": {"turn_id": "turn", "turn_token_usage": native_usage},
+            },
+            {"type": "event_msg", "payload": {"type": "task_complete", "turn_id": "turn"}},
+        ],
+        "session",
+    )
+    usage = turns[0]["usage"]
+    assert usage is not None
+    expected_details = {"cached_tokens": 3}
+    if cache_write is not None:
+        expected_details["cache_write_tokens"] = cache_write
+    assert usage["input_tokens_details"] == expected_details
+    turns[0]["parent_session_id"] = "parent-session"
+    turns[0]["parent_turn_id"] = "parent-turn"
+    state = SessionState(
+        format_version=2,
+        codex_revision="synthetic-revision",
+        source_session_id="session",
+        history=[],
+        root_metadata={},
+        repair_turns=turns,
+    )
+    assert SessionState.from_json(state.to_json()).repair_turns == turns
 
 
 async def test_cancel_joins_pending_native_usage_capture_before_admitting_next_turn(

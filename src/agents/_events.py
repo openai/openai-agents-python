@@ -24,6 +24,8 @@ class NativeEvent(TypedDict):
 
 class InputTokensDetails(TypedDict):
     cached_tokens: int
+    # Omitted when unavailable in the source record; an explicit zero is known.
+    cache_write_tokens: NotRequired[int]
 
 
 class OutputTokensDetails(TypedDict):
@@ -535,6 +537,7 @@ class FunctionCallOutputItem(TypedDict):
     status: FunctionCallStatus
     output: str | list[InputText | InputImage] | None
     error: str | None
+    reconciliation: NotRequired[Literal["applied", "not_applied"]]
 
 
 class McpCallItem(TypedDict):

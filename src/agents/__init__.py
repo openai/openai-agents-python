@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     )
     from .agent import (
         Agent as Agent,
+        CodexAccount as CodexAccount,
+        CodexLogin as CodexLogin,
         ModelSettings as ModelSettings,
         NativeProvider as NativeProvider,
     )
@@ -59,6 +61,11 @@ if TYPE_CHECKING:
     from .rate_limits import (
         ApiRateLimits as ApiRateLimits,
         ApiRateLimitWindow as ApiRateLimitWindow,
+    )
+    from .recovery import (
+        LocalRecoveryRequired as LocalRecoveryRequired,
+        ReconciledCall as ReconciledCall,
+        UncertainCall as UncertainCall,
     )
     from .schema import (
         NativeOutput as NativeOutput,
@@ -140,6 +147,8 @@ _MODULES = {
     "VerificationProof": ".manual",
     "Interaction": ".manual",
     "Agent": ".agent",
+    "CodexAccount": ".agent",
+    "CodexLogin": ".agent",
     "ModelSettings": ".agent",
     "NativeProvider": ".agent",
     "NativeOutput": ".schema",
@@ -148,6 +157,9 @@ _MODULES = {
     "OutputValidationError": ".schema",
     "CheckpointStatus": ".state",
     "LocalStorage": ".state",
+    "LocalRecoveryRequired": ".recovery",
+    "ReconciledCall": ".recovery",
+    "UncertainCall": ".recovery",
     "ApiRateLimits": ".rate_limits",
     "ApiRateLimitWindow": ".rate_limits",
     "InputImage": ".input",

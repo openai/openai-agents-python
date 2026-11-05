@@ -28,13 +28,16 @@ from .subagents import Subagent
 
 
 def _usage(native: dict[str, Any]) -> TokenUsage:
-    return {
+    usage: TokenUsage = {
         "input_tokens": native.get("input_tokens", 0),
         "input_tokens_details": {"cached_tokens": native.get("cached_input_tokens", 0)},
         "output_tokens": native.get("output_tokens", 0),
         "output_tokens_details": {"reasoning_tokens": native.get("reasoning_output_tokens", 0)},
         "total_tokens": native.get("total_tokens", 0),
     }
+    if "cache_write_input_tokens" in native:
+        usage["input_tokens_details"]["cache_write_tokens"] = native["cache_write_input_tokens"]
+    return usage
 
 
 def _error_code(error: dict[str, Any]) -> str | None:

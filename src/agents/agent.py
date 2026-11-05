@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from .executor import Environment, EnvironmentSource
     from .input import UserInput
     from .native_agents import NativeAgents
+    from .recovery import ReconciledCall
     from .schema import OutputSpec
     from .session import (
         Completed,
@@ -131,16 +132,54 @@ def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:
 
 
 @dataclass(frozen=True, kw_only=True)
+class CodexLogin:
+    """Reuse an existing file-backed Codex login for a local native Session.
+
+    Codex locates its usual login directory unless you supply ``codex_home``.
+    Set ``account_id`` to require a specific ChatGPT account or workspace.
+    The SDK checks the saved login when it opens a Session.
+
+    This experimental mode may change or be absent from the public beta or
+    general availability of the Agents SDK.
+    """
+
+    codex_home: str | Path | None = field(default=None, repr=False)
+    account_id: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.codex_home is not None and (
+            not isinstance(self.codex_home, (str, Path)) or not str(self.codex_home).strip()
+        ):
+            raise ValueError("codex_home must be a non-empty path")
+        if self.account_id is not None and (
+            not isinstance(self.account_id, str) or not self.account_id.strip()
+        ):
+            raise ValueError("account_id must be a non-empty string")
+
+
+@dataclass(frozen=True, kw_only=True)
+class CodexAccount:
+    """The saved plan type and optional workspace ID at Session opening."""
+
+    account_id: str | None
+    plan_type: str
+
+
+@dataclass(frozen=True, kw_only=True)
 class NativeProvider:
     """A native Responses connection. Construction performs no I/O.
 
-    An omitted key uses ``OPENAI_API_KEY`` when the session opens. Credentials
-    and connection URLs are excluded from the descriptor's representation.
+    For API-key authentication, an omitted key uses ``OPENAI_API_KEY`` when
+    the Session opens. Credentials and connection URLs are excluded from the
+    descriptor's representation.
     With ``supports_websockets=None``, the SDK permits WebSockets only when
     ``base_url=None``; an explicit ``base_url`` defaults to HTTP. Set ``True``
     to permit WebSockets for a compatible custom provider, or ``False`` to use
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries.
+
+    Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
+    Omit ``api_key`` and ``base_url`` in this experimental mode.
 
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
@@ -149,6 +188,7 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
+    auth: CodexLogin | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         for name in ("base_url", "api_key"):
@@ -157,10 +197,15 @@ class NativeProvider:
                 raise ValueError(f"{name} must be a non-empty string when provided")
         if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
             raise ValueError("supports_websockets must be a bool or None")
+        if self.auth is not None:
+            if not isinstance(self.auth, CodexLogin):
+                raise TypeError("auth must be CodexLogin or None")
+            if self.api_key is not None or self.base_url is not None or self.supports_websockets:
+                raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
 
     @property
     def _websockets_enabled(self) -> bool:
-        return (
+        return self.auth is None and (
             self.supports_websockets
             if self.supports_websockets is not None
             else self.base_url is None
@@ -485,6 +530,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[None] | None = None,
         tools: Sequence[Tool[None]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[None, OutputT]]: ...
 
     @overload
@@ -501,6 +547,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[object] | None = None,
         tools: Sequence[Tool[object]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[object, OutputT]]: ...
 
     @overload
@@ -517,6 +564,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[ContextT] | None = None,
         tools: Sequence[Tool[ContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]: ...
 
     @asynccontextmanager
@@ -533,6 +581,7 @@ class Agent(Generic[ContextT, OutputT]):
         environment: EnvironmentSource[SessionContextT] | None = None,
         tools: Sequence[Tool[SessionContextT]] | None = None,
         instruction_files: Sequence[Path] = (),
+        reconciled_calls: Sequence[ReconciledCall] = (),
     ) -> AsyncIterator[Session[SessionContextT, OutputT]]:
         """Open one conversation and close all runtime work on context exit.
 
@@ -577,8 +626,12 @@ class Agent(Generic[ContextT, OutputT]):
         With ``storage=LocalStorage(path)``, use Core's native local storage.
         Retain Session.id and supply ``resume=id`` in a later process to reopen
         the same conversation. This requires the current tools, context and
-        provider. Missing tool receipts are rejected as unknown effects, not
-        replayed. Local storage and portable ``state`` cannot be combined.
+        provider. An unknown root tool outcome raises LocalRecoveryRequired.
+        Check the effect using application records and pass reconciled_calls
+        on reopen. The SDK records those outcomes without running those
+        calls. An unknown descendant tool outcome raises RuntimeError because
+        descendant calls cannot be reconciled. Local storage and portable
+        ``state`` cannot be combined.
 
         Pass instruction_files to load trusted UTF-8 files as application
         instructions. Use files and parent directories that untrusted actors
@@ -598,6 +651,7 @@ class Agent(Generic[ContextT, OutputT]):
             model_settings=model_settings,
             tool_selection=tools,
             instruction_files=instruction_files,
+            reconciled_calls=reconciled_calls,
         )
         try:
             yield session
