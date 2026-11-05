@@ -223,7 +223,11 @@
     {
       "path": "0046-native-documented-defaults.patch",
       "sha256": "e03f4c67d22f559ac9ba3056c91c5731c7a66975022603a0d571a8acdc34fc34"
+    },
+    {
+      "path": "0054-model-context-transform.patch",
+      "sha256": "d4904edbf30a77b083263c1633c0a0a19ad64b7392406a7be112bc7e37b2ded3"
     }
   ],
-  "result_tree": "c1c2ab079be5a7828b9c612c326483ff4f329ba4"
+  "result_tree": "a48a9209954be06eec1100ca9aff9af6df67fe1e"
 }

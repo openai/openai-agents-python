@@ -121,12 +121,32 @@ pub struct PythonTools {
     interception: OnceLock<Weak<crate::native_interception::Control>>,
     selecting_steps: AtomicBool,
     selecting_children: AtomicBool,
+    context_transform_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
     // share the lock so a late step cannot wait on an already closed reader.
-    step_replies: Mutex<Option<HashMap<u64, oneshot::Sender<Option<Vec<ToolName>>>>>>,
+    step_replies: Mutex<Option<HashMap<u64, oneshot::Sender<Option<Value>>>>>,
     #[cfg(test)]
     pub(crate) before_result: Mutex<Option<Arc<manual_checkpoint_tests::BeforeResult>>>,
+}
+
+struct PendingPreparation {
+    tools: Arc<PythonTools>,
+    id: u64,
+}
+
+impl Drop for PendingPreparation {
+    fn drop(&mut self) {
+        if let Some(pending) = self
+            .tools
+            .step_replies
+            .lock()
+            .expect("Python step replies poisoned")
+            .as_mut()
+        {
+            pending.remove(&self.id);
+        }
+    }
 }
 
 enum QueuedRequest {
@@ -1013,14 +1033,19 @@ impl PythonTools {
     pub(crate) fn sdk_owned(&self) -> bool {
         self.policy.allowed_tools.as_deref() == Some(&[sdk_name()])
     }
-    pub fn install(startup: &mut StartThreadOptions, specs: Vec<DynamicToolSpec>) -> Result<()> {
-        Self::install_manual(startup, specs, &[])
+    pub fn install(
+        startup: &mut StartThreadOptions,
+        specs: Vec<DynamicToolSpec>,
+        transform_context: bool,
+    ) -> Result<()> {
+        Self::install_manual(startup, specs, &[], transform_context)
     }
 
     pub fn install_manual(
         startup: &mut StartThreadOptions,
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
+        transform_context: bool,
     ) -> Result<()> {
         // Core resolves absent source options from resumed metadata at startup.
         let resumed_sources = startup.initial_history.get_resumed_session_sources();
@@ -1094,6 +1119,7 @@ impl PythonTools {
             interception: OnceLock::new(),
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
+            context_transform_enabled: transform_context,
             step_defaults: RwLock::new(None),
             step_replies: Mutex::new(Some(HashMap::new())),
             #[cfg(test)]
@@ -1143,6 +1169,7 @@ impl PythonTools {
                 parent.selecting_steps.load(Ordering::Acquire)
                     || parent.selecting_children.load(Ordering::Acquire),
             ),
+            context_transform_enabled: parent.context_transform_enabled,
             step_defaults: RwLock::new(
                 parent
                     .step_defaults
@@ -1213,6 +1240,57 @@ impl PythonTools {
         self.selecting_steps.store(enabled, Ordering::Release);
     }
 
+    pub(crate) fn transforms_context(&self) -> bool {
+        self.context_transform_enabled
+    }
+
+    pub(crate) async fn transform_context(
+        self: &Arc<Self>,
+        input: codex_extension_api::ModelContextInput<'_>,
+    ) -> Result<()> {
+        let owner = self.admission_ready(input.turn_id)?;
+        let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let (reply, receive) = oneshot::channel();
+        self.step_replies
+            .lock()
+            .expect("Python step replies poisoned")
+            .as_mut()
+            .context("Expired model context owner")?
+            .insert(id, reply);
+        let _pending = PendingPreparation {
+            tools: self.clone(),
+            id,
+        };
+        let mut request = json!({
+            "id": input.turn_id,
+            "msg": {
+                "type": "_sdk_transform_context", "turn_id": input.turn_id,
+                "thread": input.thread_id, "instance": self.instance,
+                "step_id": id, "model": input.model,
+                "purpose": if input.compaction { "compaction" } else { "turn" },
+                "items": input.items,
+            }
+        });
+        if let Some(tracing) = &owner.tracing {
+            request["msg"]["tracing_context"] = json!(tracing.token());
+        }
+        ensure!(owner.is_current(), "Expired model context owner");
+        self.family
+            .requests
+            .send(QueuedRequest::Step(request))
+            .map_err(|_| anyhow::anyhow!("Model context reader closed"))?;
+        let value = receive
+            .await
+            .context("Model context transformation cancelled")?
+            .context("Model context transformation failed")?;
+        ensure!(owner.is_current(), "Expired model context owner");
+        if !value.is_null() {
+            *input.items = serde_json::from_value(value)
+                .map_err(|_| anyhow::anyhow!("Invalid model context items"))?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn retire_steps(&self) {
         // Dropping the owned senders wakes blocked selectors with no authority.
         let pending = self
@@ -1224,6 +1302,10 @@ impl PythonTools {
     }
 
     pub(crate) fn reply_step(&self, id: u64, names: Option<Vec<ToolName>>) -> Result<()> {
+        self.reply_preparation(id, names.map(|names| json!(names)))
+    }
+
+    fn reply_preparation(&self, id: u64, value: Option<Value>) -> Result<()> {
         let reply = self
             .step_replies
             .lock()
@@ -1233,7 +1315,7 @@ impl PythonTools {
             .remove(&id)
             .context("Expired step selection")?;
         reply
-            .send(names)
+            .send(value)
             .map_err(|_| anyhow::anyhow!("Expired step selection"))
     }
 
@@ -1289,6 +1371,17 @@ impl PythonTools {
         instance: Option<&str>,
     ) -> Result<()> {
         self.step_owner(thread, instance)?.reply_step(id, names)
+    }
+
+    pub(crate) fn reply_context(
+        self: &Arc<Self>,
+        id: u64,
+        items: Option<Value>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        self.step_owner(thread, instance)?
+            .reply_preparation(id, items)
     }
 
     pub(crate) fn retain_context_revision(&self, source: &Self) -> Result<()> {
@@ -2607,6 +2700,7 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                     .get::<crate::native_interception::Control>()
                 {
                     let _ = tools.interception.set(Arc::downgrade(&control));
+                    control.bind_context_tools(&tools);
                 }
                 let _graph = tools.family.graph.lock().expect("Python graph poisoned");
                 tools
@@ -2816,24 +2910,7 @@ impl ToolContributor for PythonContributor {
             }
             // Dropping the native step retires this exact nonce even if Python
             // returns later, after another step or incarnation has started.
-            struct PendingStep {
-                tools: Arc<PythonTools>,
-                id: u64,
-            }
-            impl Drop for PendingStep {
-                fn drop(&mut self) {
-                    if let Some(pending) = self
-                        .tools
-                        .step_replies
-                        .lock()
-                        .expect("Python step replies poisoned")
-                        .as_mut()
-                    {
-                        pending.remove(&self.id);
-                    }
-                }
-            }
-            let _pending = PendingStep {
+            let _pending = PendingPreparation {
                 tools: tools.clone(),
                 id,
             };
@@ -2867,7 +2944,9 @@ impl ToolContributor for PythonContributor {
                 .await
                 .map_err(|_| "Step selection cancelled")?
                 .ok_or("Step selection failed")?;
-            Ok(Some(names))
+            serde_json::from_value(names)
+                .map(Some)
+                .map_err(|_| "Invalid step selection".to_owned())
         })
     }
 }
@@ -4647,6 +4726,7 @@ pub(crate) mod managed_tests {
             manual_progress: watch::channel(0).0,
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
+            context_transform_enabled: false,
             step_defaults: RwLock::new(None),
             step_replies: Mutex::new(Some(HashMap::new())),
             before_result: Mutex::new(None),

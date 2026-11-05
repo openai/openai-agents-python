@@ -40,6 +40,7 @@ class ForbiddenRuntime(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, ForbiddenRuntime())
 import agents
 from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool
+from agents import ModelRequestContext
 from agents.state import SessionState
 
 def reject_socket(*args, **kwargs):

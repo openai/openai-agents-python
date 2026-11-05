@@ -776,6 +776,7 @@ pub async fn restore(
         .transpose()?;
     let mut current_files = options.sdk_instruction_files.clone();
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
+    let transform_context = options.transform_context;
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
     // Snapshot data is not authority to enable model-facing goal tools. The
     // validated record still requires goal storage above, but never the feature.
@@ -801,7 +802,12 @@ pub async fn restore(
             history_revision: None,
             rollout_path: None,
         });
-        crate::python_tools::PythonTools::install_manual(&mut startup, specs, &manual_slots)?;
+        crate::python_tools::PythonTools::install_manual(
+            &mut startup,
+            specs,
+            &manual_slots,
+            transform_context,
+        )?;
     }
     if startup
         .thread_extension_init

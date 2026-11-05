@@ -1,0 +1,113 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index cb98f828bbed447c96a5b0dd9ecab20aa3698c7f..6a336734220b574e1c8bca20ec03e0e7129495a6 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -2228,6 +2228,14 @@ impl ModelClientSession {
+         service_tier: Option<String>,
+         responses_metadata: &CodexResponsesMetadata,
+     ) -> Result<()> {
++        // A warmup can transmit the complete prompt before the application's
++        // request owner exists. Keep connection-only preconnect, but let the
++        // ordinary request run the awaited context policy before sending input.
++        if self.client.request_contributors.iter().any(|contributor| {
++            contributor.transforms_context(&self.client.state.thread_id.to_string())
++        }) {
++            return Ok(());
++        }
+         if !self.client.responses_websocket_enabled() {
+             return Ok(());
+         }
+@@ -2290,6 +2298,37 @@ impl ModelClientSession {
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
+     ) -> Result<ResponseStream> {
++        let thread_id = self.client.state.thread_id.to_string();
++        let mut transformed = None;
++        for contributor in &self.client.request_contributors {
++            if !contributor.transforms_context(&thread_id) {
++                continue;
++            }
++            let turn_id = responses_metadata
++                .turn_id
++                .as_deref()
++                .ok_or_else(|| CodexErr::InvalidRequest("Missing model context owner".into()))?;
++            let projected = transformed.get_or_insert_with(|| prompt.clone());
++            contributor
++                .transform_context(codex_extension_api::ModelContextInput {
++                    thread_id: &thread_id,
++                    turn_id,
++                    model: &model_info.slug,
++                    compaction: matches!(
++                        responses_metadata.request_kind,
++                        Some(crate::responses_metadata::CodexResponsesRequestKind::Compaction(_))
++                    ),
++                    items: &mut projected.input,
++                })
++                .await
++                .map_err(CodexErr::InvalidRequest)?;
++        }
++        if let Some(projected) = &transformed
++            && let Some(recorder) = &self.client.executed_tool_calls
++        {
++            recorder.invalidate_wire_inventory_loss(&prompt.input, &projected.input);
++        }
++        let prompt = transformed.as_ref().unwrap_or(prompt);
+         let wire_api = self.client.state.provider.info().wire_api;
+         match wire_api {
+             WireApi::Responses => {
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index e44afa9b206b7b346863fa76eb4164186e3d21f4..151ef579cc643039f5215e99c771e80cee5f9d9c 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -116,6 +116,7 @@ pub use user_instructions::UserInstructionsProvider;
+ pub use contributors::ToolDispatchInput;
+ 
+ mod model_request;
++pub use model_request::ModelContextInput;
+ pub use model_request::ModelRequestContributor;
+ pub use model_request::ModelRequestInput;
+ pub use model_request::ModelRequestKind;
+diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
+index 45fa289c1d3a458daa5305abc634e79a47c7b1e5..9d824898c42015f92fa9961c66f5d7868faef158 100644
+--- a/codex-rs/ext/extension-api/src/model_request.rs
++++ b/codex-rs/ext/extension-api/src/model_request.rs
+@@ -1,5 +1,6 @@
+ //! Request-scoped interception of model response streams.
+ use crate::ExtensionData;
++use crate::ExtensionFuture;
+ pub use codex_api::ApiError as ModelResponseError;
+ pub use codex_api::ResponseEvent;
+ use codex_protocol::models::ResponseItem;
+@@ -48,10 +49,32 @@ pub struct ModelRequestInput<'a> {
+     pub model: &'a str,
+ }
+ 
++/// A detached input projection for one model request, before transport retries.
++pub struct ModelContextInput<'a> {
++    pub thread_id: &'a str,
++    pub turn_id: &'a str,
++    pub model: &'a str,
++    pub compaction: bool,
++    pub items: &'a mut Vec<ResponseItem>,
++}
++
+ /// Creates request-scoped interceptors without delaying inference.
+ /// Return None for requests this host does not manage.
+ pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
++
++    /// Whether this thread requires an awaited context policy before sending input.
++    fn transforms_context(&self, _thread_id: &str) -> bool {
++        false
++    }
++
++    /// Transform only the request's detached input, never canonical history.
++    fn transform_context<'a>(
++        &'a self,
++        _input: ModelContextInput<'a>,
++    ) -> ExtensionFuture<'a, Result<(), String>> {
++        Box::pin(async { Ok(()) })
++    }
+ }
+ 
+ /// Immutable routing and owner evidence captured for one issuing model request.

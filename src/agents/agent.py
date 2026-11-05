@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Generic, SupportsIndex, cast, overload
 from typing_extensions import TypedDict, TypeVar
 
 from ._trace_context import TraceContext, _trace_context
+from .model_context import _ContextTransform
 
 if TYPE_CHECKING:
     from ._function_tools import Tool
@@ -369,6 +370,11 @@ class Agent(Generic[ContextT, OutputT]):
     Python functions execute in the application and use its own authority.
     Include NativeAgents in tools to grant native child agents at opening.
 
+    ``transform_context`` runs before each model request, including children,
+    output repair, and model-based compaction. Return replacement input items
+    or None to keep the original input. The callback does not edit saved history.
+    Raising an exception prevents that request from reaching the provider.
+
     ``programmatic_tool_calling=True`` also permits native JavaScript cells to call the declared
     function and MCP tools. MCP result transforms run before those cells
     receive results. The cells use the SDK's bundled host and do not grant
@@ -384,6 +390,7 @@ class Agent(Generic[ContextT, OutputT]):
     provider: NativeProvider | None
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
+    transform_context: _ContextTransform[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -405,6 +412,7 @@ class Agent(Generic[ContextT, OutputT]):
             *args: Any,
             tools: Sequence[Tool[ContextT]] | None = None,
             output_type: None = None,
+            transform_context: _ContextTransform[ContextT] | None = None,
             **kwargs: Any,
         ) -> TextAgentT: ...
 
@@ -414,6 +422,7 @@ class Agent(Generic[ContextT, OutputT]):
             *args: Any,
             output_type: OutputSpec[OutputT],
             tools: Sequence[Tool[ContextT]] | None = None,
+            transform_context: _ContextTransform[ContextT] | None = None,
             **kwargs: Any,
         ) -> TypedAgentT: ...
 
@@ -438,6 +447,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         output_type: None = None,
         programmatic_tool_calling: bool = False,
+        transform_context: _ContextTransform[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -452,6 +462,7 @@ class Agent(Generic[ContextT, OutputT]):
         model_settings: ModelSettings | None = None,
         provider: NativeProvider | None = None,
         programmatic_tool_calling: bool = False,
+        transform_context: _ContextTransform[ContextT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -465,6 +476,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
+        transform_context: _ContextTransform[ContextT] | None = None,
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")
@@ -472,6 +484,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("name must be a string or None")
         if not isinstance(programmatic_tool_calling, bool):
             raise TypeError("programmatic_tool_calling must be a bool")
+        if transform_context is not None and not callable(transform_context):
+            raise TypeError("transform_context must be callable or None")
         if model is not None and not isinstance(model, str):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
@@ -486,6 +500,7 @@ class Agent(Generic[ContextT, OutputT]):
         )
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
+        object.__setattr__(self, "transform_context", transform_context)
 
     def validate(self) -> None:
         """Check the declaration without opening a Session.

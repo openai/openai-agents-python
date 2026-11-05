@@ -52,6 +52,7 @@ if TYPE_CHECKING:
         MCPResultContext as MCPResultContext,
         StdioMCP as StdioMCP,
     )
+    from .model_context import ModelRequestContext as ModelRequestContext
     from .native_agents import (
         ChildInvocation as ChildInvocation,
         NativeAgents as NativeAgents,
@@ -127,6 +128,7 @@ if TYPE_CHECKING:
     )
 
 _MODULES = {
+    "ModelRequestContext": ".model_context",
     "TraceContext": "._trace_context",
     "Allow": ".native_interception",
     "Deny": ".native_interception",

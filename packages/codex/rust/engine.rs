@@ -533,6 +533,7 @@ impl EngineState {
             && options.permits_initial_config())
         .then_some(&self.service_config);
         let manual_slots = std::mem::take(&mut options.manual_tool_slots);
+        let transform_context = options.transform_context;
         let resume = options.sdk_resume_thread_id;
         let sdk_history = options.take_sdk_history(history.is_some(), python_specs.is_some())?;
         let (mut startup, instructions) = self.build_startup(options, initial_config).await?;
@@ -578,7 +579,12 @@ impl EngineState {
                     && startup.reserved_thread_id.is_none(),
                 "start replaceable tools on a new thread; use a portable checkpoint to restore"
             );
-            crate::python_tools::PythonTools::install_manual(&mut startup, specs, &manual_slots)?;
+            crate::python_tools::PythonTools::install_manual(
+                &mut startup,
+                specs,
+                &manual_slots,
+                transform_context,
+            )?;
         }
         if let Some(items) = sdk_history {
             startup.initial_history = InitialHistory::Forked(
@@ -767,6 +773,7 @@ impl EngineState {
             .local_checklist_store
             .as_ref()
             .context("local recovery requires native local storage")?;
+        let transform_context = options.transform_context;
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let receipt = receipt.into();
         // Compaction holds the source context lease through this handoff.
@@ -787,7 +794,7 @@ impl EngineState {
             None
         };
         startup.initial_history = self.history(&state.id.to_string()).await?;
-        crate::python_tools::PythonTools::install(&mut startup, specs)?;
+        crate::python_tools::PythonTools::install(&mut startup, specs, transform_context)?;
         // Compare and publish under the same retained writer, including the
         // ordinary missing-result append. Preparation alone is not publication.
         store
@@ -945,6 +952,7 @@ impl EngineState {
         python_specs: Option<Vec<codex_protocol::dynamic_tools::DynamicToolSpec>>,
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
+        let transform_context = options.transform_context;
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let mut managed_parent = false;
         let mut source_code = None;
@@ -1056,7 +1064,7 @@ impl EngineState {
             // The native fork will select its own boundary. Install against
             // that source's fixed header, not a fresh startup's empty history.
             startup.initial_history = history.clone();
-            crate::python_tools::PythonTools::install(&mut startup, specs)?;
+            crate::python_tools::PythonTools::install(&mut startup, specs, transform_context)?;
         }
         let new = self
             .manager

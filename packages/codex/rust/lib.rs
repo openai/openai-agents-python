@@ -1639,6 +1639,32 @@ impl NativeThread {
         Ok(())
     }
 
+    #[pyo3(signature = (id, items_json, thread=None, instance=None))]
+    fn _reply_context(
+        &self,
+        id: u64,
+        items_json: Option<&str>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Model context transformation requires Python tools"))?;
+        let items = items_json
+            .map(|text| {
+                serde_json::from_str::<Option<Vec<codex_protocol::models::ResponseItem>>>(text)
+                    .map(|items| serde_json::json!(items))
+                    .map_err(|_| py_error("Invalid model context items"))
+            })
+            .transpose()?;
+        tools
+            .reply_context(id, items, thread, instance)
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, thread=None, instance=None))]
     fn _check_step(&self, id: u64, thread: Option<&str>, instance: Option<&str>) -> PyResult<()> {
         let inner = self.current()?;
