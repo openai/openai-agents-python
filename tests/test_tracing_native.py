@@ -1242,46 +1242,49 @@ async def _child_turn_policy(recorder: Recorder, peer: DecodedCollector, directo
                     [first] = await handles(session, 1)
                     initial_wait = asyncio.create_task(first.get_result())
                     entered_wait = asyncio.create_task(model.entered["alpha"].wait())
-                    ready, _ = await asyncio.wait(
-                        (initial_wait, entered_wait), return_when=asyncio.FIRST_COMPLETED
-                    )
-                    if initial_wait in ready:
-                        entered_wait.cancel()
-                        await asyncio.gather(entered_wait, return_exceptions=True)
-                        try:
-                            await initial_wait
-                        except Exception as error:
+                    try:
+                        ready, _ = await asyncio.wait(
+                            (initial_wait, entered_wait), return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if initial_wait in ready:
+                            try:
+                                await initial_wait
+                            except Exception as error:
+                                raise AssertionError(
+                                    (
+                                        mode,
+                                        len(model.requests),
+                                        seen,
+                                        "child failed before its response hold",
+                                    )
+                                ) from error
                             raise AssertionError(
                                 (
                                     mode,
                                     len(model.requests),
                                     seen,
-                                    "child failed before its response hold",
+                                    "child completed before its response hold",
                                 )
-                            ) from error
-                        raise AssertionError(
-                            (
-                                mode,
-                                len(model.requests),
-                                seen,
-                                "child completed before its response hold",
                             )
-                        )
-                    with telemetry.trace(
-                        "unrelated child caller",
-                        options=telemetry.TraceOptions(
-                            trace_id="f" * 32, include_sensitive_data=True
-                        ),
-                    ):
-                        try:
+                        with telemetry.trace(
+                            "unrelated child caller",
+                            options=telemetry.TraceOptions(
+                                trace_id="f" * 32, include_sensitive_data=True
+                            ),
+                        ):
                             await first.steer(steer)
-                        finally:
                             model.release["alpha"].set()
-                        assert (await initial_wait).final_output == "alpha complete"
-                        [child] = [child async for child in session.subagents()]
-                        later = await child.start(fresh)
-                        assert later.turn_id != first.turn_id
-                        assert (await later.get_result()).final_output == "alpha complete"
+                            assert (await initial_wait).final_output == "alpha complete"
+                            [child] = [child async for child in session.subagents()]
+                            later = await child.start(fresh)
+                            assert later.turn_id != first.turn_id
+                            assert (await later.get_result()).final_output == "alpha complete"
+                    finally:
+                        model.release["alpha"].set()
+                        for waiter in (initial_wait, entered_wait):
+                            if not waiter.done():
+                                waiter.cancel()
+                        await asyncio.gather(initial_wait, entered_wait, return_exceptions=True)
                     assert {row[0] for row in seen} == {"initial", "steer", "fresh"}, seen
                     assert all(
                         row[1:] == (origin_id, disabled, mode != "metadata") for row in seen
