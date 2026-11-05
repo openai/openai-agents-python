@@ -1,0 +1,189 @@
+diff --git a/codex-rs/sandboxing/src/local_write_roots.rs b/codex-rs/sandboxing/src/local_write_roots.rs
+index a9d8c081966c400e307c847f6da5c97bc0c888ee..f12a1aae9676081d291713b3aab0c1674a20b68e 100644
+--- a/codex-rs/sandboxing/src/local_write_roots.rs
++++ b/codex-rs/sandboxing/src/local_write_roots.rs
+@@ -43,11 +43,8 @@
+             return Ok(true);
+         }
+         #[cfg(target_os = "linux")]
+-        if !self.mounts.identities.is_empty()
+-            && let Some(identity) = entry_identity(path)?
+-        {
+-            return Ok(self.mounts.identities.contains(&identity));
+-        }
++        return self.mounts.contains_entry(path);
++        #[cfg(not(target_os = "linux"))]
+         Ok(false)
+     }
+ 
+@@ -134,11 +131,19 @@
+ }
+ 
+ #[cfg(target_os = "linux")]
++#[derive(Eq, Hash, PartialEq)]
++struct BackingEntry {
++    visible: PathBuf,
++    backing: PathBuf,
++    identity: EntryIdentity,
++}
++
++#[cfg(target_os = "linux")]
+ #[derive(Default)]
+ struct WritableMounts {
+     mounts: Vec<Mount>,
+     identities: HashSet<EntryIdentity>,
+-    backing_entries: HashSet<(PathBuf, EntryIdentity)>,
++    backing_entries: HashSet<BackingEntry>,
+ }
+ 
+ #[cfg(target_os = "linux")]
+@@ -183,11 +188,52 @@
+ 
+     fn insert(&mut self, path: &Path, identity: EntryIdentity) {
+         self.identities.insert(identity);
+-        self.backing_entries.extend(
+-            self.mounts
+-                .iter()
+-                .filter_map(|mount| Some((mount.backing_path(path)?, identity))),
+-        );
++        self.backing_entries
++            .extend(self.mounts.iter().filter_map(|mount| {
++                Some(BackingEntry {
++                    visible: path.to_path_buf(),
++                    backing: mount.backing_path(path)?,
++                    identity,
++                })
++            }));
++    }
++
++    fn contains_entry(&self, path: &Path) -> io::Result<bool> {
++        if self.identities.is_empty() {
++            return Ok(false);
++        }
++        let Some(identity) = entry_identity(path)? else {
++            return Ok(false);
++        };
++        if self.identities.contains(&identity) {
++            return Ok(true);
++        }
++        for mount in &self.mounts {
++            if let Some(backing) = mount.backing_path(path)
++                && self.contains_backing_path(&backing, identity)?
++            {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
++
++    fn contains_backing_path(&self, backing: &Path, identity: EntryIdentity) -> io::Result<bool> {
++        for entry in &self.backing_entries {
++            let Ok(relative) = backing.strip_prefix(&entry.backing) else {
++                continue;
++            };
++            // The protected path can be mounted from beneath a grant. Confirm the
++            // proposed writable name still exposes that inode without following a
++            // symlink out of the grant or through a covered mount.
++            let candidate = join_mount_relative(&entry.visible, relative);
++            if entry_identity(&candidate)? == Some(identity)
++                && fs::canonicalize(&candidate)? == candidate
++            {
++                return Ok(true);
++            }
++        }
++        Ok(false)
+     }
+ 
+     fn contains_descendant(&self, path: &Path) -> io::Result<bool> {
+@@ -201,15 +247,20 @@
+             } else {
+                 continue;
+             };
+-            for (entry, identity) in &self.backing_entries {
++            if let Some(identity) = entry_identity(directory)?
++                && self.contains_backing_path(&backing, identity)?
++            {
++                return Ok(true);
++            }
++            for entry in &self.backing_entries {
+                 // Mount roots propose a location. Stat the candidate to establish actual
+                 // identity, including when a different mount covers the proposed path.
+-                let Ok(relative) = entry.strip_prefix(&backing) else {
++                let Ok(relative) = entry.backing.strip_prefix(&backing) else {
+                     continue;
+                 };
+-                // Adding a slash to a file mount's own path makes it unstatable.
+-                let child = (!relative.as_os_str().is_empty()).then(|| directory.join(relative));
+-                if entry_identity(child.as_deref().unwrap_or(directory))? == Some(*identity) {
++                if entry_identity(&join_mount_relative(directory, relative))?
++                    == Some(entry.identity)
++                {
+                     return Ok(true);
+                 }
+             }
+@@ -219,6 +270,16 @@
+ }
+ 
+ #[cfg(target_os = "linux")]
++fn join_mount_relative(path: &Path, relative: &Path) -> PathBuf {
++    // Adding a slash to a file mount's own path makes it unstatable.
++    if relative.as_os_str().is_empty() {
++        path.to_path_buf()
++    } else {
++        path.join(relative)
++    }
++}
++
++#[cfg(target_os = "linux")]
+ fn entry_identity(path: &Path) -> io::Result<Option<EntryIdentity>> {
+     match fs::symlink_metadata(path) {
+         Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+@@ -285,6 +346,48 @@
+         Ok(())
+     }
+ 
++    #[test]
++    fn protected_mount_backed_by_a_child_of_a_write_grant() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let workspace = temp.path().join("workspace");
++        let source = workspace.join("source");
++        fs::create_dir_all(&source)?;
++        let protected = temp.path().join("protected");
++        fs::write(&protected, "synthetic bind target")?;
++        let alias = source.join("alias");
++        // A hard link supplies the same file identity without a privileged mount.
++        fs::hard_link(&protected, &alias)?;
++        let mountinfo = format!(
++            "3 1 0:1 / / rw - ext4 /dev/fixture rw\n7 3 0:1 {} {} rw - ext4 /dev/fixture rw\n",
++            alias.display(),
++            protected.display(),
++        );
++        let roots = [AbsolutePathBuf::from_absolute_path(&workspace)?];
++        let grants = LocalWriteRoots {
++            roots: &roots,
++            mounts: WritableMounts::new(&roots, mountinfo.as_bytes())?,
++        };
++
++        assert!(grants.contains_entry(&protected)?);
++        assert!(grants.has_root_at_or_below(&protected)?);
++
++        // Simulate a cover at the mount source with a different visible inode.
++        fs::remove_file(&alias)?;
++        fs::write(&alias, "covered by a different file")?;
++        assert!(!grants.contains_entry(&protected)?);
++        assert!(!grants.has_root_at_or_below(&protected)?);
++
++        // An intermediate symlink can resolve to the same inode outside the grant.
++        fs::remove_dir_all(&source)?;
++        let outside = temp.path().join("outside");
++        fs::create_dir(&outside)?;
++        fs::hard_link(&protected, outside.join("alias"))?;
++        std::os::unix::fs::symlink(outside, source)?;
++        assert!(!grants.contains_entry(&protected)?);
++        assert!(!grants.has_root_at_or_below(&protected)?);
++        Ok(())
++    }
++
+     #[test]
+     fn nested_mount_exposes_the_helper_identity() -> io::Result<()> {
+         let temp = tempfile::tempdir()?;

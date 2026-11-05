@@ -1,3 +1,5 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
 //! Python ownership and asyncio boundaries for the unchanged Codex runtime.
 
 mod application_instructions;
@@ -13,6 +15,8 @@ mod environment;
 mod extensions;
 mod goals;
 mod live;
+mod local_reconciliation;
+mod local_sandbox;
 mod manual_checkpoint;
 mod mcp_result_control;
 mod mcp_roster;
@@ -154,11 +158,9 @@ async fn close_engine_owner(owner: Arc<std::sync::Mutex<EngineOwner>>) -> PyResu
         inner.release_native_threads();
         let mut state = owner.lock().map_err(py_error)?;
         if state.live.is_some() {
-            state.remote_drain = inner
-                .manager
-                .environment_manager()
-                .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                .and_then(|environment| environment.subscribe_connection_state());
+            state.remote_drain =
+                environment::selected_executor(&inner.manager.environment_manager())
+                    .and_then(|environment| environment.subscribe_connection_state());
             state.live.take();
         }
     }
@@ -394,11 +396,9 @@ impl Engine {
                 inner.release_native_threads();
                 let mut state = owner.lock().map_err(py_error)?;
                 if state.live.is_some() {
-                    state.remote_drain = inner
-                        .manager
-                        .environment_manager()
-                        .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                        .and_then(|environment| environment.subscribe_connection_state());
+                    state.remote_drain =
+                        environment::selected_executor(&inner.manager.environment_manager())
+                            .and_then(|environment| environment.subscribe_connection_state());
                     state.live.take();
                 }
             }
@@ -1211,6 +1211,18 @@ impl NativeThread {
         })
     }
 
+    fn _request_sampling_stop(&self, expected_turn_id: &str) -> PyResult<()> {
+        if let Some(inner) = self.live()?
+            && let Some(tools) = inner
+                .thread
+                .thread_extension_data()
+                .get::<python_tools::PythonTools>()
+        {
+            tools.request_sampling_stop(expected_turn_id);
+        }
+        Ok(())
+    }
+
     #[pyo3(signature = (expected_turn_id, *, queued_compaction=false))]
     fn _interrupt_session<'py>(
         &self,
@@ -1244,7 +1256,7 @@ impl NativeThread {
             .ok_or_else(|| py_error("Graph interruption requires a managed Session"))?;
         let request = {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
-            tools.request_graph_interrupt().map_err(py_error)?
+            tools.request_graph_interrupt(force).map_err(py_error)?
         };
         async_bridge::future_into_py(py, async move {
             let _request = request;
@@ -1373,6 +1385,27 @@ impl NativeThread {
                 .await
                 .map_err(py_error)?;
             serde_json::to_string(&result).map_err(py_error)
+        })
+    }
+
+    fn _validate_local_executor_policy<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            local_reconciliation::validate_executor_policy(&inner)
+                .await
+                .map_err(py_error)
+        })
+    }
+
+    fn _executor_policies<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let inner = self.current()?;
+        async_bridge::future_into_py(py, async move {
+            let _context_operation = inner.engine.operation(false).map_err(py_error)?;
+            let policies = local_reconciliation::executor_policies(&inner)
+                .await
+                .map_err(py_error)?;
+            serde_json::to_string(&policies).map_err(py_error)
         })
     }
 
@@ -2351,14 +2384,9 @@ impl NativeThread {
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
-            if inner
-                .engine
-                .manager
-                .environment_manager()
-                .get_environment(codex_exec_server::REMOTE_ENVIRONMENT_ID)
-                .is_none()
+            if environment::selected_executor(&inner.engine.manager.environment_manager()).is_none()
             {
-                return Err(py_error("Session has no remote executor"));
+                return Err(py_error("Session has no executor"));
             }
             let tools = inner
                 .thread

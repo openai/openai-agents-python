@@ -686,6 +686,35 @@ async def test_child_prompt_mode_preserves_root_policy_and_limits_child_approval
         app = agent_for(peer, executor)
         if interactions:
             app = interactive(app)
+            original_response = peer.response
+            completion_id = "shared-call-id"
+
+            def response():
+                nonlocal completion_id
+                items = original_response()
+                if items[0].get("item", {}).get("id") == "done-alpha":
+                    body = peer.child_requests["alpha"][-1]
+                    output = tool_output(body, completion_id)
+                    running = re.search(r"(?m)^Process running with session ID (-?\d+)$", output)
+                    if running:
+                        assert any(tool.get("name") == "write_stdin" for tool in body["tools"])
+                        completion_id = f"policy-alpha-wait-{len(peer.child_requests['alpha'])}"
+                        return [
+                            function_call(
+                                "write_stdin",
+                                {
+                                    "session_id": int(running[1]),
+                                    "chars": "",
+                                    "yield_time_ms": 1000,
+                                    "max_output_tokens": 100,
+                                },
+                                completion_id,
+                            )
+                        ]
+                    assert re.search(r"(?m)^Process exited with code 0$", output), output
+                return items
+
+            peer.response = response
         async with app.session(environment=declaration(executor)) as session:
             root = await session.submit("Start the child")
             assert (await root.get_result()).final_output == "root complete"

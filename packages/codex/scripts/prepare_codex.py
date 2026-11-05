@@ -1,6 +1,7 @@
 """Prepare the pinned Codex base with its reviewed local patch series."""
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
@@ -30,17 +31,25 @@ def main():
         if source is None:
             source = Path(temporary) / "source"
             subprocess.run(["git", "init", "--bare", str(source)], check=True)
+            print(f"Fetching pinned Codex source {revision}", flush=True)
             subprocess.run(
                 [
                     "git",
+                    "-c",
+                    "http.lowSpeedLimit=1024",
+                    "-c",
+                    "http.lowSpeedTime=120",
                     "-C",
                     str(source),
                     "fetch",
+                    "--progress",
                     "--depth=1",
                     "https://github.com/openai/codex.git",
                     revision,
                 ],
                 check=True,
+                timeout=300,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
             )
         _extract_archive(source, revision, destination, temporary)
         record_pristine_source(root, source)

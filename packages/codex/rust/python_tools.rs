@@ -3,12 +3,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
 
 use anyhow::{Context, Result, ensure};
-use codex_core_api::{CodexThread, Config, Feature, StartThreadOptions, ThreadManager};
+use codex_core_api::{
+    CodexThread, Config, Feature, ManagedLocalExecCancelFailure, StartThreadOptions, ThreadManager,
+};
 use codex_extension_api::{
     ContextContributor, ExtensionData, ExtensionFuture, ThreadIdleInput,
     ThreadLifecycleContributor, ThreadStartInput, ThreadStopInput, ToolCallOutcome,
     ToolContributor, ToolFinishInput, ToolLifecycleContributor, ToolLifecycleFuture, ToolPolicy,
-    TurnErrorInput, TurnLifecycleContributor, TurnStartInput, TurnStartPhase,
+    TurnErrorInput, TurnLifecycleContributor, TurnSamplingStop, TurnStartInput, TurnStartPhase,
     WorldStateContributionInput, WorldStateSectionContribution,
 };
 use codex_protocol::dynamic_tools::{
@@ -197,6 +199,8 @@ enum AdmissionState {
     Closed,
 }
 
+const LOCAL_COMMAND_CLEANUP_FAILED: &str = "Interrupted local command cleanup did not finish";
+
 // Core emits TurnComplete before releasing its active-turn slot. This receipt
 // proves only that another turn may be admitted, not that the thread has closed.
 pub(crate) struct TurnAdmission {
@@ -206,12 +210,14 @@ pub(crate) struct TurnAdmission {
     state: watch::Sender<AdmissionState>,
     completed_calls: Mutex<HashSet<String>>,
     graceful_requested: AtomicBool,
+    sampling_stop: Arc<TurnSamplingStop>,
     // A turn born while the graph is stopped must stay fenced even if a
     // later explicit submission starts a new graph generation.
     graph_fenced: bool,
     // Idle notification and terminal delivery are different native boundaries.
     // Reopening must never trust an idle hint alone for a fenced new turn.
     terminal: AtomicBool,
+    local_command_cleanup_failed: AtomicBool,
     input_recorded: AtomicBool,
     // Private namespace for SDK steers of this exact runtime, including same-ID recovery.
     steering_namespace: String,
@@ -343,7 +349,16 @@ impl TurnAdmission {
         }
     }
 
-    async fn probe_idle(self: &Arc<Self>, thread: &CodexThread) {
+    pub(crate) fn check_local_command_cleanup(&self) -> Result<()> {
+        ensure!(
+            !self.local_command_cleanup_failed.load(Ordering::Acquire),
+            LOCAL_COMMAND_CLEANUP_FAILED
+        );
+        Ok(())
+    }
+
+    async fn probe_idle(self: &Arc<Self>, thread: &CodexThread) -> Result<()> {
+        self.check_local_command_cleanup()?;
         IDLE_PROBE_RECEIPT
             .scope(
                 Arc::clone(self),
@@ -352,6 +367,7 @@ impl TurnAdmission {
                 ),
             )
             .await;
+        Ok(())
     }
 }
 
@@ -501,9 +517,22 @@ pub fn checkpoint_specs(specs: &[DynamicToolSpec]) -> Result<Value> {
 }
 
 impl PythonTools {
+    pub(crate) fn request_sampling_stop(&self, turn_id: &str) {
+        let admission = self
+            .admission
+            .lock()
+            .expect("Python admission receipt poisoned");
+        if let Some(receipt) = admission
+            .as_ref()
+            .filter(|receipt| receipt.turn_id == turn_id)
+        {
+            receipt.sampling_stop.request();
+        }
+    }
+
     /// Reserve the stop before returning an awaitable to Python. Native tools
     /// may finish while its settlement task is still waiting to be scheduled.
-    pub(crate) fn request_graph_interrupt(&self) -> Result<GraphStopRequest> {
+    pub(crate) fn request_graph_interrupt(&self, force: bool) -> Result<GraphStopRequest> {
         ensure!(
             self.instance.is_none(),
             "Only the root can interrupt its graph"
@@ -514,6 +543,9 @@ impl PythonTools {
             graph.fenced = true;
             for (_, _, receipt) in self.graph_turns(false) {
                 receipt.graceful_requested.store(true, Ordering::Release);
+                if force {
+                    receipt.sampling_stop.request();
+                }
             }
         }
         self.family.graph_changed.send_replace(());
@@ -732,8 +764,7 @@ impl PythonTools {
         // The SQ has now processed both the queued Compact and its stop.
         // Capturing before acknowledgement can capture the preceding receipt.
         let receipt = self.admission_ready(expected_turn_id)?;
-        receipt.probe_idle(thread).await;
-        Ok(())
+        receipt.probe_idle(thread).await
     }
 
     pub(crate) fn request_graceful_interrupt(&self, turn_id: &str) -> Result<bool> {
@@ -778,12 +809,13 @@ impl PythonTools {
             .lock()
             .expect("Python admission receipt poisoned")
             .as_ref()
-            .filter(|receipt| {
-                receipt.terminal.load(Ordering::Acquire)
-                    && *receipt.state.borrow() == AdmissionState::Pending
-            })
+            .filter(|receipt| receipt.terminal.load(Ordering::Acquire))
             .cloned();
         if let Some(receipt) = terminal {
+            receipt.check_local_command_cleanup()?;
+            if *receipt.state.borrow() != AdmissionState::Pending {
+                return Ok(());
+            }
             // Core has already detached or taken this task. Never infer this
             // from a reader's current turn, which may lag native lifecycle.
             self.finish_session_interrupt(thread, &receipt).await?;
@@ -803,7 +835,7 @@ impl PythonTools {
                         // A later raw Core interrupt can take that slot without
                         // notifying idle at all. Only Core may prove it idle;
                         // do not repeat an interrupt or an input submission.
-                        receipt.probe_idle(thread).await;
+                        receipt.probe_idle(thread).await?;
                     }
                 }
             }
@@ -833,8 +865,7 @@ impl PythonTools {
             .await?;
         // Core owns the active-slot and trigger-mailbox check. An
         // acknowledged interrupt is not by itself a global idle claim.
-        receipt.probe_idle(thread).await;
-        Ok(())
+        receipt.probe_idle(thread).await
     }
 
     fn owns_admission(&self, receipt: &Arc<TurnAdmission>) -> bool {
@@ -2196,8 +2227,10 @@ impl TurnLifecycleContributor for PythonContributor {
                     state: watch::channel(AdmissionState::Pending).0,
                     completed_calls: Mutex::default(),
                     graceful_requested: AtomicBool::new(false),
+                    sampling_stop: input.turn_store.get_or_init(TurnSamplingStop::default),
                     graph_fenced: graph.fenced,
                     terminal: AtomicBool::new(false),
+                    local_command_cleanup_failed: AtomicBool::new(false),
                     input_recorded: AtomicBool::new(false),
                     steering_namespace: format!(
                         "agents-steer:{}:",
@@ -2316,6 +2349,21 @@ impl TurnLifecycleContributor for PythonContributor {
             if let Some(tools) = input.thread_store.get::<PythonTools>()
                 && let Some(receipt) = input.turn_store.get::<Arc<TurnAdmission>>()
             {
+                if input
+                    .turn_store
+                    .get::<ManagedLocalExecCancelFailure>()
+                    .is_some()
+                {
+                    // Another turn can replace the thread's last failure while
+                    // this turn's cancellation still owns its cleanup.
+                    receipt
+                        .local_command_cleanup_failed
+                        .store(true, Ordering::Release);
+                    let mut graph = tools.family.graph.lock().expect("Python graph poisoned");
+                    if graph.fenced {
+                        graph.failure.get_or_insert(LOCAL_COMMAND_CLEANUP_FAILED);
+                    }
+                }
                 receipt.terminal.store(true, Ordering::Release);
                 tools.family.graph_changed.send_replace(());
             }
@@ -2535,6 +2583,7 @@ impl ThreadLifecycleContributor<Config> for PythonContributor {
                 && IDLE_PROBE_RECEIPT
                     .try_with(|expected| Arc::ptr_eq(expected, receipt))
                     .unwrap_or(true)
+                && receipt.check_local_command_cleanup().is_ok()
             {
                 receipt.graceful_requested.store(false, Ordering::Release);
                 receipt.state.send_if_modified(|state| {
@@ -3286,6 +3335,54 @@ pub(crate) mod managed_tests {
     }
 
     #[tokio::test]
+    async fn failed_local_join_does_not_release_admission_or_poison_a_replacement() {
+        let provider = crate::engine::settlement_tests::Provider::start().await;
+        let directory = tempfile::tempdir().unwrap();
+        let engine = real_engine(&directory, &provider.url).await;
+        let native = engine
+            .start_with_tools(Default::default(), None, Some(vec![]), false)
+            .await
+            .unwrap();
+        let state = native.current().unwrap();
+        let tools = state
+            .thread
+            .thread_extension_data()
+            .get::<PythonTools>()
+            .unwrap();
+        let turn_id = "reused-id";
+        let _first = sdk_turn(&state, turn_id).await;
+        let failed = tools.admission_ready(turn_id).unwrap();
+        // The native failure is independent of an idle slot and survives
+        // every waiter on this exact receipt.
+        failed
+            .local_command_cleanup_failed
+            .store(true, Ordering::Release);
+        for _ in 0..2 {
+            let error = tools
+                .finish_session_interrupt(&state.thread, &failed)
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), LOCAL_COMMAND_CLEANUP_FAILED);
+        }
+        state
+            .thread
+            .emit_thread_idle_lifecycle_if_idle(codex_extension_api::ThreadIdleCause::Interrupted)
+            .await;
+        assert!(*failed.state.borrow() == AdmissionState::Pending);
+
+        let _next = sdk_turn(&state, turn_id).await;
+        let successor = tools.admission_ready(turn_id).unwrap();
+        tools
+            .finish_session_interrupt(&state.thread, &successor)
+            .await
+            .unwrap();
+        successor.wait().await.unwrap();
+        assert!(failed.check_local_command_cleanup().is_err());
+        state.close().await.unwrap();
+        engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn stale_child_idle_probe_cannot_ready_or_unmark_native_successor() {
         let provider = crate::engine::settlement_tests::Provider::start().await;
         let directory = tempfile::tempdir().unwrap();
@@ -3644,7 +3741,7 @@ pub(crate) mod managed_tests {
                     assert_eq!(history.matches("unique steering tail in the native gap").count(), 1);
                     if outcome == "stop" {
                         let tools = state.thread.thread_extension_data().get::<PythonTools>().unwrap();
-                        let _stop = tools.request_graph_interrupt().unwrap();
+                        let _stop = tools.request_graph_interrupt(false).unwrap();
                         let rejected = crate::ops::submit_replaceable(&state, continuation).await.unwrap();
                         assert_eq!(rejected["status"], "not_submitted");
                         assert_eq!(provider.requests.lock().unwrap().len(), 1);

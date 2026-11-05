@@ -81,13 +81,101 @@
       "sha256": "2e7b19c453c96c609fd5dafba2836eafe802776f02274ea45f6320a04d60a67c"
     },
     {
-      "path": "0021-native-history-durability.patch",
-      "sha256": "6d86e76d4b6340d2c1b6a84827a97db430ccef2d153abd71ffbda80f4abf53d4"
+      "path": "0021-redact-executor-startup-tracing.patch",
+      "sha256": "2febc726d78dd113512306c3bd59d9eaf4b233ff18cba8559af20e94c918b7a0"
     },
     {
-      "path": "0022-native-history-write-reconciliation.patch",
-      "sha256": "02abd4b0ab45907d179d315ea65063a196df6a96af7dcd7a6eb5211826543f71"
+      "path": "0022-sdk-local-network-receipts.patch",
+      "sha256": "44d43b139d8d1f8a010dbab32a3bb7ae8e54f10a695e97026e63c93d73bb0fcf"
+    },
+    {
+      "path": "0023-retain-early-sandbox-denials.patch",
+      "sha256": "31eee8fd638f35abd56e216a18bbc70dad6b8b93f90fe2db16b2deaae1bd004f"
+    },
+    {
+      "path": "0024-restrict-local-macos-sandbox-defaults.patch",
+      "sha256": "b397bbd1e5d6104d0a308dadef045049d3d10ef8b7015c27135cf81ddc6c428c"
+    },
+    {
+      "path": "0025-mount-sandbox-reentry-helper.patch",
+      "sha256": "d1e3ce174262a157028fd0c7ea99bbb9d500722462282420bea26cd358ac6eba"
+    },
+    {
+      "path": "0026-join-interrupted-local-commands.patch",
+      "sha256": "090301b67c4442820a9fb01977b546caf1e772bb8c0c4cd7d5b9f845bc42aab3"
+    },
+    {
+      "path": "0027-join-linux-sandbox-namespace.patch",
+      "sha256": "ed695b5e678fa85ce4472fc0d533830ed007298c888b540f1830deab5fe5b93e"
+    },
+    {
+      "path": "0028-own-managed-local-launch-before-payload.patch",
+      "sha256": "9ceb1de13400e03331bf5fd97ec407cca776dfdc454d493fb047ace030ba4628"
+    },
+    {
+      "path": "0029-own-managed-darwin-command-cohort.patch",
+      "sha256": "2df2d03f5f8c88124e6b54a9c85f02f1b9aff8b56e768f289eaa75c0971ccb43"
+    },
+    {
+      "path": "0030-stop-owned-turn-sampling.patch",
+      "sha256": "fbc98457cdfd3749088dbd32370eef5e1d3c4bc9fcbd7ca6ac3e9b4fb7cea713"
+    },
+    {
+      "path": "0031-protect-local-helper-mount-aliases.patch",
+      "sha256": "b269ec3e3a8d2a737494732696f4b9ecd94c2fbe0458c4a6eccdb543a6692059"
+    },
+    {
+      "path": "0032-join-published-linux-sandbox-shutdown.patch",
+      "sha256": "7222d3929d79347cd0e3822885d6e85a201a46eeebab45f80ada6a8be6aae564"
+    },
+    {
+      "path": "0033-confirm-darwin-terminal-release.patch",
+      "sha256": "7852dcd5333147fc4b5cca18cd865bda66d9c1f1ed83ca49c7776d6371f4ebd0"
+    },
+    {
+      "path": "0034-confirm-owned-tree-shutdown.patch",
+      "sha256": "d46090b9165a1535b2df44c8f863203be163e6fa16156eef959f1783a16ef01d"
+    },
+    {
+      "path": "0035-scope-managed-process-shutdown.patch",
+      "sha256": "c036ebf1c2db9e048b7ae82d6d86821d92aa05fcaeec88aa687ed70ec6067848"
+    },
+    {
+      "path": "0036-protect-local-helper-hard-links.patch",
+      "sha256": "96cc15f6742b20578468fa01876774bcc735fbea325e442313c20eba12016de5"
+    },
+    {
+      "path": "0037-protect-reverse-local-bind-aliases.patch",
+      "sha256": "1eb99a3ac7386544dcfc83df9977e88050dfdf5bc45011acf61405d6fa10174f"
+    },
+    {
+      "path": "0038-protect-macos-local-helper-hard-links.patch",
+      "sha256": "dd1f102c61a4d8bac29b72dfbce0bb334228b0c31e3212590ebeac8f0f39cf08"
+    },
+    {
+      "path": "0039-resume-trusted-darwin-wrapper-during-shutdown.patch",
+      "sha256": "2136f3fbf487e6446e60587cdca30fb1cf909adcb4db3e18d0c242f7b6cbae6e"
+    },
+    {
+      "path": "0040-protect-physical-local-write-roots.patch",
+      "sha256": "8f6395a1b8d253170db019319cdaeff855ce1798efcc20eed704689fe070d994"
+    },
+    {
+      "path": "0044-scan-deep-helper-hard-links.patch",
+      "sha256": "dbdc0621cb4011fab3ca7ddd6812193c53c6b49851ddb4b24fdadb0cc0d93223"
+    },
+    {
+      "path": "0045-native-history-durability.patch",
+      "sha256": "f7352806ae2339e03bf09bd889e09dce4f7be702c62b771f7f1c1cabb1bb23cc"
+    },
+    {
+      "path": "0046-native-history-write-reconciliation.patch",
+      "sha256": "e8da877bf23d570c3cde2bc5a776e7cf5945b854245288137ab765376baa6647"
+    },
+    {
+      "path": "0047-native-tree-finalization-before-store-close.patch",
+      "sha256": "637dc7d1c29d6f98bba7cf43c885a0d3830e267c6524d675baa2b9d0d192823f"
     }
   ],
-  "result_tree": "3528521796e56b5166ef2ae08af906e52a9a017f"
+  "result_tree": "b1023a9fd1e7880f06a6759ada91bd80cce29d4b"
 }

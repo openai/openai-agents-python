@@ -7,6 +7,7 @@ reenter the SDK. Payloads are trusted opaque native records, not portable state.
 import json
 import os
 import sqlite3
+import sys
 import threading
 import uuid
 from collections.abc import Iterator
@@ -114,6 +115,8 @@ class SQLiteThreadStore:
             raise RuntimeError("Canonical storage writer is stale or closed")
 
     def acquire(self, thread_id: str) -> str:
+        if sys.platform == "win32":
+            raise RuntimeError("SQLiteThreadStore requires POSIX file locking")
         import fcntl
         import hashlib
 

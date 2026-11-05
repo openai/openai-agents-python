@@ -183,6 +183,10 @@ class SessionState(BaseModel):
     against the destination's current opening declarations. No version
     contains live grants or acquires tools from saved names. Versions 6 and 7
     also retain native CodeMode values and terminal cell observations.
+
+    Verify the checkpoint's integrity before restoring it. Opening with a
+    local executor or explicit writable roots requires a matching saved
+    executor policy digest.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True, hide_input_in_errors=True)
@@ -219,6 +223,7 @@ class SessionState(BaseModel):
     repair_turns: list[RecordedTurn] = Field(default_factory=list)
     repair_items: list[SessionItem] = Field(default_factory=list)
     network_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    executor_policy_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def validate_tree(self) -> "SessionState":

@@ -182,7 +182,7 @@ def test_portable_checkpoint_omits_descendant_and_repair_executor_details():
     private = {"executors": [{"cwd": "/synthetic/private"}], "model": "test-model"}
     descendant = {
         "type": "turn_context",
-        "payload": {"sdk_receipt": private.copy()},
+        "payload": {"sdk_receipt": {**private, "strict_executor_writes": True}},
     }
     unknown = {"type": "turn_context", "payload": {"sdk_receipt": "unknown shape"}}
     repair = {"receipt": private}

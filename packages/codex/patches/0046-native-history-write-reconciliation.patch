@@ -207,7 +207,7 @@ index 7422c7f4e761c72a2c547d6a55e49a58502a939d..d030901fd09c60955d3cbd72016b2177
  }
  
 diff --git a/codex-rs/rollout/src/recorder_tests.rs b/codex-rs/rollout/src/recorder_tests.rs
-index c97800ba4b156d663b508fc88cb22a613c899a95..00b27dc1f8233e08cd0abdfe1be9c7a45290a1c9 100644
+index a5aa2bde6fdec7fe7773a26d8cce5c6da6e0dda2..9372f4626d36e11151bd42bd5721b0f52e02a52b 100644
 --- a/codex-rs/rollout/src/recorder_tests.rs
 +++ b/codex-rs/rollout/src/recorder_tests.rs
 @@ -148,8 +148,8 @@ fn append_repair_terminates_nonempty_rollout_tail() -> std::io::Result<()> {
@@ -238,7 +238,7 @@ index c97800ba4b156d663b508fc88cb22a613c899a95..00b27dc1f8233e08cd0abdfe1be9c7a4
      };
      state.add_items(vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
          AgentMessageEvent {
-@@ -1110,54 +1111,29 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
+@@ -1111,54 +1112,29 @@ async fn resumed_paginated_rollout_continues_after_decimal_token_count() -> std:
  }
  
  #[tokio::test]
@@ -312,7 +312,7 @@ index c97800ba4b156d663b508fc88cb22a613c899a95..00b27dc1f8233e08cd0abdfe1be9c7a4
  }
  
  #[tokio::test]
-@@ -1930,3 +1906,94 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
+@@ -1932,3 +1908,94 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
      );
      Ok(())
  }

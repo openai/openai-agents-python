@@ -1,0 +1,282 @@
+diff --git a/codex-rs/core/src/unified_exec/process.rs b/codex-rs/core/src/unified_exec/process.rs
+index 502334d2e16dca39e1207363e7ba8eeeed8114bc..b129559570ddf741286c2dbcd5533e1737f8db25 100644
+--- a/codex-rs/core/src/unified_exec/process.rs
++++ b/codex-rs/core/src/unified_exec/process.rs
+@@ -397,10 +397,11 @@ impl UnifiedExecProcess {
+                 }
+             }
+             #[cfg(target_os = "macos")]
+-            if let Some(control) = &self.darwin_control
+-                && !control.wait_drained().await
+-            {
+-                return false;
++            if let Some(control) = &self.darwin_control {
++                control.resume_wrapper_for_shutdown().await;
++                if !control.wait_drained().await {
++                    return false;
++                }
+             }
+             state
+                 .wait_for(|state| {
+diff --git a/codex-rs/exec-server/src/darwin_coalition.rs b/codex-rs/exec-server/src/darwin_coalition.rs
+index ae2572f63ea436473710372fbe9b21aa86de5659..b6fd0aef45e30b1e4e6c2e4a2ce981bd0d32b75f 100644
+--- a/codex-rs/exec-server/src/darwin_coalition.rs
++++ b/codex-rs/exec-server/src/darwin_coalition.rs
+@@ -38,9 +38,30 @@ struct ProcessIdentity {
+ }
+ 
+ #[repr(transparent)]
+-struct AuditToken([u32; 8]);
++#[derive(Clone, Copy)]
++pub(crate) struct AuditToken(pub(crate) [u32; 8]);
+ 
+ impl AuditToken {
++    pub(crate) fn current() -> io::Result<Self> {
++        // SAFETY: getpid returns the calling process's PID.
++        let pid = unsafe { libc::getpid() };
++        task_audit_token(kernel_api()?, pid)
++    }
++
++    pub(crate) fn resume(self) -> io::Result<()> {
++        self.signal(kernel_api()?, libc::SIGCONT)
++    }
++
++    fn signal(mut self, api: &KernelApi, signal: c_int) -> io::Result<()> {
++        // SAFETY: This is a complete kernel audit token. XNU validates its PID
++        // and version at signal delivery.
++        let error = unsafe { (api.signal)(&mut self, signal) };
++        if error != 0 {
++            return Err(io::Error::from_raw_os_error(error));
++        }
++        Ok(())
++    }
++
+     fn pid(&self) -> pid_t {
+         self.0[5] as pid_t
+     }
+@@ -269,7 +290,7 @@ impl CoalitionOwner {
+     }
+ 
+     fn kill_member(&self, api: &KernelApi, pid: pid_t, keep_helper: bool) -> io::Result<()> {
+-        let mut token = task_audit_token(api, pid)?;
++        let token = task_audit_token(api, pid)?;
+         if token.pid() != pid {
+             return Err(io::Error::from_raw_os_error(libc::ESRCH));
+         }
+@@ -277,12 +298,7 @@ impl CoalitionOwner {
+         if id == self.id
+             && !(keep_helper && pid == self.helper_pid && identity == self.helper_identity)
+         {
+-            // SAFETY: token is the complete audit token returned by the
+-            // kernel. XNU validates its PID and version at signal delivery.
+-            let error = unsafe { (api.signal)(&mut token, libc::SIGKILL) };
+-            if error != 0 {
+-                return Err(io::Error::from_raw_os_error(error));
+-            }
++            token.signal(api, libc::SIGKILL)?;
+         }
+         Ok(())
+     }
+diff --git a/codex-rs/exec-server/src/darwin_command.rs b/codex-rs/exec-server/src/darwin_command.rs
+index e1cd44b7d0f2a89a3e29c207c7c3941fef87c162..b605cfc4428d8786d44a1e0cf0cffe3fa9540e7a 100644
+--- a/codex-rs/exec-server/src/darwin_command.rs
++++ b/codex-rs/exec-server/src/darwin_command.rs
+@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
+ use tokio::io::AsyncReadExt;
+ use tokio::sync::watch;
+ 
+-use crate::darwin_coalition::CoalitionOwner;
++use crate::darwin_coalition::{AuditToken, CoalitionOwner};
+ use crate::sandboxed_file_open::{receive_file_descriptor, send_file_descriptor};
+ 
+ pub const WRAPPER_ARG: &str = "--codex-sdk-darwin-command";
+@@ -24,6 +24,7 @@ const STARTED: u8 = 2;
+ const DRAINED: u8 = 3;
+ const INTERRUPT: u8 = 4;
+ const EXITED: u8 = 5;
++const WRAPPER_STARTED: u8 = 6;
+ const SETUP_TIMEOUT: Duration = Duration::from_secs(5);
+ const DRAIN_TIMEOUT: Duration = Duration::from_secs(4);
+ const POLL_INTERVAL: Duration = Duration::from_millis(10);
+@@ -160,7 +161,7 @@ pub async fn check_supported(helper: &Path) -> io::Result<()> {
+ 
+ #[derive(Clone, Copy, Default)]
+ struct ControlState {
+-    started: bool,
++    started_wrapper: Option<AuditToken>,
+     drained: bool,
+     closed: bool,
+ }
+@@ -176,9 +177,20 @@ impl CommandControl {
+         let mut reader = tokio::net::UnixStream::from_std(socket.try_clone()?)?;
+         let (updates, state) = watch::channel(ControlState::default());
+         tokio::spawn(async move {
+-            loop {
++            'messages: loop {
+                 match reader.read_u8().await {
+-                    Ok(STARTED) => updates.send_modify(|state| state.started = true),
++                    Ok(WRAPPER_STARTED) => {
++                        // Only the trusted wrapper can send this frame.
++                        let mut words = [0; 8];
++                        for word in &mut words {
++                            let Ok(value) = reader.read_u32_le().await else {
++                                break 'messages;
++                            };
++                            *word = value;
++                        }
++                        updates
++                            .send_modify(|state| state.started_wrapper = Some(AuditToken(words)));
++                    }
+                     Ok(DRAINED) => updates.send_modify(|state| state.drained = true),
+                     _ => break,
+                 }
+@@ -200,10 +212,31 @@ impl CommandControl {
+         let _ = self.socket.shutdown(Shutdown::Write);
+     }
+ 
++    /// After requesting EOF, allow a stopped wrapper to drain its coalition.
++    pub async fn resume_wrapper_for_shutdown(&self) {
++        let mut state = self.state.clone();
++        // A starting command may already have queued its identity while the
++        // reader task has not recorded it yet. The caller bounds this wait.
++        let wrapper = match state
++            .wait_for(|state| state.started_wrapper.is_some() || state.drained || state.closed)
++            .await
++        {
++            Ok(state) => state.started_wrapper,
++            Err(_) => None,
++        };
++        if let Some(wrapper) = wrapper {
++            // Confirmation still depends on DRAINED and on actual wrapper exit.
++            let _ = wrapper.resume();
++        }
++    }
++
+     pub async fn wait_started(&self) -> io::Result<()> {
+         let mut state = self.state.clone();
+-        match state.wait_for(|state| state.started || state.closed).await {
+-            Ok(state) if state.started => Ok(()),
++        match state
++            .wait_for(|state| state.started_wrapper.is_some() || state.closed)
++            .await
++        {
++            Ok(state) if state.started_wrapper.is_some() => Ok(()),
+             _ => Err(io::Error::other(
+                 "managed local launchd command did not start",
+             )),
+@@ -296,6 +329,7 @@ fn run_managed(
+     owner: &CoalitionOwner,
+     request: &JobRequest,
+ ) -> io::Result<i32> {
++    let wrapper_token = AuditToken::current()?;
+     worker.write_all(&owner.id().to_le_bytes())?;
+     let bytes = serde_json::to_vec(request)?;
+     if bytes.len() > MAX_REQUEST_SIZE {
+@@ -320,7 +354,10 @@ fn run_managed(
+         }
+         if worker_ready {
+             match read_byte(worker)? {
+-                Some(STARTED) => control.write_all(&[STARTED])?,
++                Some(STARTED) => {
++                    control.write_all(&[WRAPPER_STARTED])?;
++                    control.write_all(wrapper_token.0.map(u32::to_le_bytes).as_flattened())?;
++                }
+                 Some(EXITED) => {
+                     let mut status = [0; 4];
+                     worker.read_exact(&mut status)?;
+@@ -803,3 +840,95 @@ fn invalid_message() -> io::Error {
+         "invalid managed local Darwin command request",
+     )
+ }
++
++#[cfg(test)]
++mod shutdown_tests {
++    use super::*;
++
++    fn control_pair() -> io::Result<(CommandControl, UnixStream)> {
++        let (socket, peer) = UnixStream::pair()?;
++        Ok((CommandControl::new(socket)?, peer))
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn shutdown_waits_for_queued_wrapper_identity() -> io::Result<()> {
++        let (control, mut peer) = control_pair()?;
++        let mut token = AuditToken::current()?;
++        // A stale version for this test process cannot signal a real process.
++        token.0[7] = token.0[7].wrapping_add(1);
++        peer.write_all(&[WRAPPER_STARTED])?;
++        peer.write_all(token.0.map(u32::to_le_bytes).as_flattened())?;
++        // The current-thread reader cannot run until this task yields.
++        assert!(control.state.borrow().started_wrapper.is_none());
++        control.stop();
++        tokio::time::timeout(SETUP_TIMEOUT, control.resume_wrapper_for_shutdown())
++            .await
++            .expect("shutdown did not observe the queued identity");
++        assert!(control.state.borrow().started_wrapper.is_some());
++        // An attempted resume, including a failed signal, never confirms drain.
++        assert!(!control.is_drained());
++        peer.write_all(&[DRAINED])?;
++        assert!(control.wait_drained().await);
++        Ok(())
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn shutdown_accepts_drained_before_started() -> io::Result<()> {
++        let (control, mut peer) = control_pair()?;
++        control.stop();
++        peer.write_all(&[DRAINED])?;
++        tokio::time::timeout(SETUP_TIMEOUT, control.resume_wrapper_for_shutdown())
++            .await
++            .expect("EOF-before-START drain blocked on an identity");
++        assert!(control.state.borrow().started_wrapper.is_none());
++        assert!(control.wait_drained().await);
++        Ok(())
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn shutdown_does_not_confirm_a_closed_control_channel() -> io::Result<()> {
++        let (control, peer) = control_pair()?;
++        control.stop();
++        drop(peer);
++        tokio::time::timeout(SETUP_TIMEOUT, control.resume_wrapper_for_shutdown())
++            .await
++            .expect("closed control channel blocked on an identity");
++        assert!(control.state.borrow().started_wrapper.is_none());
++        assert!(!control.wait_drained().await);
++        Ok(())
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn shutdown_rejects_the_old_started_opcode() -> io::Result<()> {
++        let (control, mut peer) = control_pair()?;
++        peer.write_all(&[STARTED])?;
++        control.stop();
++        tokio::time::timeout(SETUP_TIMEOUT, control.resume_wrapper_for_shutdown())
++            .await
++            .expect("mismatched helper blocked on an identity");
++        assert!(control.wait_started().await.is_err());
++        assert!(!control.wait_drained().await);
++        Ok(())
++    }
++
++    #[tokio::test(flavor = "current_thread")]
++    async fn incomplete_wrapper_identity_remains_bounded_and_unconfirmed() -> io::Result<()> {
++        let (control, mut peer) = control_pair()?;
++        peer.write_all(&[WRAPPER_STARTED, 0])?;
++        control.stop();
++        assert!(
++            tokio::time::timeout(
++                Duration::from_millis(20),
++                control.resume_wrapper_for_shutdown(),
++            )
++            .await
++            .is_err()
++        );
++        assert!(control.state.borrow().started_wrapper.is_none());
++        assert!(!control.is_drained());
++        drop(peer);
++        control.resume_wrapper_for_shutdown().await;
++        assert!(!control.wait_drained().await);
++        Ok(())
++    }
++}
