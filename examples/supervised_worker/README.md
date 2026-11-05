@@ -48,8 +48,13 @@ returned binding with callbacks from that feed. A matching read establishes the
 account before the watcher accepts sparse updates.
 
 The example uses your application's `read_account_limits` helper. It returns
-the raw read and the time it arrived in epoch seconds. Choose the maximum age
-for your feed. Here it is 30 seconds.
+the raw read and its arrival time. Use unrounded epoch seconds from the
+worker's local clock for reads and updates. The watcher accepts observations
+with timestamps strictly later than both the attachment and the last accepted
+observation. Equal timestamps leave the order ambiguous, so the watcher keeps
+the existing evidence. If your feed overlaps reads, discard superseded
+responses before forwarding them. Choose the maximum age for your feed. Here
+it is 30 seconds.
 
 ```python
 from agents import PendingRequests

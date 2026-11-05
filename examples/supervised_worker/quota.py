@@ -61,7 +61,11 @@ class AccountBinding:
 
 @dataclass(frozen=True)
 class Observation:
-    """The binding captured by the feed, with local epoch-second observation times."""
+    """The feed binding and local epoch seconds for observation and expiry.
+
+    The observation time must be strictly later than the attachment and the
+    last accepted observation.
+    """
 
     binding: AccountBinding
     observed_at: float

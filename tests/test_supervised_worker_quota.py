@@ -122,6 +122,28 @@ def trace() -> worker.TurnTrace:
     return worker.TurnTrace(monotonic())
 
 
+def test_tied_and_older_observations_leave_account_evidence_intact(feed: Feed) -> None:
+    watch = quota.QuotaWatch()
+    binding = watch.attach("account-a")
+    tied_with_attachment = quota.Observation(binding, feed.now, feed.now + 20)
+    blocking = raw_read(binding.account_id, NO_CREDITS)
+    watch.observe_read(tied_with_attachment, blocking)
+    initial = watch.account_view()
+    assert initial is not None and initial.read is None
+
+    current = feed.stamp(binding)
+    watch.observe_read(current, raw_read(binding.account_id, USABLE_CREDITS))
+    accepted = watch.account_view()
+    assert accepted is not None and accepted.rate_limits["credits"].value == USABLE_CREDITS
+
+    older = replace(current, observed_at=current.observed_at - 0.5)
+    for observation in (current, older):
+        watch.observe_read(observation, blocking)
+        assert watch.account_view() == accepted
+        watch.observe_update(observation, {"rateLimits": {"credits": NO_CREDITS}})
+        assert watch.account_view() == accepted
+
+
 def test_account_view_preserves_raw_values_and_individual_expiry(feed: Feed) -> None:
     watch = quota.QuotaWatch()
     assert watch.account_view() is None
