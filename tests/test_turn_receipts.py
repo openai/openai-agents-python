@@ -12,14 +12,14 @@ from pathlib import Path
 
 import pytest
 
-import agents.turn_receipt as turn_receipt
+import agents._runtime.turn_receipt as turn_receipt
 from agents import Agent, NativeAgents
-from agents.state import SessionState
-from agents.turn_receipt import (
+from agents._runtime.turn_receipt import (
     _load_instruction_files,
     _project_turn_receipt,
     _redact_checkpoint_executor_receipts,
 )
+from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import assistant_output

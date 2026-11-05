@@ -218,9 +218,9 @@ async def state_transfer_gate(
     gate = StateTransferGate()
     server = await asyncio.start_server(gate.accept, "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
-    import agents.session as session_module
+    import agents._runtime.session as session_module
 
-    bundled = Path(session_module.__file__).parent / "bin"
+    bundled = Path(session_module.__file__).parents[1] / "bin"
     helper = bundled / "codex-code-mode-host"
     # Select the test helper before Session captures client and thread runtime.
     # Keep every other bundled executable unchanged through this private mirror.
@@ -248,7 +248,7 @@ async def state_transfer_gate(
     launcher.chmod(0o755)
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(session_module, "__file__", str(package / "session.py"))
+            patch.setattr(session_module, "__file__", str(package / "_runtime" / "session.py"))
             yield gate
     finally:
         await gate.release("terminate")

@@ -13,7 +13,7 @@ from dataclasses import replace
 import pytest
 
 from agents import Agent, HttpMCP, NativeProvider, Turn, function_tool
-from agents.experimental.deferred import _wait_for_job
+from agents._runtime.experimental.deferred import _wait_for_job
 from agents.state import SessionState
 from tests._asyncio import timeout
 from tests.native_fixtures import (

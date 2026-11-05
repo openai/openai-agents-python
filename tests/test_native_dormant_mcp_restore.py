@@ -38,7 +38,7 @@ from tests.test_native_mcp_tools import Peer, declarations, mcp_call
 async def test_http_restore_reserves_destination_until_selected(
     responses: ResponsesFixture, checkpoint: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import agents.session as session_module
+    import agents._runtime.session as session_module
 
     source, destination, foreign = Peer(label="completed-source"), Peer(label="destination"), Peer()
     manual = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
@@ -176,7 +176,7 @@ async def test_http_restore_reserves_destination_until_selected(
 async def test_restore_rejects_unconfirmed_disabled_receipt_before_manual_grants(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, fault: str
 ) -> None:
-    import agents.session as session_module
+    import agents._runtime.session as session_module
 
     source, destination = Peer(), Peer()
     manual = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
@@ -241,7 +241,7 @@ async def test_restore_rejects_unconfirmed_disabled_receipt_before_manual_grants
 async def test_restored_http_activation_failure_fences_and_joins(
     responses: ResponsesFixture, fault: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import agents.session as session_module
+    import agents._runtime.session as session_module
 
     gate = None if fault == "denied" else asyncio.Event()
     destination = Peer(denied=fault == "denied", release_ready=gate)

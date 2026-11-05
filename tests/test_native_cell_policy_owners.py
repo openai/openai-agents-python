@@ -9,10 +9,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from agents._runtime.native_interception import _NativeInterception
+from agents._runtime.turn import _root_turn
 from agents.executor import Environment
-from agents.native_interception import _NativeInterception
 from agents.session import NativeError, Session
-from agents.turn import _root_turn
 from tests._asyncio import timeout
 
 

@@ -1095,6 +1095,7 @@ def test_processor_loss_survives_sequential_event_loops(new_events: bool) -> Non
     script = r"""
 import asyncio,json,threading,sys
 from agents import telemetry
+from agents._runtime import telemetry as runtime_telemetry
 entered=threading.Event(); release=threading.Event(); seen=[]
 class Processor:
     def on_trace_event(self,event):
@@ -1130,7 +1131,7 @@ async def second():
     await telemetry.shutdown(timeout_ms=2000)
 asyncio.run(first())
 release.set()
-route=next(iter(telemetry._processors.values()))
+route=next(iter(runtime_telemetry._processors.values()))
 route.pending.completion.result(timeout=2)
 asyncio.run(second())
 """
@@ -1155,6 +1156,7 @@ def test_shutdown_owns_processors_on_a_fresh_event_loop(queued_events: bool) -> 
     script = r"""
 import asyncio,json,sys
 from agents import telemetry
+from agents._runtime import telemetry as runtime_telemetry
 seen=[]
 class Processor:
     def on_trace_event(self,event): seen.append((event['name'],event['lifecycle']))
@@ -1165,7 +1167,7 @@ if sys.argv[1]=='True':
 asyncio.run(telemetry.shutdown(timeout_ms=2000))
 expected=[('between loops','start'),('between loops','end')] if sys.argv[1]=='True' else []
 assert seen==expected,seen
-assert telemetry._processors=={} and telemetry._processor_task is None
+assert runtime_telemetry._processors=={} and runtime_telemetry._processor_task is None
 print(json.dumps({'seen':seen,'shutdown':'complete'}))
 """
     with tempfile.TemporaryDirectory() as home:
