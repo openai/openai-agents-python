@@ -1,0 +1,603 @@
+{
+  "$schemaVersion": "1.21",
+  "current_turn": 2,
+  "current_agent": {
+    "name": "worker",
+    "identity": "worker#2"
+  },
+  "original_input": "Record before, then request approval.",
+  "pending_input": [],
+  "model_responses": [
+    {
+      "usage": {
+        "requests": 1,
+        "input_tokens": 0,
+        "input_tokens_details": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        ],
+        "output_tokens": 0,
+        "output_tokens_details": [
+          {
+            "reasoning_tokens": 0
+          }
+        ],
+        "total_tokens": 0,
+        "request_usage_entries": []
+      },
+      "output": [
+        {
+          "arguments": "{}",
+          "call_id": "handoff-high",
+          "name": "choose_high",
+          "type": "function_call",
+          "id": "item-handoff"
+        }
+      ],
+      "response_id": "resp-789",
+      "request_id": null
+    },
+    {
+      "usage": {
+        "requests": 1,
+        "input_tokens": 0,
+        "input_tokens_details": [
+          {
+            "cache_write_tokens": 0,
+            "cached_tokens": 0
+          }
+        ],
+        "output_tokens": 0,
+        "output_tokens_details": [
+          {
+            "reasoning_tokens": 0
+          }
+        ],
+        "total_tokens": 0,
+        "request_usage_entries": []
+      },
+      "output": [
+        {
+          "arguments": "{\"label\": \"before\"}",
+          "call_id": "effect-before",
+          "name": "record_effect",
+          "type": "function_call",
+          "id": "item-effect-before"
+        },
+        {
+          "arguments": "{\"label\": \"approved\"}",
+          "call_id": "effect-approved",
+          "name": "approved_effect",
+          "type": "function_call",
+          "id": "item-effect-approved"
+        }
+      ],
+      "response_id": "resp-789",
+      "request_id": null
+    }
+  ],
+  "context": {
+    "usage": {
+      "requests": 2,
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "total_tokens": 0,
+      "request_usage_entries": []
+    },
+    "approvals": {},
+    "tool_invocations": {
+      "handoff-high": {
+        "type": "function_call",
+        "approval_scope": "2c043d3d1880ca63d1ea60fa9ebc5800e8b5254c0e73ee3efbf2d4a88909af6e",
+        "fingerprint": "e19d42584d1039ac36c1ba4a35de66926f19366e065bb681537852dd6b8753a3",
+        "executed": true,
+        "completed": true
+      },
+      "effect-before": {
+        "type": "function_call",
+        "approval_scope": "302fc935aca0c0f121ddaed84cf9d2abc92dd6e5e5bd3131a0a9c17525fe5a7d",
+        "fingerprint": "4edb9b48b3e28d95861792c7ed2b0ef3e108676798a1e1e7764cb5ae311f79f6",
+        "executed": true,
+        "completed": true
+      },
+      "effect-approved": {
+        "type": "function_call",
+        "approval_scope": "adde72ce4524005af5b1091c9de30c3c6eadd6f8aa159b3bd392756957609330",
+        "fingerprint": "06bbdedbb61a03aa0e310e05170dff363530bfb8153062abe07159539e5f72ab",
+        "executed": false,
+        "completed": false
+      }
+    },
+    "context": {
+      "effects": [
+        "before"
+      ]
+    },
+    "context_meta": {
+      "original_type": "mapping",
+      "serialized_via": "mapping",
+      "requires_deserializer": false,
+      "omitted": false
+    }
+  },
+  "tool_use_tracker": {
+    "root": [
+      "choose_high"
+    ],
+    "worker#2": [
+      "record_effect",
+      "approved_effect"
+    ]
+  },
+  "max_turns": 10,
+  "no_active_agent_run": true,
+  "input_guardrail_results": [],
+  "output_guardrail_results": [],
+  "tool_input_guardrail_results": [],
+  "tool_output_guardrail_results": [],
+  "conversation_id": null,
+  "previous_response_id": null,
+  "auto_previous_response_id": false,
+  "generated_prompt_cache_key": null,
+  "reasoning_item_id_policy": null,
+  "nested_history_owned_session_item_refs": [],
+  "generated_session_item_indexes": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5
+  ],
+  "current_response_generated_item_ownership": {
+    "start": 2,
+    "end": 6,
+    "interruptions": [
+      5
+    ]
+  },
+  "generated_items": [
+    {
+      "type": "handoff_call_item",
+      "raw_item": {
+        "arguments": "{}",
+        "call_id": "handoff-high",
+        "name": "choose_high",
+        "type": "function_call",
+        "id": "item-handoff"
+      },
+      "agent": {
+        "name": "root"
+      }
+    },
+    {
+      "type": "handoff_output_item",
+      "raw_item": {
+        "call_id": "handoff-high",
+        "output": "{\"assistant\": \"worker\"}",
+        "type": "function_call_output"
+      },
+      "agent": {
+        "name": "root"
+      },
+      "source_agent": {
+        "name": "root"
+      },
+      "target_agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      }
+    },
+    {
+      "type": "tool_call_item",
+      "raw_item": {
+        "arguments": "{\"label\": \"before\"}",
+        "call_id": "effect-before",
+        "name": "record_effect",
+        "type": "function_call",
+        "id": "item-effect-before"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "tool_name": "record_effect",
+      "description": "Record one observable application effect.",
+      "tool_origin": {
+        "type": "function"
+      }
+    },
+    {
+      "type": "tool_call_item",
+      "raw_item": {
+        "arguments": "{\"label\": \"approved\"}",
+        "call_id": "effect-approved",
+        "name": "approved_effect",
+        "type": "function_call",
+        "id": "item-effect-approved"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "tool_name": "approved_effect",
+      "description": "Record an application effect after approval.",
+      "tool_origin": {
+        "type": "function"
+      }
+    },
+    {
+      "type": "tool_call_output_item",
+      "raw_item": {
+        "call_id": "effect-before",
+        "output": "recorded:before",
+        "type": "function_call_output"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "output": "recorded:before",
+      "tool_origin": {
+        "type": "function"
+      }
+    },
+    {
+      "type": "tool_approval_item",
+      "raw_item": {
+        "arguments": "{\"label\": \"approved\"}",
+        "call_id": "effect-approved",
+        "name": "approved_effect",
+        "type": "function_call",
+        "id": "item-effect-approved"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "tool_name": "approved_effect",
+      "tool_lookup_key": {
+        "kind": "bare",
+        "name": "approved_effect"
+      },
+      "tool_origin": {
+        "type": "function"
+      }
+    }
+  ],
+  "session_items": [
+    {
+      "type": "handoff_call_item",
+      "raw_item": {
+        "arguments": "{}",
+        "call_id": "handoff-high",
+        "name": "choose_high",
+        "type": "function_call",
+        "id": "item-handoff"
+      },
+      "agent": {
+        "name": "root"
+      }
+    },
+    {
+      "type": "handoff_output_item",
+      "raw_item": {
+        "call_id": "handoff-high",
+        "output": "{\"assistant\": \"worker\"}",
+        "type": "function_call_output"
+      },
+      "agent": {
+        "name": "root"
+      },
+      "source_agent": {
+        "name": "root"
+      },
+      "target_agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      }
+    },
+    {
+      "type": "tool_call_item",
+      "raw_item": {
+        "arguments": "{\"label\": \"before\"}",
+        "call_id": "effect-before",
+        "name": "record_effect",
+        "type": "function_call",
+        "id": "item-effect-before"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "tool_name": "record_effect",
+      "description": "Record one observable application effect.",
+      "tool_origin": {
+        "type": "function"
+      }
+    },
+    {
+      "type": "tool_call_item",
+      "raw_item": {
+        "arguments": "{\"label\": \"approved\"}",
+        "call_id": "effect-approved",
+        "name": "approved_effect",
+        "type": "function_call",
+        "id": "item-effect-approved"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "tool_name": "approved_effect",
+      "description": "Record an application effect after approval.",
+      "tool_origin": {
+        "type": "function"
+      }
+    },
+    {
+      "type": "tool_call_output_item",
+      "raw_item": {
+        "call_id": "effect-before",
+        "output": "recorded:before",
+        "type": "function_call_output"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "output": "recorded:before",
+      "tool_origin": {
+        "type": "function"
+      }
+    },
+    {
+      "type": "tool_approval_item",
+      "raw_item": {
+        "arguments": "{\"label\": \"approved\"}",
+        "call_id": "effect-approved",
+        "name": "approved_effect",
+        "type": "function_call",
+        "id": "item-effect-approved"
+      },
+      "agent": {
+        "name": "worker",
+        "identity": "worker#2"
+      },
+      "tool_name": "approved_effect",
+      "tool_lookup_key": {
+        "kind": "bare",
+        "name": "approved_effect"
+      },
+      "tool_origin": {
+        "type": "function"
+      }
+    }
+  ],
+  "current_step": {
+    "type": "next_step_interruption",
+    "data": {
+      "interruptions": [
+        {
+          "type": "tool_approval_item",
+          "raw_item": {
+            "arguments": "{\"label\": \"approved\"}",
+            "call_id": "effect-approved",
+            "name": "approved_effect",
+            "type": "function_call",
+            "id": "item-effect-approved"
+          },
+          "agent": {
+            "name": "worker",
+            "identity": "worker#2"
+          },
+          "tool_name": "approved_effect",
+          "tool_origin": {
+            "type": "function"
+          },
+          "tool_lookup_key": {
+            "kind": "bare",
+            "name": "approved_effect"
+          }
+        }
+      ],
+      "response_accepted": false,
+      "llm_end_hooks_started": true
+    }
+  },
+  "last_model_response": {
+    "usage": {
+      "requests": 1,
+      "input_tokens": 0,
+      "input_tokens_details": [
+        {
+          "cache_write_tokens": 0,
+          "cached_tokens": 0
+        }
+      ],
+      "output_tokens": 0,
+      "output_tokens_details": [
+        {
+          "reasoning_tokens": 0
+        }
+      ],
+      "total_tokens": 0,
+      "request_usage_entries": []
+    },
+    "output": [
+      {
+        "arguments": "{\"label\": \"before\"}",
+        "call_id": "effect-before",
+        "name": "record_effect",
+        "type": "function_call",
+        "id": "item-effect-before"
+      },
+      {
+        "arguments": "{\"label\": \"approved\"}",
+        "call_id": "effect-approved",
+        "name": "approved_effect",
+        "type": "function_call",
+        "id": "item-effect-approved"
+      }
+    ],
+    "response_id": "resp-789",
+    "request_id": null
+  },
+  "last_processed_response": {
+    "new_items": [
+      {
+        "type": "tool_call_item",
+        "raw_item": {
+          "arguments": "{\"label\": \"before\"}",
+          "call_id": "effect-before",
+          "name": "record_effect",
+          "type": "function_call",
+          "id": "item-effect-before"
+        },
+        "agent": {
+          "name": "worker",
+          "identity": "worker#2"
+        },
+        "tool_name": "record_effect",
+        "description": "Record one observable application effect.",
+        "tool_origin": {
+          "type": "function"
+        }
+      },
+      {
+        "type": "tool_call_item",
+        "raw_item": {
+          "arguments": "{\"label\": \"approved\"}",
+          "call_id": "effect-approved",
+          "name": "approved_effect",
+          "type": "function_call",
+          "id": "item-effect-approved"
+        },
+        "agent": {
+          "name": "worker",
+          "identity": "worker#2"
+        },
+        "tool_name": "approved_effect",
+        "description": "Record an application effect after approval.",
+        "tool_origin": {
+          "type": "function"
+        }
+      }
+    ],
+    "tools_used": [
+      "record_effect",
+      "approved_effect"
+    ],
+    "functions": [
+      {
+        "tool_call": {
+          "arguments": "{\"label\": \"before\"}",
+          "call_id": "effect-before",
+          "name": "record_effect",
+          "type": "function_call",
+          "id": "item-effect-before"
+        },
+        "tool": {
+          "name": "record_effect",
+          "lookupKey": {
+            "kind": "bare",
+            "name": "record_effect"
+          },
+          "description": "Record one observable application effect.",
+          "paramsJsonSchema": {
+            "properties": {
+              "label": {
+                "title": "Label",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label"
+            ],
+            "title": "record_effect_args",
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      },
+      {
+        "tool_call": {
+          "arguments": "{\"label\": \"approved\"}",
+          "call_id": "effect-approved",
+          "name": "approved_effect",
+          "type": "function_call",
+          "id": "item-effect-approved"
+        },
+        "tool": {
+          "name": "approved_effect",
+          "lookupKey": {
+            "kind": "bare",
+            "name": "approved_effect"
+          },
+          "description": "Record an application effect after approval.",
+          "paramsJsonSchema": {
+            "properties": {
+              "label": {
+                "title": "Label",
+                "type": "string"
+              }
+            },
+            "required": [
+              "label"
+            ],
+            "title": "approved_effect_args",
+            "type": "object",
+            "additionalProperties": false
+          }
+        }
+      }
+    ],
+    "computer_actions": [],
+    "custom_tool_actions": [],
+    "local_shell_actions": [],
+    "shell_actions": [],
+    "apply_patch_actions": [],
+    "handoffs": [],
+    "mcp_approval_requests": [],
+    "interruptions": [
+      {
+        "type": "tool_approval_item",
+        "raw_item": {
+          "arguments": "{\"label\": \"approved\"}",
+          "call_id": "effect-approved",
+          "name": "approved_effect",
+          "type": "function_call",
+          "id": "item-effect-approved"
+        },
+        "agent": {
+          "name": "worker",
+          "identity": "worker#2"
+        },
+        "tool_name": "approved_effect",
+        "tool_origin": {
+          "type": "function"
+        },
+        "tool_lookup_key": {
+          "kind": "bare",
+          "name": "approved_effect"
+        }
+      }
+    ],
+    "mcp_tool_bindings": {}
+  },
+  "current_turn_persisted_item_count": 0,
+  "trace": null
+}
