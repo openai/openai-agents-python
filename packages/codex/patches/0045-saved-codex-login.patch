@@ -13,7 +13,7 @@ index 12df487a9d91ac7f6ea63ebc8929e57b659b69dc..577af7a5ee1e5c06013028e058627c15
          Some("usage_not_included") => ApiError::UsageNotIncluded,
          Some("cyber_policy") => ApiError::CyberPolicy {
 diff --git a/codex-rs/login/src/auth/auth_tests.rs b/codex-rs/login/src/auth/auth_tests.rs
-index ab15a338718561251a4673c1e53e77b5e68485a8..78ea721f37378d268e4251e6c1e3171ef858c6ee 100644
+index ab15a338718561251a4673c1e53e77b5e68485a8..338edabad181fb17aad4ab768a107ce219c8db1b 100644
 --- a/codex-rs/login/src/auth/auth_tests.rs
 +++ b/codex-rs/login/src/auth/auth_tests.rs
 @@ -81,6 +81,7 @@ async fn refresh_without_id_token() {
@@ -23,11 +23,11 @@ index ab15a338718561251a4673c1e53e77b5e68485a8..78ea721f37378d268e4251e6c1e3171e
 +        /*saved_login*/ None,
      )
      .expect("update_tokens should succeed");
- 
-@@ -90,6 +91,115 @@ async fn refresh_without_id_token() {
+
+@@ -90,6 +91,158 @@ async fn refresh_without_id_token() {
      assert_eq!(tokens.refresh_token, "new-refresh-token");
  }
- 
+
 +#[test]
 +fn saved_chatgpt_refresh_persists_only_for_the_current_owner() -> anyhow::Result<()> {
 +    let home = tempdir()?;
@@ -137,17 +137,60 @@ index ab15a338718561251a4673c1e53e77b5e68485a8..78ea721f37378d268e4251e6c1e3171e
 +    Ok(())
 +}
 +
++#[tokio::test]
++async fn saved_chatgpt_refresh_reloads_personal_login_on_unauthorized() -> anyhow::Result<()> {
++    let home = tempdir()?;
++    write_auth_file(
++        AuthFileParams {
++            openai_api_key: None,
++            chatgpt_plan_type: Some("pro".to_string()),
++            chatgpt_account_id: None,
++        },
++        home.path(),
++    )?;
++    let manager = AuthManager::shared_saved_chatgpt(
++        home.path().to_path_buf(),
++        crate::test_support::transport_default_auth_route_config(),
++    )?;
++    let mut recovery = manager.unauthorized_recovery();
++    assert_eq!(recovery.next().await?.auth_state_changed(), Some(false));
++    assert_eq!(recovery.step_name(), "refresh_token");
++
++    let Some(CodexAuth::Chatgpt(auth)) = manager.auth_cached() else {
++        anyhow::bail!("expected saved ChatGPT auth");
++    };
++    let mut replacement = auth.current_auth_json().expect("saved login");
++    let tokens = replacement.tokens.as_mut().expect("login tokens");
++    tokens.access_token = "rotated-personal-access-token".to_string();
++    tokens.refresh_token = "rotated-personal-refresh-token".to_string();
++    auth.storage().save(&replacement)?;
++    let mut recovery = manager.unauthorized_recovery();
++    assert_eq!(recovery.next().await?.auth_state_changed(), Some(true));
++    assert_eq!(
++        manager.auth_cached().expect("cached login").get_token()?,
++        "rotated-personal-access-token"
++    );
++
++    std::fs::remove_file(get_auth_file(home.path()))?;
++    let mut recovery = manager.unauthorized_recovery();
++    assert!(matches!(
++        recovery.next().await,
++        Err(RefreshTokenError::Permanent(_))
++    ));
++    Ok(())
++}
++
  #[test]
  fn login_with_api_key_overwrites_existing_auth_json() {
      let dir = tempdir().unwrap();
 diff --git a/codex-rs/login/src/auth/manager.rs b/codex-rs/login/src/auth/manager.rs
-index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b67629295a17693 100644
+index cdc9c8d3560359aca41ebf28b1b313e1a1793304..918a3b04023d5fa172d2c8952e6707c14e251964 100644
 --- a/codex-rs/login/src/auth/manager.rs
 +++ b/codex-rs/login/src/auth/manager.rs
 @@ -1596,16 +1596,73 @@ async fn load_auth(
      Ok(Some(auth))
  }
- 
+
 +// The SDK opts into the exact file-backed Codex OAuth login. Unlike the
 +// regular loader, this path never looks at environment or in-memory auth.
 +type SavedChatgptOwner = (Option<String>, String);
@@ -215,7 +258,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b676292
 +            "Saved Codex login changed during refresh.",
 +        ));
 +    }
- 
+
      let tokens = auth_dot_json.tokens.get_or_insert_with(TokenData::default);
      if let Some(id_token) = id_token {
 @@ -1618,6 +1675,13 @@ fn persist_tokens(
@@ -255,7 +298,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b676292
 +    saved_chatgpt_owner: Option<SavedChatgptOwner>,
      auth_route_config: AuthRouteConfig,
  }
- 
+
 @@ -2181,6 +2250,14 @@ impl AuthManager {
              .await
              .ok()
@@ -279,7 +322,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b676292
              auth_route_config,
          }
      }
- 
+
 +    /// Load an existing file-backed Codex OAuth login and constrain reloads to its owner.
 +    pub fn shared_saved_chatgpt(
 +        codex_home: PathBuf,
@@ -351,9 +394,46 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b676292
          let Some(auth) = self.auth().await else {
              return Ok(None);
          };
+@@ -2486,26 +2597,26 @@ impl AuthManager {
+         &self,
+         expected_account_id: Option<&str>,
+     ) -> ReloadOutcome {
+-        let expected_account_id = match expected_account_id {
+-            Some(account_id) => account_id,
+-            None => {
+-                tracing::info!("Skipping auth reload because no account id is available.");
+-                return ReloadOutcome::Skipped;
+-            }
+-        };
++        // Personal saved logins can have no workspace ID. The saved loader
++        // still verifies the original owner before returning auth.
++        if expected_account_id.is_none() && self.saved_chatgpt_owner.is_none() {
++            tracing::info!("Skipping auth reload because no account id is available.");
++            return ReloadOutcome::Skipped;
++        }
+
+         let new_auth = self.load_auth().await;
+         let new_account_id = new_auth.as_ref().and_then(CodexAuth::get_account_id);
++        let expected_label = expected_account_id.unwrap_or("personal");
+
+-        if new_account_id.as_deref() != Some(expected_account_id) {
++        if new_auth.is_none() || new_account_id.as_deref() != expected_account_id {
+             let found_account_id = new_account_id.as_deref().unwrap_or("unknown");
+             tracing::info!(
+-                "Skipping auth reload due to account id mismatch (expected: {expected_account_id}, found: {found_account_id})"
++                "Skipping auth reload due to account id mismatch (expected: {expected_label}, found: {found_account_id})"
+             );
+             return ReloadOutcome::Skipped;
+         }
+
+-        tracing::info!("Reloading auth for account {expected_account_id}");
++        tracing::info!("Reloading auth for account {expected_label}");
+         let cached_before_reload = self.auth_cached();
+         let auth_changed =
+             !Self::auths_equal_for_refresh(cached_before_reload.as_ref(), new_auth.as_ref());
 @@ -2572,6 +2683,12 @@ impl AuthManager {
      }
- 
+
      async fn load_auth(&self) -> Option<CodexAuth> {
 +        if let Some(owner) = &self.saved_chatgpt_owner {
 +            return load_saved_chatgpt(&self.codex_home, &self.auth_route_config, Some(owner))
@@ -405,7 +485,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b676292
                  RefreshTokenFailedReason::Other,
 @@ -2974,6 +3107,12 @@ impl AuthManager {
      }
- 
+
      fn ensure_logout_allowed(&self) -> std::io::Result<()> {
 +        if self.saved_chatgpt_owner.is_some() {
 +            return Err(std::io::Error::new(
@@ -435,7 +515,7 @@ index cdc9c8d3560359aca41ebf28b1b313e1a1793304..78f4acf09e0257720a37da296b676292
 +        self.finish_chatgpt_refresh(auth, saved_login.as_ref(), response)
 +            .await
 +    }
- 
+
 -        persist_tokens(
 -            auth.storage(),
 -            refresh_response.id_token,

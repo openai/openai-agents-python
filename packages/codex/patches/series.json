@@ -166,8 +166,8 @@
     },
     {
       "path": "0045-saved-codex-login.patch",
-      "sha256": "da60ef00a6e4bd3eac7d7a4f835f1c025961fa5b6ff65ff57ed3cdaaea4b045b"
+      "sha256": "aad03f5a1b28deafbbfcc8f0cbd10f00d221613c93f93d90bb68a1fd33690556"
     }
   ],
-  "result_tree": "294d16210ba55b4324e3c10c43f95958fe5027f6"
+  "result_tree": "b28dae0c0c83406f74adeb0b1739f8eeccaeeb78"
 }
