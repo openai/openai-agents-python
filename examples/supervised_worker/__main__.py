@@ -91,13 +91,16 @@ def record_once(directory: Path, name: str, value: dict[str, Any]) -> bool:
         except FileExistsError:
             if read_record(directory, name) != value:
                 raise ValueError(f"The existing {name} record differs.") from None
-            return False
+            created = False
+        else:
+            created = True
+        # A prior attempt may have linked the record but failed to sync its directory.
         fd = os.open(directory, os.O_RDONLY)
         try:
             os.fsync(fd)
         finally:
             os.close(fd)
-    return True
+    return created
 
 
 @dataclass
