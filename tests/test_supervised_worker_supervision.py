@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
+import stat
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -304,11 +306,38 @@ async def test_prior_accepted_snapshot_remains_publishable(tmp_path, monkeypatch
     assert worker.read_record(directory, "published") == accepted
 
 
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Uses Unix directory fsync")
+def test_publish_retry_waits_for_directory_sync(tmp_path, monkeypatch, capsys):
+    accepted = {"session_id": "previous", "text": "alpha: verified\n"}
+    worker.record_once(tmp_path, "accepted", accepted)
+    monkeypatch.setattr(sys, "argv", ["worker", "publish", str(tmp_path)])
+    fsync = os.fsync
+    directory_syncs = 0
+
+    def fail_directory_sync_twice(fd):
+        nonlocal directory_syncs
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            directory_syncs += 1
+            if directory_syncs <= 2:
+                raise OSError("Could not sync the publication directory")
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fail_directory_sync_twice)
+    for _ in range(2):
+        with pytest.raises(OSError, match="Could not sync the publication directory"):
+            worker.main()
+        assert capsys.readouterr().out == ""
+        assert worker.read_record(tmp_path, "published") == accepted
+
+    worker.main()
+    assert json.loads(capsys.readouterr().out) == {"status": "already_published"}
+    assert directory_syncs == 3
+    assert worker.read_record(tmp_path, "published") == accepted
+
+
 @pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Retargets a directory symlink")
 @pytest.mark.parametrize("command", ["status", "publish"])
 def test_worker_cli_keeps_original_journal_on_retarget(tmp_path, monkeypatch, capsys, command):
-    import json
-
     directory, other = tmp_path / "alpha", tmp_path / "bravo"
     for path in (directory, other):
         path.mkdir()
