@@ -98,9 +98,16 @@ async def _pending_work_at_exit(options):
 
 
 async def test_interpreter_exits_with_pending_native_work(tmp_path, responses):
+    # Python 3.10 ignores PYTHONSAFEPATH; keep tests/_asyncio.py off the import path.
     completed = await asyncio.to_thread(
         subprocess.run,
-        [sys.executable, __file__, json.dumps(native_options(tmp_path, responses))],
+        [
+            sys.executable,
+            "-c",
+            "import runpy, sys; sys.argv.pop(0); runpy.run_path(sys.argv[0], run_name='__main__')",
+            __file__,
+            json.dumps(native_options(tmp_path, responses)),
+        ],
         capture_output=True,
         text=True,
         timeout=30,

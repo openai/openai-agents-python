@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.recovery import (
+from _agents_codex.recovery import (
     FunctionCallItem as FunctionCallItem,
     JsonValue as JsonValue,
     Literal as Literal,

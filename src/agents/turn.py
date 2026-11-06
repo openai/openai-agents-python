@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.turn import (
+from _agents_codex.turn import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     Generic as Generic,

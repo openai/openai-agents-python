@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime._native_async import (
+from _agents_codex._native_async import (
     Any as Any,
     ExitStack as ExitStack,
     _await_native_completion as _await_native_completion,

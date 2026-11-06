@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime._lifecycle import (
+from _agents_codex._lifecycle import (
     Any as Any,
     Awaitable as Awaitable,
     Callable as Callable,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.schema import (
+from _agents_codex.schema import (
     Any as Any,
     ConfigDict as ConfigDict,
     Generic as Generic,

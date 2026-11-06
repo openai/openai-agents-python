@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime._compat import (
+from _agents_codex._compat import (
     Any as Any,
     WeakSet as WeakSet,
     asyncio as asyncio,

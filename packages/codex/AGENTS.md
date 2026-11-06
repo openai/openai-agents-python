@@ -1,10 +1,10 @@
 # Contributor guide
 
-This guide adapts the [OpenAI Agents Python contributor guidance](https://github.com/openai/openai-agents-python/blob/125efa029b4bfd84238bd2c4fd69c3406f802663/AGENTS.md) to this repository. Application code and verification use the root SDK; native source preparation tools remain in this directory.
+This guide adapts the [OpenAI Agents Python contributor guidance](https://github.com/openai/openai-agents-python/blob/125efa029b4bfd84238bd2c4fd69c3406f802663/AGENTS.md) to this repository. This component owns the Codex Python runtime, native inputs, tests, and examples. Application code imports the root SDK, and verification runs from the repository root.
 
 ## Scope and architecture
 
-This package embeds the pinned Codex Rust crates through PyO3 with reviewed SDK-local patches over an authenticated upstream base. Core owns every model turn, native transport, and accepted conversation history. The root Python package owns typed declarations, callbacks, and public session lifetime. There is one SDK distribution and no separate SDK model loop or public runtime selector.
+This package embeds the pinned Codex Rust crates through PyO3 with reviewed SDK-local patches over an authenticated upstream base. Core owns every model turn, native transport, and accepted conversation history. The private `_agents_codex` package owns typed declarations, callbacks, and public session lifetime; root `agents` modules expose those objects. There is one SDK distribution and no separate SDK model loop or public runtime selector.
 
 Each Session captures fresh credentials and settings and owns its Core runtime, history, callbacks, and cleanup. The Provider tracks native acquisition leases and private homes so cancellation cannot orphan resources. Portable manual checkpoints suspend Core's turn and preserve its accepted history; restoration rebinds pending replies to current tool declarations before Core resumes.
 
@@ -18,12 +18,14 @@ Each Session captures fresh credentials and settings and owns its Core runtime, 
 
 ## Repository map
 
-- `../../src/agents/`: the sole Python API, callback embedding and package exports.
+- `src/_agents_codex/`: Codex Python implementation, including callbacks and session lifetime.
+- `../../src/agents/`: public API facades, shared declarations, metadata, and the retained Classic runtime.
 - `rust/`: PyO3 bindings and integration with the pinned Codex crates.
 - `scripts/prepare_codex.py`: prepares the pinned upstream source without changing its source repository.
 - `scripts/build.py` and `scripts/native_env.py`: build the extension and matching runtime helpers.
 - `tests/`: Python and native integration tests, typing checks, and execution fixtures.
-- `../../examples/` and `../../docs/sdk/`: current examples and supported API contracts.
+- `examples/`: current Python examples.
+- `../../docs/sdk/`: supported API contracts.
 - `../../.github/workflows/codex-python.yml`: builds the SDK wheel and test executor for the platform selected by the caller. See [wheel verification](MAINTAINING.md#verify-the-delivered-wheel).
 
 ## Setup and checks

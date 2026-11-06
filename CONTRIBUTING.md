@@ -16,7 +16,7 @@ Run these steps from the repository root:
 
 1. Read [AGENTS.md](AGENTS.md) for the repository's scope, compatibility, review, and verification requirements.
 2. Install Make and the [native build prerequisites](packages/codex/MAINTAINING.md#build-from-this-source), including a supported CPython version, `uv`, Git, and Rust. Check that `git` is on `PATH`, then run `make sync` to install the SDK for contributor work. This command can compile the native extension. Run Python commands through `uv run`.
-3. Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [tests/README.md](tests/README.md) to run focused checks while developing.
+3. Keep changes focused on the agreed outcome. Add regression coverage for changed behavior and follow [packages/codex/tests/README.md](packages/codex/tests/README.md) to run focused checks while developing.
 4. Run the applicable final checks in [AGENTS.md](AGENTS.md#testing--automated-checks). Use the [pull request template](.github/PULL_REQUEST_TEMPLATE/pull_request_template.md) to explain the problem, change, and validation. Documentation changes follow the repository's verification tiers and release-timing rules.
 
 Tests use Git to create temporary repositories, verify release sources, and detect changes. Install Git with your operating system's package manager. Neither `make sync` nor Python package installers install Git.

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime._function_tools import (
+from _agents_codex._function_tools import (
     TYPE_CHECKING as TYPE_CHECKING,
     ActionRequested as ActionRequested,
     Allow as Allow,

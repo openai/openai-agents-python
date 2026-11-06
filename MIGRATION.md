@@ -61,10 +61,10 @@ finally:
 
 The adapter does not choose a provider or change your model credentials. It borrows the Model and ModelProvider. Your application remains responsible for their resources, including any client you supply.
 
-Run the [complete scripted example](examples/migration.py) from the matching source tree:
+Run the [complete scripted example](packages/codex/examples/migration.py) from the matching source tree:
 
 ```sh
-python examples/migration.py
+python packages/codex/examples/migration.py
 ```
 
 It needs no model credentials and makes no external model requests. Its scripted Model requests the existing Classic `greet` tool, the native loop executes that tool with application context, and the next response supplies the final answer. The example prints `Hello, Ada!` and the native session ID. It verifies the execution path, not model quality.

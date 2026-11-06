@@ -1,6 +1,6 @@
 """Application-owned projections of the context sent to a model."""
 
-from ._runtime.model_context import (
+from _agents_codex.model_context import (
     Any as Any,
     Awaitable as Awaitable,
     Callable as Callable,

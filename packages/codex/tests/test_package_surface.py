@@ -91,7 +91,8 @@ def test_package_root_has_one_public_surface():
     import agents
 
     contract_path = (
-        Path(__file__).resolve().parents[3] / "tests/fixtures/released_api_contract.json"
+        Path(__file__).resolve().parents[3]
+        / "packages/codex/tests/fixtures/released_api_contract.json"
     )
     contract = json.loads(contract_path.read_text())
     assert set(agents.__all__) == set(contract["public_api"]["root_exports"])

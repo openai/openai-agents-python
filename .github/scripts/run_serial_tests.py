@@ -15,7 +15,7 @@ SERIAL_MARKER = "pytest.mark.serial"
 def _test_files() -> list[Path]:
     return sorted(
         path
-        for path in (ROOT / "tests").rglob("*.py")
+        for path in (ROOT / "packages/codex/tests").rglob("*.py")
         if any(fnmatch.fnmatchcase(path.name, pattern) for pattern in PYTEST_FILE_PATTERNS)
     )
 

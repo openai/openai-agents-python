@@ -271,7 +271,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Collect syntactic Python logging and raw-output candidates for manual review."
         )
     )
-    parser.add_argument("roots", nargs="*", default=["src/agents"])
+    parser.add_argument(
+        "roots", nargs="*", default=["src/agents", "packages/codex/src/_agents_codex"]
+    )
     parser.add_argument("--format", choices=("json", "markdown"), default="markdown")
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument("--output", type=Path)

@@ -31,7 +31,7 @@ For an audit or proposal-only request, report findings without editing. When the
 
 3. Doc-first pass: review existing pages
    - Walk the relevant pages within the requested scope. Current API guides live under `docs/sdk/` and appear in `mkdocs.yml`; `docs/installation.md` and `docs/published.md` cover the published wheel.
-   - Identify missing mentions of important, supported options (opt-in flags, env vars), customization points, or new features from `src/agents/` and `examples/`.
+   - Identify missing mentions of important, supported options (opt-in flags, env vars), customization points, or new features from `src/agents/`, `packages/codex/src/_agents_codex/`, and `packages/codex/examples/`.
    - Propose additions where users would reasonably expect to find them on that page.
 
 4. Code-first pass: map features to docs

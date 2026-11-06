@@ -6,7 +6,7 @@ awaiting shutdown(). Native owns the exporters and the process lifetime.
 
 from __future__ import annotations
 
-from ._runtime.telemetry import (
+from _agents_codex.telemetry import (
     _MAX_PROCESSOR_WORKERS as _MAX_PROCESSOR_WORKERS,
     Any as Any,
     ContextVar as ContextVar,

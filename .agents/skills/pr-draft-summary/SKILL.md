@@ -11,7 +11,7 @@ Produce the PR-ready summary required in this repository after eligible code wor
 ## When to Trigger
 - An explicit user request for a PR draft takes precedence over the automatic-trigger exclusions below.
 - For automatic invocation, spelling, comments, or formatting alone are editorial even under runtime/test paths when they change no behavior or contract. Skip the automatic draft for those edits.
-- Before every final response, check whether the current task changed runtime code (`src/agents/`), tests (`tests/`), examples (`examples/`), build/test configuration, or docs with behavior impact.
+- Before every final response, check whether the current task changed runtime code (`src/agents/`, `packages/codex/src/_agents_codex/`), tests (`packages/codex/tests/`), examples (`packages/codex/examples/`), build/test configuration, or docs with behavior impact.
 - If it did, run this skill after required verification and before sending the final response. Do not use perceived change size to decide whether to run it.
 - Run it for eligible local-only and uncommitted work even when the user did not ask to create a pull request. Producing this text does not authorize creating a branch, committing, pushing, or opening a pull request.
 - Skip only for trivial or conversation-only tasks, repo-meta/doc-only tasks without behavior impact, an explicitly invoked `$release-candidate-prep` handoff that uses the complete `$final-release-review` report as its release-specific PR description, or when the user explicitly says not to include the PR draft block. This exception applies to preparing the release candidate itself, not to implementing or changing the release-preparation skill.
@@ -26,7 +26,7 @@ Produce the PR-ready summary required in this repository after eligible code wor
 - Set `BASE_COMMIT` to the supplied final-base commit. If none was supplied, compute it with `BASE_COMMIT=$(git merge-base --fork-point "$BASE_REF" HEAD || git merge-base "$BASE_REF" HEAD)`. Verify that the ref and commit exist; stop if the base cannot be resolved.
 - Committed changes: `git diff --name-status "${BASE_COMMIT}" HEAD`, `git diff --stat "${BASE_COMMIT}" HEAD`, and the complete patch from `git diff "${BASE_COMMIT}" HEAD`.
 - Commits ahead of the base fork point: `git log --oneline --no-merges ${BASE_COMMIT}..HEAD`.
-- Category signals for this repo: runtime (`src/agents/`), tests (`tests/`), examples (`examples/`), docs (`docs/`, `mkdocs.yml`), build/test config (`pyproject.toml`, `uv.lock`, `Makefile`, `.github/`).
+- Category signals for this repo: runtime (`src/agents/`, `packages/codex/src/_agents_codex/`), tests (`packages/codex/tests/`), examples (`packages/codex/examples/`), docs (`docs/`, `mkdocs.yml`), build/test config (`pyproject.toml`, `uv.lock`, `Makefile`, `.github/`).
 
 ## Workflow
 1) Run the commands above without asking the user; compute `BASE_REF`/`BASE_COMMIT` first so later commands reuse them. Read the complete committed patch, staged and unstaged patches, and untracked file contents. Reuse previously reviewed complete diffs only when they still match the current base, head and working tree.

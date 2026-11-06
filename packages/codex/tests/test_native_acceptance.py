@@ -5,7 +5,6 @@ import json
 from contextlib import AsyncExitStack
 
 import pytest
-from test_native_completion_lifetime import ReceiptGate
 
 from agents import Agent, NativeProvider, _native
 from tests._asyncio import timeout
@@ -15,6 +14,7 @@ from tests.native_fixtures import (
     native_options,
     responses as responses,
 )
+from tests.test_native_completion_lifetime import ReceiptGate
 
 
 @pytest.mark.parametrize("outcome", ["success", "cancel", "failure"])

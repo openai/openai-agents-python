@@ -1,6 +1,6 @@
 # Repository skill tests
 
-Run `make tests-repo-skills` from the repository root. This command uses `uv run --no-project --python 3.11` and needs Git and make for disposable repository fixtures. It installs no SDK dependencies and does not collect `tests/` or pytest configuration. With an existing Python 3.11+ interpreter, use `python .github/scripts/run_repo_skill_tests.py` directly.
+Run `make tests-repo-skills` from the repository root. This command uses `uv run --no-project --python 3.11` and needs Git and make for disposable repository fixtures. It installs no SDK dependencies and does not collect `packages/codex/tests/` or pytest configuration. With an existing Python 3.11+ interpreter, use `python .github/scripts/run_repo_skill_tests.py` directly.
 
 Use `uv run --no-project --python 3.11 python .github/scripts/run_repo_skill_tests.py --list` to print the discovered inventory without executing tests. The runner discovers `.agents/skills/*/scripts/test_*.py` and its own `.github/scripts/test_run_repo_skill_tests.py` regression suite. Add skill helper tests under that pattern using standard-library `unittest` and sibling imports.
 

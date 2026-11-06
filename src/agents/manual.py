@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.manual import (
+from _agents_codex.manual import (
     _EXTENSION_FORM_MODES as _EXTENSION_FORM_MODES,
     _FORM_DRAFT as _FORM_DRAFT,
     _FORM_MODES as _FORM_MODES,

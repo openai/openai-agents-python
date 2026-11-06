@@ -117,9 +117,7 @@ def main():
                     },
                 }
             )
-        elif (
-            method is None and request_id == elicitation_id and pending_call is not None
-        ):
+        elif method is None and request_id == elicitation_id and pending_call is not None:
             receipt = {
                 "server_request_id": request_id,
                 "response": message.get("result"),

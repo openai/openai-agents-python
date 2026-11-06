@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.rate_limits import (
+from _agents_codex.rate_limits import (
     _DURATION as _DURATION,
     _DURATION_COMPONENT as _DURATION_COMPONENT,
     _DURATION_UNIT_SECONDS as _DURATION_UNIT_SECONDS,

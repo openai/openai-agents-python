@@ -1,6 +1,6 @@
 """Native environment and recorded permission shapes."""
 
-from ._runtime._options import (
+from _agents_codex._options import (
     BasicSpecialPath as BasicSpecialPath,
     FileSystemAccessMode as FileSystemAccessMode,
     FileSystemEntry as FileSystemEntry,

@@ -8,13 +8,13 @@ Codex owns every model turn for the native API. Python supplies typed declaratio
 
 The retained v0 API has its own implementation under `agents.classic`; see [the Classic contract](../../CLASSIC.md). Keep it isolated from the Codex runtime described below.
 
-`src/agents/_runtime` owns the native API's Python runtime, including sessions, tools, checkpoints, telemetry, native completion handling, testing helpers, and experimental features. The modules directly under `src/agents` retain existing imports by forwarding to those implementations. The root export map stays lazy. `config.py` retains shared immutable type aliases, and `version.py` retains package metadata.
+`packages/codex/src/_agents_codex` owns the native API's Python runtime, including sessions, tools, checkpoints, telemetry, native completion handling, testing helpers, and experimental features. The modules directly under `src/agents` retain existing imports by forwarding to those implementations. The root export map stays lazy. `config.py` retains shared immutable type aliases, and `version.py` retains package metadata.
 
 Runtime code imports its private siblings directly. It may use the shared configuration declarations, version metadata, and native ABI, but must not import through the public facades. Public facades expose the same objects and retain their original literal `__all__` declarations. Explicit import aliases in the runtime let type checkers follow every forwarded binding. The private metadata helper preserves existing class, function, method, and TypeVar module identities for inspection and pickle. Forward references retain their actual implementation namespace so models can resolve annotations during initialization.
 
-This directory continues to own the Rust source, native build inputs, and artifact qualification. The single wheel includes both the public facades and private runtime. Keep `agents._native`, the `agents._native_async` forwarding module, and `agents/bin` stable: compiled bindings and packaged helper lookup depend on those paths. A Python implementation move does not require renaming native modules or distributing another wheel.
+This directory owns the Python implementation, Rust source, native build inputs, tests, examples, and artifact qualification. The single wheel includes both the public facades and private runtime. Keep `agents._native`, the `agents._native_async` forwarding module, and `agents/bin` stable: compiled bindings and packaged helper lookup depend on those paths. A Python implementation move does not require renaming native modules or distributing another wheel.
 
-`tests/test_runtime_architecture.py` checks the import boundary, forwarding surfaces, identities, and lazy loading. The released API checker follows explicit facades to their declarations and checks the unchanged reviewed API snapshot. Runtime tests patch private owners when they need implementation hooks; native callback tests still patch the public ABI entry point that Rust calls.
+`packages/codex/tests/test_runtime_architecture.py` checks the import boundary, forwarding surfaces, identities, and lazy loading. The released API checker follows explicit facades to their declarations and checks the unchanged reviewed API snapshot. Runtime tests patch private owners when they need implementation hooks; native callback tests still patch the public ABI entry point that Rust calls.
 
 ## Build from this source
 
@@ -74,7 +74,7 @@ To run the example with a real model, set your key in this shell first:
 
 ```sh
 export OPENAI_API_KEY="your-key"
-.venv/bin/python "$SDK_ROOT/examples/basic.py"
+.venv/bin/python "$SDK_ROOT/packages/codex/examples/basic.py"
 ```
 
 ## Use a qualified wheel for Python edits
@@ -85,10 +85,10 @@ Replace the wheel path in this Linux example with the absolute path to your down
 
 ```sh
 OPENAI_AGENTS_NATIVE_WHEEL=/absolute/path/to/your-built-wheel.whl make sync
-uv run --no-sync pytest tests/test_native_session_input.py
+uv run --no-sync pytest packages/codex/tests/test_native_session_input.py
 ```
 
-Edits under `src/agents` take effect on the next Python invocation. After changing Rust or native build inputs, leave `OPENAI_AGENTS_NATIVE_WHEEL` unset and run `uv sync --group dev --reinstall-package openai-agents` to rebuild the editable package. Run `make build` when you need a release wheel.
+Edits under `src/agents` and `packages/codex/src/_agents_codex` take effect on the next Python invocation. After changing Rust or native build inputs, leave `OPENAI_AGENTS_NATIVE_WHEEL` unset and run `uv sync --group dev --reinstall-package openai-agents` to rebuild the editable package. Run `make build` when you need a release wheel.
 
 ### Native products in Tests CI
 
