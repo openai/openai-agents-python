@@ -54,14 +54,21 @@ def test_supported_optional_exports_and_dictionary_configuration(tmp_path):
     from tests.a2a_helpers import HostStore
 
     assert all(hasattr(module, name) for name in module.__all__)
+
+    def factory(binding, call_context):
+        return NativeA2AAgent(agent=Agent(instructions="Synthetic"))
+
     executor = NativeA2AExecutor(
-        agent_factory=lambda binding, call_context: NativeA2AAgent(
-            agent=Agent(instructions="Synthetic")
-        ),
+        agent_factory=factory,
         store=HostStore(tmp_path),
-        limits={"message_bytes": 1024},
+        limits={"message_bytes": 1024, "timeout": 2},
     )
-    assert executor.limits == A2ALimits(message_bytes=1024)
+    assert executor.limits == A2ALimits(message_bytes=1024, timeout=2)
+    for timeout in (True, False, "invalid"):
+        with pytest.raises(ValueError, match="timeout"):
+            NativeA2AExecutor(
+                agent_factory=factory, store=executor.store, limits={"timeout": timeout}
+            )
     with pytest.raises(ValueError):
         A2AEndpoint(
             name="bad",

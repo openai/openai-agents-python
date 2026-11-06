@@ -326,7 +326,7 @@ async def test_connection_credentials_survive_retry_but_not_teardown(failure, st
     assert authorizations == [True]
 
 
-@pytest.mark.parametrize("close_method", ["context", "direct"])
+@pytest.mark.parametrize("close_method", ["context", "direct", "value-error", "cancelled"])
 async def test_client_clears_credentials_before_cleanup_failure(monkeypatch, close_method):
     from _agents_codex.a2a._client import _BoundedClient, _BoundedTransport
 
@@ -338,12 +338,26 @@ async def test_client_clears_credentials_before_cleanup_failure(monkeypatch, clo
 
     monkeypatch.setattr(_BoundedTransport, "aclose", close_then_fail)
     client = _BoundedClient(A2ALimits(), headers={"Authorization": "Bearer synthetic-close-token"})
-    with pytest.raises(RuntimeError, match="Synthetic cleanup failure"):
-        if close_method == "context":
-            async with client:
-                pass
-        else:
+    primary = (
+        ValueError("Synthetic body failure")
+        if close_method == "value-error"
+        else asyncio.CancelledError("Synthetic body cancellation")
+        if close_method == "cancelled"
+        else None
+    )
+    error = type(primary) if primary is not None else RuntimeError
+    match = str(primary) if primary is not None else "Synthetic cleanup failure"
+    with pytest.raises(error, match=match) as caught:
+        if close_method == "direct":
             await client.aclose()
+        else:
+            async with client:
+                if primary is not None:
+                    raise primary
+    if primary is not None:
+        assert caught.value is primary
+        assert isinstance(primary.__context__, RuntimeError)
+        assert str(primary.__context__) == "Synthetic cleanup failure"
     assert client.is_closed
     assert "authorization" not in client.headers
 
@@ -454,10 +468,22 @@ async def test_discovery_rejects_before_credential_acquisition(kind):
 
 
 @pytest.mark.parametrize("route", ["card", "rpc"])
-async def test_rejects_encoded_responses_before_reading_the_body(route):
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_rejects_encoded_responses_before_reading_the_body(route, cleanup_fails, monkeypatch):
     release_body = asyncio.Event()
     seen = []
     acquired = []
+    failed_closes = []
+    original_close = httpx.Response.aclose
+
+    async def close_then_fail(response):
+        await original_close(response)
+        if cleanup_fails and response.headers.get("content-encoding") == "gzip":
+            assert response.is_closed
+            failed_closes.append(response)
+            raise RuntimeError("Synthetic encoded response cleanup failure")
+
+    monkeypatch.setattr(httpx.Response, "aclose", close_then_fail)
 
     async def credentials():
         acquired.append(True)
@@ -484,13 +510,19 @@ async def test_rejects_encoded_responses_before_reading_the_body(route):
                 await client.get_task(p.GetTaskRequest(id="synthetic-task"))
 
         try:
-            with pytest.raises(ValueError, match="A2A discovery failed|encoded A2A response"):
+            with pytest.raises(
+                ValueError, match="A2A discovery failed|encoded A2A response"
+            ) as caught:
                 await asyncio.wait_for(call(), 5)
+            if cleanup_fails and route == "rpc":
+                assert isinstance(caught.value.__context__, RuntimeError)
+                assert str(caught.value.__context__) == "Synthetic encoded response cleanup failure"
         finally:
             release_body.set()
 
     assert seen == (["identity"] if route == "card" else ["identity", "identity"])
     assert acquired == ([] if route == "card" else [True])
+    assert len(failed_closes) == int(cleanup_fails)
 
 
 def drip_response(payload, *, heartbeat=b" ", media_type="application/json"):

@@ -51,7 +51,11 @@ class A2ALimits:
         ):
             if type(value) is not int or value <= 0:
                 raise ValueError("A2A byte and event limits must be positive integers")
-        if not math.isfinite(self.timeout) or self.timeout <= 0:
+        if (
+            type(self.timeout) not in (int, float)
+            or not math.isfinite(self.timeout)
+            or self.timeout <= 0
+        ):
             raise ValueError("A2A timeout must be positive and finite")
 
 
@@ -162,8 +166,9 @@ class _BoundedTransport(httpx.AsyncBaseTransport):
         request.headers["accept-encoding"] = "identity"
         response = await self._transport.handle_async_request(request)
         if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
-            await response.aclose()
-            raise ValueError("Cannot accept an encoded A2A response")
+            error = ValueError("Cannot accept an encoded A2A response")
+            await _close_after_error(error, response.aclose)
+            raise error
         return httpx.Response(
             response.status_code,
             headers=response.headers,
@@ -197,9 +202,11 @@ class _BoundedClient(httpx.AsyncClient):
         exc_value: BaseException | None = None,
         traceback: TracebackType | None = None,
     ) -> None:
-        # HTTPX's context exit closes transports without calling aclose().
         self.headers.pop("authorization", None)
-        await super().__aexit__(exc_type, exc_value, traceback)
+        if exc_value is None:
+            await super().aclose()
+        else:
+            await _close_after_error(exc_value, super().aclose)
 
     async def send(self, request: httpx.Request, **options: Any) -> httpx.Response:
         # HTTPX reads an ordinary response here. A streaming send returns at the headers.
@@ -313,9 +320,7 @@ async def connect_a2a(
                     supported_protocol_bindings=["JSONRPC"],
                 )
             ).create(selected)
-            try:
-                yield client
-            finally:
-                await client.close()
+            # The supplied HTTPX client owns the shared transport's cleanup.
+            yield client
     finally:
         token = None
