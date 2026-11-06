@@ -20,12 +20,13 @@ from uuid import uuid4
 from openai.types.responses import ResponseFunctionToolCall
 from pydantic import RootModel, TypeAdapter
 
+from _agents_codex._function_tools import FunctionTool, ToolContext
+from _agents_codex._lifecycle import _join
+from _agents_codex.agent import Agent as NativeAgent, NativeProvider
+from _agents_codex.session import Completed, Session, _close_after_error
+from _agents_codex.tools import _CapturedFunction
+
 from .. import classic
-from .._runtime._function_tools import FunctionTool, ToolContext
-from .._runtime._lifecycle import _join
-from .._runtime.agent import Agent as NativeAgent, NativeProvider
-from .._runtime.session import Completed, Session, _close_after_error
-from .._runtime.tools import _CapturedFunction
 from ..classic.exceptions import MaxTurnsExceeded, ModelBehaviorError, UserError
 from ..classic.items import ModelResponse, TResponseInputItem
 from ..classic.model_settings import ModelSettings
