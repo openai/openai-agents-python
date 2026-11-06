@@ -593,7 +593,9 @@ async def local_native_goal_types(storage: LocalStorage) -> None:
                 goal["status"],
                 Literal["active", "paused", "blocked", "usageLimited", "budgetLimited", "complete"],
             )
-        assert_type(await (await session.submit("Pause the goal.")).get_result(), Completed[Answer])
+        assert_type(
+            await session.set_paused_goal("Review the record", token_budget=4000), NativeGoal
+        )
 
 
 def select_step(current: Turn[Any], *, step_index: int) -> Sequence[Tool[Application]] | None:

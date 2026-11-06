@@ -21,6 +21,7 @@ from agents import (
     ChecklistState,
     Environment,
     FunctionTool,
+    LocalStorage,
     NativeAgents,
     NetworkPolicy,
     Session,
@@ -584,6 +585,58 @@ async def test_checklist_updates_reads_idle_saves_and_requires_current_authority
         with pytest.raises(CapabilityError, match="captured"):
             await restored.submit("new grant", tools=[Checklist()])
     assert not responses.replies
+
+
+async def test_local_checklist_reopens_explicit_empty_and_reports_storage_error(
+    tmp_path: Path, responses: ResponsesFixture
+) -> None:
+    plan = [
+        {"step": "Read", "status": "in_progress"},
+        {"step": "Summarize", "status": "pending"},
+    ]
+    storage = LocalStorage(tmp_path / "profile")
+    model_provider = provider(responses)
+    agent = Agent(
+        instructions="Inspect.", model="gpt-5.5", tools=[Checklist()], provider=model_provider
+    )
+    async with timeout(30), model_provider:
+        async with agent.session(storage=storage) as session:
+            assert await session.checklist() is None
+            responses.respond(function_call("update_plan", {"plan": plan}, "plan"))
+            responses.respond(assistant_output("Accepted"))
+            turn = await session.submit("Record the plan")
+            await turn.get_result()
+            prior = await session.checklist()
+            assert prior is not None and prior.turn_id == turn.turn_id
+            assert prior.model_dump()["plan"] == plan
+
+            invalid = [{"step": "Overwrite", "status": "invalid"}]
+            responses.respond(function_call("update_plan", {"plan": invalid}, "invalid"))
+            responses.respond(assistant_output("Rejected"))
+            await (await session.submit("Reject the invalid update")).get_result()
+            assert "Plan updated" not in tool_output(responses.requests[-1], "invalid")
+            assert await session.checklist() == prior
+
+            responses.respond(function_call("update_plan", {"plan": []}, "empty"))
+            responses.respond(assistant_output("Cleared"))
+            clear = await session.submit("Clear the plan")
+            await clear.get_result()
+            empty = await session.checklist()
+            assert empty is not None and empty.plan == [] and empty.turn_id == clear.turn_id
+
+        count = len(responses.requests)
+        async with agent.session(storage=storage, resume=session.id, tools=[]) as reopened:
+            assert await reopened.checklist() == empty
+            path = storage.path / "sdk-checklists" / f"{session.id}.json"
+            backup = path.rename(path.with_suffix(".saved"))
+            try:
+                path.write_text("unreadable checklist")
+                with pytest.raises(RuntimeError, match="native checklist storage"):
+                    await reopened.checklist()
+            finally:
+                backup.replace(path)
+            assert await reopened.checklist() == empty
+        assert len(responses.requests) == count
 
 
 async def test_restored_checklist_with_explicit_destination_declaration(
