@@ -1348,7 +1348,7 @@ async def test_function_tool_rejects_non_object_json_input(input_json: str) -> N
 async def test_function_tool_bad_json_redacts_payload_when_dont_log_tool_data(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="openai.agents")
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
 
     def echo(value: str) -> str:
@@ -1379,7 +1379,7 @@ async def test_function_tool_bad_json_redacts_payload_when_dont_log_tool_data(
 async def test_function_tool_bad_json_includes_payload_when_tool_logging_enabled(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="openai.agents")
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     def echo(value: str) -> str:
