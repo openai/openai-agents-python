@@ -173,7 +173,7 @@ def test_tool_output_image_admits_only_inline_data_urls(image: str) -> None:
 async def test_public_dormant_http_receipts_effects_and_admitted_leaves(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import agents.session as session_module
+    import agents._runtime.session as session_module
 
     peer = Peer(names=("find-record", "read", "excluded"))
     receipts: list[dict[str, Any]] = []

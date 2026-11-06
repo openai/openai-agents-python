@@ -475,7 +475,7 @@ async def test_uncached_required_child_startup_fails_before_turn_publication(
 @pytest.mark.parametrize("enabled,unsupported", [(True, False), (False, False), (True, True)])
 def test_missing_child_grant_distinguishes_expiry_from_unsupported_prompt(enabled, unsupported):
     from agents import ChildInvocation, InteractionRequired, Session
-    from agents.manual import _question
+    from agents._runtime.manual import _question
 
     owner = object.__new__(Session)
     owner._native_agents = NativeAgents(interactions=enabled)

@@ -20,8 +20,8 @@ from agents import (
     InteractionExpiredError,
     Session,
 )
-from agents.manual import _CapturedManual, _question
-from agents.turn import _root_turn
+from agents._runtime.manual import _CapturedManual, _question
+from agents._runtime.turn import _root_turn
 
 
 @pytest.mark.parametrize(

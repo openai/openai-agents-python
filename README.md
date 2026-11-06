@@ -4,6 +4,10 @@ Build Python agents that use Codex to run model turns and keep conversation hist
 
 Your application runs the agent and owns its workers, storage, and credentials. See [Choose how to run your agent](docs/sdk/choosing.md) to compare this model with the hosted Agents API.
 
+## Existing v0 applications
+
+The source on this branch also provides `agents.classic` for existing v0 workflows. It retains the Python runner while the root `agents` API uses Codex. This addition is not included in the preview release linked below. See [classic migration](CLASSIC.md) for source installation, import changes, dependency extras, and compatibility limits.
+
 ## Install
 
 The commands below install the published preview. Use [documentation and example files from that release](docs/sdk/versions.md); these branch guides also describe APIs added after the release.

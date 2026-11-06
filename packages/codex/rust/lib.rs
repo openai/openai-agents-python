@@ -1618,6 +1618,46 @@ impl NativeThread {
         })
     }
 
+    fn _prepare_requests(&self, enabled: bool) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Request preparation requires Python tools"))?;
+        tools.prepare_requests(enabled).map_err(py_error)
+    }
+
+    fn _check_prepared_request(&self, request_id: u64) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.check_prepared_request(request_id)))
+    }
+
+    #[pyo3(signature = (request_id, data_json=None, error=false))]
+    fn _reply_prepared_request(
+        &self,
+        request_id: u64,
+        data_json: Option<&str>,
+        error: bool,
+    ) -> PyResult<bool> {
+        Ok(self
+            .live()?
+            .and_then(|inner| {
+                inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+            })
+            .is_some_and(|tools| tools.reply_prepared_request(request_id, data_json, error)))
+    }
+
     #[pyo3(signature = (enabled, defaults_json=None, children=false))]
     fn _select_steps(
         &self,

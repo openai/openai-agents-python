@@ -1,0 +1,265 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Literal, TypeAlias
+
+from ..usage import Usage
+from .items import RealtimeItem
+
+RealtimeConnectionStatus: TypeAlias = Literal["connecting", "connected", "disconnected"]
+
+
+@dataclass
+class RealtimeModelErrorEvent:
+    """Represents a transport‑layer error."""
+
+    error: Any
+
+    type: Literal["error"] = "error"
+
+
+@dataclass
+class RealtimeModelToolCallEvent:
+    """Model attempted a tool/function call."""
+
+    name: str
+    call_id: str
+    arguments: str
+
+    id: str | None = None
+    previous_item_id: str | None = None
+
+    type: Literal["function_call"] = "function_call"
+
+
+@dataclass
+class RealtimeModelAudioEvent:
+    """Raw audio bytes emitted by the model."""
+
+    data: bytes
+    response_id: str
+
+    item_id: str
+    """The ID of the item containing audio."""
+
+    content_index: int
+    """The index of the audio content in `item.content`"""
+
+    type: Literal["audio"] = "audio"
+
+
+@dataclass
+class RealtimeModelAudioInterruptedEvent:
+    """Audio interrupted."""
+
+    item_id: str
+    """The ID of the item containing audio."""
+
+    content_index: int
+    """The index of the audio content in `item.content`"""
+
+    type: Literal["audio_interrupted"] = "audio_interrupted"
+
+
+@dataclass
+class RealtimeModelAudioDoneEvent:
+    """Audio done."""
+
+    item_id: str
+    """The ID of the item containing audio."""
+
+    content_index: int
+    """The index of the audio content in `item.content`"""
+
+    type: Literal["audio_done"] = "audio_done"
+
+
+@dataclass
+class RealtimeModelInputAudioTranscriptionCompletedEvent:
+    """Input audio transcription completed."""
+
+    item_id: str
+    transcript: str
+
+    type: Literal["input_audio_transcription_completed"] = "input_audio_transcription_completed"
+
+
+@dataclass
+class RealtimeModelInputAudioTimeoutTriggeredEvent:
+    """Input audio timeout triggered."""
+
+    item_id: str
+    audio_start_ms: int
+    audio_end_ms: int
+
+    type: Literal["input_audio_timeout_triggered"] = "input_audio_timeout_triggered"
+
+
+@dataclass
+class RealtimeModelTranscriptDeltaEvent:
+    """Partial transcript update."""
+
+    item_id: str
+    delta: str
+    response_id: str
+
+    type: Literal["transcript_delta"] = "transcript_delta"
+
+
+@dataclass
+class RealtimeModelOutputTextDeltaEvent:
+    """Partial text output update."""
+
+    item_id: str
+    delta: str
+    response_id: str
+
+    type: Literal["output_text_delta"] = "output_text_delta"
+
+
+@dataclass
+class RealtimeModelItemUpdatedEvent:
+    """Item added to the history or updated."""
+
+    item: RealtimeItem
+
+    type: Literal["item_updated"] = "item_updated"
+
+
+@dataclass
+class RealtimeModelItemDeletedEvent:
+    """Item deleted from the history."""
+
+    item_id: str
+
+    type: Literal["item_deleted"] = "item_deleted"
+
+
+@dataclass
+class RealtimeModelConnectionStatusEvent:
+    """Connection status changed."""
+
+    status: RealtimeConnectionStatus
+
+    type: Literal["connection_status"] = "connection_status"
+
+
+@dataclass
+class RealtimeModelEndOfStreamEvent:
+    """The model event stream ended permanently and will emit no further events."""
+
+    type: Literal["end_of_stream"] = "end_of_stream"
+
+
+@dataclass
+class RealtimeModelTurnStartedEvent:
+    """Triggered when the model starts generating a response for a turn."""
+
+    type: Literal["turn_started"] = "turn_started"
+
+    response_id: str | None = None
+    """The response ID, when provided by the model transport."""
+
+
+@dataclass
+class RealtimeModelCachedTokensDetails:
+    """Modality breakdown for cached Realtime input tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+    image_tokens: int | None = None
+
+
+@dataclass
+class RealtimeModelInputTokensDetails:
+    """Modality breakdown for Realtime input tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+    image_tokens: int | None = None
+    cached_tokens: int | None = None
+    cached_tokens_details: RealtimeModelCachedTokensDetails | None = None
+
+
+@dataclass
+class RealtimeModelOutputTokensDetails:
+    """Modality breakdown for Realtime output tokens."""
+
+    text_tokens: int | None = None
+    audio_tokens: int | None = None
+
+
+@dataclass
+class RealtimeModelUsageEvent:
+    """Token usage reported for a completed Realtime model response."""
+
+    usage: Usage
+    """Aggregate usage compatible with the shared SDK usage accounting."""
+
+    input_tokens_details: RealtimeModelInputTokensDetails | None = None
+    """Optional input-token modality details reported by the model provider."""
+
+    output_tokens_details: RealtimeModelOutputTokensDetails | None = None
+    """Optional output-token modality details reported by the model provider."""
+
+    type: Literal["usage"] = "usage"
+
+
+@dataclass
+class RealtimeModelTurnEndedEvent:
+    """Triggered when the model finishes generating a response for a turn."""
+
+    type: Literal["turn_ended"] = "turn_ended"
+    response_id: str | None = None
+    """Provider response ID for this turn, when available."""
+
+
+@dataclass
+class RealtimeModelOtherEvent:
+    """Used as a catchall for vendor-specific events."""
+
+    data: Any
+
+    type: Literal["other"] = "other"
+
+
+@dataclass
+class RealtimeModelExceptionEvent:
+    """Exception occurred during model operation."""
+
+    exception: Exception
+    context: str | None = None
+
+    type: Literal["exception"] = "exception"
+
+
+@dataclass
+class RealtimeModelRawServerEvent:
+    """Raw events forwarded from the server."""
+
+    data: Any
+
+    type: Literal["raw_server_event"] = "raw_server_event"
+
+
+RealtimeModelEvent: TypeAlias = (
+    RealtimeModelErrorEvent
+    | RealtimeModelToolCallEvent
+    | RealtimeModelAudioEvent
+    | RealtimeModelAudioInterruptedEvent
+    | RealtimeModelAudioDoneEvent
+    | RealtimeModelInputAudioTimeoutTriggeredEvent
+    | RealtimeModelInputAudioTranscriptionCompletedEvent
+    | RealtimeModelTranscriptDeltaEvent
+    | RealtimeModelOutputTextDeltaEvent
+    | RealtimeModelItemUpdatedEvent
+    | RealtimeModelItemDeletedEvent
+    | RealtimeModelConnectionStatusEvent
+    | RealtimeModelEndOfStreamEvent
+    | RealtimeModelTurnStartedEvent
+    | RealtimeModelUsageEvent
+    | RealtimeModelTurnEndedEvent
+    | RealtimeModelOtherEvent
+    | RealtimeModelExceptionEvent
+    | RealtimeModelRawServerEvent
+)

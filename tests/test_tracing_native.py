@@ -133,6 +133,7 @@ def _answer(fixture: ResponsesFixture, text: str) -> None:
         "terminal_queue",
         "host_contexts",
         "manual_validation_context",
+        "prepared_request_context",
         "closed_session_context",
         "child_turn_policy",
         "child_interaction_policy",
@@ -226,6 +227,8 @@ async def _native_case(case: str) -> None:
                     await _host_contexts(recorder)
                 elif case == "manual_validation_context":
                     await _manual_validation_context(fixture, provider)
+                elif case == "prepared_request_context":
+                    await _prepared_request_context(fixture, str(model.make_url("/v1")))
                 elif case == "closed_session_context":
                     await _closed_session_context(fixture, provider)
                 elif case == "child_turn_policy":
@@ -237,6 +240,44 @@ async def _native_case(case: str) -> None:
             finally:
                 await provider.aclose()
                 await telemetry.shutdown(timeout_ms=5000)
+
+
+async def _prepared_request_context(fixture: ResponsesFixture, url: str) -> None:
+    provider = NativeProvider(base_url=url, api_key="model-only-key", supports_websockets=False)
+    try:
+        for disabled in (False, True):
+            observed = []
+
+            def edit(turn, request, observed=observed, **indices):
+                with telemetry.span(
+                    "inside request editor",
+                    options=telemetry.TraceOptions(include_sensitive_data=True),
+                ) as child:
+                    observed.append(
+                        (
+                            child.context.trace_id,
+                            child.context.disabled,
+                            child.context.include_sensitive_data,
+                        )
+                    )
+                request["instructions"] = "edited instructions"
+                return request
+
+            _answer(fixture, "done")
+            agent = Agent(model="gpt-5.5", instructions="Answer.", provider=provider)
+            async with agent.session() as session:
+                with telemetry.trace(
+                    "submitted workflow",
+                    options=telemetry.TraceOptions(disabled=disabled, include_sensitive_data=False),
+                ) as workflow:
+                    turn = await session.submit("answer", prepare_request=edit)
+                assert telemetry.current_context() is None
+                assert (await turn.get_result()).final_output == "done"
+            assert observed == [(workflow.context.trace_id, disabled, False)]
+            assert "edited instructions" in json.dumps(fixture.requests[-1])
+        assert len(fixture.requests) == 2
+    finally:
+        await provider.aclose()
 
 
 async def _closed_session_context(fixture: ResponsesFixture, provider: NativeProvider) -> None:
@@ -1054,6 +1095,7 @@ def test_processor_loss_survives_sequential_event_loops(new_events: bool) -> Non
     script = r"""
 import asyncio,json,threading,sys
 from agents import telemetry
+from agents._runtime import telemetry as runtime_telemetry
 entered=threading.Event(); release=threading.Event(); seen=[]
 class Processor:
     def on_trace_event(self,event):
@@ -1089,7 +1131,7 @@ async def second():
     await telemetry.shutdown(timeout_ms=2000)
 asyncio.run(first())
 release.set()
-route=next(iter(telemetry._processors.values()))
+route=next(iter(runtime_telemetry._processors.values()))
 route.pending.completion.result(timeout=2)
 asyncio.run(second())
 """
@@ -1114,6 +1156,7 @@ def test_shutdown_owns_processors_on_a_fresh_event_loop(queued_events: bool) -> 
     script = r"""
 import asyncio,json,sys
 from agents import telemetry
+from agents._runtime import telemetry as runtime_telemetry
 seen=[]
 class Processor:
     def on_trace_event(self,event): seen.append((event['name'],event['lifecycle']))
@@ -1124,7 +1167,7 @@ if sys.argv[1]=='True':
 asyncio.run(telemetry.shutdown(timeout_ms=2000))
 expected=[('between loops','start'),('between loops','end')] if sys.argv[1]=='True' else []
 assert seen==expected,seen
-assert telemetry._processors=={} and telemetry._processor_task is None
+assert runtime_telemetry._processors=={} and runtime_telemetry._processor_task is None
 print(json.dumps({'seen':seen,'shutdown':'complete'}))
 """
     with tempfile.TemporaryDirectory() as home:

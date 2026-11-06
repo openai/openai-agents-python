@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import json
 import pickle
 from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
@@ -13,7 +15,14 @@ import pytest_asyncio
 from aiohttp import web
 from aiohttp.test_utils import TestServer
 
-from agents import Agent, InteractionRequired, NativeError, NativeProvider, function_tool
+from agents import (
+    Agent,
+    InteractionRequired,
+    NativeError,
+    NativeProvider,
+    TurnStoppedError,
+    function_tool,
+)
 from tests._asyncio import timeout
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
 from tests.test_native_provider_websockets import peer as websocket_peer
@@ -24,13 +33,21 @@ class ProviderErrorPeer(ResponsesFixture):
     # The shared fixture supplies SSE; provider failures must occur before SSE starts.
     failure: tuple[int, object, str] | None = None
     failed_requests: int = 0
+    failed_inputs: list[dict[str, Any]] = field(default_factory=list)
+    failure_started: asyncio.Event | None = None
+    failure_release: asyncio.Event | None = None
 
     async def handle(self, request: web.Request) -> web.StreamResponse:
-        if self.failure is None:
+        failure = self.failure
+        if failure is None:
             return await super().handle(request)
         self.failed_requests += 1
-        await request.read()
-        status, code, kind = self.failure
+        self.failed_inputs.append(await request.json())
+        status, code, kind = failure
+        if self.failure_started is not None:
+            self.failure_started.set()
+        if self.failure_release is not None:
+            await self.failure_release.wait()
         return web.json_response(
             {
                 "error": {
@@ -266,6 +283,218 @@ async def test_provider_metadata_does_not_reach_later_turns_or_local_errors(
         await provider.aclose()
 
 
+@pytest.mark.parametrize("status,expected_requests", [(401, 2), (403, 1)])
+async def test_terminal_http_auth_failure_stops_after_bounded_recovery(
+    provider_peer: ProviderErrorPeer, status: int, expected_requests: int
+) -> None:
+    provider_peer.failure = (status, "invalid_api_key", "invalid_request_error")
+    async with NativeProvider(
+        base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+    ) as provider:
+        with pytest.raises(NativeError) as caught:
+            await Agent(instructions="Answer.", model="gpt-5.2", provider=provider).run(
+                "Reject the captured key."
+            )
+    assert provider_peer.failed_requests == expected_requests
+    assert caught.value.status_code == status
+    assert caught.value.code == "invalid_api_key"
+    assert caught.value.request_id == "synthetic-provider-request"
+    assert caught.value.category == "authentication_error"
+
+
+@pytest.mark.parametrize("status,expected_requests", [(401, 2), (403, 1)])
+async def test_terminal_http_auth_failure_preserves_one_prior_tool_effect(
+    provider_peer: ProviderErrorPeer, status: int, expected_requests: int
+) -> None:
+    effects = []
+
+    @function_tool
+    def write_once() -> str:
+        effects.append("committed")
+        provider_peer.failure = (status, "invalid_api_key", "invalid_request_error")
+        return "receipt-1"
+
+    provider_peer.respond(function_call("write_once", {}, "write-once-call"))
+    async with NativeProvider(
+        base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+    ) as provider:
+        with pytest.raises(NativeError) as caught:
+            await Agent(
+                instructions="Use write_once then answer.",
+                model="gpt-5.2",
+                provider=provider,
+                tools=[write_once],
+            ).run("Record one effect.")
+    assert effects == ["committed"]
+    assert len(provider_peer.requests) == 1
+    assert provider_peer.failed_requests == expected_requests
+    assert caught.value.status_code == status
+    assert caught.value.code == "invalid_api_key"
+    assert caught.value.request_id == "synthetic-provider-request"
+    assert caught.value.category == "authentication_error"
+    for request in provider_peer.failed_inputs:
+        original = next(item for item in request["input"] if item.get("type") == "function_call")
+        outputs = [item for item in request["input"] if item.get("type") == "function_call_output"]
+        assert len(outputs) == 1 and outputs[0]["call_id"] == original["call_id"]
+        assert outputs[0]["output"] == "receipt-1"
+
+
+@pytest.mark.parametrize(
+    "upgrade_status,status,expected_upgrades,expected_http",
+    [(401, 401, 2, 2), (401, 403, 2, 1), (426, 401, 1, 2), (426, 403, 1, 1)],
+)
+async def test_websocket_startup_auth_fallback_keeps_final_http_failure(
+    upgrade_status: int, status: int, expected_upgrades: int, expected_http: int
+) -> None:
+    async with (
+        timeout(30),
+        websocket_peer(
+            upgrade_status=upgrade_status,
+            http_failure=(status, "final_http_rejection", "final-http-request"),
+        ) as peer,
+    ):
+        agent = Agent(
+            instructions="Answer.",
+            model="gpt-5.2",
+            provider=peer.provider(key="synthetic-rejected-key"),
+        )
+        async with agent.session() as session:
+            with pytest.raises(NativeError) as caught:
+                await (await session.submit("Reject the upgrade then reject HTTP.")).get_result()
+        assert caught.value.status_code == status
+        assert caught.value.code == "final_http_rejection"
+        assert caught.value.request_id == "final-http-request"
+        assert caught.value.category == "authentication_error"
+        assert len(peer.upgrades) == expected_upgrades
+        assert all(
+            json.loads(headers["x-codex-turn-metadata"])["request_kind"] == "prewarm"
+            for headers in peer.upgrades
+        )
+        assert len(peer.http_requests) == expected_http
+        assert all(request.get("generate") is not False for request in peer.http_requests)
+        assert all(
+            header.get("authorization") == "Bearer synthetic-rejected-key"
+            for header in [*peer.upgrades, *peer.request_headers]
+        )
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_sampling_websocket_auth_recovery_is_spent_before_http_fallback(status: int) -> None:
+    steps = []
+
+    def before_step(turn: Any, step_index: int) -> list[Any]:
+        steps.append(step_index)
+        return []
+
+    async with timeout(30), websocket_peer() as peer:
+        peer.respond(assistant_output("socket ready"))
+        agent = Agent(
+            instructions="Answer.",
+            model="gpt-5.2",
+            provider=peer.provider(key="synthetic-rejected-key"),
+        )
+        async with agent.session() as session:
+            assert (
+                await (await session.submit("Prime the existing socket.")).get_result()
+            ).final_output == "socket ready"
+            assert peer.warmups == 1 and not peer.http_requests
+            prior_upgrades = len(peer.upgrades)
+            # Retire the warmed socket so the next actual turn must reconnect.
+            await asyncio.gather(*(socket.close() for socket in tuple(peer.sockets)))
+            await peer.disconnected.wait()
+            peer.upgrade_status = 401
+            peer.http_failure = (status, "final_http_rejection", "final-http-request")
+            with pytest.raises(NativeError) as caught:
+                await (
+                    await session.submit("Reject the sampling reconnect.", before_step=before_step)
+                ).get_result()
+        assert steps == [0]
+        rejected_upgrades = peer.upgrades[prior_upgrades:]
+        assert len(rejected_upgrades) == 2
+        for headers in rejected_upgrades:
+            metadata = json.loads(headers["x-codex-turn-metadata"])
+            assert metadata["request_kind"] == "turn" and metadata["turn_id"]
+            assert headers.get("authorization") == "Bearer synthetic-rejected-key"
+        assert len(peer.http_requests) == 1
+        assert peer.http_requests[0].get("generate") is not False
+        assert caught.value.status_code == status
+        assert caught.value.code == "final_http_rejection"
+        assert caught.value.request_id == "final-http-request"
+        assert caught.value.category == "authentication_error"
+
+
+async def test_http_auth_recovery_budget_resets_for_each_model_request(
+    provider_peer: ProviderErrorPeer,
+) -> None:
+    provider_peer.failure = (401, "invalid_api_key", "invalid_request_error")
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+        ) as provider,
+    ):
+        async with Agent(
+            instructions="Answer.", model="gpt-5.2", provider=provider
+        ).session() as session:
+            for request_index in range(2):
+                with pytest.raises(NativeError) as caught:
+                    await (
+                        await session.submit("Reject this independent model request.")
+                    ).get_result()
+                assert provider_peer.failed_requests == 2 * (request_index + 1)
+                assert caught.value.status_code == 401
+                assert caught.value.code == "invalid_api_key"
+                assert caught.value.request_id == "synthetic-provider-request"
+                assert caught.value.category == "authentication_error"
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_cancel_after_tool_effect_prevents_late_auth_retry(
+    provider_peer: ProviderErrorPeer, status: int
+) -> None:
+    effects = []
+    provider_peer.failure_started = asyncio.Event()
+    provider_peer.failure_release = asyncio.Event()
+
+    @function_tool
+    def write_once() -> str:
+        effects.append("committed")
+        provider_peer.failure = (status, "invalid_api_key", "invalid_request_error")
+        return "receipt-1"
+
+    provider_peer.respond(function_call("write_once", {}, "write-once-call"))
+    async with (
+        timeout(30),
+        NativeProvider(
+            base_url=provider_peer.url, api_key="synthetic-loopback-only", supports_websockets=False
+        ) as provider,
+    ):
+        agent = Agent(
+            instructions="Use write_once then answer.",
+            model="gpt-5.2",
+            provider=provider,
+            tools=[write_once],
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Record one effect then hold the auth rejection.")
+            try:
+                await provider_peer.failure_started.wait()
+                assert effects == ["committed"]
+                await turn.cancel()
+                with pytest.raises(TurnStoppedError):
+                    await turn.get_result()
+            finally:
+                provider_peer.failure_release.set()
+            provider_peer.failure = None
+            provider_peer.respond(assistant_output("fresh turn"))
+            assert (
+                await (await session.submit("Answer after cancellation.")).get_result()
+            ).final_output == "fresh turn"
+    assert effects == ["committed"]
+    assert provider_peer.failed_requests == 1
+    assert len(provider_peer.requests) == 2
+
+
 @pytest.mark.parametrize(
     "reason",
     [
@@ -278,7 +507,7 @@ async def test_provider_metadata_does_not_reach_later_turns_or_local_errors(
 def test_captured_integrity_reason_is_readonly_and_does_not_change_error_metadata(
     reason: str,
 ) -> None:
-    from agents.session import _model_failure_error, _native_error
+    from agents._runtime.session import _model_failure_error, _native_error
 
     error = _model_failure_error(
         {"message": "fixed safe message", "response_integrity_reason": reason}
@@ -307,7 +536,7 @@ def test_captured_integrity_reason_is_readonly_and_does_not_change_error_metadat
 
 
 def test_absent_captured_integrity_reason_remains_unknown() -> None:
-    from agents.session import _model_failure_error
+    from agents._runtime.session import _model_failure_error
 
     assert _model_failure_error({"message": "safe"}).response_integrity_reason is None
     assert (
@@ -319,7 +548,7 @@ def test_absent_captured_integrity_reason_remains_unknown() -> None:
 
 
 def test_passive_reason_conversion_preserves_its_originating_category_and_provider_fields() -> None:
-    from agents.session import _native_error
+    from agents._runtime.session import _native_error
 
     error = _native_error(
         {

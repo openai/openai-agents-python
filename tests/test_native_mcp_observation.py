@@ -24,6 +24,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
+from agents._runtime.session import _ChildCallbacks
 from agents.observation import (
     EventGap,
     ExecutionItemCompleted,
@@ -32,7 +33,6 @@ from agents.observation import (
     ToolStarted,
     TurnFinished,
 )
-from agents.session import _ChildCallbacks
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

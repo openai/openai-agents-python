@@ -2,22 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
-import sys
-from typing import Any
-from weakref import WeakSet
+from ._runtime._compat import (
+    Any as Any,
+    WeakSet as WeakSet,
+    asyncio as asyncio,
+    cancel_once as cancel_once,
+    sys as sys,
+)
 
 __all__ = ("cancel_once",)
-
-if sys.version_info >= (3, 11):
-
-    def cancel_once(task: asyncio.Task[Any]) -> None:
-        if not task.cancelling():
-            task.cancel()
-
-else:
-    _cancelled_by_sdk: WeakSet[asyncio.Task[Any]] = WeakSet()
-
-    def cancel_once(task: asyncio.Task[Any]) -> None:
-        if task not in _cancelled_by_sdk and task.cancel():
-            _cancelled_by_sdk.add(task)

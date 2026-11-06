@@ -1,7 +1,8 @@
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 
-from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow, _api_rate_limits
+from agents._runtime.rate_limits import _api_rate_limits
+from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
 
 
 def test_api_rate_limits_preserve_sparse_exact_values() -> None:

@@ -8,7 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from agents import Agent, Session, _native_async
+from agents import Agent, Session, _native_async as native_async_bridge
+from agents._runtime import _native_async
 from tests._asyncio import timeout
 from tests.native_fixtures import responses as responses
 from tests.test_native_agent_observation import provider, text_response
@@ -135,7 +136,7 @@ async def test_setup_failure_releases_unstarted_owner_with_retained_traceback(mo
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows retains the original native bridge")
 async def test_native_pending_setup_failure_does_not_strand_session_close(responses, monkeypatch):
-    original = _native_async._await_native_event
+    original = native_async_bridge._await_native_event
     original_startup = Session._publish_startup
     original_pair = socket.socketpair
     failed = asyncio.Event()
@@ -168,7 +169,7 @@ async def test_native_pending_setup_failure_does_not_strand_session_close(respon
 
         return await original_startup(session, complete_after_injection())
 
-    monkeypatch.setattr(_native_async, "_await_native_event", inject)
+    monkeypatch.setattr(native_async_bridge, "_await_native_event", inject)
     monkeypatch.setattr(Session, "_publish_startup", publish_until_injected)
     owner = provider(responses)
     agent = Agent(instructions="Answer.", provider=owner)

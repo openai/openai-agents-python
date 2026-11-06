@@ -68,7 +68,6 @@ index e44afa9b206b7b346863fa76eb4164186e3d21f4..151ef579cc643039f5215e99c771e80c
  pub use model_request::ModelRequestInput;
  pub use model_request::ModelRequestKind;
 diff --git a/codex-rs/ext/extension-api/src/model_request.rs b/codex-rs/ext/extension-api/src/model_request.rs
-index 45fa289c1d3a458daa5305abc634e79a47c7b1e5..9d824898c42015f92fa9961c66f5d7868faef158 100644
 --- a/codex-rs/ext/extension-api/src/model_request.rs
 +++ b/codex-rs/ext/extension-api/src/model_request.rs
 @@ -1,5 +1,6 @@
@@ -78,7 +77,7 @@ index 45fa289c1d3a458daa5305abc634e79a47c7b1e5..9d824898c42015f92fa9961c66f5d786
  pub use codex_api::ApiError as ModelResponseError;
  pub use codex_api::ResponseEvent;
  use codex_protocol::models::ResponseItem;
-@@ -48,10 +49,32 @@ pub struct ModelRequestInput<'a> {
+@@ -51,6 +52,15 @@
      pub model: &'a str,
  }
  
@@ -91,9 +90,12 @@ index 45fa289c1d3a458daa5305abc634e79a47c7b1e5..9d824898c42015f92fa9961c66f5d786
 +    pub items: &'a mut Vec<ResponseItem>,
 +}
 +
- /// Creates request-scoped interceptors without delaying inference.
+ /// Contributes request-scoped preparation and response interception.
  /// Return None for requests this host does not manage.
  pub trait ModelRequestContributor: Send + Sync + std::fmt::Debug {
+@@ -71,6 +81,19 @@
+     }
+ 
      fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>>;
 +
 +    /// Whether this thread requires an awaited context policy before sending input.

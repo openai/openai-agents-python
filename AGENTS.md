@@ -141,7 +141,9 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 ### Repo Structure & Important Files
 
-- `src/agents/`: Core library implementation.
+- `src/agents/`: Public Codex API facades, shared declarations, and package metadata.
+- `src/agents/_runtime/`: Private Codex runtime implementation, including experimental features.
+- `src/agents/classic/`: Retained v0 Python runtime, isolated under its explicit namespace.
 - `tests/`: Test suite; see `tests/README.md` for native fixtures, typing checks, and wheel verification.
 - `examples/`: Current Python examples and their [guide](examples/README.md).
 - `docs/sdk/`: Current MkDocs source. Start at [the SDK guide](docs/sdk/index.md) for deployment choices, Sessions, tools, configuration and the API reference.
@@ -154,13 +156,14 @@ The OpenAI Agents Python repository provides the Python Agents SDK, examples, an
 
 ### Agents Core Runtime Guidelines
 
-- The root `openai-agents` distribution exposes `agents` and uses Codex as its only engine. Keep typed declarations and application callbacks in Python; native Codex owns model requests, turns, MCP execution and canonical history. Do not recreate a Python model loop, adapter backend or separate SDK distribution.
-- `src/agents/agent.py` defines Agent and its one-shot helpers, `Agent.run()` and `Agent.run_sync()`.
-- `src/agents/session.py` owns one native thread/event reader, exact submission handles, callback lifetime, tool generation and joined cleanup. Preserve native admission at application-code entry and after awaits; cancellation must not start queued application work after its ownership is invalidated.
-- `src/agents/_function_tools.py` and `tools.py` own the typed declaration and single captured function representation. Reuse that schema/validator capture instead of adding a parallel mutable tool executor.
-- `src/agents/mcp.py` declares selected native HTTP or stdio MCP tools. Native Core owns server connections and execution. Tool replacement stays within the opening ceiling and commits one confirmed generation.
-- `src/agents/observation.py` provides passive bounded events. Use settled results and canonical history as authority. `state.py` holds trusted native conversation checkpoints; current callbacks, context and credentials come from the application. The [Sessions guide](docs/sdk/sessions.md#compact-save-and-restore) defines supported save boundaries.
+- The root `openai-agents` distribution exposes the native SDK through `agents` and the retained v0 Python runtime through `agents.classic`. Native Codex owns model requests, turns, MCP execution and canonical history for the native API. Keep classic implementation and dependencies isolated under its explicit namespace; preserve its released behavior and supported persisted state. Do not add automatic engine switching, cross-runtime object or checkpoint conversion, another adapter backend, or a separate distribution without an explicit requirement. See `CLASSIC.md` for the migration contract.
+- `src/agents/_runtime/agent.py` defines Agent and its one-shot helpers, `Agent.run()` and `Agent.run_sync()`.
+- `src/agents/_runtime/session.py` owns one native thread/event reader, exact submission handles, callback lifetime, tool generation and joined cleanup. Preserve native admission at application-code entry and after awaits; cancellation must not start queued application work after its ownership is invalidated.
+- `src/agents/_runtime/_function_tools.py` and `tools.py` own the typed declaration and single captured function representation. Reuse that schema/validator capture instead of adding a parallel mutable tool executor.
+- `src/agents/_runtime/mcp.py` declares selected native HTTP or stdio MCP tools. Native Core owns server connections and execution. Tool replacement stays within the opening ceiling and commits one confirmed generation.
+- `src/agents/_runtime/observation.py` provides passive bounded events. Use settled results and canonical history as authority. `state.py` holds trusted native conversation checkpoints; current callbacks, context and credentials come from the application. The [Sessions guide](docs/sdk/sessions.md#compact-save-and-restore) defines supported save boundaries.
 - `packages/codex/rust/` owns SDK bindings to the fixed Codex pin. Coordinate compiled module names, async imports, build inputs and matching native verification. Do not change upstream source or the pin without explicit authorization.
+- Public facades forward to the same runtime objects; keep their import paths, explicit exports, and type identities stable. Runtime modules import private siblings directly. Only shared `config` declarations, `version` metadata, and the stable `agents._native` ABI sit outside that owner. Preserve the `agents._native_async` forwarding module used by Rust. See [runtime ownership](packages/codex/MAINTAINING.md#runtime-ownership).
 - The root wheel producer includes `agents`, the matching native extension, helpers, shared libraries and notices. Current examples are in `examples/`, current docs in `docs/sdk/`, and independent native test fixtures in `tests/native_fixtures.py`.
 
 ## Operation Guide

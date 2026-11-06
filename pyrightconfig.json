@@ -18,5 +18,18 @@
   "typeCheckingMode": "basic",
   "reportMissingImports": "error",
   "reportPrivateImportUsage": "none",
-  "reportUnsupportedDunderAll": "none"
+  "reportUnsupportedDunderAll": "none",
+  "executionEnvironments": [
+    {
+      "root": "src/agents/classic",
+      "reportAttributeAccessIssue": "none",
+      "reportArgumentType": "none",
+      "reportGeneralTypeIssues": "none",
+      "reportIndexIssue": "none",
+      "reportTypedDictNotRequiredAccess": "none"
+    },
+    {
+      "root": "."
+    }
+  ]
 }

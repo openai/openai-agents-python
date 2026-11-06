@@ -181,7 +181,7 @@ async def test_waiting_native_request_reader_follows_turn_when_session_starts_cl
     responses, monkeypatch
 ):
     from agents import ApprovalRequest, HttpMCP
-    from agents.observation import _ObservationBuffer
+    from agents._runtime.observation import _ObservationBuffer
     from tests.test_native_mcp_tools import Peer, mcp_call
 
     first_scan, closing_scan, release_close = (
