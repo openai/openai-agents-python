@@ -32,9 +32,10 @@ from http.server import (
     BaseHTTPRequestHandler as BaseHTTPRequestHandler,
     ThreadingHTTPServer as ThreadingHTTPServer,
 )
-from socketserver import TCPServer as _TCPServer
+from socketserver import TCPServer as TCPServer
 from threading import Lock as Lock, Thread as Thread
 from types import TracebackType as TracebackType
+from typing import cast as cast
 from uuid import uuid4 as uuid4
 
 from agents.config import JsonValue as JsonValue
@@ -85,10 +86,9 @@ def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) ->
 
 class _LoopbackHTTPServer(ThreadingHTTPServer):
     def server_bind(self) -> None:
-        # Skip HTTPServer's hostname lookup for this numeric loopback address.
-        _TCPServer.server_bind(self)
-        self.server_name = self.server_address[0]
-        self.server_port = self.server_address[1]
+        # Numeric loopback needs no reverse DNS lookup during local startup.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = cast(tuple[str, int], self.server_address)
 
 
 class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):

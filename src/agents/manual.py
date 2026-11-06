@@ -36,6 +36,7 @@ from _agents_codex.manual import (
     _general_form_validator as _general_form_validator,
     _is_json_value as _is_json_value,
     _NativeQuestion as _NativeQuestion,
+    _PreparedManualResult as _PreparedManualResult,
     _primitive_form_schema as _primitive_form_schema,
     _primitive_select_choices as _primitive_select_choices,
     _question as _question,
