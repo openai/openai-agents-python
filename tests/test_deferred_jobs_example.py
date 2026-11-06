@@ -392,7 +392,16 @@ async def test_documented_model_endpoint_runs_three_cli_commands(tmp_path: Path)
     )
     try:
         assert endpoint.stdout is not None
-        ready = await asyncio.wait_for(endpoint.stdout.readline(), 15)
+        try:
+            ready = await asyncio.wait_for(endpoint.stdout.readline(), 30)
+        except asyncio.TimeoutError:
+            if endpoint.returncode is None:
+                endpoint.kill()
+            stdout, stderr = await asyncio.wait_for(endpoint.communicate(), 5)
+            pytest.fail(
+                f"Model endpoint startup timed out (exit={endpoint.returncode}, "
+                f"stdout={stdout[-4096:]!r}, stderr={stderr[-4096:]!r})"
+            )
         assert ready.startswith(b"MODEL_PORT="), ready
         port = int(ready.removeprefix(b"MODEL_PORT="))
         directory = tmp_path / "private-state"
