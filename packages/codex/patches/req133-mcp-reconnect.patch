@@ -1,0 +1,1802 @@
+diff --git a/codex-rs/rmcp-client/src/rmcp_client.rs b/codex-rs/rmcp-client/src/rmcp_client.rs
+index 27babe2..4acc777 100644
+--- a/codex-rs/rmcp-client/src/rmcp_client.rs
++++ b/codex-rs/rmcp-client/src/rmcp_client.rs
+@@ -20,6 +20,7 @@ use codex_api::SharedAuthProvider;
+ use codex_config::McpServerOAuthConfig;
+ use codex_config::types::AuthKeyringBackendKind;
+ use codex_config::types::McpServerEnvVar;
++use codex_exec_server::ExecServerError;
+ use codex_exec_server::HttpClient;
+ use codex_keyring_store::DefaultKeyringStore;
+ use codex_otel::auth_storage::AuthStorageOriginator;
+@@ -69,9 +70,9 @@ use serde::Deserialize;
+ use serde::Serialize;
+ use serde_json::Value;
+ use tokio::sync::Mutex;
+-use tokio::sync::Semaphore;
+ use tokio::sync::watch;
+ use tokio::time;
++use tokio_util::sync::CancellationToken;
+ use tracing::instrument;
+ use tracing::warn;
+ 
+@@ -184,7 +185,7 @@ impl ClientService {
+     }
+     pub(crate) fn is_closed(&self) -> bool {
+         match self {
+-            Self::Shared(service) => service.is_closed(),
++            Self::Shared(service) => service.is_closed() || service.peer().is_transport_closed(),
+             Self::Owned {
+                 peer, cancellation, ..
+             } => {
+@@ -237,17 +238,70 @@ impl Drop for ClientService {
+     }
+ }
+ 
++#[derive(Default)]
++struct OwnedStdioShutdown {
++    started: CancellationToken,
++    completion: OnceLock<futures::future::Shared<BoxFuture<'static, Result<(), String>>>>,
++}
++
++async fn reap_owned_stdio(
++    service: Option<&ClientService>,
++    process: Option<&StdioServerProcessHandle>,
++) -> Result<()> {
++    let service_result = match service {
++        Some(service) => service.stop_owned().await,
++        None => Ok(()),
++    };
++    let process_result = match process {
++        Some(process) => process
++            .terminate_and_wait()
++            .await
++            .map_err(anyhow::Error::from),
++        None => Ok(()),
++    };
++    if service_result.is_err()
++        && let Err(error) = &process_result
++    {
++        warn!("failed to reap MCP stdio server process: {error}");
++    }
++    service_result.and(process_result)
++}
++
+ enum ClientState {
+     Connecting {
+         transport: Option<PendingTransport>,
++        stdio_process: Option<StdioServerProcessHandle>,
+     },
+     Ready {
+         service: Arc<ClientService>,
+         oauth: Option<OAuthRuntime>,
++        stdio_process: Option<StdioServerProcessHandle>,
++        initialize_context: Arc<InitializeContext>,
++        recovery_needed: bool,
+     },
+     Closed,
+ }
+ 
++impl ClientState {
++    fn stdio_process(&self) -> Option<&StdioServerProcessHandle> {
++        match self {
++            Self::Connecting { stdio_process, .. } | Self::Ready { stdio_process, .. } => {
++                stdio_process.as_ref()
++            }
++            Self::Closed => None,
++        }
++    }
++}
++
++impl PendingTransport {
++    fn stdio_process(&self) -> Option<StdioServerProcessHandle> {
++        match self {
++            Self::Stdio { transport } => Some(transport.process_handle()),
++            _ => None,
++        }
++    }
++}
++
+ /// Bearer authentication applied directly or by the selected HTTP transport.
+ #[derive(Clone)]
+ pub enum StreamableHttpBearerToken {
+@@ -393,11 +447,41 @@ where
+ #[derive(Debug, thiserror::Error)]
+ pub(crate) enum ClientOperationError {
+     #[error(transparent)]
+-    Service(#[from] rmcp::service::ServiceError),
++    Service(#[from] ServiceError),
++    #[error(transparent)]
++    AfterDispatch(ServiceError),
++    #[error("MCP tool continuation failed; the tool was not restarted")]
++    VerificationContinuation(#[source] ServiceError),
+     #[error("timed out awaiting {label} after {duration:.0?}")]
+     Timeout { label: String, duration: Duration },
+ }
+ 
++impl ClientOperationError {
++    fn service_error(&self) -> Option<&ServiceError> {
++        match self {
++            Self::Service(error)
++            | Self::AfterDispatch(error)
++            | Self::VerificationContinuation(error) => Some(error),
++            Self::Timeout { .. } => None,
++        }
++    }
++}
++
++fn is_http_connection_closed(error: &ExecServerError) -> bool {
++    match error {
++        ExecServerError::Closed | ExecServerError::Disconnected(_) => true,
++        // The local backend reports an incomplete response body as text.
++        // Its generic send error also covers timeouts and TLS failures.
++        ExecServerError::HttpRequest(message) => {
++            message.starts_with("error decoding response body")
++        }
++        ExecServerError::Protocol(message) => {
++            message.starts_with("http response stream `") && message.contains("` failed:")
++        }
++        _ => false,
++    }
++}
++
+ fn remaining_operation_timeout(
+     label: &str,
+     timeout: Option<Duration>,
+@@ -538,15 +622,13 @@ pub struct CancellableEventStreamRequest {
+ /// MCP client implemented on top of the official `rmcp` SDK.
+ /// https://github.com/modelcontextprotocol/rust-sdk
+ pub struct RmcpClient {
+-    state: Mutex<ClientState>,
+-    stdio_process: Option<StdioServerProcessHandle>,
++    state: Arc<Mutex<ClientState>>,
+     transport_recipe: TransportRecipe,
+     protocol_mode: McpProtocolMode,
+     requires_read_only_tools: bool,
+     owned_stdio_lifetime: bool,
+-    owned_stdio_shutdown: tokio::sync::OnceCell<std::result::Result<(), String>>,
+-    initialize_context: Mutex<Option<InitializeContext>>,
+-    session_recovery_lock: Semaphore,
++    owned_stdio_shutdown: Arc<OwnedStdioShutdown>,
++    session_recovery_lock: Arc<Mutex<()>>,
+     elicitation_pause_state: ElicitationPauseState,
+     transport_instance: Arc<AtomicU64>,
+ }
+@@ -565,9 +647,13 @@ impl RmcpClient {
+     }
+ 
+     pub fn with_owned_stdio_lifetime(mut self, enabled: bool) -> Self {
+-        self.owned_stdio_lifetime = enabled && self.stdio_process.is_some();
++        let process = Arc::get_mut(&mut self.state)
++            .expect("client ownership is configured before sharing")
++            .get_mut()
++            .stdio_process();
++        self.owned_stdio_lifetime = enabled && process.is_some();
+         if self.owned_stdio_lifetime
+-            && let Some(process) = &self.stdio_process
++            && let Some(process) = process
+         {
+             process.enable_owned_lifetime();
+         }
+@@ -595,17 +681,16 @@ impl RmcpClient {
+             .map_err(io::Error::other)?;
+ 
+         Ok(Self {
+-            state: Mutex::new(ClientState::Connecting {
++            state: Arc::new(Mutex::new(ClientState::Connecting {
+                 transport: Some(transport),
+-            }),
+-            stdio_process: None,
++                stdio_process: None,
++            })),
+             transport_recipe,
+             protocol_mode: McpProtocolMode::Legacy,
+             requires_read_only_tools: false,
+             owned_stdio_lifetime: false,
+-            owned_stdio_shutdown: tokio::sync::OnceCell::new(),
+-            initialize_context: Mutex::new(None),
+-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
++            owned_stdio_shutdown: Arc::default(),
++            session_recovery_lock: Arc::new(Mutex::new(())),
+             elicitation_pause_state: ElicitationPauseState::new(),
+             transport_instance: Arc::new(AtomicU64::new(0)),
+         })
+@@ -663,26 +748,18 @@ impl RmcpClient {
+         let transport = Self::create_pending_transport(&transport_recipe)
+             .await
+             .map_err(io::Error::other)?;
+-        let stdio_process = match &transport {
+-            PendingTransport::Stdio { transport } => Some(transport.process_handle()),
+-            PendingTransport::InProcess { .. }
+-            | PendingTransport::StreamableHttp { .. }
+-            | PendingTransport::StreamableHttpWithOAuth { .. }
+-            | PendingTransport::StreamableHttpWithAccessTokenOnly { .. } => None,
+-        };
+-
++        let stdio_process = transport.stdio_process();
+         Ok(Self {
+-            state: Mutex::new(ClientState::Connecting {
++            state: Arc::new(Mutex::new(ClientState::Connecting {
+                 transport: Some(transport),
+-            }),
+-            stdio_process,
++                stdio_process,
++            })),
+             transport_recipe,
+             protocol_mode,
+-            initialize_context: Mutex::new(None),
+             requires_read_only_tools: false,
+             owned_stdio_lifetime: false,
+-            owned_stdio_shutdown: tokio::sync::OnceCell::new(),
+-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
++            owned_stdio_shutdown: Arc::default(),
++            session_recovery_lock: Arc::new(Mutex::new(())),
+             elicitation_pause_state: ElicitationPauseState::new(),
+             transport_instance: Arc::new(AtomicU64::new(0)),
+         })
+@@ -782,17 +859,16 @@ impl RmcpClient {
+         };
+         let transport = Self::create_pending_transport(&transport_recipe).await?;
+         Ok(Self {
+-            state: Mutex::new(ClientState::Connecting {
++            state: Arc::new(Mutex::new(ClientState::Connecting {
+                 transport: Some(transport),
+-            }),
+-            stdio_process: None,
++                stdio_process: None,
++            })),
+             transport_recipe,
+             protocol_mode,
+-            initialize_context: Mutex::new(None),
+             requires_read_only_tools: false,
+             owned_stdio_lifetime: false,
+-            owned_stdio_shutdown: tokio::sync::OnceCell::new(),
+-            session_recovery_lock: Semaphore::new(/*permits*/ 1),
++            owned_stdio_shutdown: Arc::default(),
++            session_recovery_lock: Arc::new(Mutex::new(())),
+             elicitation_pause_state: ElicitationPauseState::new(),
+             transport_instance: Arc::new(AtomicU64::new(0)),
+         })
+@@ -834,10 +910,18 @@ impl RmcpClient {
+             send_elicitation,
+             url_notifications,
+         };
++        let _owned_recovery = if self.owned_stdio_lifetime {
++            Some(self.session_recovery_lock.lock().await)
++        } else {
++            None
++        };
+         let pending_transport = {
+             let mut guard = self.state.lock().await;
++            if self.owned_stdio_shutdown.started.is_cancelled() {
++                return Err(anyhow!("MCP client is shut down"));
++            }
+             match &mut *guard {
+-                ClientState::Connecting { transport } => match transport.take() {
++                ClientState::Connecting { transport, .. } => match transport.take() {
+                     Some(transport) => transport,
+                     None => return Err(anyhow!("client already initializing")),
+                 },
+@@ -856,11 +940,6 @@ impl RmcpClient {
+             .ok_or_else(|| anyhow!("handshake succeeded but server info was missing"))?;
+         let initialize_result = initialize_result_rmcp.as_ref().clone();
+ 
+-        {
+-            let mut initialize_context = self.initialize_context.lock().await;
+-            *initialize_context = Some(context);
+-        }
+-
+         {
+             let mut guard = self.state.lock().await;
+             if matches!(*guard, ClientState::Closed) {
+@@ -869,6 +948,9 @@ impl RmcpClient {
+             *guard = ClientState::Ready {
+                 service,
+                 oauth: oauth_runtime.clone(),
++                stdio_process: guard.stdio_process().cloned(),
++                initialize_context: Arc::new(context),
++                recovery_needed: false,
+             };
+         }
+ 
+@@ -1086,11 +1168,15 @@ impl RmcpClient {
+                                 .await?;
+                             match result {
+                                 ServerResult::CallToolResult(result) => Ok(result),
+-                                _ => Err(rmcp::service::ServiceError::UnexpectedResponse),
++                                _ => Err(ServiceError::UnexpectedResponse.into()),
+                             }
+                         })
+                         .await;
+-                    if let Err(ServiceError::McpError(error)) = &result {
++                    if let Some(ServiceError::McpError(error)) = result
++                        .as_ref()
++                        .err()
++                        .and_then(ClientOperationError::service_error)
++                    {
+                         if let Some(output) = service
+                             .service()
+                             .handle_url_required(error, url_call.receipt())
+@@ -1110,8 +1196,9 @@ impl RmcpClient {
+                 Ok(result)
+             }
+             Err(error) => {
+-                let Some(ClientOperationError::Service(ServiceError::TransportSend(transport))) =
+-                    error.downcast_ref()
++                let Some(ServiceError::TransportSend(transport)) = error
++                    .downcast_ref::<ClientOperationError>()
++                    .and_then(ClientOperationError::service_error)
+                 else {
+                     return authentication_required_result(error);
+                 };
+@@ -1202,7 +1289,7 @@ impl RmcpClient {
+         &self,
+         params: Option<serde_json::Value>,
+     ) -> Result<CancellableEventStreamRequest> {
+-        let service = self.service().await?;
++        let (service, _) = self.service_for_operation().await?;
+         let (sender, notifications) = event_notification_channel();
+         let mut request = crate::trace_context::traced_custom_request("events/stream", params);
+         request.extensions.insert(sender);
+@@ -1220,6 +1307,7 @@ impl RmcpClient {
+         })
+     }
+ 
++    #[cfg(test)]
+     async fn service(&self) -> Result<Arc<ClientService>> {
+         let guard = self.state.lock().await;
+         match &*guard {
+@@ -1251,11 +1339,12 @@ impl RmcpClient {
+ 
+     /// Returns whether an initialized transport or its underlying service has stopped.
+     pub async fn is_closed(&self) -> bool {
++        if self.owned_stdio_shutdown.started.is_cancelled() {
++            return true;
++        }
+         let state = self.state.lock().await;
+         match &*state {
+-            ClientState::Ready { service, .. } => {
+-                service.is_closed() || service.peer().is_transport_closed()
+-            }
++            ClientState::Ready { service, .. } => service.is_closed(),
+             ClientState::Connecting { .. } => false,
+             ClientState::Closed => true,
+         }
+@@ -1263,6 +1352,12 @@ impl RmcpClient {
+ 
+     /// Stop the MCP transport and any stdio server process owned by this client.
+     pub async fn shutdown(&self) {
++        if self.owned_stdio_lifetime {
++            if let Err(error) = self.shutdown_owned_stdio().await {
++                warn!("failed to shut down owned MCP stdio server: {error}");
++            }
++            return;
++        }
+         let previous_state = {
+             let mut guard = self.state.lock().await;
+             std::mem::replace(&mut *guard, ClientState::Closed)
+@@ -1271,7 +1366,7 @@ impl RmcpClient {
+         if let ClientState::Ready { service, .. } = &previous_state {
+             service.service().retire_url_transport();
+         }
+-        if let Some(process) = &self.stdio_process
++        if let Some(process) = previous_state.stdio_process()
+             && let Err(error) = process.terminate().await
+         {
+             warn!("failed to terminate MCP stdio server process: {error}");
+@@ -1282,30 +1377,30 @@ impl RmcpClient {
+ 
+     /// Join the actual stdio service and reap its process before acknowledging retirement.
+     pub async fn shutdown_owned_stdio(&self) -> Result<()> {
++        self.owned_stdio_shutdown.started.cancel();
+         self.owned_stdio_shutdown
+-            .get_or_init(|| async {
+-                let previous = {
+-                    let mut state = self.state.lock().await;
+-                    std::mem::replace(&mut *state, ClientState::Closed)
+-                };
+-                let service_result = if let ClientState::Ready { service, .. } = previous {
+-                    service.stop_owned().await
+-                } else {
+-                    Ok(())
+-                };
+-                let process_result = match &self.stdio_process {
+-                    Some(process) => process
+-                        .terminate_and_wait()
++            .completion
++            .get_or_init(|| {
++                let state = Arc::clone(&self.state);
++                let recovery_lock = Arc::clone(&self.session_recovery_lock);
++                let task = tokio::spawn(async move {
++                    // Recovery owns the gate until it has transferred or reaped its child.
++                    let _recovery = recovery_lock.lock().await;
++                    let previous = std::mem::replace(&mut *state.lock().await, ClientState::Closed);
++                    let service = match &previous {
++                        ClientState::Ready { service, .. } => Some(service.as_ref()),
++                        _ => None,
++                    };
++                    reap_owned_stdio(service, previous.stdio_process())
+                         .await
+-                        .map_err(anyhow::Error::from),
+-                    None => Ok(()),
+-                };
+-                service_result
+-                    .and(process_result)
+-                    .map_err(|error| error.to_string())
++                        .map_err(|error| error.to_string())
++                });
++                async move { task.await.map_err(|error| error.to_string())? }
++                    .boxed()
++                    .shared()
+             })
+-            .await
+             .clone()
++            .await
+             .map_err(anyhow::Error::msg)
+     }
+ 
+@@ -1624,18 +1719,27 @@ impl RmcpClient {
+             ),
+         };
+ 
+-        let service_result = match timeout {
+-            Some(duration) => match time::timeout(duration, transport).await {
+-                Ok(result) => {
+-                    result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
+-                }
+-                Err(_elapsed) => Err(anyhow!(
+-                    "timed out handshaking with MCP server after {duration:?}"
+-                )),
+-            },
+-            None => transport
+-                .await
+-                .map_err(|source| anyhow::Error::from(HandshakeError { source })),
++        let initialize = async {
++            match timeout {
++                Some(duration) => match time::timeout(duration, transport).await {
++                    Ok(result) => {
++                        result.map_err(|source| anyhow::Error::from(HandshakeError { source }))
++                    }
++                    Err(_elapsed) => Err(anyhow!(
++                        "timed out handshaking with MCP server after {duration:?}"
++                    )),
++                },
++                None => transport
++                    .await
++                    .map_err(|source| anyhow::Error::from(HandshakeError { source })),
++            }
++        };
++        let service_result = tokio::select! {
++            biased;
++            _ = self.owned_stdio_shutdown.started.cancelled(), if self.owned_stdio_lifetime => {
++                Err(anyhow!("MCP client is shut down"))
++            }
++            result = initialize => result,
+         };
+         let service = match service_result {
+             Ok(service) => service,
+@@ -1666,7 +1770,7 @@ impl RmcpClient {
+         ))
+     }
+ 
+-    async fn run_service_operation<T, F, Fut>(
++    async fn run_service_operation<T, F, Fut, E>(
+         &self,
+         label: &str,
+         timeout: Option<Duration>,
+@@ -1674,37 +1778,53 @@ impl RmcpClient {
+     ) -> Result<T>
+     where
+         F: Fn(Arc<ClientService>) -> Fut,
+-        Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
++        Fut: Future<Output = std::result::Result<T, E>>,
++        E: Into<ClientOperationError>,
+     {
+-        let service = self.service().await?;
+-        match Self::run_service_operation_with_transient_retries(
+-            Arc::clone(&service),
+-            label,
+-            timeout,
+-            self.elicitation_pause_state.clone(),
+-            &operation,
+-        )
+-        .await
+-        {
+-            Ok(result) => Ok(result),
+-            Err(error) if Self::is_session_expired_404(&error) => {
+-                self.reinitialize_after_session_expiry(&service).await?;
+-                let recovered_service = self.service().await?;
+-                Self::run_service_operation_with_transient_retries(
+-                    recovered_service,
+-                    label,
+-                    timeout,
+-                    self.elicitation_pause_state.clone(),
+-                    &operation,
+-                )
+-                .await
+-                .map_err(Into::into)
++        let (mut service, mut recovered) = self.service_for_operation().await?;
++        loop {
++            let error = match Self::run_service_operation_with_transient_retries(
++                Arc::clone(&service),
++                label,
++                timeout,
++                self.elicitation_pause_state.clone(),
++                &operation,
++            )
++            .await
++            {
++                Ok(result) => return Ok(result),
++                Err(error) => error,
++            };
++
++            let Some(service_error) = error.service_error() else {
++                return Err(error.into());
++            };
++            let session_expired = Self::is_session_expired_404(service_error);
++            let connection_closed = Self::is_connection_closed(service_error);
++            if session_expired || connection_closed {
++                self.mark_recovery_needed(&service).await;
++                // A 404 rejects a single request before execution. A continuation
++                // can return that same error after earlier rounds have executed.
++                let retry = session_expired && matches!(&error, ClientOperationError::Service(_));
++                if !recovered && (retry || connection_closed) {
++                    match self.reconnect(&service).await {
++                        Ok(replacement) if retry => {
++                            service = replacement;
++                            recovered = true;
++                            continue;
++                        }
++                        Ok(_) => {}
++                        Err(repair_error) => {
++                            warn!("failed to reconnect MCP client: {repair_error:#}");
++                        }
++                    }
++                }
+             }
+-            Err(error) => Err(error.into()),
++            return Err(error.into());
+         }
+     }
+ 
+-    async fn run_service_operation_with_transient_retries<T, F, Fut>(
++    async fn run_service_operation_with_transient_retries<T, F, Fut, E>(
+         service: Arc<ClientService>,
+         label: &str,
+         timeout: Option<Duration>,
+@@ -1713,7 +1833,8 @@ impl RmcpClient {
+     ) -> std::result::Result<T, ClientOperationError>
+     where
+         F: Fn(Arc<ClientService>) -> Fut,
+-        Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
++        Fut: Future<Output = std::result::Result<T, E>>,
++        E: Into<ClientOperationError>,
+     {
+         let retry_deadline = timeout.map(|duration| Instant::now() + duration);
+         for (attempt, retry_delay_ms) in STREAMABLE_HTTP_RETRY_DELAYS_MS
+@@ -1760,7 +1881,7 @@ impl RmcpClient {
+         unreachable!("service operation retry loop should return on success or final error")
+     }
+ 
+-    async fn run_service_operation_once<T, F, Fut>(
++    async fn run_service_operation_once<T, F, Fut, E>(
+         service: Arc<ClientService>,
+         label: &str,
+         timeout: Option<Duration>,
+@@ -1769,7 +1890,8 @@ impl RmcpClient {
+     ) -> std::result::Result<T, ClientOperationError>
+     where
+         F: Fn(Arc<ClientService>) -> Fut,
+-        Fut: std::future::Future<Output = std::result::Result<T, rmcp::service::ServiceError>>,
++        Fut: Future<Output = std::result::Result<T, E>>,
++        E: Into<ClientOperationError>,
+     {
+         match timeout {
+             Some(duration) => {
+@@ -1779,32 +1901,27 @@ impl RmcpClient {
+                         label: label.to_string(),
+                         duration,
+                     })?
+-                    .map_err(ClientOperationError::from)
++                    .map_err(Into::into)
+             }
+-            None => operation(service).await.map_err(ClientOperationError::from),
++            None => operation(service).await.map_err(Into::into),
+         }
+     }
+ 
+     fn is_retryable_tools_list_error(label: &str, error: &ClientOperationError) -> bool {
+-        if label != "tools/list" {
+-            return false;
+-        }
+-        let ClientOperationError::Service(rmcp::service::ServiceError::TransportSend(error)) =
+-            error
+-        else {
++        let Some(service_error @ ServiceError::TransportSend(error)) = error.service_error() else {
+             return false;
+         };
+ 
+-        error
+-            .error
+-            .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
+-            .is_some_and(Self::is_retryable_streamable_http_error)
++        label == "tools/list"
++            && !Self::is_connection_closed(service_error)
++            && error
++                .error
++                .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
++                .is_some_and(Self::is_retryable_streamable_http_error)
+     }
+ 
+-    fn is_session_expired_404(error: &ClientOperationError) -> bool {
+-        let ClientOperationError::Service(rmcp::service::ServiceError::TransportSend(error)) =
+-            error
+-        else {
++    fn is_session_expired_404(error: &ServiceError) -> bool {
++        let ServiceError::TransportSend(error) = error else {
+             return false;
+         };
+ 
+@@ -1821,68 +1938,223 @@ impl RmcpClient {
+             })
+     }
+ 
+-    async fn reinitialize_after_session_expiry(
+-        &self,
+-        failed_service: &Arc<ClientService>,
+-    ) -> Result<()> {
+-        let _recovery_guard = self
+-            .session_recovery_lock
+-            .acquire()
+-            .await
+-            .map_err(|_| anyhow!("MCP client recovery semaphore closed"))?;
++    pub(crate) fn is_connection_closed(error: &ServiceError) -> bool {
++        fn is_closed_io(error: &io::Error) -> bool {
++            matches!(
++                error.kind(),
++                io::ErrorKind::BrokenPipe
++                    | io::ErrorKind::ConnectionAborted
++                    | io::ErrorKind::ConnectionReset
++                    | io::ErrorKind::NotConnected
++                    | io::ErrorKind::UnexpectedEof
++            )
++        }
++
++        // RMCP converts an SSE response stream ending before its final reply
++        // into TransportClosed, even if the HTTP worker is still alive.
++        match error {
++            ServiceError::TransportClosed => true,
++            ServiceError::TransportSend(transport) => {
++                transport
++                    .error
++                    .downcast_ref::<io::Error>()
++                    .is_some_and(is_closed_io)
++                    || transport
++                        .error
++                        .downcast_ref::<StreamableHttpError<StreamableHttpClientAdapterError>>()
++                        .is_some_and(|error| match error {
++                            StreamableHttpError::UnexpectedEndOfStream
++                            | StreamableHttpError::TransportChannelClosed => true,
++                            StreamableHttpError::Io(error) => is_closed_io(error),
++                            StreamableHttpError::Client(
++                                StreamableHttpClientAdapterError::HttpRequest(error),
++                            ) => is_http_connection_closed(error),
++                            _ => false,
++                        })
++            }
++            _ => false,
++        }
++    }
+ 
++    async fn mark_recovery_needed(&self, failed: &Arc<ClientService>) {
++        let mut state = self.state.lock().await;
++        if let ClientState::Ready {
++            service,
++            recovery_needed,
++            ..
++        } = &mut *state
++            && Arc::ptr_eq(service, failed)
+         {
+-            let guard = self.state.lock().await;
+-            match &*guard {
+-                ClientState::Ready { service, .. } if !Arc::ptr_eq(service, failed_service) => {
+-                    return Ok(());
++            *recovery_needed = true;
++        }
++    }
++
++    async fn service_for_operation(&self) -> Result<(Arc<ClientService>, bool)> {
++        let service = {
++            let state = self.state.lock().await;
++            if self.owned_stdio_shutdown.started.is_cancelled() {
++                return Err(anyhow!("MCP client is shut down"));
++            }
++            match &*state {
++                ClientState::Ready {
++                    service,
++                    recovery_needed,
++                    ..
++                } => {
++                    if !recovery_needed && !service.is_closed() {
++                        return Ok((Arc::clone(service), false));
++                    }
++                    Arc::clone(service)
+                 }
+-                ClientState::Ready { .. } => {}
+                 ClientState::Connecting { .. } => {
+                     return Err(anyhow!("MCP client not initialized"));
+                 }
+-                ClientState::Closed => {
+-                    return Err(anyhow!("MCP client is shut down"));
++                ClientState::Closed => return Err(anyhow!("MCP client is shut down")),
++            }
++        };
++        let original = ClientOperationError::from(ServiceError::TransportClosed);
++        match self.reconnect(&service).await {
++            Ok(replacement) => Ok((replacement, true)),
++            Err(error) => {
++                warn!("failed to reconnect MCP client: {error:#}");
++                Err(original.into())
++            }
++        }
++    }
++
++    async fn reconnect(&self, failed: &Arc<ClientService>) -> Result<Arc<ClientService>> {
++        let recovery = Arc::clone(&self.session_recovery_lock).lock_owned().await;
++        if self.owned_stdio_shutdown.started.is_cancelled() {
++            return Err(anyhow!("MCP client is shut down"));
++        }
++        {
++            let state = self.state.lock().await;
++            match &*state {
++                ClientState::Ready {
++                    service,
++                    recovery_needed,
++                    ..
++                } if !Arc::ptr_eq(service, failed) => {
++                    if *recovery_needed || service.is_closed() {
++                        return Err(ServiceError::TransportClosed.into());
++                    }
++                    return Ok(Arc::clone(service));
++                }
++                ClientState::Ready { .. } => {}
++                ClientState::Connecting { .. } => {
++                    return Err(anyhow!("MCP client not initialized"));
+                 }
++                ClientState::Closed => return Err(anyhow!("MCP client is shut down")),
+             }
+         }
+ 
+-        let initialize_context = self
+-            .initialize_context
+-            .lock()
+-            .await
+-            .clone()
+-            .ok_or_else(|| anyhow!("MCP client cannot recover before initialize succeeds"))?;
++        if self.owned_stdio_lifetime {
++            // Owned launchers must complete even when the requesting future is
++            // dropped. Shutdown joins this task by acquiring the same gate.
++            let client = Self {
++                state: Arc::clone(&self.state),
++                transport_recipe: self.transport_recipe.clone(),
++                protocol_mode: self.protocol_mode,
++                requires_read_only_tools: self.requires_read_only_tools,
++                owned_stdio_lifetime: true,
++                owned_stdio_shutdown: Arc::clone(&self.owned_stdio_shutdown),
++                session_recovery_lock: Arc::clone(&self.session_recovery_lock),
++                elicitation_pause_state: self.elicitation_pause_state.clone(),
++                transport_instance: Arc::clone(&self.transport_instance),
++            };
++            tokio::spawn(async move {
++                let _recovery = recovery;
++                client.replace_transport().await
++            })
++            .await?
++        } else {
++            let _recovery = recovery;
++            self.replace_transport().await
++        }
++    }
++
++    async fn replace_transport(&self) -> Result<Arc<ClientService>> {
++        let (previous_service, previous_process, initialize_context) = {
++            let state = self.state.lock().await;
++            match &*state {
++                ClientState::Ready {
++                    service,
++                    stdio_process,
++                    initialize_context,
++                    ..
++                } => (
++                    Arc::clone(service),
++                    stdio_process.clone(),
++                    Arc::clone(initialize_context),
++                ),
++                _ => return Err(anyhow!("MCP client is shut down")),
++            }
++        };
++        if self.owned_stdio_lifetime {
++            reap_owned_stdio(Some(&previous_service), previous_process.as_ref()).await?;
++        }
++        if self.owned_stdio_shutdown.started.is_cancelled()
++            || matches!(*self.state.lock().await, ClientState::Closed)
++        {
++            return Err(anyhow!("MCP client is shut down"));
++        }
++
+         let pending_transport = Self::create_pending_transport(&self.transport_recipe).await?;
+-        let (service, oauth_runtime) = self
++        let stdio_process = pending_transport.stdio_process();
++        if self.owned_stdio_lifetime
++            && let Some(process) = &stdio_process
++        {
++            process.enable_owned_lifetime();
++            // Retain this handle through the handshake so shutdown can retry a failed reap.
++            let mut state = self.state.lock().await;
++            if let ClientState::Ready { stdio_process, .. } = &mut *state {
++                *stdio_process = Some(process.clone());
++            }
++        }
++        let connected = self
+             .connect_pending_transport_with_initialize_retries(
+                 pending_transport,
+                 &initialize_context,
+             )
+-            .await?;
+-        service
+-            .peer()
+-            .peer_info()
+-            .ok_or_else(|| anyhow!("recovered handshake succeeded but server info was missing"))?;
++            .await;
++        let (service, oauth_runtime) = match connected {
++            Ok(connected) => connected,
++            Err(error) => {
++                if self.owned_stdio_lifetime
++                    && let Err(cleanup_error) = reap_owned_stdio(None, stdio_process.as_ref()).await
++                {
++                    warn!("failed to reap MCP stdio server after reconnect: {cleanup_error:#}");
++                }
++                return Err(error);
++            }
++        };
+ 
+         {
+-            let mut guard = self.state.lock().await;
+-            if matches!(*guard, ClientState::Closed) {
++            let mut state = self.state.lock().await;
++            if matches!(*state, ClientState::Closed) {
+                 return Err(anyhow!("MCP client is shut down"));
+             }
+-            *guard = ClientState::Ready {
+-                service,
++            *state = ClientState::Ready {
++                service: Arc::clone(&service),
+                 oauth: oauth_runtime.clone(),
++                stdio_process,
++                initialize_context,
++                recovery_needed: false,
+             };
+         }
+ 
++        // Publish before checking shutdown so the shutdown task can join the
++        // replacement service. A request must not dispatch after losing admission.
++        if self.owned_stdio_shutdown.started.is_cancelled() {
++            return Err(anyhow!("MCP client is shut down"));
++        }
+         if let Some(OAuthRuntime::Legacy(runtime)) = oauth_runtime
+             && let Err(error) = runtime.persist_if_needed().await
+         {
+             warn!("failed to persist OAuth tokens after session recovery: {error}");
+         }
+ 
+-        Ok(())
++        Ok(service)
+     }
+ }
+ 
+@@ -1991,6 +2263,10 @@ async fn create_oauth_transport_and_runtime(
+     })
+ }
+ 
++#[cfg(test)]
++#[path = "reconnect_tests.rs"]
++mod reconnect_tests;
++
+ #[cfg(test)]
+ #[path = "tool_input_tests.rs"]
+ mod tool_input_tests;
+diff --git a/codex-rs/rmcp-client/src/stdio_server_launcher.rs b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+index d6090a3..49a4525 100644
+--- a/codex-rs/rmcp-client/src/stdio_server_launcher.rs
++++ b/codex-rs/rmcp-client/src/stdio_server_launcher.rs
+@@ -55,6 +55,7 @@ use rmcp::service::TxJsonRpcMessage;
+ use rmcp::transport::Transport;
+ use tokio::io::AsyncBufReadExt;
+ use tokio::io::BufReader;
++use tokio::sync::OnceCell;
+ use tokio::sync::watch;
+ use tokio::time::Instant;
+ use tracing::info;
+@@ -243,7 +244,7 @@ pub(crate) struct StdioServerProcessHandle {
+ struct StdioServerProcessHandleInner {
+     program_name: String,
+     kind: StdioServerProcessKind,
+-    terminated: AtomicBool,
++    terminated: OnceCell<()>,
+     owned_lifetime: AtomicBool,
+     local_child: Option<Arc<tokio::sync::Mutex<Box<codex_utils_pty::Child>>>>,
+     // An escaped descendant can keep stderr open after the MCP server exits.
+@@ -259,6 +260,9 @@ mod private {
+     pub trait Sealed {}
+ }
+ 
++#[cfg(all(test, unix))]
++pub(crate) use private::Sealed as TestStdioServerLauncher;
++
+ impl private::Sealed for LocalStdioServerLauncher {}
+ 
+ impl LocalStdioServerLauncher {
+@@ -473,7 +477,7 @@ impl StdioServerProcessHandle {
+                 program_name,
+                 kind: StdioServerProcessKind::Local(terminator),
+                 local_child: Some(local_child),
+-                terminated: AtomicBool::new(false),
++                terminated: OnceCell::new(),
+                 owned_lifetime: AtomicBool::new(false),
+                 stderr_reader,
+             }),
+@@ -486,7 +490,7 @@ impl StdioServerProcessHandle {
+                 program_name,
+                 kind: StdioServerProcessKind::Executor(process),
+                 local_child: None,
+-                terminated: AtomicBool::new(false),
++                terminated: OnceCell::new(),
+                 owned_lifetime: AtomicBool::new(false),
+                 stderr_reader: None,
+             }),
+@@ -503,20 +507,24 @@ impl StdioServerProcessHandle {
+             StdioServerProcessKind::Executor(process) => Some(process.subscribe_events()),
+             _ => None,
+         };
+-        self.terminate().await?;
++        let termination = self.terminate().await;
+         if let Some(child) = &self.inner.local_child {
+             let mut child = child.lock().await;
+-            if tokio::time::timeout(Duration::from_secs(3), child.wait())
+-                .await
+-                .is_err()
+-            {
++            if termination.is_err() {
+                 child.kill().await?;
++            } else {
++                match tokio::time::timeout(Duration::from_secs(3), child.wait()).await {
++                    Ok(status) => {
++                        status?;
++                    }
++                    Err(_) => child.kill().await?,
++                }
+             }
+-            child.wait().await?;
+         }
+         if let Some(stderr_reader) = &self.inner.stderr_reader {
+             stderr_reader.closed().await;
+         }
++        termination?;
+         if let Some(events) = remote_events.as_mut() {
+             loop {
+                 match events.recv().await.map_err(io::Error::other)? {
+@@ -537,50 +545,53 @@ impl StdioServerProcessHandle {
+     }
+ 
+     pub(crate) async fn terminate(&self) -> io::Result<()> {
+-        if self.inner.terminated.swap(true, Ordering::AcqRel) {
+-            return Ok(());
+-        }
+-
+-        let result = match &self.inner.kind {
+-            StdioServerProcessKind::Local(Some(terminator)) => {
+-                if self.inner.owned_lifetime.load(Ordering::Acquire) {
+-                    #[cfg(unix)]
+-                    {
+-                        // Join the existing grace/escalation sequence instead of leaving its
+-                        // delayed group kill running after a successor can start.
+-                        if terminate_process_group(terminator.process_group_id)? {
+-                            tokio::time::sleep(PROCESS_GROUP_TERM_GRACE_PERIOD).await;
+-                            kill_process_group(terminator.process_group_id)?;
++        // The RMCP service and its owner can close concurrently. Join the
++        // termination already in progress, including the owned group's grace period.
++        self.inner
++            .terminated
++            .get_or_try_init(|| async {
++                let result = match &self.inner.kind {
++                    StdioServerProcessKind::Local(Some(terminator)) => {
++                        if self.inner.owned_lifetime.load(Ordering::Acquire) {
++                            #[cfg(unix)]
++                            {
++                                async {
++                                    if terminate_process_group(terminator.process_group_id)? {
++                                        tokio::time::sleep(PROCESS_GROUP_TERM_GRACE_PERIOD).await;
++                                        kill_process_group(terminator.process_group_id)?;
++                                    }
++                                    Ok(())
++                                }
++                                .await
++                            }
++                            #[cfg(not(unix))]
++                            {
++                                terminator.terminate();
++                                Ok(())
++                            }
++                        } else {
++                            terminator.terminate();
++                            Ok(())
+                         }
+                     }
+-                    #[cfg(not(unix))]
+-                    {
+-                        terminator.terminate();
++                    StdioServerProcessKind::Local(None) => Ok(()),
++                    StdioServerProcessKind::Executor(process) => {
++                        process.terminate().await.map_err(io::Error::other)
+                     }
+-                } else {
+-                    terminator.terminate();
+-                }
+-                Ok(())
+-            }
+-            StdioServerProcessKind::Local(None) => Ok(()),
+-            StdioServerProcessKind::Executor(process) => match process.terminate().await {
+-                Ok(()) => Ok(()),
+-                Err(error) => {
+-                    self.inner.terminated.store(false, Ordering::Release);
+-                    Err(io::Error::other(error))
++                };
++                if let Some(stderr_reader) = &self.inner.stderr_reader {
++                    stderr_reader.send_replace(());
+                 }
+-            },
+-        };
+-        if let Some(stderr_reader) = &self.inner.stderr_reader {
+-            stderr_reader.send_replace(());
+-        }
+-        result
++                result
++            })
++            .await
++            .copied()
+     }
+ }
+ 
+ impl Drop for StdioServerProcessHandleInner {
+     fn drop(&mut self) {
+-        if self.terminated.swap(true, Ordering::AcqRel) {
++        if self.terminated.initialized() {
+             return;
+         }
+ 
+diff --git a/codex-rs/rmcp-client/src/tool_input.rs b/codex-rs/rmcp-client/src/tool_input.rs
+index 2f31d81..54bfe19 100644
+--- a/codex-rs/rmcp-client/src/tool_input.rs
++++ b/codex-rs/rmcp-client/src/tool_input.rs
+@@ -23,7 +23,9 @@ use serde::Deserialize;
+ use serde_json::Value;
+ 
+ use crate::http_client_adapter::StreamableHttpClientAdapterError;
++use crate::rmcp_client::ClientOperationError;
+ use crate::rmcp_client::ClientService;
++use crate::rmcp_client::RmcpClient;
+ 
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -35,7 +37,7 @@ struct ToolInput {
+ pub(crate) async fn call_tool(
+     service: &ClientService,
+     mut params: CallToolRequestParams,
+-) -> Result<CallToolResult, ServiceError> {
++) -> Result<CallToolResult, ClientOperationError> {
+     let mut state_only_rounds = 0;
+     let mut submitted_verification_proof = false;
+     for round in 0..DEFAULT_MRTR_MAX_ROUNDS {
+@@ -53,6 +55,7 @@ pub(crate) async fn call_tool(
+         .await;
+         let (id, result) = response.map_err(|error| {
+             if submitted_verification_proof
++                && !RmcpClient::is_connection_closed(&error)
+                 && let ServiceError::TransportSend(transport) = &error
+                 && !matches!(
+                     transport
+@@ -64,9 +67,11 @@ pub(crate) async fn call_tool(
+                 // Session recovery must not replay the original operation after a
+                 // continuation (which may already have consumed a signed proof).
+                 // Auth challenges already return without replaying the operation.
+-                invalid("MCP tool continuation failed; the tool was not restarted")
++                ClientOperationError::VerificationContinuation(error)
++            } else if round > 0 {
++                ClientOperationError::AfterDispatch(error)
+             } else {
+-                error
++                error.into()
+             }
+         })?;
+         let input = match result {
+@@ -79,7 +84,7 @@ pub(crate) async fn call_tool(
+             {
+                 result.0
+             }
+-            _ => return Err(ServiceError::UnexpectedResponse),
++            _ => return Err(ServiceError::UnexpectedResponse.into()),
+         };
+         if round + 1 == DEFAULT_MRTR_MAX_ROUNDS {
+             break;
+@@ -88,7 +93,7 @@ pub(crate) async fn call_tool(
+             serde_json::from_value(input).map_err(|_| invalid("invalid MCP tool input request"))?;
+         let requests = input.input_requests.unwrap_or_default();
+         if requests.is_empty() && input.request_state.is_none() {
+-            return Err(ServiceError::UnexpectedResponse);
++            return Err(ServiceError::UnexpectedResponse.into());
+         }
+         // Parse the whole round before presenting any prompts. Only standard MCP
+         // inputs and supported OpenAI elicitation modes are accepted.
+@@ -141,10 +146,10 @@ pub(crate) async fn call_tool(
+                 // RMCP exposes closure status but no awaitable closure notification.
+                 // Include explicit cancellation and transport EOF; dropping the joined
+                 // handlers releases both their UI callbacks and timeout pause guards.
+-                while !service.is_closed() && !service.peer().is_transport_closed() {
++                while !service.is_closed() {
+                     tokio::time::sleep(Duration::from_millis(/*millis*/ 50)).await;
+                 }
+-            } => return Err(ServiceError::TransportClosed),
++            } => return Err(ServiceError::TransportClosed.into()),
+             responses = responses => responses?,
+         };
+         params.input_responses = (!responses.is_empty()).then(|| {
+@@ -160,7 +165,8 @@ pub(crate) async fn call_tool(
+     }
+     Err(ServiceError::InputRequiredRoundsExceeded {
+         max_rounds: DEFAULT_MRTR_MAX_ROUNDS,
+-    })
++    }
++    .into())
+ }
+ 
+ fn parse_input(value: Value) -> Result<ServerRequest, ServiceError> {
+diff --git a/codex-rs/rmcp-client/src/tool_input_tests.rs b/codex-rs/rmcp-client/src/tool_input_tests.rs
+index 52badec..879fc97 100644
+--- a/codex-rs/rmcp-client/src/tool_input_tests.rs
++++ b/codex-rs/rmcp-client/src/tool_input_tests.rs
+@@ -1,5 +1,6 @@
+ //! Exercises pending MRTR input cleanup over a real duplex transport.
+ 
++use super::ClientOperationError;
+ use super::ClientService;
+ use super::ElicitationClientService;
+ use crate::rmcp_client::ElicitationPauseState;
+@@ -95,7 +96,10 @@ async fn connection_closure_releases_pending_inputs_and_timeout_pause() -> anyho
+                 }
+                 let result = timeout(Duration::from_secs(/*secs*/ 5), call).await?;
+                 assert!(
+-                    matches!(result, Err(ServiceError::TransportClosed)),
++                    matches!(
++                        result,
++                        Err(ClientOperationError::Service(ServiceError::TransportClosed))
++                    ),
+                     "{result:?}"
+                 );
+                 assert!(reply.is_closed());
+diff --git a/codex-rs/rmcp-client/src/user_verification_cancellation_tests.rs b/codex-rs/rmcp-client/src/user_verification_cancellation_tests.rs
+index 2fc8a2f..f296c13 100644
+--- a/codex-rs/rmcp-client/src/user_verification_cancellation_tests.rs
++++ b/codex-rs/rmcp-client/src/user_verification_cancellation_tests.rs
+@@ -130,7 +130,7 @@ async fn recovered_connections_accept_elicitations_with_previously_cancelled_ids
+         .await?;
+ 
+         let previous = client.service().await?;
+-        client.reinitialize_after_session_expiry(&previous).await?;
++        client.reconnect(&previous).await?;
+         let recovered_server = timeout(Duration::from_secs(/*secs*/ 5), server_rx.recv())
+             .await?
+             .unwrap()?;
+diff --git a/codex-rs/rmcp-client/tests/mcp_2026_mrtr.rs b/codex-rs/rmcp-client/tests/mcp_2026_mrtr.rs
+index 887139e..a8c5c5d 100644
+--- a/codex-rs/rmcp-client/tests/mcp_2026_mrtr.rs
++++ b/codex-rs/rmcp-client/tests/mcp_2026_mrtr.rs
+@@ -740,3 +740,74 @@ async fn modern_tool_mrtr_preserves_state_only_rounds_without_elicitation() -> a
+     client.shutdown().await;
+     Ok(())
+ }
++
++#[tokio::test]
++async fn closed_tool_continuation_does_not_replay_initial_round() -> anyhow::Result<()> {
++    let server = MockServer::start().await;
++    let calls = Arc::new(Mutex::new(Vec::new()));
++    let recorded_calls = Arc::clone(&calls);
++
++    Mock::given(method("POST"))
++        .and(path("/mcp"))
++        .respond_with(move |request: &Request| {
++            let body: Value = request.body_json().expect("valid JSON-RPC request");
++            match body["method"].as_str() {
++                Some("server/discover") => discover_response(&body),
++                Some("tools/call") => {
++                    let name = body["params"]["name"].as_str().expect("tool name");
++                    let state = body["params"]["requestState"].as_str();
++                    recorded_calls
++                        .lock()
++                        .expect("calls lock")
++                        .push((name.to_owned(), state.map(str::to_owned)));
++                    match (name, state) {
++                        ("state-only", None) => result_response(
++                            &body,
++                            json!({"resultType": "input_required", "requestState": OPAQUE_STATE}),
++                        ),
++                        ("state-only", Some(OPAQUE_STATE)) => {
++                            ResponseTemplate::new(200).set_body_raw("", "text/event-stream")
++                        }
++                        ("next", None) => {
++                            result_response(&body, json!({"resultType": "complete", "content": []}))
++                        }
++                        _ => panic!("unexpected tool request {body}"),
++                    }
++                }
++                other => panic!("unexpected MRTR request: {other:?}"),
++            }
++        })
++        .expect(5)
++        .mount(&server)
++        .await;
++
++    let client = create_client(&server, Arc::new(Mutex::new(Vec::new()))).await?;
++    let error = client
++        .call_tool(
++            "state-only".into(),
++            None,
++            None,
++            Some(Duration::from_secs(5)),
++        )
++        .await
++        .expect_err("response stream ended before the final result");
++    assert!(
++        format!("{error:#}")
++            .to_lowercase()
++            .contains("transport closed"),
++        "{error:#}"
++    );
++    client
++        .call_tool("next".into(), None, None, Some(Duration::from_secs(5)))
++        .await?;
++    assert_eq!(
++        *calls.lock().expect("calls lock"),
++        [
++            ("state-only".to_owned(), None),
++            ("state-only".to_owned(), Some(OPAQUE_STATE.to_owned())),
++            ("next".to_owned(), None)
++        ]
++    );
++    client.shutdown().await;
++    Ok(())
++}
+diff --git a/codex-rs/rmcp-client/src/reconnect_tests.rs b/codex-rs/rmcp-client/src/reconnect_tests.rs
+new file mode 100644
+index 0000000..2b3d28d
+--- /dev/null
++++ b/codex-rs/rmcp-client/src/reconnect_tests.rs
+@@ -0,0 +1,518 @@
++//! Scripted RMCP peers count tool requests across transport generations.
++
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::AtomicUsize;
++
++use rmcp::RoleServer;
++use rmcp::model::ClientJsonRpcMessage;
++use rmcp::model::ServerInfo;
++use rmcp::model::ServerJsonRpcMessage;
++use rmcp::transport::IntoTransport;
++use rmcp::transport::Transport;
++use tokio::io::DuplexStream;
++use tokio::sync::mpsc;
++use tokio::time::timeout;
++
++use super::*;
++
++const TEST_TIMEOUT: Duration = Duration::from_secs(10);
++
++struct ScriptedFactory {
++    peers: mpsc::UnboundedSender<DuplexStream>,
++    opens: AtomicUsize,
++    fail_next: AtomicBool,
++}
++
++impl InProcessTransportFactory for ScriptedFactory {
++    fn open(&self) -> BoxFuture<'static, io::Result<DuplexStream>> {
++        self.opens.fetch_add(1, Ordering::Relaxed);
++        let fail = self.fail_next.swap(false, Ordering::Relaxed);
++        let peers = self.peers.clone();
++        async move {
++            if fail {
++                return Err(io::Error::other("scripted reconnect failure"));
++            }
++            let (client, server) = tokio::io::duplex(4096);
++            peers.send(server).map_err(io::Error::other)?;
++            Ok(client)
++        }
++        .boxed()
++    }
++}
++
++async fn accept(
++    peers: &mut mpsc::UnboundedReceiver<DuplexStream>,
++) -> Result<impl Transport<RoleServer, Error = io::Error> + use<>> {
++    let server = peers.recv().await.context("missing MCP connection")?;
++    let mut peer = IntoTransport::<RoleServer, _, _>::into_transport(server);
++    let Some(ClientJsonRpcMessage::Request(request)) = peer.receive().await else {
++        anyhow::bail!("expected initialize request");
++    };
++    let ClientRequest::InitializeRequest(_) = request.request else {
++        anyhow::bail!("expected initialize, got {:?}", request.request);
++    };
++    peer.send(ServerJsonRpcMessage::response(
++        ServerResult::InitializeResult(
++            ServerInfo::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
++        ),
++        request.id,
++    ))
++    .await?;
++    assert!(matches!(
++        peer.receive().await,
++        Some(ClientJsonRpcMessage::Notification(notification))
++            if matches!(notification.notification, ClientNotification::InitializedNotification(_))
++    ));
++    Ok(peer)
++}
++
++async fn initialize(client: &RmcpClient) -> Result<ServerPeerInfo> {
++    client
++        .initialize(
++            InitializeRequestParams::default().with_protocol_version(ProtocolVersion::V_2025_06_18),
++            Some(TEST_TIMEOUT),
++            Box::new(|_, _| Box::pin(async { anyhow::bail!("unexpected elicitation") })),
++        )
++        .await
++}
++
++async fn scripted_client() -> Result<(
++    RmcpClient,
++    Arc<ScriptedFactory>,
++    mpsc::UnboundedReceiver<DuplexStream>,
++    impl Transport<RoleServer, Error = io::Error>,
++)> {
++    let (send, mut peers) = mpsc::unbounded_channel();
++    let factory = Arc::new(ScriptedFactory {
++        peers: send,
++        opens: AtomicUsize::new(0),
++        fail_next: AtomicBool::new(false),
++    });
++    let client = RmcpClient::new_in_process_client(factory.clone()).await?;
++    let (_, peer) = tokio::try_join!(initialize(&client), accept(&mut peers))?;
++    Ok((client, factory, peers, peer))
++}
++
++async fn next_call(peer: &mut impl Transport<RoleServer>) -> (RequestId, String) {
++    loop {
++        match peer.receive().await {
++            Some(ClientJsonRpcMessage::Request(request)) => {
++                let ClientRequest::CallToolRequest(call) = request.request else {
++                    panic!("expected tools/call, got {:?}", request.request);
++                };
++                return (request.id, call.params.name.to_string());
++            }
++            Some(ClientJsonRpcMessage::Notification(notification)) => assert!(matches!(
++                notification.notification,
++                ClientNotification::CancelledNotification(_)
++            )),
++            message => panic!("expected a call or cancellation, got {message:?}"),
++        }
++    }
++}
++
++async fn reply(
++    peer: &mut impl Transport<RoleServer, Error = io::Error>,
++    id: RequestId,
++) -> Result<()> {
++    peer.send(ServerJsonRpcMessage::response(
++        ServerResult::CallToolResult(CallToolResult::success(vec![])),
++        id,
++    ))
++    .await?;
++    Ok(())
++}
++
++async fn call(client: &RmcpClient, name: &str) -> Result<CallToolResult> {
++    client
++        .call_tool(name.into(), None, None, Some(TEST_TIMEOUT))
++        .await
++}
++
++fn assert_closed(error: anyhow::Error) {
++    assert!(
++        matches!(
++            error
++                .downcast_ref::<ClientOperationError>()
++                .and_then(ClientOperationError::service_error),
++            Some(ServiceError::TransportClosed)
++        ),
++        "{error:#}"
++    );
++}
++
++#[tokio::test]
++async fn known_closed_calls_share_one_reconnect_and_queued_abort_does_not_dispatch() -> Result<()> {
++    timeout(TEST_TIMEOUT, async {
++        let (client, factory, mut peers, original) = scripted_client().await?;
++        drop(original);
++        while !client.is_closed().await {
++            tokio::task::yield_now().await;
++        }
++
++        let first = call(&client, "first");
++        let second = call(&client, "second");
++        let mut aborted = Box::pin(call(&client, "aborted"));
++        tokio::pin!(first, second);
++        assert!(futures::poll!(&mut first).is_pending());
++        assert!(futures::poll!(&mut second).is_pending());
++        assert!(futures::poll!(&mut aborted).is_pending());
++        drop(aborted);
++
++        let peer_work = async {
++            let mut replacement = accept(&mut peers).await?;
++            let (first_id, first_name) = next_call(&mut replacement).await;
++            let (second_id, second_name) = next_call(&mut replacement).await;
++            let mut names = [first_name.as_str(), second_name.as_str()];
++            names.sort_unstable();
++            assert_eq!(names, ["first", "second"]);
++            reply(&mut replacement, first_id).await?;
++            reply(&mut replacement, second_id).await
++        };
++        tokio::try_join!(first, second, peer_work)?;
++        assert_eq!(factory.opens.load(Ordering::Relaxed), 2);
++        Ok(())
++    })
++    .await?
++}
++
++#[tokio::test]
++async fn uncertain_close_preserves_error_when_repair_fails_and_next_call_recovers() -> Result<()> {
++    timeout(TEST_TIMEOUT, async {
++        let (client, factory, mut peers, mut original) = scripted_client().await?;
++        factory.fail_next.store(true, Ordering::Relaxed);
++        let lost = call(&client, "lost-response");
++        let close = async {
++            assert_eq!(next_call(&mut original).await.1, "lost-response");
++            drop(original);
++        };
++        let (result, ()) = tokio::join!(lost, close);
++        assert_closed(result.unwrap_err());
++        assert_eq!(factory.opens.load(Ordering::Relaxed), 2);
++
++        let peer_work = async {
++            let mut replacement = accept(&mut peers).await?;
++            let (id, name) = next_call(&mut replacement).await;
++            assert_eq!(name, "next");
++            reply(&mut replacement, id).await
++        };
++        tokio::try_join!(call(&client, "next"), peer_work)?;
++        assert_eq!(factory.opens.load(Ordering::Relaxed), 3);
++        Ok(())
++    })
++    .await?
++}
++
++#[tokio::test]
++async fn aborting_an_active_call_keeps_the_existing_connection() -> Result<()> {
++    timeout(TEST_TIMEOUT, async {
++        let (client, factory, _peers, mut peer) = scripted_client().await?;
++        let mut aborted = Box::pin(call(&client, "aborted"));
++        tokio::select! {
++            result = &mut aborted => panic!("aborted call completed: {result:?}"),
++            (_, name) = next_call(&mut peer) => assert_eq!(name, "aborted"),
++        }
++        drop(aborted);
++
++        let peer_work = async {
++            let (id, name) = next_call(&mut peer).await;
++            assert_eq!(name, "next");
++            reply(&mut peer, id).await
++        };
++        tokio::try_join!(call(&client, "next"), peer_work)?;
++        assert_eq!(factory.opens.load(Ordering::Relaxed), 1);
++        Ok(())
++    })
++    .await?
++}
++
++#[derive(Default)]
++struct HttpScript {
++    negotiate_session: bool,
++    calls: StdMutex<Vec<(String, Option<String>)>>,
++    handshakes: StdMutex<Vec<Option<String>>>,
++    arrived: tokio::sync::Notify,
++    release_lost: tokio::sync::Notify,
++    release_stale: tokio::sync::Notify,
++    release_pending: tokio::sync::Notify,
++}
++
++async fn http_post(
++    axum::extract::State(script): axum::extract::State<Arc<HttpScript>>,
++    headers: HeaderMap,
++    axum::Json(request): axum::Json<Value>,
++) -> axum::response::Response {
++    use axum::response::IntoResponse;
++    use http::StatusCode;
++    use serde_json::json;
++
++    let session = headers
++        .get("mcp-session-id")
++        .map(|header| header.to_str().unwrap().to_owned());
++    let result = match request["method"].as_str() {
++        Some("initialize") => {
++            let generation = {
++                let mut handshakes = script.handshakes.lock().unwrap();
++                handshakes.push(session);
++                handshakes.len()
++            };
++            let mut response = axum::Json(json!({
++                "jsonrpc": "2.0",
++                "id": request["id"],
++                "result": {
++                    "protocolVersion": "2025-06-18",
++                    "capabilities": {"tools": {}},
++                    "serverInfo": {"name": "test", "version": "1"}
++                }
++            }))
++            .into_response();
++            if script.negotiate_session {
++                response.headers_mut().insert(
++                    "mcp-session-id",
++                    format!("generation-{generation}").parse().unwrap(),
++                );
++            }
++            return response;
++        }
++        Some("notifications/initialized" | "notifications/cancelled") => {
++            return StatusCode::ACCEPTED.into_response();
++        }
++        Some("tools/call") => {
++            let name = request["params"]["name"].as_str().unwrap();
++            script
++                .calls
++                .lock()
++                .unwrap()
++                .push((name.to_owned(), session));
++            script.arrived.notify_one();
++            match name {
++                "lost" | "stale" => {
++                    let release = if name == "lost" {
++                        &script.release_lost
++                    } else {
++                        &script.release_stale
++                    };
++                    release.notified().await;
++                    return ([("content-type", "text/event-stream")], "").into_response();
++                }
++                "pending" => script.release_pending.notified().await,
++                "next" => {}
++                _ => panic!("unexpected tool call {name}"),
++            }
++            json!({"content": [{"type": "text", "text": name}]})
++        }
++        _ => panic!("unexpected HTTP MCP request {request}"),
++    };
++    axum::Json(json!({"jsonrpc": "2.0", "id": request["id"], "result": result})).into_response()
++}
++
++#[tokio::test]
++async fn http_sse_close_recovers_without_replaying_or_interrupting_another_call() -> Result<()> {
++    for (configured_session_header, negotiate_session) in [
++        (None, true),
++        (Some("configured-header"), true),
++        (Some("configured-header"), false),
++    ] {
++        timeout(TEST_TIMEOUT, async {
++            let script = Arc::new(HttpScript {
++                negotiate_session,
++                ..HttpScript::default()
++            });
++            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await?;
++            let url = format!("http://{}", listener.local_addr()?);
++            let router = axum::Router::new()
++                .route("/", axum::routing::post(http_post))
++                .with_state(Arc::clone(&script));
++            let server = tokio::spawn(async move { axum::serve(listener, router).await });
++            let client = Arc::new(
++                RmcpClient::new_streamable_http_client(
++                    "scripted",
++                    &url,
++                    Some("test-token".into()),
++                    configured_session_header
++                        .map(|id| HashMap::from([("MCP-Session-Id".into(), id.into())])),
++                    None,
++                    OAuthCredentialsStoreMode::File,
++                    AuthKeyringBackendKind::default(),
++                    codex_exec_server::Environment::default_for_tests().get_http_client(),
++                    None,
++                )
++                .await?,
++            );
++            initialize(&client).await?;
++            let start = |name: &'static str| {
++                let client = Arc::clone(&client);
++                tokio::spawn(async move { call(&client, name).await })
++            };
++            let lost = start("lost");
++            let stale = start("stale");
++            let pending = start("pending");
++            while script.calls.lock().unwrap().len() < 3 {
++                script.arrived.notified().await;
++            }
++            script.release_lost.notify_one();
++            assert_closed(lost.await?.unwrap_err());
++            assert_eq!(script.handshakes.lock().unwrap().len(), 2);
++
++            script.release_stale.notify_one();
++            script.release_pending.notify_one();
++            assert_closed(stale.await?.unwrap_err());
++            assert!(pending.await??.is_error != Some(true));
++            assert!(call(&client, "next").await?.is_error != Some(true));
++            let configured_header = configured_session_header.map(str::to_owned);
++            assert_eq!(
++                *script.handshakes.lock().unwrap(),
++                [configured_header.clone(), configured_header]
++            );
++            let mut calls = script.calls.lock().unwrap().clone();
++            calls.sort_unstable();
++            let session_id = |generation| {
++                if negotiate_session {
++                    Some(format!("generation-{generation}"))
++                } else {
++                    configured_session_header.map(str::to_owned)
++                }
++            };
++            assert_eq!(
++                calls,
++                [
++                    ("lost".into(), session_id(1)),
++                    ("next".into(), session_id(2)),
++                    ("pending".into(), session_id(1)),
++                    ("stale".into(), session_id(1)),
++                ]
++            );
++            client.shutdown().await;
++            server.abort();
++            anyhow::Ok(())
++        })
++        .await??;
++    }
++    Ok(())
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn owned_stdio_shutdown_joins_a_reconnect_after_its_request_is_dropped() -> Result<()> {
++    use std::ffi::OsString;
++
++    use tokio::sync::Notify;
++
++    use crate::LocalStdioServerLauncher;
++
++    // Hold the second launch after spawn_blocking returns but before its
++    // process handle reaches the RMCP client.
++    struct GatedLauncher {
++        local: LocalStdioServerLauncher,
++        launches: AtomicUsize,
++        launched_replacement: Arc<Notify>,
++        release_replacement: Arc<Notify>,
++    }
++
++    impl crate::stdio_server_launcher::TestStdioServerLauncher for GatedLauncher {}
++
++    impl StdioServerLauncher for GatedLauncher {
++        fn launch(
++            &self,
++            command: StdioServerCommand,
++        ) -> BoxFuture<'static, io::Result<StdioServerTransport>> {
++            let launch = self.local.launch(command);
++            let replacement = self.launches.fetch_add(1, Ordering::Relaxed) == 1;
++            let launched = Arc::clone(&self.launched_replacement);
++            let release = Arc::clone(&self.release_replacement);
++            async move {
++                let transport = launch.await?;
++                if replacement {
++                    launched.notify_one();
++                    release.notified().await;
++                }
++                Ok(transport)
++            }
++            .boxed()
++        }
++    }
++
++    const SERVER: &str = r#"
++import json, os, pathlib, signal, sys
++signal.alarm(20)
++pathlib.Path(f'{os.getpid()}.pid').touch()
++for line in sys.stdin:
++    request = json.loads(line)
++    method = request.get('method')
++    if method == 'initialize':
++        print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':{
++            'protocolVersion':'2025-06-18','capabilities':{'tools':{}},
++            'serverInfo':{'name':'owned-reconnect','version':'1'}}}), flush=True)
++    elif method == 'tools/call':
++        with open('calls.log', 'a') as log:
++            log.write(request['params']['name'] + '\n')
++        os.close(sys.stdout.fileno())
++"#;
++
++    timeout(TEST_TIMEOUT, async {
++        let work = tempfile::tempdir()?;
++        let launcher = Arc::new(GatedLauncher {
++            local: LocalStdioServerLauncher::new(work.path().to_path_buf()),
++            launches: AtomicUsize::new(0),
++            launched_replacement: Arc::new(Notify::new()),
++            release_replacement: Arc::new(Notify::new()),
++        });
++        let client = RmcpClient::new_stdio_client(
++            "python3".into(),
++            ["-u", "-c", SERVER].map(OsString::from).into(),
++            None,
++            &[],
++            None,
++            launcher.clone(),
++        )
++        .await?
++        .with_owned_stdio_lifetime(true);
++        initialize(&client).await?;
++        let mut request = Box::pin(call(&client, "lost"));
++        tokio::select! {
++            result = &mut request => panic!("call completed before reconnect: {result:?}"),
++            () = launcher.launched_replacement.notified() => {}
++        }
++        drop(request);
++
++        let pids = loop {
++            let pids = std::fs::read_dir(work.path())?
++                .filter_map(|entry| {
++                    entry
++                        .ok()?
++                        .path()
++                        .file_stem()?
++                        .to_str()?
++                        .parse::<i32>()
++                        .ok()
++                })
++                .collect::<Vec<_>>();
++            if pids.len() == 2 {
++                break pids;
++            }
++            time::sleep(Duration::from_millis(10)).await;
++        };
++        let mut shutdown = Box::pin(client.shutdown_owned_stdio());
++        assert!(futures::poll!(&mut shutdown).is_pending());
++        drop(shutdown);
++        launcher.release_replacement.notify_one();
++        client.shutdown_owned_stdio().await?;
++
++        assert_eq!(
++            std::fs::read_to_string(work.path().join("calls.log"))?,
++            "lost\n"
++        );
++        for pid in pids {
++            assert!(
++                !std::process::Command::new("kill")
++                    .args(["-0", &pid.to_string()])
++                    .output()?
++                    .status
++                    .success(),
++                "owned MCP child {pid} was not reaped"
++            );
++        }
++        Ok(())
++    })
++    .await?
++}

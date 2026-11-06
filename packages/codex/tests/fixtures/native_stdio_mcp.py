@@ -18,6 +18,7 @@ def main() -> None:
     parser.add_argument("--env-var", default="N19_STDIO_CURRENT")
     parser.add_argument("--hold", action="store_true")
     parser.add_argument("--writable", action="store_true")
+    parser.add_argument("--exit-after-key")
     parser.add_argument("--invalid-init", action="store_true")
     parser.add_argument("--missing-tool", action="store_true")
     parser.add_argument("--background-form-on-second-call", action="store_true")
@@ -110,6 +111,11 @@ def main() -> None:
             }
         elif method == "tools/call":
             calls += 1
+            if options.exit_after_key is not None:
+                key = message["params"]["arguments"][options.field]
+                record("effect", key=key)
+                if key == options.exit_after_key:
+                    return
             if options.background_form_on_second_call and calls == 2:
                 pending_call = message["id"]
                 # A background request associated with the earlier call cannot

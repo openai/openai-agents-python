@@ -235,7 +235,11 @@
     {
       "path": "0054-model-context-transform.patch",
       "sha256": "6639ee84450ec3bd9f9915db2dc852e6a63c9bddb08b446cb07f4680597d05b0"
+    },
+    {
+      "path": "req133-mcp-reconnect.patch",
+      "sha256": "b33f5d9c6d343765599b057614a31445a242691f0ea1a23d83c6d4681c6ab48e"
     }
   ],
-  "result_tree": "b4646ba06693042c09248f5e2e9dcf07c78352c4"
+  "result_tree": "6e376e41843627b113eca3f0b672a58ae6eb2c7a"
 }
