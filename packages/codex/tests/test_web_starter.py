@@ -19,7 +19,6 @@ pytest.importorskip("fcntl", reason="The starter requires POSIX flock and privat
 
 from examples.web_starter.app import Final, Identity, RunContext, Service, create_app
 from examples.web_starter.store import Store
-
 from tests.native_fixtures import responses as responses
 
 HEADERS = {"X-Web-Starter": "1"}
@@ -304,9 +303,8 @@ async def test_native_mcp_dispatch_uses_authenticated_user_credential(tmp_path, 
 
 
 async def test_native_gap_recovers_from_application_snapshot(tmp_path, responses):
-    from examples.web_starter.app import Work
-
     from agents import NativeProvider
+    from examples.web_starter.app import Work
     from tests.native_fixtures import text_response
 
     async with running(tmp_path) as (service, server, client, post, get):

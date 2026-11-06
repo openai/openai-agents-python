@@ -11,13 +11,13 @@ import sys
 from pathlib import Path
 
 import pytest
-from examples.external_job.__main__ import ThumbnailProvider, run_order
-from examples.external_job.journal import Busy, Journal
-from examples.external_job.store import ThumbnailStore
 
 from agents import NativeError
 from agents.experimental.deferred import JobBinding
 from agents.state import SessionState
+from examples.external_job.__main__ import ThumbnailProvider, run_order
+from examples.external_job.journal import Busy, Journal
+from examples.external_job.store import ThumbnailStore
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

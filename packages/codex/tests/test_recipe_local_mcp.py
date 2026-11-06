@@ -5,9 +5,9 @@ import os
 from pathlib import Path
 
 import pytest
-from examples.recipes.local_mcp import catalog_agent
 
 from agents import NativeError
+from examples.recipes.local_mcp import catalog_agent
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+
 from examples.evaluation.run import Case, Configuration, compare, evaluate, score
 
 FOLDER = Path(__file__).parents[1] / "examples" / "evaluation"

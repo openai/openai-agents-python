@@ -250,7 +250,7 @@ select = [
   "TRY201", # needless exception name in raise statements
   "UP", # pyupgrade
 ]
-isort = { combine-as-imports = true, known-first-party = ["agents", "_agents_codex"] }
+isort = { combine-as-imports = true, known-first-party = ["agents", "_agents_codex", "examples"] }
 logger-objects = ["agents.logger.logger"]
 
 [tool.ruff.lint.pydocstyle]

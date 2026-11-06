@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import get_origin, get_type_hints
 
 import pytest
+from typing_extensions import ReadOnly
 
 import _agents_codex
 import agents
@@ -205,7 +206,7 @@ def test_public_models_resolve_annotations_without_rebuilding() -> None:
     from agents.telemetry import TraceLifecycleEvent
 
     assert get_type_hints(ModelSettings)["reasoning_effort"] is str
-    assert get_type_hints(TraceLifecycleEvent)["sequence"] is int
+    assert get_type_hints(TraceLifecycleEvent, include_extras=True)["sequence"] == ReadOnly[int]
     assert SessionState.__pydantic_complete__
     state = SessionState(
         format_version=2,
@@ -225,6 +226,34 @@ def test_public_dataclass_values_round_trip_through_pickle() -> None:
         restored = pickle.loads(pickle.dumps(value))
         assert restored == value
         assert type(restored) is type(value)
+
+
+def test_inherited_event_fields_remain_available_to_schema_readers() -> None:
+    from pydantic import TypeAdapter, ValidationError
+
+    from agents._events import CommandOutputDeltaEvent
+
+    class ApplicationEvent(CommandOutputDeltaEvent):
+        label: str
+
+    annotations = get_type_hints(ApplicationEvent, include_extras=True)
+    assert annotations["event_id"] is str
+    assert annotations["session_id"] is str
+    assert annotations["turn_id"] == str | None
+    payload = {
+        "event_id": "synthetic-event",
+        "session_id": "synthetic-session",
+        "turn_id": None,
+        "type": "agent.output.command_execution_output.delta",
+        "item_id": "synthetic-item",
+        "output_index": 0,
+        "delta": "synthetic-output",
+        "label": "application",
+    }
+    adapter = TypeAdapter(ApplicationEvent)
+    assert adapter.validate_python(payload) == payload
+    with pytest.raises(ValidationError, match="event_id"):
+        adapter.validate_python({key: value for key, value in payload.items() if key != "event_id"})
 
 
 def test_annotations_resolve_after_public_module_metadata_is_restored() -> None:

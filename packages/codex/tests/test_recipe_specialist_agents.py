@@ -2,11 +2,11 @@ import asyncio
 import json
 
 import pytest
-from examples.recipes.inspect_requests import function_declarations
-from examples.recipes.specialist_agents import Application, Catalog, Summary, consult, run_example
 
 from agents import Agent, ToolContext, TurnStoppedError, function_tool
 from agents.testing import ScriptedResponses, text, tool_call
+from examples.recipes.inspect_requests import function_declarations
+from examples.recipes.specialist_agents import Application, Catalog, Summary, consult, run_example
 
 
 async def test_specialist_has_only_declared_tools_context_and_typed_return():

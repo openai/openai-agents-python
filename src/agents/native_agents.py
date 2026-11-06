@@ -18,7 +18,6 @@ from _agents_codex.native_agents import (
     NativeToolCall as NativeToolCall,
     Protocol as Protocol,
     Sequence as Sequence,
-    StopTurn as StopTurn,
     _child_submission_id as _child_submission_id,
     _ChildBeforeStep as _ChildBeforeStep,
     dataclass as dataclass,

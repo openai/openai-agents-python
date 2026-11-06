@@ -8,10 +8,10 @@ import time
 from pathlib import Path
 
 import pytest
-from examples.recipes.image_input import image_agent, image_message, write_synthetic_png
 
 from agents import OutputValidationError
 from agents.testing import ScriptedResponses, text
+from examples.recipes.image_input import image_agent, image_message, write_synthetic_png
 from tests._asyncio import timeout
 
 

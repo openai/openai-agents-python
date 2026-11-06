@@ -1,10 +1,11 @@
 """Retain import and pickle identities while implementations live privately."""
 
+import sys
 from collections.abc import Callable
 from types import FunctionType
-from typing import Any
+from typing import Any, get_type_hints
 
-from typing_extensions import TypeAliasType
+from typing_extensions import TypeAliasType, is_typeddict
 
 
 def _new_type_alias(name: str, value: Any, constructor: Callable[[str, Any], Any]) -> Any:
@@ -32,6 +33,10 @@ def preserve_module_identity(namespace: dict[str, Any], public_module: str) -> N
             for accessor in (value.fget, value.fset, value.fdel):
                 restore(accessor)
         elif getattr(value, "__module__", None) == implementation_module:
+            if sys.version_info >= (3, 14) and is_typeddict(value):
+                # Resolve deferred fields before schema readers look in the public facade,
+                # which may not have loaded while private modules import each other.
+                value.__annotations__.update(get_type_hints(value, include_extras=True))
             value.__module__ = public_module
             if isinstance(value, type):
                 for member in vars(value).values():

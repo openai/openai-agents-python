@@ -8,10 +8,10 @@ from typing import Any
 from xml.etree import ElementTree
 
 import pytest
-from examples.validated_artifact import ArtifactContext, publish_xml, read_memory
 
 from agents import Agent
 from agents.testing import ScriptedResponses, text, tool_call
+from examples.validated_artifact import ArtifactContext, publish_xml, read_memory
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

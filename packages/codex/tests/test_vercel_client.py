@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from examples.vercel_stream import stream_turn
 
 from agents import Agent, function_tool
+from examples.vercel_stream import stream_turn
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

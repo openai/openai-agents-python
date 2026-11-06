@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from examples.vercel_stream import export_metadata, passive_wait, stream_turn, wait_owned_turn
 
 from agents import Agent, NativeError, TurnStoppedError, function_tool
 from agents.observation import EventGap, OutputTextDelta, TurnStarted
+from examples.vercel_stream import export_metadata, passive_wait, stream_turn, wait_owned_turn
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -509,10 +509,10 @@ async def test_queued_cancel_without_native_start_is_not_history_loss(
 async def test_response_body_rejects_non_plain_output_before_open(
     responses: ResponsesFixture, mode: str
 ) -> None:
-    from examples.vercel_stream import response_body
     from pydantic import BaseModel
 
     from agents import PromptedOutput
+    from examples.vercel_stream import response_body
 
     class Answer(BaseModel):
         value: int

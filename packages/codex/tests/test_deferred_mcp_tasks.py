@@ -1797,10 +1797,9 @@ async def _restart_host(
     model_endpoint: str, endpoint: str, directory: Path, read_token: str = TOKEN
 ) -> str:
     # Reuse a real application-owned conditional SQLite journal across fresh processes.
+    from agents import NativeProvider
     from examples.external_job.journal import Journal
     from examples.external_job.store import ThumbnailStore
-
-    from agents import NativeProvider
 
     journal = Journal(ThumbnailStore(directory, "tenant"), "private-business-key")
     with journal.owner():
