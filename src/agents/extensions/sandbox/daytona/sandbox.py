@@ -937,6 +937,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                             entry.pty_handle.disconnect(), timeout=self.state.timeouts.cleanup_s
                         )
                     except Exception:
+                        # Best-effort disconnect must not prevent worker finalization.
                         pass
             finally:
                 worker_task = entry.worker_task
@@ -950,6 +951,7 @@ class DaytonaSandboxSession(BaseSandboxSession):
                             timeout=self.state.timeouts.cleanup_s,
                         )
                     except asyncio.TimeoutError:
+                        # Cancellation has been requested; cleanup timeout is non-fatal.
                         pass
 
     async def _read_bounded(self, path: Path, *, max_bytes: int) -> bytes:
