@@ -8,10 +8,11 @@ import importlib.util
 import pickle
 import subprocess
 import sys
+from collections.abc import Callable
 from importlib.metadata import version
 from pathlib import Path
 from types import ModuleType
-from typing import get_origin, get_type_hints
+from typing import Literal, get_origin, get_type_hints
 
 import pytest
 from typing_extensions import ReadOnly
@@ -299,6 +300,7 @@ def test_annotations_resolve_after_public_module_metadata_is_restored() -> None:
     from agents.input import InputText
     from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
     from agents.telemetry import SpanContext, TraceOptions, TraceScope, trace
+    from agents.usage import RunBudget, TokenUsage
 
     assert get_type_hints(trace)["return"] is TraceScope
     assert get_type_hints(FunctionTool)["name"] is str
@@ -306,6 +308,9 @@ def test_annotations_resolve_after_public_module_metadata_is_restored() -> None:
     assert get_type_hints(TraceOptions)["parent"] == SpanContext | None
     assert get_type_hints(ApiRateLimits)["requests"] == ApiRateLimitWindow | None
     assert get_origin(get_type_hints(Session.submit)["return"]) is Turn
+    budget_hints = get_type_hints(RunBudget)
+    assert budget_hints["estimate_cost_micros"] == Callable[[TokenUsage], int | None] | None
+    assert budget_hints["missing_usage"] == Literal["stop", "continue"]
 
 
 def test_import_and_discovery_leave_native_binding_unloaded() -> None:

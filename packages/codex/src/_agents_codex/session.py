@@ -203,7 +203,13 @@ from .turn_receipt import (
     _load_instruction_files as _load_instruction_files,
     _redact_checkpoint_executor_receipts as _redact_checkpoint_executor_receipts,
 )
-from .usage import TokenUsageInfo as TokenUsageInfo, _token_usage_info as _token_usage_info
+from .usage import (
+    _MAX_SAFE_INTEGER,
+    RunBudget,
+    TokenUsage,
+    TokenUsageInfo as TokenUsageInfo,
+    _token_usage_info as _token_usage_info,
+)
 
 _MutationResultT = TypeVar("_MutationResultT")
 _ResultT = TypeVar("_ResultT")
@@ -498,7 +504,7 @@ class NativeError(RuntimeError):
     """The native conversation could not complete the submitted operation.
 
     ``status_code``, ``code`` and ``request_id`` contain available provider
-    metadata. ``code`` is the upstream error code; ``category`` is the normalized
+    metadata. Budget failures use an SDK-defined ``code``. ``category`` is the normalized
     native failure category. Missing or discarded values remain ``None``.
     Messages and metadata may contain provider-supplied information.
     effects describes only the failed operation, never earlier actions.
@@ -536,6 +542,91 @@ class NativeError(RuntimeError):
     def effects(self) -> Literal["not_started", "unknown", "recorded"]:
         """Effect outcome proved for this exact failure, otherwise unknown."""
         return self._effects
+
+
+@dataclass
+class _RunBudget:
+    """Accounting shared by all native turns in one logical run."""
+
+    limits: RunBudget
+    requests: int = 0
+    tokens: int = 0
+    cost_micros: int = 0
+    usage_missing: bool = False
+    pending_estimates: list[TokenUsage] = field(default_factory=list)
+
+    def observe(self, usage: dict[str, Any] | None) -> None:
+        if self.limits.max_tokens is None and self.limits.max_estimated_cost_micros is None:
+            return
+        total = usage.get("total_tokens") if usage is not None else None
+        if usage is None or type(total) is not int or total < 0:
+            self.usage_missing = True
+            return
+        self.tokens += total
+        if self.limits.max_estimated_cost_micros is not None:
+            if self.limits.estimate_cost_micros is None:
+                self.usage_missing = True
+            else:
+                self.pending_estimates.append(TokenUsage(**usage))
+
+    def check(self) -> None:
+        limits = self.limits
+        for limit, observed, metric in (
+            (limits.max_requests, self.requests, "request"),
+            (limits.max_tokens, self.tokens, "token"),
+            (limits.max_estimated_cost_micros, self.cost_micros, "estimated cost"),
+        ):
+            if limit is not None and observed >= limit:
+                raise NativeError(
+                    f"Run budget reached its {metric} limit", code="run_budget_exceeded"
+                )
+        stop_on_missing = limits.missing_usage == "stop"
+        cost_limit = limits.max_estimated_cost_micros
+        estimator = limits.estimate_cost_micros
+        if (
+            cost_limit is not None
+            and estimator is not None
+            and not (self.usage_missing and stop_on_missing)
+        ):
+            for usage in self.pending_estimates:
+                invalid = False
+                try:
+                    estimate = estimator(usage)
+                except (Exception, asyncio.CancelledError):
+                    # Do not attach the estimator's exception or its traceback.
+                    invalid = True
+                    estimate = None
+                if invalid or (
+                    estimate is not None
+                    and (type(estimate) is not int or not 0 <= estimate <= _MAX_SAFE_INTEGER)
+                ):
+                    if (
+                        inspect.iscoroutine(estimate)
+                        and inspect.getcoroutinestate(estimate) == inspect.CORO_CREATED
+                    ):
+                        estimate.close()
+                    estimate = None  # Keep the rejected value out of traceback locals.
+                    raise NativeError(
+                        "Run budget cost estimator failed or returned an invalid estimate",
+                        code="run_budget_invalid_estimate",
+                    )
+                if estimate is None:
+                    self.usage_missing = True
+                    if stop_on_missing:
+                        break
+                    continue
+                self.cost_micros += estimate
+                if self.cost_micros >= cost_limit:
+                    raise NativeError(
+                        "Run budget reached its estimated cost limit",
+                        code="run_budget_exceeded",
+                    )
+            self.pending_estimates.clear()
+        if self.usage_missing and stop_on_missing:
+            raise NativeError(
+                "Run budget requires reported usage and estimates for configured limits",
+                code="run_budget_usage_unavailable",
+            )
 
 
 def _model_failure_error(message: dict[str, Any]) -> NativeError:
@@ -642,6 +733,7 @@ class _Submission:
     prepare_request: _PrepareRequest | None = None
     preparation_index: int = 0
     step_index: int = 0
+    budget: _RunBudget | None = None
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None
@@ -2915,6 +3007,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2931,6 +3024,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2946,6 +3040,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: None = None,
         trace_options: None = None,
         prepare_request: None = None,
+        budget: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -2961,6 +3056,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -2995,6 +3091,11 @@ class Session(Generic[ContextT, OutputT]):
         can be cancelled before any model request. This hook does not count
         transport retries, compaction or separate output-repair requests.
         Keep this Turn to wait with the chosen type, steer or cancel exactly it.
+
+        budget limits this logical run's next root sampling admission. A
+        queued submission has its own budget. Steering and live replies
+        keep the active run's budget. A budgeted active turn cannot suspend.
+        See RunBudget for the counted usage, errors, and overshoot behavior.
 
         trace_options overrides linkage and adds native tracing restrictions.
         Explicit parent takes precedence over ambient context, then Session
@@ -3031,6 +3132,7 @@ class Session(Generic[ContextT, OutputT]):
                 or before_step is not None
                 or writable_roots is not None
                 or prepare_request is not None
+                or budget is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -3043,6 +3145,8 @@ class Session(Generic[ContextT, OutputT]):
                     raise SessionBusyError("Cannot steer private Session work")
                 await self._steer(captured, input)
                 return captured
+            if budget is not None and not isinstance(budget, RunBudget):
+                raise TypeError("budget must be a RunBudget or None")
             output = self._default_output if output_type is None else _prepare_spec(output_type)
             parts = _native_input(input)
             roots = None
@@ -3071,6 +3175,7 @@ class Session(Generic[ContextT, OutputT]):
                 enqueue=if_busy != "reject",
                 writable_roots=roots,
                 prepare_request=prepare_request,
+                budget=_RunBudget(budget) if budget is not None else None,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -4087,6 +4192,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: _RunBudget | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:
@@ -4177,6 +4283,7 @@ class Session(Generic[ContextT, OutputT]):
                 output,
                 before_step=before_step,
                 prepare_request=prepare_request,
+                budget=budget,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -5300,7 +5407,11 @@ class Session(Generic[ContextT, OutputT]):
                     self._native._prepare_requests(True)
                 self._native._select_steps(
                     input is not None
-                    and (state.before_step is not None or state.operation_slots is not None),
+                    and (
+                        state.budget is not None
+                        or state.before_step is not None
+                        or state.operation_slots is not None
+                    ),
                     _native_tool_refs(state.operation_refs)
                     if state.operation_refs is not None
                     else None,
@@ -5603,6 +5714,7 @@ class Session(Generic[ContextT, OutputT]):
                     prepare_request=state.prepare_request,
                     preparation_index=state.preparation_index,
                     step_index=state.step_index,
+                    budget=state.budget,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
                     operation_refs=state.operation_refs,
@@ -5770,6 +5882,7 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps({"schema": state.output.schema, "invalid_output": text})
                             ),
                             _prepare_spec(str),
+                            budget=state.budget,
                         )
                     except NativeError as error:
                         rejected = error._effects == "not_started"
@@ -6466,6 +6579,7 @@ class Session(Generic[ContextT, OutputT]):
             return
         selected_json = None
         replied = False
+        budget = state.budget if isinstance(state, _Submission) else None
         guard = _Invocation(self)
         token = _invocation.set(guard)
         try:
@@ -6506,6 +6620,8 @@ class Session(Generic[ContextT, OutputT]):
             selection = None
             if not active():
                 return
+            if budget is not None:
+                budget.check()
             if callback is not None:
                 selection = await _call_callback(
                     callback,
@@ -6599,6 +6715,8 @@ class Session(Generic[ContextT, OutputT]):
                     self._native._reply_step(
                         message["step_id"], selected_json, message["thread"], message["instance"]
                     )
+                    if budget is not None and selected_json is not None:
+                        budget.requests += 1
             except RuntimeError:
                 # Cancellation can retire this exact native nonce first.
                 # A child's native nonce can retire before its terminal receipt.
@@ -6829,6 +6947,12 @@ class Session(Generic[ContextT, OutputT]):
                     turn_id = turn_id or event["id"]
                 if turn_id and turn_id != handle.turn_id:
                     continue
+                if (
+                    kind == "raw_response_completed"
+                    and event["id"] == handle.turn_id
+                    and state.budget is not None
+                ):
+                    state.budget.observe(message["token_usage"])
                 # Observe delivered MCP ends before settled-policy failure bookkeeping.
                 self._observe_mcp(event, state)
                 if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -7859,6 +7983,10 @@ class Session(Generic[ContextT, OutputT]):
         return await self._checkpoint(active, before_seal=before_seal)
 
     def _check_portable_capture(self) -> None:
+        if self._active is not None and self._active.budget is not None:
+            raise CapabilityError(
+                "Cannot checkpoint an active run with a budget. Reply in the live Session."
+            )
         if self._active is not None and self._active.prepare_request is not None:
             raise CapabilityError(
                 "Cannot checkpoint an operation with prepare_request: "

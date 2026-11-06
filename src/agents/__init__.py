@@ -130,9 +130,11 @@ if TYPE_CHECKING:
         InstructionFileReceipt as InstructionFileReceipt,
         TurnReceipt as TurnReceipt,
     )
+    from .usage import RunBudget as RunBudget
 
 _MODULES = {
     "ModelRequestContext": ".model_context",
+    "RunBudget": ".usage",
     "PreparedRequest": ".prepared_request",
     "PreparedToolPresentation": ".prepared_request",
     "TraceContext": "._trace_context",
