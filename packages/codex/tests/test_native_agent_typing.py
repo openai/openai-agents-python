@@ -19,6 +19,8 @@ from agents import (
     ChildInvocation,
     CompactionContext,
     Completed,
+    CompletionContext,
+    ContinueTurn,
     Environment,
     EnvironmentSource,
     ExecutorContext,
@@ -409,6 +411,24 @@ async def project_context(request: ModelRequestContext[Application]) -> Sequence
     assert_type(request.items, tuple[dict[str, Any], ...])
     assert_type(request.purpose, Literal["turn", "compaction", "output_repair"])
     return request.items
+
+
+async def validate_completion(
+    request: CompletionContext[Application],
+) -> ContinueTurn | StopTurn | None:
+    assert_type(request.context, Application)
+    assert_type(request.text, str | None)
+    assert_type(request.continuation_count, int)
+    return ContinueTurn("Finish the report.") if request.continuation_count == 0 else None
+
+
+assert_type(
+    Agent(instructions="Answer.", before_complete=validate_completion), Agent[Application, str]
+)
+assert_type(
+    Agent(instructions="Answer.", output_type=Answer, before_complete=validate_completion),
+    Agent[Application, Answer],
+)
 
 
 async def summarize_context(request: CompactionContext[Application]) -> str | None:

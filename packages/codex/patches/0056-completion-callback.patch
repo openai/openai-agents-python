@@ -1,0 +1,146 @@
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 57e7a2b849610ec5972098e6963646b181561a6a..d20bb7023b6eb2e1269e76cad248061331f245dc 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -412,6 +412,7 @@ pub(crate) async fn run_turn(
+ 
+     let mut last_agent_message: Option<String> = None;
+     let mut stop_hook_active = false;
++    let mut completion_continuations = 0;
+     // Although from the perspective of codex.rs, TurnDiffTracker has the lifecycle of a Task which contains
+     // many turns, from the perspective of the user, it is a single turn.
+     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(
+@@ -565,19 +566,62 @@ pub(crate) async fn run_turn(
+                 can_drain_pending_input = true;
+                 // Process async hooks only after sampling and its tools have finished.
+                 drain_async_hook_results(&sess, &turn_context, /*before_user_prompt*/ false).await;
+-                let (has_pending_input, token_status) = async {
+-                    let has_pending_input =
+-                        sess.input_queue.has_pending_input(&sess.active_turn).await;
+-                    let token_status = super::context_window::context_window_token_status(
+-                        sess.as_ref(),
+-                        turn_context.as_ref(),
+-                    )
+-                    .await;
+-                    (has_pending_input, token_status)
++                let has_pending_input = sess.input_queue.has_pending_input(&sess.active_turn).await;
++                let mut needs_follow_up = model_needs_follow_up || has_pending_input;
++                if !needs_follow_up {
++                    for contributor in sess.services.extensions.turn_lifecycle_contributors() {
++                        let feedback = contributor
++                            .before_turn_complete(codex_extension_api::TurnCompletionInput {
++                                turn_id: &turn_context.sub_id,
++                                model: &step_context.settings.model_info.slug,
++                                last_assistant_message: sampling_request_last_agent_message
++                                    .as_deref(),
++                                continuation_count: completion_continuations,
++                                thread_store: &sess.services.thread_extension_data,
++                                turn_store: turn_context.extension_data.as_ref(),
++                            })
++                            .or_cancel(&cancellation_token)
++                            .await?
++                            .map_err(CodexErr::InvalidRequest)?;
++                        if cancellation_token.is_cancelled() {
++                            return Err(CodexErr::TurnAborted);
++                        }
++                        if let Some(feedback) = feedback {
++                            let item = build_hook_prompt_message(&[
++                                codex_protocol::items::HookPromptFragment::from_single_hook(
++                                    feedback,
++                                    uuid::Uuid::new_v4().to_string(),
++                                ),
++                            ])
++                            .ok_or_else(|| {
++                                CodexErr::InvalidRequest(
++                                    "Completion feedback must not be empty".to_owned(),
++                                )
++                            })?;
++                            sess.record_response_item_and_emit_turn_item(
++                                &turn_context,
++                                &step_context.settings.model_info,
++                                item,
++                            )
++                            .await;
++                            sess.input_queue
++                                .accept_mailbox_delivery_for_current_turn(
++                                    &sess.active_turn,
++                                    &turn_context.sub_id,
++                                )
++                                .await;
++                            completion_continuations += 1;
++                            needs_follow_up = true;
++                            break;
++                        }
++                    }
+                 }
++                let token_status = super::context_window::context_window_token_status(
++                    sess.as_ref(),
++                    turn_context.as_ref(),
++                )
+                 .instrument(trace_span!("run_turn.collect_post_sampling_state"))
+                 .await;
+-                let needs_follow_up = model_needs_follow_up || has_pending_input;
+                 let token_limit_reached = token_status.token_limit_reached;
+ 
+                 trace!(
+diff --git a/codex-rs/ext/extension-api/src/contributors.rs b/codex-rs/ext/extension-api/src/contributors.rs
+index 518590bfb981dc8e8cdf3455a486a7a085d3d891..a2f6201b78186775e214011053f58d1ddba0bb0f 100644
+--- a/codex-rs/ext/extension-api/src/contributors.rs
++++ b/codex-rs/ext/extension-api/src/contributors.rs
+@@ -59,6 +59,7 @@ pub use tool_lifecycle::ToolTimingInput;
+ pub use turn_input::TurnInputContext;
+ pub use turn_input::TurnInputEnvironment;
+ pub use turn_lifecycle::TurnAbortInput;
++pub use turn_lifecycle::TurnCompletionInput;
+ pub use turn_lifecycle::TurnErrorInput;
+ pub use turn_lifecycle::TurnStartInput;
+ pub use turn_lifecycle::TurnStartPhase;
+@@ -204,6 +205,15 @@ pub trait ThreadLifecycleContributor<C: Sync>: Send + Sync {
+ /// extension-private turn state. The host exposes stable identifiers and
+ /// extension stores instead of core runtime objects.
+ pub trait TurnLifecycleContributor: Send + Sync {
++    /// Accept natural completion, or return feedback to continue the same turn.
++    /// Errors fail the turn; callback results never authorize tools or permissions.
++    fn before_turn_complete<'a>(
++        &'a self,
++        _input: TurnCompletionInput<'a>,
++    ) -> ExtensionFuture<'a, Result<Option<String>, String>> {
++        Box::pin(std::future::ready(Ok(None)))
++    }
++
+     /// Selects the start phase using the current thread policy. Disabled callbacks
+     /// may retain the default phase and return without doing any work.
+     fn turn_start_phase(&self, _thread_store: &ExtensionData) -> TurnStartPhase {
+diff --git a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+index 7361c20c5fb2a2e1724e6a1ca2a82b222be7b6b9..96c4b7572b99efb263d88ca5e2950ecd47a7bdc8 100644
+--- a/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
++++ b/codex-rs/ext/extension-api/src/contributors/turn_lifecycle.rs
+@@ -33,6 +33,16 @@ pub struct TurnStartInput<'a> {
+     pub turn_store: &'a ExtensionData,
+ }
+ 
++/// Application acceptance of a successful natural completion, before turn stop.
++pub struct TurnCompletionInput<'a> {
++    pub turn_id: &'a str,
++    pub model: &'a str,
++    pub last_assistant_message: Option<&'a str>,
++    pub continuation_count: usize,
++    pub thread_store: &'a ExtensionData,
++    pub turn_store: &'a ExtensionData,
++}
++
+ /// Input supplied when the host completes a turn.
+ pub struct TurnStopInput<'a> {
+     /// Store scoped to the host session runtime.
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index d06c3fdcaadd0e6eb76e7107a7cbcb620f448c7d..64b1650d52525f64dea9344e48a0bfa97e1aae38 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -89,6 +89,7 @@ pub use contributors::ToolStartInput;
+ pub use contributors::ToolTimingBoundary;
+ pub use contributors::ToolTimingInput;
+ pub use contributors::TurnAbortInput;
++pub use contributors::TurnCompletionInput;
+ pub use contributors::TurnContextContributionInput;
+ pub use contributors::TurnErrorInput;
+ pub use contributors::TurnInputContext;

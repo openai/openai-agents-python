@@ -1751,6 +1751,31 @@ impl NativeThread {
             .map_err(py_error)
     }
 
+    #[pyo3(signature = (id, instructions, thread=None, instance=None, *, error=false))]
+    fn _reply_completion(
+        &self,
+        id: u64,
+        instructions: Option<String>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Completion callbacks require Python tools"))?;
+        tools
+            .reply_completion(
+                id,
+                if error { Err(()) } else { Ok(instructions) },
+                thread,
+                instance,
+            )
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, thread=None, instance=None))]
     fn _check_step(&self, id: u64, thread: Option<&str>, instance: Option<&str>) -> PyResult<()> {
         let inner = self.current()?;

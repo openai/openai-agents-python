@@ -67,6 +67,8 @@ pub struct ThreadOptions {
     pub(crate) transform_context: bool,
     #[serde(rename = "_before_compact")]
     pub(crate) before_compact: bool,
+    #[serde(rename = "_before_complete")]
+    pub(crate) before_complete: bool,
     // The public native-agent declaration; the same owner guards root and children.
     #[serde(rename = "_native_agent_roles")]
     native_agent_roles: Option<Vec<String>>,

@@ -133,6 +133,7 @@ pub struct PythonTools {
     selecting_children: AtomicBool,
     context_transform_enabled: bool,
     before_compact_enabled: bool,
+    before_complete_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
     // share the lock so a late step cannot wait on an already closed reader.
@@ -150,6 +151,10 @@ enum PreparationReply {
     Step(StepReply),
     Context(oneshot::Sender<Option<ModelContextUpdate>>),
     Compaction(oneshot::Sender<std::result::Result<Option<String>, ()>>),
+    Completion {
+        reply: oneshot::Sender<std::result::Result<Option<String>, ()>>,
+        stop: crate::native_interception::CapturedTurnStop,
+    },
 }
 
 impl PreparationReply {
@@ -158,6 +163,7 @@ impl PreparationReply {
             Self::Step(reply) => reply.reply.is_closed(),
             Self::Context(reply) => reply.is_closed(),
             Self::Compaction(reply) => reply.is_closed(),
+            Self::Completion { reply, .. } => reply.is_closed(),
         }
     }
 }
@@ -1073,8 +1079,16 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         transform_context: bool,
         before_compact: bool,
+        before_complete: bool,
     ) -> Result<()> {
-        Self::install_manual(startup, specs, &[], transform_context, before_compact)
+        Self::install_manual(
+            startup,
+            specs,
+            &[],
+            transform_context,
+            before_compact,
+            before_complete,
+        )
     }
 
     pub fn install_manual(
@@ -1083,6 +1097,7 @@ impl PythonTools {
         manual_slots: &[usize],
         transform_context: bool,
         before_compact: bool,
+        before_complete: bool,
     ) -> Result<()> {
         // Core resolves absent source options from resumed metadata at startup.
         let resumed_sources = startup.initial_history.get_resumed_session_sources();
@@ -1159,6 +1174,7 @@ impl PythonTools {
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: transform_context,
             before_compact_enabled: before_compact,
+            before_complete_enabled: before_complete,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
             #[cfg(test)]
@@ -1211,6 +1227,7 @@ impl PythonTools {
             ),
             context_transform_enabled: parent.context_transform_enabled,
             before_compact_enabled: parent.before_compact_enabled,
+            before_complete_enabled: parent.before_complete_enabled,
             step_defaults: RwLock::new(
                 parent
                     .step_defaults
@@ -1395,6 +1412,72 @@ impl PythonTools {
             .map_err(|_| anyhow::anyhow!("Expired compaction callback"))
     }
 
+    pub(crate) async fn before_complete(
+        self: &Arc<Self>,
+        input: codex_extension_api::TurnCompletionInput<'_>,
+    ) -> Result<Option<String>> {
+        if !self.before_complete_enabled {
+            return Ok(None);
+        }
+        let owner = self.admission_ready(input.turn_id)?;
+        let stop =
+            crate::native_interception::capture_step_stop(input.thread_store, input.turn_store)
+                .context("Completion owner unavailable")?;
+        let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let (reply, receive) = oneshot::channel();
+        self.preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned")
+            .as_mut()
+            .context("Expired completion owner")?
+            .insert(id, PreparationReply::Completion { reply, stop });
+        let _pending = PendingPreparation {
+            tools: self.clone(),
+            id,
+        };
+        let mut request = json!({
+            "id": input.turn_id,
+            "msg": {
+                "type": "_sdk_before_complete", "turn_id": input.turn_id,
+                "thread": input.thread_store.level_id(), "instance": self.instance,
+                "step_id": id, "model": input.model,
+                "text": input.last_assistant_message,
+                "continuation_count": input.continuation_count,
+            }
+        });
+        if let Some(tracing) = &owner.tracing {
+            request["msg"]["tracing_context"] = json!(tracing.token());
+        }
+        ensure!(owner.is_current(), "Expired completion owner");
+        self.family
+            .requests
+            .send(QueuedRequest::Step(request))
+            .map_err(|_| anyhow::anyhow!("Completion callback reader closed"))?;
+        let instructions = receive
+            .await
+            .context("Completion callback cancelled")?
+            .map_err(|_| anyhow::anyhow!("Completion callback failed"))?;
+        ensure!(owner.is_current(), "Expired completion owner");
+        Ok(instructions)
+    }
+
+    pub(crate) fn reply_completion(
+        self: &Arc<Self>,
+        id: u64,
+        instructions: std::result::Result<Option<String>, ()>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let PreparationReply::Completion { reply, .. } =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid completion reply");
+        };
+        reply
+            .send(instructions)
+            .map_err(|_| anyhow::anyhow!("Expired completion callback"))
+    }
+
     pub(crate) fn retire_steps(&self) {
         self.retire_prepared_requests();
         // Dropping the owned senders wakes blocked selectors with no authority.
@@ -1425,15 +1508,24 @@ impl PythonTools {
         let Ok(owner) = self.step_owner(thread, instance) else {
             return false;
         };
-        let Ok(PreparationReply::Step(pending)) = owner.take_preparation(id) else {
-            return false;
+        let stop = match owner.take_preparation(id) {
+            Ok(PreparationReply::Step(pending)) => {
+                if pending.reply.send(None).is_err() {
+                    return false;
+                }
+                pending.stop
+            }
+            Ok(PreparationReply::Completion { reply, stop }) => {
+                if reply.send(Err(())).is_err() {
+                    return false;
+                }
+                stop
+            }
+            _ => return false,
         };
-        if pending.reply.send(None).is_err() {
-            return false;
-        }
         // Claim the live preparation before fencing its captured turn. Neither
         // a late reply nor a successor with the same display ID owns this stop.
-        pending.stop.stop();
+        stop.stop();
         true
     }
 
@@ -4909,6 +5001,7 @@ pub(crate) mod managed_tests {
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: false,
             before_compact_enabled: false,
+            before_complete_enabled: false,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
             before_result: Mutex::new(None),

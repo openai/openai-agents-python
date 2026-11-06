@@ -83,6 +83,7 @@ from .agent import (
 )
 from .canonical_storage import CustomStorage as CustomStorage
 from .compaction import CompactionContext
+from .completion import CompletionContext, ContinueTurn
 from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
@@ -1698,6 +1699,7 @@ class Session(Generic[ContextT, OutputT]):
                 programmatic_tool_calling=agent.programmatic_tool_calling,
                 transform_context=agent.transform_context,
                 before_compact=agent.before_compact,
+                before_complete=agent.before_complete,
             )
         codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
@@ -2157,6 +2159,7 @@ class Session(Generic[ContextT, OutputT]):
                 options = {
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
+                    "_before_complete": agent.before_complete is not None,
                     **(
                         {"parent_trace": parent_trace.to_headers()}
                         if parent_trace is not None
@@ -6834,6 +6837,59 @@ class Session(Generic[ContextT, OutputT]):
 
         await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
+    async def _before_complete(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        with _owned_span(
+            "completion callback", "callback", message.get("tracing_context")
+        ) as tracing:
+            await self._before_complete_body(state, message)
+            if tracing is not None and state.failure.done():
+                tracing.set_outcome(status="error", category="callback_error")
+
+    async def _before_complete_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def prepare() -> tuple[Callable[..., Any], CompletionContext[ContextT]]:
+            assert self._opening_agent is not None
+            callback = self._opening_agent.before_complete
+            if callback is None:
+                raise NativeError("Completion callback has no application owner")
+            return callback, CompletionContext(
+                context=cast(ContextT, self._context),
+                text=message["text"],
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                subagent_id=message["thread"] if message["instance"] is not None else None,
+                model=message["model"],
+                continuation_count=message["continuation_count"],
+            )
+
+        def reply(decision: Any) -> None:
+            if isinstance(decision, StopTurn):
+                if self._native._stop_step(
+                    message["step_id"], message["thread"], message["instance"]
+                ):
+                    state.policy_stop = "requested"
+                    state.stopping = True
+                    state.failure.set_result(NativeError("Turn stopped by policy"))
+                return
+            instructions = None
+            if decision is not None:
+                if not isinstance(decision, ContinueTurn):
+                    raise TypeError("before_complete must return ContinueTurn, StopTurn or None")
+                instructions = decision.instructions
+                if not isinstance(instructions, str):
+                    raise TypeError("ContinueTurn instructions must be a string")
+                if not instructions.strip():
+                    raise ValueError("ContinueTurn instructions must not be empty")
+            self._native._reply_completion(
+                message["step_id"], instructions, message["thread"], message["instance"]
+            )
+
+        def reject() -> None:
+            self._native._reply_completion(
+                message["step_id"], None, message["thread"], message["instance"], error=True
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
     async def _select_step(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("step callback", "callback", message.get("tracing_context")) as tracing:
             await self._select_step_body(state, message)
@@ -7065,7 +7121,12 @@ class Session(Generic[ContextT, OutputT]):
                     continue
                 if (
                     message.get("type")
-                    in {"_sdk_select_step", "_sdk_transform_context", "_sdk_before_compact"}
+                    in {
+                        "_sdk_select_step",
+                        "_sdk_transform_context",
+                        "_sdk_before_compact",
+                        "_sdk_before_complete",
+                    }
                     and message["thread"] != self.id
                 ):
                     try:
@@ -7082,6 +7143,8 @@ class Session(Generic[ContextT, OutputT]):
                         if message["type"] == "_sdk_transform_context"
                         else self._before_compact
                         if message["type"] == "_sdk_before_compact"
+                        else self._before_complete
+                        if message["type"] == "_sdk_before_complete"
                         else self._select_step
                     )
                     child.add_callback(asyncio.create_task(callback(child, message)))
@@ -7282,6 +7345,8 @@ class Session(Generic[ContextT, OutputT]):
                 elif kind == "_sdk_select_step":
                     task = asyncio.create_task(self._select_step(state, message))
                     state.add_callback(task)
+                elif kind == "_sdk_before_complete":
+                    state.add_callback(asyncio.create_task(self._before_complete(state, message)))
                 elif kind == "_sdk_before_compact":
                     state.add_callback(asyncio.create_task(self._before_compact(state, message)))
                 elif kind == "_sdk_transform_context":

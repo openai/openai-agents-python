@@ -247,7 +247,11 @@
     {
       "path": "0055-compaction-callback.patch",
       "sha256": "5cf5df20f97b17d042d91359a2291bee3f0b4a73f7830834d6f7624038291015"
+    },
+    {
+      "path": "0056-completion-callback.patch",
+      "sha256": "ce5c3381285bf830cf3203b7bc031d3b5e6fd33331f2bf69428b8aabe4b8a619"
     }
   ],
-  "result_tree": "8e99da88f37c3dca89897ab1849d8d66bddfc66c"
+  "result_tree": "8e02342a0ac03ac7c22ce7556988a857cb912f72"
 }
