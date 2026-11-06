@@ -8,9 +8,9 @@ import importlib.util
 import pickle
 import subprocess
 import sys
-from types import ModuleType
 from importlib.metadata import version
 from pathlib import Path
+from types import ModuleType
 from typing import get_origin, get_type_hints
 
 import pytest
