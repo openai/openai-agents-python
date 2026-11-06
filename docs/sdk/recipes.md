@@ -4,7 +4,7 @@ Install the [SDK preview wheel](installation.md) and use examples from the match
 
 ## Runnable task examples
 
-Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. Run a module with `python -m examples.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
+Follow the [example setup](installation.md#examples-and-upgrades) to download the matching source archive and open its root directory. From the development checkout's repository root, run a module with `PYTHONPATH=packages/codex python -m examples.recipes.NAME`, replacing `NAME` with a name below. Follow each source file's setup notes.
 
 ### Test application logic without a model
 
@@ -14,12 +14,13 @@ These examples use scripted responses and need no API key. Tools still execute, 
 | --- | --- |
 | [`typed_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/typed_tools.py) | Validates nested Python input and returns typed results as JSON. Python enforces bounds the native schema can omit. Invalid input prevents a write; invalid output cannot undo one. |
 | [`inspect_requests`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/inspect_requests.py) | Prints native declarations, original arguments, arguments after preparation, and the model-visible result. Scripted selection does not measure prompt quality. |
+| [`prepared_request`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/prepared_request.py) | Edits the next sampling request after a tool result while retaining execution policies. Uses APIs added after alpha.6; follow the [matching-source setup](installation.md#examples-and-upgrades) and [request-editing limits](configuration.md#edit-the-next-sampling-request). |
 | [`concurrent_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/concurrent_tools.py) | Two Sessions share one quota unit through an event-loop lock. The quota does not work across threads or processes. |
 | [`safe_effects`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/safe_effects.py) | A fake writer records one write for duplicate calls. Deduplication lasts only in memory. |
 | [`specialist_agents`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/specialist_agents.py) | A function tool calls a separate Agent with explicit catalog context and tools, then returns a typed summary. This nested Session is not a native child for tracking or checkpoints. Python closures can still share permissions and resources. |
 | [`application_memory`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/application_memory.py) | Saves, recalls, and deletes a user's SQLite fact across new Sessions. The example removes its temporary database on exit. Your application owns retention and expiry. |
 
-For example, `python -m examples.recipes.concurrent_tools` prints `Two Sessions shared one unit without overspending.` Its assertions check the remaining quota and tool results, not just the scripted answer.
+For example, `PYTHONPATH=packages/codex python -m examples.recipes.concurrent_tools` prints `Two Sessions shared one unit without overspending.` Its assertions check the remaining quota and tool results, not just the scripted answer.
 
 ### Try a live model
 
@@ -55,7 +56,7 @@ Install the matching preview wheel and pinned dependencies, then build the brows
 Run from the repository root:
 
 ```sh
-python -m examples.web_starter --directory /tmp/agents-web-state --port 8080
+PYTHONPATH=packages/codex python -m examples.web_starter --directory /tmp/agents-web-state --port 8080
 ```
 
 Open `http://127.0.0.1:8080`, choose `alice`, send the request, and approve publication to get a download. The default mode uses scripted Responses and needs no API key.
@@ -84,6 +85,7 @@ Use these guides for the rules behind each recipe:
 | Save or resume a conversation | [Storage choices](state.md#choose-how-to-store-a-conversation) and [capture readiness](state.md#check-support-and-capture-readiness) |
 | Stream to a browser or stop work | [Stream observations](sessions.md#stream-observations) and [cancel joined work](sessions.md#interrupt-work) |
 | Validate tool inputs and results | [Python tools](tools.md#python-functions), [argument inspection](tools.md#inspect-python-policy-arguments), and [structured output](configuration.md#structured-output) |
+| Edit the next model request | [Prepared sampling requests](configuration.md#edit-the-next-sampling-request), available in a matching development build |
 | Call tools from generated JavaScript | [Programmatic tool calling](configuration.md#programmatic-tool-calling) |
 | Run an MCP server locally | [Start a stdio server](mcp.md#start-a-stdio-server) |
 | Manage conversation context and application memory | [History and compaction](state.md#compact-conversation-context) |

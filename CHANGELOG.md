@@ -1,6 +1,6 @@
 # Changelog
 
-This file records public Agents SDK releases through 0.23.1. For private preview changes, see the [preview changelog](CHANGELOG-alpha.md).
+This file records public Agents SDK releases through 0.23.1. For preview changes, see the [preview changelog](CHANGELOG-alpha.md).
 
 ## [0.23.1](https://github.com/openai/openai-agents-python/compare/v0.23.0...v0.23.1) (2026-10-02)
 

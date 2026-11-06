@@ -140,6 +140,21 @@ async def request(provider: NativeProvider, method: str, path: str, body: object
     return await asyncio.to_thread(send)
 
 
+async def test_loopback_startup_does_not_require_reverse_dns(monkeypatch):
+    def unavailable(_hostname: str) -> str:
+        raise OSError("Host resolver is unavailable.")
+
+    monkeypatch.setattr(socket, "getfqdn", unavailable)
+    async with ScriptedResponses([text("loopback response")]) as peer:
+        status, content_type, payload = await request(
+            peer.provider, "POST", "/v1/responses", {"input": "synthetic request"}
+        )
+        assert status == 200
+        assert content_type == "text/event-stream"
+        assert '"text": "loopback response"' in payload
+        assert peer.requests == ({"input": "synthetic request"},)
+
+
 async def test_http_response_order_and_request_snapshots(capsys):
     assert testing.__all__ == ["ScriptedResponses", "text", "tool_call"]
     arguments = {"key": "synthetic-record"}

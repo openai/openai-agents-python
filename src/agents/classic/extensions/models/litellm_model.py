@@ -17,8 +17,8 @@ try:
     import litellm
 except ImportError as _e:
     raise ImportError(
-        "`litellm` is required to use the LitellmModel. You can install it via the optional "
-        "dependency group: `pip install 'openai-agents[classic-litellm]'`."
+        "`litellm` is required to use the LitellmModel. From the matching source checkout, run "
+        "`python -m pip install '.[classic-litellm]'`. See CLASSIC.md for source setup."
     ) from _e
 
 from openai import AsyncStream, NotGiven, omit

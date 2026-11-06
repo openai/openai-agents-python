@@ -58,6 +58,91 @@ Exporter settings are:
 
 Content defaults are `log_user_prompt=False`, `log_agent_responses=False` and `tool_result_max_bytes=0`. The switches control only the named native records. They do not sanitize all telemetry. The byte limit bounds only result text. Select exporters and controls for the data your collector may receive.
 
+## Group work in a local trace
+
+Local workflow scopes, `TraceOptions`, and custom processors require a development build newer than `0.24.0-alpha.6`. Follow the [matching-source setup](installation.md#examples-and-upgrades). Run each complete telemetry example below in a fresh Python process because telemetry configuration and shutdown apply to the process.
+
+Use `telemetry.trace()` for a workflow and `telemetry.span()` for application work inside it. These are synchronous context managers used inside either synchronous or asynchronous application code. This complete script groups two synthetic Agent runs and an application span. It checks local context without configuring an exporter. To send the spans to a collector, add the exporter from [telemetry configuration](#configure-telemetry).
+
+```python
+import asyncio
+
+from agents import Agent, telemetry
+from agents.testing import ScriptedResponses, text
+
+
+async def main() -> None:
+    await telemetry.configure()
+    try:
+        with telemetry.trace("synthetic-workflow") as workflow:
+            with telemetry.span("prepare-input"):
+                prompt = "Return the synthetic label."
+            assert telemetry.current_context() == workflow.context
+            async with ScriptedResponses([text("First")], [text("Second")]) as peer:
+                agent = Agent(instructions="Answer briefly.", provider=peer.provider)
+                first = await agent.run(prompt)
+                second = await agent.run(prompt)
+                print(first.final_output, second.final_output)
+        assert telemetry.current_context() is None
+    finally:
+        await telemetry.shutdown()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Expected final-answer output is `First Second`. The scripted peer uses a local HTTP server and no real model key. The current scope is task-local. Enter and exit a scope in the same task; each scope can be entered once. Ending a scope restores the previous context immediately. Already admitted work retains its captured context through cleanup.
+
+A new workflow defaults to metadata-only tracing. Use `TraceOptions(disabled=True)` on a workflow or operation to disable its tracing. Use `include_sensitive_data` only when the destination may receive that content. An ancestor's disabled or metadata-only restrictions remain in effect: a child cannot relax them, and `detached=True` removes parent linkage without clearing restrictions. These per-workflow controls supplement the process-level [content switches](#configure-telemetry), which do not sanitize all telemetry.
+
+For `agent.session(trace_options=...)`, `agent.run(trace_options=...)`, or `session.submit(trace_options=...)`, an explicit `TraceOptions.parent` selects a local `SpanContext`. Otherwise the current SDK scope supplies the parent, followed by the Session default. The Session default and current owners still constrain tracing policy when another parent is selected. Submission captures context before queueing; steering cannot change an admitted Turn's policy. Use fresh tracing options on restore because local context is not part of saved conversation state.
+
+`SpanContext` is process-local and can outlive the recording scope through captured work. Do not serialize it or send it to another process. W3C [trace headers](#continue-a-trace-across-workers) transfer ancestry only. They do not transfer local workflow policy or exporter credentials. `TraceOptions` can also set a trace ID, group ID, application metadata, and private per-trace export headers through `TraceExportCredentials`. Keep credentials out of metadata and header carriers.
+
+## Send native traces to an application sink
+
+This section uses the same [development-build setup](installation.md#examples-and-upgrades) as local trace scopes. Supply an object with `on_trace_event(event)` through `telemetry.configure(processors=[...])` before opening Sessions. A processor can receive native trace records without an OTLP collector. The interface is separate from classic SDK trace processors.
+
+This complete script prints synthetic lifecycle records and a bounded delivery result:
+
+```python
+import asyncio
+
+from agents import telemetry
+
+
+class ConsoleProcessor:
+    def on_trace_event(self, event: telemetry.TraceLifecycleEvent) -> None:
+        print(event["lifecycle"], event["name"], event["outcome"])
+
+
+async def main() -> None:
+    await telemetry.configure(processors=[ConsoleProcessor()])
+    try:
+        with telemetry.trace("synthetic-job"):
+            with telemetry.span("synthetic-step"):
+                pass
+        delivery = await telemetry.force_flush(timeout_ms=5000)
+        print(delivery.status, delivery.dropped_records, delivery.failed_deliveries)
+    finally:
+        await telemetry.shutdown(timeout_ms=5000)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Events are immutable snapshots. `lifecycle` is `"start"` or `"end"`; events include trace/span identities, nanosecond timestamps as decimal strings, attributes, outcome, and `dropped_attributes_count`. `end_time_unix_nanos` is `None` until a span ends. Keep processor output and metadata synthetic or apply your application's data policy.
+
+A callback may be synchronous or asynchronous. It runs on a private worker loop with a one-second delivery budget. Up to 16 workers can remain live, including stalled removed routes. A stalled processor can lose later events; failures affect delivery accounting rather than the Agent's result. Callbacks must cooperate to return because the SDK cannot forcibly stop Python code. Do not call `force_flush()` or `shutdown()` inside a processor callback.
+
+After configuration, `add_trace_processor(processor)` adds a route and preserves the selected native exporter. `set_trace_processors(processors)` replaces future trace routes, including that exporter. Removed routes can still finish queued deliveries. At most 64 current and retired route descriptors are retained; flush before adding routes if that bound is reached.
+
+`force_flush(timeout_ms=...)` covers completed records through a barrier within one total budget. `FlushResult.status` is `"success"`, `"partial"`, `"timeout"`, or `"failure"`; `dropped_records` and `failed_deliveries` report known loss, and `barrier` identifies the covered sequence. Success means exporter calls completed without known loss. It does not prove durable storage or viewer visibility. Unfinished spans and future records are excluded.
+
+Both `force_flush` and an explicit shutdown budget accept integer milliseconds from 1 through 60000. Flush defaults to 10000 milliseconds. `shutdown(timeout_ms=None)` uses the runtime's default shutdown behavior. End application scopes and close Sessions before shutdown. Shutdown retires telemetry for the process, so use flush for periodic delivery checks while the worker continues.
+
 ## Continue a trace across workers
 
 `TraceContext` and `parent_trace` were added after `0.24.0-alpha.6`. Follow the [development-branch setup](installation.md#examples-and-upgrades) to use these APIs and the example below.

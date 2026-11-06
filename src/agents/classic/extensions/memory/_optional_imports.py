@@ -11,8 +11,10 @@ def raise_optional_dependency_error(
     cause: ImportError | None = None,
 ) -> NoReturn:
     error = ImportError(
-        f"{export_name} requires the '{dependency_name}' extra. "
-        f"Install it with: pip install openai-agents[classic-{extra_name}]"
+        f"{export_name} requires '{dependency_name}'. "
+        "From the matching source checkout, run "
+        f"`python -m pip install '.[classic-{extra_name}]'`. "
+        "See CLASSIC.md#install-from-the-matching-source."
     )
     if cause is None:
         raise error

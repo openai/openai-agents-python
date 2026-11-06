@@ -220,6 +220,82 @@ def test_public_models_resolve_annotations_without_rebuilding() -> None:
     assert SessionState.model_validate_json(state.model_dump_json()) == state
 
 
+def test_state_schema_resolves_before_adjacent_public_modules_are_imported() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from agents.state import SessionState
+
+assert 'agents.subagents' not in sys.modules
+assert 'agents.turn_receipt' not in sys.modules
+assert SessionState.__pydantic_complete__
+state = SessionState(
+    format_version=2,
+    codex_revision='synthetic-revision',
+    source_session_id='synthetic-session',
+    root_metadata={},
+    history=[],
+    subagents={'worker': {'description': 'Read the synthetic record.'}},
+)
+assert SessionState.model_validate_json(state.model_dump_json()) == state
+
+from pydantic import TypeAdapter
+from agents.subagents import SubagentConfig
+from agents.turn_receipt import TurnReceipt
+
+assert TypeAdapter(SubagentConfig).json_schema()['required'] == ['description']
+receipt = TypeAdapter(TurnReceipt).json_schema()
+assert 'instruction_files' in receipt['required']
+assert receipt['$defs']['InstructionFileReceipt']['required'] == ['path', 'source', 'sha256']
+assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
+    )
+
+
+def test_typed_dict_rehoming_preserves_resolved_qualifiers_and_keys(monkeypatch) -> None:
+    from types import ModuleType
+
+    from typing_extensions import NotRequired, Required
+
+    from _agents_codex._public import preserve_module_identity
+
+    module = ModuleType("_agents_codex.synthetic_annotations")
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    exec(
+        """
+from __future__ import annotations
+from typing_extensions import NotRequired, ReadOnly, Required, TypedDict
+
+class Record(TypedDict, total=False):
+    required: Required[int]
+    optional: NotRequired[str]
+    readonly: ReadOnly[int]
+""",
+        vars(module),
+    )
+    record = module.Record
+    keys = (record.__required_keys__, record.__optional_keys__, record.__readonly_keys__)
+    public_name = "agents.synthetic_annotations"
+    assert public_name not in sys.modules
+
+    preserve_module_identity(vars(module), public_name)
+
+    assert module.Record is record
+    assert record.__module__ == public_name
+    assert (record.__required_keys__, record.__optional_keys__, record.__readonly_keys__) == keys
+    assert get_type_hints(record, include_extras=True) == {
+        "required": Required[int],
+        "optional": NotRequired[str],
+        "readonly": ReadOnly[int],
+    }
+    assert public_name not in sys.modules
+
+
 def test_public_typed_dict_annotations_preserve_inheritance_and_qualifiers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

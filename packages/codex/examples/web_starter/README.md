@@ -128,12 +128,12 @@ Expiry prevents access. This demo does not run a retention job. Protect the whol
 
 ## Use an external worker
 
-For jobs that need work outside this process, use the existing [external-job example](../external_job/README.md). It supplies a separate worker and journal. This starter's in-memory queue does not provide durable execution. From the repository root, with a local Responses endpoint on port 8081 and `THUMBNAIL_STATE_DIR` set to a private absolute POSIX directory:
+For jobs that need work outside this process, use the existing [external-job example](../external_job/README.md). Its [synthetic endpoint setup](../external_job/README.md#start-the-synthetic-model-endpoint) provides a runnable no-key demonstration. The example supplies a separate worker and journal. This starter's in-memory queue does not provide durable execution. From the repository root, set `MODEL_PORT` to the endpoint's printed port and `THUMBNAIL_STATE_DIR` to a private absolute POSIX directory, as the external-job setup describes:
 
 ```sh
-PYTHONPATH=packages/codex python -m examples.external_job run sample-01 --model-port 8081 --directory "$THUMBNAIL_STATE_DIR"
+PYTHONPATH=packages/codex python -m examples.external_job run sample-01 --model-port "$MODEL_PORT" --directory "$THUMBNAIL_STATE_DIR"
 PYTHONPATH=packages/codex python -m examples.external_job worker sample-01 --directory "$THUMBNAIL_STATE_DIR"
-PYTHONPATH=packages/codex python -m examples.external_job run sample-01 --model-port 8081 --directory "$THUMBNAIL_STATE_DIR"
+PYTHONPATH=packages/codex python -m examples.external_job run sample-01 --model-port "$MODEL_PORT" --directory "$THUMBNAIL_STATE_DIR"
 ```
 
 The worker needs no model credential. The external-job example closes its Sessions before closing `NativeProvider`. Reuse its journal's reconciliation rules for that worker's effects.

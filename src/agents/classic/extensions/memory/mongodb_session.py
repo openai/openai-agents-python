@@ -1,9 +1,11 @@
 """MongoDB-powered Session backend.
 
 Requires ``pymongo>=4.14``, which ships the native async API
-(``AsyncMongoClient``).  Install it with::
+(``AsyncMongoClient``). From the matching source checkout, install it with::
 
-    pip install openai-agents[classic-mongodb]
+    python -m pip install '.[classic-mongodb]'
+
+See CLASSIC.md#install-from-the-matching-source for source setup.
 
 Usage::
 

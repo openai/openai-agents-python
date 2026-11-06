@@ -20,7 +20,9 @@ _classic_dependencies = (
 _missing_classic_dependencies = [name for name in _classic_dependencies if _find_spec(name) is None]
 if _missing_classic_dependencies:
     raise ModuleNotFoundError(
-        "agents.classic requires the classic extra; install 'openai-agents[classic]'. "
-        "Missing modules: " + ", ".join(_missing_classic_dependencies),
+        "agents.classic requires the classic extra. From the matching source checkout, run "
+        "`python -m pip install '.[classic]'`. "
+        "See CLASSIC.md#install-from-the-matching-source. Missing modules: "
+        + ", ".join(_missing_classic_dependencies),
         name=_missing_classic_dependencies[0],
     )

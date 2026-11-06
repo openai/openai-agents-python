@@ -52,6 +52,10 @@ Do not pass manual results to `Session.submit()`. Reply to the exact live `Actio
 
 `submit()` returns a handle to the root `Turn`. Use `await turn.get_result()` in the event loop where you opened the Session. The call waits for that root's work and its native continuations.
 
+For new work, returning from `submit()` acknowledges local registration, before native admission or any model request. The handle's `submission_id` is immediately available for correlation. Its native `turn_id` starts as `None` and becomes available after admission; observe `TurnStarted` before relying on a native turn ID. These rules also apply to the first root in an idle Session.
+
+Keep application receipts if acknowledgments must survive a process restart. Neither ID reconstructs a live Turn or grants permission to control it.
+
 The handle has these lifetime rules:
 
 - A later independent submission cannot change its result. You can read the result again after later work starts or the Session closes.
@@ -67,6 +71,23 @@ If root work is active, choose how to submit a new prompt:
 - `if_busy="steer"` steers the active root and returns the same Turn after native acceptance. Refused steering is not queued.
 
 You can also use `await turn.steer(prompt)` for a captured root. Accepted steering may start a native continuation after a model step ends. `await turn.get_result()` waits for that continuation too. Do not resubmit input the root has retained.
+
+To withdraw queued work, cancel its handle. This async fragment assumes `session` has an active root waiting for an application reply, so that root stays active while the fragment runs:
+
+```python
+from agents import TurnStoppedError
+
+queued = await session.submit("Review the next document.", if_busy="queue")
+print("Application correlation:", queued.submission_id)
+await queued.cancel()
+try:
+    await queued.get_result()
+except TurnStoppedError:
+    print("Cancelled before native admission:", queued.turn_id is None)
+    print("Native observations:", [event async for event in queued.events()])
+```
+
+Work withdrawn before admission has no native turn or history record, and its Turn observer can finish without events. Cancelling only a result reader leaves queued work registered.
 
 #### Steer one exact root turn
 
@@ -158,6 +179,36 @@ Observations are passive, and the SDK retains a limited number. A slow reader ca
 
 `TurnFinished` marks the end of one native step. Accepted steering can start a continuation after that step. Use `await turn.get_result()` to wait for the captured root and its continuations, including when observations have been dropped.
 
+### Reconnect an observer
+
+Record `event.sequence` to resume an observer with `events(after=last_seen)`. The sequence belongs to one live Session and its in-memory buffer. It is not a durable restart token. After reopening from a profile or checkpoint, start a new cursor and read canonical history for earlier work.
+
+This async helper reads one record, then disconnects only its reader. Call it again with the returned sequence to resume on the same open `session`:
+
+```python
+from contextlib import aclosing
+
+from agents import Session
+from agents.observation import EventGap, OutputTextDelta
+
+
+async def read_one(session: Session, last_seen: int = 0) -> int:
+    async with aclosing(session.events(after=last_seen)) as events:
+        event = await anext(events, None)
+        if event is None:
+            return last_seen
+        if isinstance(event, EventGap):
+            items = [item async for item in session.items()]
+            print("Recovered history:", items)
+        elif isinstance(event, OutputTextDelta):
+            print(event.delta, end="", flush=True)
+        return event.sequence
+```
+
+Use the recovered history to refresh your application's view after a gap; the missing observations cannot be replayed. Choose what history your application may display or log.
+
+An existing `turn.events()` iterator ends when its owned steps settle. Keep reading `session.events()` to observe later background completions. To replay a late completion still in the buffer, open a fresh Turn cursor with `turn.events(after=last_seen)`. The detailed execution-completion observations require a matching development build added after alpha.6; see [completed execution](#inspect-completed-execution).
+
 ## Interrupt work
 
 ### Stop a root or child
@@ -221,11 +272,99 @@ Match the event item's native `thread_id`, `turn_id`, and `call_id` to the typed
 
 Execution items carry a call ID and a status when the runtime records them. Command records can include the original `argv`, working directory, exit code, and output. Patch records can include the changes and output. MCP records can include arguments and the result or error. Core can shorten command output and MCP results in history. An interrupted call can lack a completion item. When a field or completion is missing, treat that evidence as unknown and check your application records before assuming the outcome.
 
+### Inspect response attempts
+
+Retained response facts and the `ModelRequestDispatching` and `ModelResponseLinked` observations were added after `0.24.0-alpha.6`. Use a [matching development build](installation.md#examples-and-upgrades) for this recipe.
+
+`session.turns()` can include `RecordedTurn.responses`, a list of retained `RecordedResponse` occurrences. A provider can report `status="completed"` while `get_result()` fails because the SDK rejects its output. Inspect both outcomes. Save the following complete script as `response_diagnostics.py` and run it with the interpreter and credentials from [SDK setup](index.md#before-you-begin):
+
+```python
+import asyncio
+
+from agents import Agent, NativeError, Turn
+from agents.observation import ModelRequestDispatching, ModelResponseLinked
+
+
+async def main() -> None:
+    dispatches = {}
+    links = {}
+
+    async def observe(turn: Turn[str]) -> None:
+        async for event in turn.events():
+            if isinstance(event, ModelRequestDispatching):
+                dispatches[event.request_id] = event
+            elif isinstance(event, ModelResponseLinked):
+                key = (event.thread_id, event.turn_id, event.response_observation_id)
+                links[key] = event.request_id
+
+    agent = Agent(instructions="Answer briefly.")
+    async with agent.session() as session:
+        turn = await session.submit("Reply with the word atlas.")
+        observer = asyncio.create_task(observe(turn))
+        try:
+            await turn.get_result()
+            print("SDK result completed")
+        except NativeError as error:
+            print("SDK result failed:", error.category, error.response_integrity_reason)
+        await observer
+
+        async for recorded_turn in session.turns():
+            for response in recorded_turn.get("responses", []):
+                key = (response["thread_id"], response["turn_id"], response["id"])
+                request_id = links.get(key)
+                dispatch = dispatches.get(request_id)
+                print(
+                    {
+                        "occurrence_id": response["id"],
+                        "provider_response_id": response["response_id"],
+                        "provider_status": response.get("status"),
+                        "incomplete_reason": response.get("incomplete_reason"),
+                        "usage_source": response["usage_source"],
+                        "usage": response["usage"],
+                        "request_id": request_id,
+                        "dispatched_model": dispatch.model if dispatch else None,
+                    }
+                )
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+Interpret the records as follows:
+
+- `id` identifies a retained occurrence. `response_id` comes from the provider and can repeat across occurrences. Join `ModelResponseLinked.response_observation_id` to the occurrence `id`, retaining its thread and turn identity.
+- `usage_source="received"` preserves counters the provider supplied. Missing counters stay unknown; a reported zero is zero. `"native_normalized"` describes older accounting records and does not prove which counters arrived from the provider.
+- `status` and `incomplete_reason` are optional provider terminal facts. Older records can omit them, and older turns can omit `responses` entirely. Missing response data does not prove that no model request occurred.
+
+`ModelRequestDispatching` describes resolved root sampling fields before entering the transport client. Its model, reasoning settings, service tier, wire format, and transport help compare client dispatch with a [settings receipt](#check-applied-instructions-and-settings). A `None` wire field means the client omitted it; the server's default remains unknown. Transport retries share a `request_id`; later client invocations have new IDs.
+
+Dispatch can precede encoding failure or any socket write. It does not prove provider receipt, success, or billing. The observations cover root sampling, including separate output-correction roots with their parent submission link. They exclude native children, compaction, warmup, and background or reviewer requests. Restored manual work emits fresh events; earlier dispatch events are not replayed.
+
+Events are bounded and best effort. Cancellation or retirement can suppress a link even when history retains the response. A missing join stays unknown. Retained responses do not guarantee complete attempt coverage and are not a billing ledger. This example prints identifiers and counters; apply your application's data policy before logging them.
+
 ## Failures and recovery
 
 `NativeError` exposes available provider metadata as `status_code`, `code`, and `request_id`. Missing or discarded values remain `None`. `category` is the normalized native failure category, which differs from the provider's `code`. Messages and metadata can contain provider-supplied information, so choose what your application logs.
 
 `error.effects` describes only the exact failed operation. Its value is `"not_started"`, `"recorded"`, or `"unknown"`. It does not describe earlier tool effects or promise to undo them. An unknown outcome does not mean that retrying is safe. Before deciding how to recover, inspect canonical history and your application's records of external effects.
+
+### Diagnose response integrity failures
+
+The read-only `NativeError.response_integrity_reason` and its public `ResponseIntegrityReason` type were added after `0.24.0-alpha.6`. Use a [matching development build](installation.md#examples-and-upgrades) to inspect this field. It identifies the captured cause of a supported-output failure, even when several failures share the same generic error message or category:
+
+| Reason | Meaning |
+| --- | --- |
+| `"undecodable_output_item"` | The response contained an output item the runtime could not decode as supported output. |
+| `"provider_owned_tool_receipt"` | The provider supplied a tool-result receipt that belongs to the runtime's tool execution. |
+| `"unfinished_assistant_item"` | The response ended with an assistant item still unfinished. |
+| `"missing_supported_terminal_output"` | The response ended without the supported terminal output needed to complete the work. |
+
+The value can be `None` when no cause was captured, including restored or ambiguously attributed errors. It does not replace `category` or provider metadata. A reason does not prove that earlier tools had no effects: an already-started tool can finish before the SDK reports the failure. Check history and application receipts before deciding whether to submit new work.
+
+See [response-attempt diagnostics](#inspect-response-attempts) to compare retained provider status with the SDK's result.
+
+### Handle lifecycle errors
 
 | Exception | Meaning |
 | --- | --- |
