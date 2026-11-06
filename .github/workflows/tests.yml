@@ -58,7 +58,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import json
           import os
           import re
@@ -101,7 +101,7 @@ jobs:
           PRODUCER_SHA: ${{ github.sha }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import json
           import os
           import urllib.parse
@@ -168,7 +168,7 @@ jobs:
           CURRENT_BASE_REF: ${{ github.base_ref || steps.producer-identity.outputs.base_ref || '' }}
           REQUIRE_WINDOWS: ${{ steps.release-windows.outputs.run }}
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import json
           import os
           import re

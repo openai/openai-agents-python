@@ -73,6 +73,19 @@ jobs:
         with:
           persist-credentials: false
           ref: ${{ github.sha }}
+      - name: Reject unbound build inputs
+        run: |
+          for config in .python-version uv.toml .venv; do
+            if [[ -e "$config" || -L "$config" ]]; then
+              echo "Native CI uses pyproject.toml; unsupported root build configuration: $config" >&2
+              exit 1
+            fi
+          done
+          native_bytecode=$(git ls-files -- ':(glob,icase)**/__pycache__' ':(glob,icase)**/__pycache__/**' ':(glob,icase)**/*.py[co]') || exit 1
+          if [[ -n "$native_bytecode" ]]; then
+            echo "Native CI rejects tracked Python bytecode and cache paths." >&2
+            exit 1
+          fi
       - name: Select shared Cargo directories
         run: |
           echo "CARGO_HOME=$RUNNER_TEMP/agents-cargo" >> "$GITHUB_ENV"
@@ -120,7 +133,7 @@ jobs:
         # Use one stable source path for Cargo, the wheel and the test executor.
         run: |
           uv build --sdist
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import tarfile
           from pathlib import Path
@@ -141,7 +154,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           NATIVE_DEPENDENCIES: ${{ inputs.native_dependencies }}
           NATIVE_DEPENDENCY_RUN: ${{ inputs.native_dependency_run }}
-        run: python .github/scripts/native-dependencies.py restore
+        run: python -I -S .github/scripts/native-dependencies.py restore
       - name: Download the qualified native build
         if: inputs.native_source_run != ''
         env:
@@ -149,11 +162,11 @@ jobs:
           NATIVE_ARTIFACTS: ${{ inputs.native_artifacts }}
           NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
           SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
-        run: python .github/scripts/download-native-snapshot.py
+        run: python -I -S .github/scripts/download-native-snapshot.py
       - name: Select the qualified wheel and test executor
         if: inputs.native_source_run != ''
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import shutil
           from pathlib import Path
@@ -173,7 +186,7 @@ jobs:
       - name: Build the shared test executor
         if: inputs.native_source_run == ''
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import shutil
           import subprocess
@@ -199,7 +212,7 @@ jobs:
       - name: Verify macOS executable symbol resolution
         if: runner.os == 'macOS'
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import subprocess
           import sys
           import tempfile
@@ -238,7 +251,7 @@ jobs:
           NATIVE_PROVENANCE: ${{ inputs.native_provenance }}
           CALLER_WORKFLOW_REF: ${{ github.workflow_ref }}
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import json
           import os
           from pathlib import Path
@@ -264,7 +277,7 @@ jobs:
       - name: Identify native build inputs
         id: native-inputs
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import runpy
           from pathlib import Path
@@ -286,7 +299,7 @@ jobs:
           retention-days: 90
       - name: Prepare Rust dependency cache
         if: github.event_name == 'push' && inputs.native_source_run == ''
-        run: python .github/scripts/native-dependencies.py pack
+        run: python -I -S .github/scripts/native-dependencies.py pack
       - name: Publish Rust dependencies
         if: github.event_name == 'push' && inputs.native_source_run == ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
@@ -304,7 +317,7 @@ jobs:
         env:
           NATIVE_SOURCE_RUN: ${{ inputs.native_source_run }}
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           from pathlib import Path
           donor = os.environ["NATIVE_SOURCE_RUN"]

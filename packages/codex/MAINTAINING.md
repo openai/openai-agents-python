@@ -113,6 +113,8 @@ Tests searches artifacts by the exact native input hash, so later docs-only runs
 
 In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests use the ARM64 `macos-15` runner. Cold native builds and dependency-only reuse use `macos-15-xlarge`.
 
+Artifact-control Python commands isolate startup from unbound checkout imports. Native CI rejects tracked Python bytecode/cache paths and root `.python-version`, `uv.toml` or `.venv` overrides before setting up uv; keep build settings in `pyproject.toml`.
+
 #### Keep native and SDK caches separate
 
 Native producers do not restore or save Actions caches. They prefer verified native snapshots. If only local Rust source and Python SDK files changed, they can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. They use the same donor, digest, publication and qualification checks as snapshots. They preserve dependency sources and timestamps, remove compiled `codex-agents-python` outputs, and require matching build environments. Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.

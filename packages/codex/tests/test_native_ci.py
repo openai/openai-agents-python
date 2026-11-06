@@ -19,7 +19,7 @@ def _native_job() -> dict:
 
 
 def _script(step: dict) -> str:
-    return step["run"].split("python - <<'PYTHON'\n", 1)[1].rsplit("\nPYTHON", 1)[0]
+    return step["run"].split("<<'PYTHON'\n", 1)[1].rsplit("\nPYTHON", 1)[0]
 
 
 @pytest.mark.parametrize(

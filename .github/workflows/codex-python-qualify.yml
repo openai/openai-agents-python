@@ -38,6 +38,19 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           persist-credentials: false
+      - name: Reject unbound build inputs
+        run: |
+          for config in .python-version uv.toml .venv; do
+            if [[ -e "$config" || -L "$config" ]]; then
+              echo "Native CI uses pyproject.toml; unsupported root build configuration: $config" >&2
+              exit 1
+            fi
+          done
+          native_bytecode=$(git ls-files -- ':(glob,icase)**/__pycache__' ':(glob,icase)**/__pycache__/**' ':(glob,icase)**/*.py[co]') || exit 1
+          if [[ -n "$native_bytecode" ]]; then
+            echo "Native CI rejects tracked Python bytecode and cache paths." >&2
+            exit 1
+          fi
       - name: Configure Linux dependency registries
         if: runner.os == 'Linux'
         run: |
@@ -58,7 +71,7 @@ jobs:
       - name: Identify native build inputs
         id: native-inputs
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import runpy
           from pathlib import Path
@@ -72,12 +85,12 @@ jobs:
           NATIVE_ARTIFACTS: ${{ format('{{"{0}-{1}":{{"id":{2},"digest":"sha256:{3}","provenance":{4},"name":"native-snapshot-{0}-{1}-{5}"}}}}', runner.os, runner.arch, inputs.artifact_id, inputs.artifact_digest, inputs.native_provenance, steps.native-inputs.outputs.identity) }}
           NATIVE_SOURCE_RUN: ${{ github.run_id }}
           SNAPSHOT_DIRECTORY: ${{ runner.temp }}/agents-native-qualified
-        run: python .github/scripts/download-native-snapshot.py
+        run: python -I -S .github/scripts/download-native-snapshot.py
       - name: Prepare the source distribution
         # Use one stable source path for Cargo, the wheel and the test executor.
         run: |
           uv build --sdist
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import tarfile
           from pathlib import Path
@@ -94,7 +107,7 @@ jobs:
           PYTHON
       - name: Select the verified native overlay
         run: |
-          python - <<'PYTHON'
+          python -I -S - <<'PYTHON'
           import os
           import shutil
           from pathlib import Path
