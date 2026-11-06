@@ -105,6 +105,47 @@ async def test_pre_output_manual_envelope_rejects_new_modes_then_resumes_receipt
     assert tool_output(responses.requests[-1], "call-B") == "known-B"
 
 
+@pytest.mark.parametrize("pending", [True, False], ids=["pending", "other-native-model"])
+async def test_sdk_runner_refuses_incompatible_portable_state_before_open(
+    responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch, pending: bool
+) -> None:
+    from agents.classic import Agent as ClassicAgent
+    from agents.migration import SDKRunner
+    from agents.migration._transport import _ResponseCarrier
+    from tests.test_migration_runner import ScriptedModel, message
+
+    lookup = FunctionTool(name="lookup", description="Read", input_type=LookupArgs, output_type=str)
+    agent = Agent(
+        instructions="Read.",
+        model="gpt-5.2",
+        tools=[lookup] if pending else [],
+        provider=provider(responses),
+    )
+    if pending:
+        responses.respond(function_call("lookup", {"key": "A"}, "pending-call"))
+    else:
+        responses.respond(assistant_output("done"))
+    async with agent.session() as source:
+        turn = await source.submit("read")
+        if pending:
+            await next_request(source.interactions(), lookup)
+            state = await source.suspend()
+        else:
+            await turn.get_result()
+            state = await source.save_state()
+    assert (state.native_continuation is not None) == pending
+
+    async def forbidden(_carrier: _ResponseCarrier) -> None:
+        pytest.fail("an incompatible checkpoint opened the carrier")
+
+    monkeypatch.setattr(_ResponseCarrier, "start", forbidden)
+    model = ScriptedModel([message("must not run")])
+    match = "idle native state" if pending else "compatible native model profile"
+    with pytest.raises(ValueError, match=match):
+        await SDKRunner.run(ClassicAgent("Current", model=model), "continue", state=state)
+    assert model.requests == []
+
+
 @pytest.mark.parametrize("manual", [False, True])
 async def test_fingerprinted_checkpoint_requires_complete_output_metadata_before_grants(
     responses: ResponsesFixture, manual: bool

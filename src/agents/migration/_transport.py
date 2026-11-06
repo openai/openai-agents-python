@@ -7,6 +7,8 @@ import json
 import secrets
 from typing import Any
 
+_CARRIER_MODEL = "gpt-5.5"
+
 
 class _ResponseCarrier:
     def __init__(self) -> None:
@@ -93,7 +95,7 @@ class _ResponseCarrier:
                 not self.active
                 or self.pending is None
                 or not isinstance(body, dict)
-                or body.get("model") != "gpt-5.5"
+                or body.get("model") != _CARRIER_MODEL
             ):
                 raise ValueError("No admitted response")
             payload, self.pending = self.pending, None

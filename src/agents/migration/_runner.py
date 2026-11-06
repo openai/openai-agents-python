@@ -11,9 +11,9 @@ import inspect
 import json
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import copy, deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar, cast
 from uuid import uuid4
 
@@ -23,8 +23,14 @@ from pydantic import RootModel, TypeAdapter
 from _agents_codex._function_tools import FunctionTool, ToolContext
 from _agents_codex._lifecycle import _join
 from _agents_codex.agent import Agent as NativeAgent, NativeProvider
-from _agents_codex.session import Completed, Session, _close_after_error
+from _agents_codex.canonical_storage import CustomStorage
+from _agents_codex.native_interception import Allow, Deny
+from _agents_codex.prepared_request import PreparedRequest
+from _agents_codex.recovery import ReconciledCall
+from _agents_codex.session import Completed, Session, _close_after_error, _validate_storage_opening
+from _agents_codex.state import LocalStorage, SessionState
 from _agents_codex.tools import _CapturedFunction
+from _agents_codex.turn import Turn
 
 from .. import classic
 from ..classic.exceptions import MaxTurnsExceeded, ModelBehaviorError, UserError
@@ -35,7 +41,7 @@ from ..classic.run_context import RunContextWrapper
 from ..classic.tool import FunctionTool as ClassicFunctionTool, ToolOriginType
 from ..classic.tool_context import ToolContext as ClassicToolContext
 from ..classic.usage import Usage, model_usage_to_span_usage
-from ._transport import _ResponseCarrier
+from ._transport import _CARRIER_MODEL, _ResponseCarrier
 
 __all__ = ("SDKRunner", "SDKRunResult")
 
@@ -83,7 +89,12 @@ def _check_loopback_route(environment: Mapping[str, str], platform: str, os_name
 
 
 def _capture_agent(
-    agent: classic.Agent[Any], input: str, max_turns: int, provider: ModelProvider | None
+    agent: classic.Agent[Any],
+    input: str,
+    max_turns: int,
+    provider: ModelProvider | None,
+    *,
+    has_approval_callback: bool,
 ) -> tuple[str, str | None, Model | str, ModelSettings, list[ClassicFunctionTool]]:
     if type(agent) is not classic.Agent:
         raise _unsupported("agent subclasses")
@@ -133,7 +144,9 @@ def _capture_agent(
             raise _unsupported("non-function tools")
         if tool.is_enabled is not True:
             raise _unsupported("tool enablement")
-        if tool.needs_approval is not False:
+        if tool.needs_approval is not False and not (
+            tool.needs_approval is True and has_approval_callback
+        ):
             raise _unsupported("tool approvals")
         for name in ("tool_input_guardrails", "tool_output_guardrails"):
             if getattr(tool, name):
@@ -167,6 +180,7 @@ def _native_tool(
     agent: classic.Agent[Any],
     run_context: RunContextWrapper[Any],
     calls: dict[str, ResponseFunctionToolCall],
+    on_approval: Callable[[ClassicToolContext[Any]], Awaitable[Allow | Deny]] | None,
 ) -> FunctionTool[Any, Any, Any]:
     # RootModel carries the original JSON object; the Classic invoker owns its
     # schema validation, defaults, context injection and failure formatting.
@@ -183,21 +197,31 @@ def _native_tool(
         allow_nan=False,
     )
 
-    async def call(native: ToolContext[Any], *, root: dict[str, Any]) -> str:
+    def tool_context(native: ToolContext[Any]) -> ClassicToolContext[Any]:
         original = deepcopy(calls[native.call_id])
-        wrapper = ClassicToolContext(
+        return ClassicToolContext(
             run_context.context,
             run_context.usage,
-            tool.name,
+            original.name,
             native.call_id,
             original.arguments,
             tool_call=original,
             agent=agent,
             turn_input=deepcopy(run_context.turn_input),
         )
+
+    async def approve(native: ToolContext[Any]) -> Allow | Deny:
+        assert on_approval is not None
+        decision = await on_approval(tool_context(native))
+        if not isinstance(decision, (Allow, Deny)):
+            raise TypeError("SDKRunner on_approval must return Allow or Deny")
+        return decision
+
+    async def call(native: ToolContext[Any], *, root: dict[str, Any]) -> str:
+        wrapper = tool_context(native)
         # Classic synchronous decorators may own executor workers. Join the
         # complete invocation before propagating cancellation or retiring tools.
-        value = await _join(asyncio.ensure_future(invoke(wrapper, original.arguments)))
+        value = await _join(asyncio.ensure_future(invoke(wrapper, wrapper.tool_arguments)))
         if not isinstance(value, str):
             raise _unsupported("non-text function tool results")
         return value
@@ -212,7 +236,7 @@ def _native_tool(
             callback=call,
             context_parameter=inspect.Parameter("native", inspect.Parameter.POSITIONAL_ONLY),
             callback_timeout=None,
-            before=None,
+            before=approve if tool.needs_approval is True else None,
             after=None,
             context=run_context.context,
         )
@@ -323,7 +347,7 @@ def _response_bytes(response: ModelResponse, names: set[str], seen_calls: set[st
 
 
 class SDKRunner:
-    """Run one static Classic agent through a fresh native Session."""
+    """Run one static Classic agent through a single native turn."""
 
     @staticmethod
     async def run(
@@ -333,9 +357,50 @@ class SDKRunner:
         context: ContextT | None = None,
         max_turns: int = 10,
         model_provider: ModelProvider | None = None,
+        state: SessionState | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
+        resume: str | None = None,
+        reconciled_calls: Sequence[ReconciledCall] = (),
+        return_state: bool = False,
+        on_approval: Callable[[ClassicToolContext[ContextT]], Awaitable[Allow | Deny]]
+        | None = None,
     ) -> SDKRunResult[ContextT]:
+        """Submit new text with current Classic bindings and join native cleanup.
+
+        Restore idle portable state or reopen native storage by Session ID.
+        Set return_state to capture an idle portable checkpoint without storage.
+        A static tool approval can await a decision inside this invocation.
+        """
+        reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
+        if not isinstance(return_state, bool):
+            raise TypeError("return_state must be a bool")
+        if return_state and storage is not None:
+            raise ValueError("SDKRunner return_state cannot be combined with storage")
+        if on_approval is not None and not callable(on_approval):
+            raise TypeError("on_approval must be callable")
+        if state is not None:
+            if not isinstance(state, SessionState):
+                raise TypeError("state must be a SessionState")
+            # Keep the idle admission check and native opening on the same
+            # snapshot even if the caller edits nested state during startup.
+            state = state.model_copy(deep=True)
+            if (
+                state.native_continuation is not None
+                or state.pending_actions
+                or state.interrupted_thread_ids
+                or state.recovery is not None
+            ):
+                raise ValueError("SDKRunner requires idle native state without pending recovery")
+            metadata = state.root_metadata
+            if metadata is None or metadata.get("model") != _CARRIER_MODEL:
+                raise ValueError("SDKRunner requires state from a compatible native model profile")
+
         name, instructions, selected, settings, tools = _capture_agent(
-            starting_agent, input, max_turns, model_provider
+            starting_agent,
+            input,
+            max_turns,
+            model_provider,
+            has_approval_callback=on_approval is not None,
         )
         _check_loopback_route(os.environ, sys.platform, os.name)
         model = (
@@ -349,7 +414,8 @@ class SDKRunner:
         run_context = RunContextWrapper(context=context, usage=usage)
         current_calls: dict[str, ResponseFunctionToolCall] = {}
         native_tools = [
-            _native_tool(tool, starting_agent, run_context, current_calls) for tool in tools
+            _native_tool(tool, starting_agent, run_context, current_calls, on_approval)
+            for tool in tools
         ]
         carrier = _ResponseCarrier()
         session: Session[Any, str] | None = None
@@ -358,7 +424,11 @@ class SDKRunner:
         seen_calls: set[str] = set()
 
         async def prepare(
-            turn: Any, request: Any, *, preparation_index: int, recovery_attempt: int
+            turn: Turn[Any],
+            request: PreparedRequest,
+            *,
+            preparation_index: int,
+            recovery_attempt: int,
         ) -> None:
             nonlocal turns
             if not carrier.active or carrier.pending is not None or recovery_attempt != 0:
@@ -367,6 +437,11 @@ class SDKRunner:
                 raise MaxTurnsExceeded(f"Max turns ({max_turns}) exceeded")
             turns += 1
             translated = _input_items(request["input"])
+            # The projected request may also contain calls from the current
+            # turn. Reserve those IDs in addition to the full root history.
+            seen_calls.update(
+                item["call_id"] for item in translated if item["type"] == "function_call"
+            )
             input_snapshot = deepcopy(translated)
             response = await model.get_response(
                 system_instructions=instructions,
@@ -425,15 +500,29 @@ class SDKRunner:
                 name=name,
                 instructions=instructions or "",
                 tools=native_tools,
-                model="gpt-5.5",
+                model=_CARRIER_MODEL,
                 provider=provider,
             )
             session = await Session[ContextT | None, str]._open(
-                native_agent, context=context, _migration_transport=True
+                native_agent,
+                context=context,
+                state=state,
+                storage=storage,
+                resume=resume,
+                reconciled_calls=reconciliation,
+                _migration_transport=True,
             )
             session._fail_unhandled_questions = True
+            if state is not None or resume is not None:
+                # Native root records can outlive the context in a Model
+                # request. Never admit a recorded call ID as a new effect.
+                async for item in session.items():
+                    if item["type"] == "function_call":
+                        seen_calls.add(item["call_id"])
             turn = await session.submit(input, prepare_request=prepare)
             result = await turn.get_result()
+            if return_state:
+                result = replace(result, state=await session.save_state())
         except BaseException as error:
             carrier.retire()
             await _close_after_error(error, close)
@@ -441,4 +530,6 @@ class SDKRunner:
         else:
             carrier.retire()
             await close()
+            # The single terminal-success boundary for result projection
+            # and history consumers. The exact turn and cleanup have settled.
             return SDKRunResult(result.final_output, starting_agent, result)
