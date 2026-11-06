@@ -92,7 +92,8 @@ It needs no model credentials and makes no external model requests. Its scripted
 | Buffered semantic events | Use `SDKRunner.run_streamed()` inside async code |
 | Synchronous execution to completion | Unsupported |
 | Native persistence | Idle portable state, `LocalStorage`, and root-only `CustomStorage` |
-| Classic Session stores, conversation history input, Classic RunState, or same-turn continuation | Unsupported |
+| Classic Session stores | Pass `session` to read and append settled, uncompacted history. `OpenAIResponsesCompactionSession` works as a store. Use `agents.classic.Runner` for automatic compaction or opaque compacted history. |
+| Raw conversation history input, Classic RunState, or same-turn continuation | Unsupported |
 
 Unsupported Agent, tool, and model settings fail before provider resolution or model/tool execution. Fix the reported configuration or keep that workflow on `agents.classic.Runner`. Do not remove a guardrail or approval policy merely to make a workflow eligible.
 
@@ -162,6 +163,37 @@ SDKRunner submits only the root turn. After reopening a compatible local root, u
 
 If local storage reports an unknown tool outcome, check your application records. Pass verified `ReconciledCall` records as `reconciled_calls` when reopening the original profile. For custom storage, follow the backend's recovery contract. Use `CustomStorage.reconcile` to record a verified result before reopening. Keep the conversation closed until you can verify what happened. See the [native storage and recovery guide](docs/sdk/state.md#recover-after-interruption).
 
+## Continue a completed Classic Session
+
+Pass your existing `agents.classic.Session` to `SDKRunner.run()` or `SDKRunner.run_streamed()`. The selected Model receives the stored messages, reasoning, and complete function call pairs in order. Your new text follows that history. The native loop starts a fresh turn and executes tools for that turn only.
+
+A declared `SessionSettings.limit` bounds the stored history that SDKRunner sends to the Model. SDKRunner checks the complete store snapshot first and reserves every stored function call ID. It then takes the latest items in order and omits any function output whose call falls outside that window. With a limit of zero or less, the Model receives only the new input. If the snapshot reaches SDKRunner's read bound, the run stops before calling the Model.
+
+```python
+from agents.migration import SDKRunner
+
+result = await SDKRunner.run(
+    agent, "Continue where we left off.", session=existing_session, context=app_context
+)
+print(result.final_output)
+```
+
+Choose one persistence route per invocation. With `session`, omit `state`, `storage`, and `resume`, leave `reconciled_calls` empty, and keep `return_state=False`.
+
+SDKRunner waits for the turn and native cleanup to succeed. It then appends the new user input, eligible Model items, and matching function results in one call. Both the result and any buffered events wait for the write to succeed. The result's `input` includes the imported history and new user input. Its `new_items` contains only the items produced in this invocation.
+
+For `OpenAIConversationsSession`, SDKRunner follows Classic Runner's rules for item metadata. On replay, it strips `id` and `provider_data` from historical assistant messages. On append, it strips top-level `id` fields from messages and function items, preserves `call_id` values, and skips reasoning items that have neither a server ID nor encrypted content.
+
+SDKRunner uses `OpenAIResponsesCompactionSession` to read and append settled, uncompacted history. `agents.classic.Runner` handles automatic Responses compaction. Opaque compaction records can hide historical function call IDs, so SDKRunner rejects them even outside the Model's retrieval window. Use `agents.classic.Runner` to continue an already compacted conversation.
+
+Reopen the same store with the same session ID after restarting your application. Use different IDs for separate conversations. Your application owns the store and closes it according to the store's lifecycle. Run one request at a time for each conversation, or coordinate concurrent requests in your application. The Classic Session protocol reads and appends in separate operations.
+
+### Finish pending Classic work before moving it
+
+SDKRunner rejects incomplete function calls, unmatched outputs, and unknown effect records before invoking the Model. Finish a pending Classic `RunState` with its original Classic Runner. If a tool may already have run, verify and reconcile its outcome before continuing. A new Model response must use fresh function call IDs. Reusing a stored ID stops the run before any tool in that response executes.
+
+If you cancel during an append, SDKRunner waits for the write to settle. It then raises cancellation. A store may commit a write before reporting an error. SDKRunner makes one append attempt. After a write error or cancellation, check the store and any tool effects before retrying.
+
 ## Approve a static tool call
 
 Set `needs_approval=True` on a supported Classic function tool and pass an async `on_approval` callback. The callback receives the Classic tool context for the exact call. That context includes the original arguments and the input supplied to the Model. Return `Allow()` to dispatch the tool or `Deny(reason)` to record a tool failure the Model can read.
@@ -204,7 +236,7 @@ Generated native receipt IDs and history from earlier native turns stay with the
 
 ### Consume buffered events
 
-Call `SDKRunner.run_streamed()` inside an async function. It starts a task with the same options as `SDKRunner.run()`, including `on_approval` and the native persistence options.
+Call `SDKRunner.run_streamed()` inside an async function. It starts a task with the same options as `SDKRunner.run()`, including `on_approval`, `session`, and the native persistence options.
 
 ```python
 from agents.migration import SDKRunner
@@ -218,7 +250,7 @@ result = await stream.get_result()
 print(result.final_output)
 ```
 
-The iterator waits for the run to succeed and close its native Session. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `stream_events()` on a settled `SDKRunResult`. Use `agents.classic.Runner` for live Model events, raw provider frames, or token deltas.
+The iterator waits for the run to close its native Session and finish any Classic Session append. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `stream_events()` on a settled `SDKRunResult`. Use `agents.classic.Runner` for live Model events, raw provider frames, or token deltas.
 
 The iterator yields no events while `on_approval` waits for a decision. If the Model completes the turn after a denial, the iterator includes the recorded denial as a `tool_output` event.
 

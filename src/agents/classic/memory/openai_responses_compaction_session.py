@@ -31,6 +31,7 @@ from .session import (
 if TYPE_CHECKING:
     from ..run_context import RunContextWrapper
     from .session import Session
+    from .session_settings import SessionSettings
 
 logger = logging.getLogger("openai-agents.classic.openai.compaction")
 
@@ -90,11 +91,11 @@ def is_openai_model_name(model: str) -> bool:
 
 
 class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwareSession):
-    """Session decorator that triggers responses.compact when stored history grows.
+    """Session decorator for OpenAI Responses API compaction.
 
-    Works with OpenAI Responses API models only. Wraps any Session (except
-    OpenAIConversationsSession) and automatically calls the OpenAI responses.compact
-    API after each turn when the decision hook returns True.
+    Wraps any Session except ``OpenAIConversationsSession``. Compaction requires an OpenAI
+    Responses API model. With ``agents.classic.Runner``, the wrapper can automatically call
+    ``responses.compact`` after a turn when the decision hook returns ``True``.
 
     Automatic compaction matches stored history against the latest successful model
     exchange, preserving order and repeated occurrences. Native SQLite, async SQLite, and
@@ -160,6 +161,7 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
 
         self.session_id = session_id
         self.underlying_session = underlying_session
+        self._session_settings: SessionSettings | None = None
         self._client = client
         self.model = model
         self.compaction_mode = compaction_mode
@@ -183,6 +185,18 @@ class OpenAIResponsesCompactionSession(SessionABC, OpenAIResponsesCompactionAwar
         # append-to-compaction gap. A later wrapper mutation revokes that one
         # pending automatic replacement without inferring ownership from history.
         self._mutation_generation = 0
+
+    @property
+    def session_settings(self) -> SessionSettings | None:
+        """Expose the wrapper's retrieval limit or the underlying session's default."""
+        settings = self._session_settings
+        if settings is not None and settings.limit is not None:
+            return settings
+        return getattr(self.underlying_session, "session_settings", None)
+
+    @session_settings.setter
+    def session_settings(self, value: SessionSettings | None) -> None:
+        self._session_settings = value
 
     @property
     def _ignore_ids_for_matching(self) -> bool:
