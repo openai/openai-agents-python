@@ -10,6 +10,7 @@ import subprocess
 import sys
 from importlib.metadata import version
 from pathlib import Path
+from types import ModuleType
 from typing import get_origin, get_type_hints
 
 import pytest
@@ -216,6 +217,43 @@ def test_public_models_resolve_annotations_without_rebuilding() -> None:
         history=[],
     )
     assert SessionState.model_validate_json(state.model_dump_json()) == state
+
+
+def test_public_typed_dict_annotations_preserve_inheritance_and_qualifiers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from typing_extensions import NotRequired, Required
+
+    from _agents_codex._public import preserve_module_identity
+
+    implementation = ModuleType("_agents_codex._annotation_test")
+    public = ModuleType("agents._annotation_test")
+    monkeypatch.setitem(sys.modules, implementation.__name__, implementation)
+    monkeypatch.setitem(sys.modules, public.__name__, public)
+    exec(
+        """
+from __future__ import annotations
+from typing_extensions import NotRequired, ReadOnly, Required, TypedDict
+
+class Parent(TypedDict, total=False):
+    required: Required[int]
+    readonly: ReadOnly[str]
+
+class Child(Parent):
+    next: NotRequired[Child]
+""",
+        vars(implementation),
+    )
+    preserve_module_identity(vars(implementation), public.__name__)
+    parent, child = implementation.Parent, implementation.Child
+    public.Parent, public.Child = parent, child
+    assert parent.__module__ == child.__module__ == public.__name__
+    assert pickle.loads(pickle.dumps(child)) is child
+    assert get_type_hints(child, include_extras=True) == {
+        "required": Required[int],
+        "readonly": ReadOnly[str],
+        "next": NotRequired[child],
+    }
 
 
 def test_public_dataclass_values_round_trip_through_pickle() -> None:
