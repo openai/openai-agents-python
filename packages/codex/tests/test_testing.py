@@ -8,6 +8,7 @@ import json
 import socket
 import socketserver
 import threading
+from contextlib import closing
 from http.client import HTTPConnection
 from urllib.parse import urlsplit
 
@@ -539,3 +540,18 @@ async def test_peer_exit_joins_http_request_handler(monkeypatch, first_error):
         _ = peer.provider
     assert len(peer.requests) == 1
     peer.assert_exhausted()
+
+
+async def test_numeric_loopback_peer_serves_without_reverse_dns(monkeypatch):
+    def forbidden_lookup(*args, **kwargs):
+        raise AssertionError("Numeric loopback must not require reverse DNS")
+
+    monkeypatch.setattr(socket, "getfqdn", forbidden_lookup)
+    async with ScriptedResponses([text("local answer")]) as peer:
+        url = urlsplit(peer.provider.base_url)
+        with closing(HTTPConnection(url.hostname, url.port, timeout=2)) as connection:
+            connection.request("POST", "/v1/responses", body="{}")
+            response = connection.getresponse()
+            assert response.status == 200
+            assert b"local answer" in response.read()
+        assert len(peer.requests) == 1
