@@ -43,6 +43,7 @@ async def test_application_selects_one_project_before_opening_session(
     selected = Peer(
         call_result={
             "content": [
+                {"type": "text", "text": "project-a-text"},
                 {
                     "type": "resource",
                     "resource": {
@@ -51,8 +52,9 @@ async def test_application_selects_one_project_before_opening_session(
                         "_meta": {"private": "resource-private-marker"},
                     },
                     "_meta": {"private": "block-private-marker"},
-                }
+                },
             ],
+            "structuredContent": {},
             "_meta": {"private": "result-private-marker"},
         }
     )
@@ -67,7 +69,11 @@ async def test_application_selects_one_project_before_opening_session(
         AsyncExitStack() as connections,
     ):
         chosen = MCPServerStreamableHttp(
-            params={"url": selected_url, "headers": {"Authorization": "Bearer synthetic-project-a"}}
+            params={
+                "url": selected_url,
+                "headers": {"Authorization": "Bearer synthetic-project-a"},
+            },
+            use_structured_content=True,
         )
         other = MCPServerStreamableHttp(params={"url": unselected_url})
 
@@ -109,7 +115,9 @@ async def test_application_selects_one_project_before_opening_session(
             "required": ["key"],
             "additionalProperties": False,
         }
-        assert "project-a-receipt" in tool_output(continuation, "allowed")
+        output = tool_output(continuation, "allowed")
+        assert "project-a-text" in output
+        assert "project-a-receipt" in output
         assert "private-marker" not in str(continuation)
         assert selected.calls == [{"name": "search", "arguments": {"key": "43"}}]
         assert all(header == "Bearer synthetic-project-a" for header in selected.auth)
@@ -243,7 +251,7 @@ async def test_empty_and_filtered_selections_do_not_install_tools() -> None:
         assert peer.calls == []
 
 
-@pytest.mark.parametrize("policy", ["approval", "metadata", "guardrail"])
+@pytest.mark.parametrize("policy", ["approval", "metadata", "guardrail", "filter"])
 async def test_classic_execution_policies_are_rejected_before_authentication(policy: str) -> None:
     @tool_input_guardrail
     def guardrail(data):
@@ -251,6 +259,9 @@ async def test_classic_execution_policies_are_rejected_before_authentication(pol
 
     def metadata(context):
         pytest.fail("Classic metadata resolver should not run")
+
+    def filter_tool(context, tool):
+        pytest.fail("Classic filter should not run")
 
     async def authenticate(context):
         pytest.fail("Authentication should not start with unsupported Classic policies")
@@ -262,15 +273,24 @@ async def test_classic_execution_policies_are_rejected_before_authentication(pol
             require_approval="always" if policy == "approval" else None,
             tool_meta_resolver=metadata if policy == "metadata" else None,
             tool_input_guardrails=[guardrail] if policy == "guardrail" else None,
+            tool_filter=filter_tool if policy == "filter" else None,
         )
-        with pytest.raises(ValueError, match="Classic execution policies"):
-            await select_mcp_tools(
-                MCPNamespace("catalog", client, authenticate=authenticate), context=None
-            )
+        namespace = MCPNamespace("catalog", client, authenticate=authenticate)
+        assert await select_mcp_tools(namespace, context=None, tool_names=[]) == ()
+        error, message = (
+            (TypeError, "Callable MCP filters require filter_context")
+            if policy == "filter"
+            else (ValueError, "Classic execution policies")
+        )
+        with pytest.raises(error, match=message):
+            await select_mcp_tools(namespace, context=None, tool_names=["search"])
         assert not peer.requests
 
 
-async def test_selected_mcp_rejects_native_and_code_mode_identity_collisions() -> None:
+@pytest.mark.parametrize("code_mode", [False, True], ids=["native", "code-mode"])
+async def test_selected_mcp_rejects_native_and_code_mode_identity_collisions(
+    code_mode: bool,
+) -> None:
     borrowed, native = Peer(), Peer()
 
     @function_tool(name="mcp__catalog__search")
@@ -286,17 +306,18 @@ async def test_selected_mcp_rejects_native_and_code_mode_identity_collisions() -
         tools = await select_mcp_tools(
             MCPNamespace("mcp__catalog", client), context=None, tool_names=["search"]
         )
-        native_tool = HttpMCP(name="catalog", url=native_url, tools=("search",))
-        agent = Agent(instructions="Read.", tools=[*tools, native_tool])
-        with pytest.raises(ValueError, match="shares a ToolRef"):
-            async with agent.session():
-                pytest.fail("A colliding native MCP descriptor opened a Session")
-        agent = Agent(
-            instructions="Read.", tools=[*tools, flattened], programmatic_tool_calling=True
+        other_tool = (
+            flattened if code_mode else HttpMCP(name="catalog", url=native_url, tools=("search",))
         )
-        with pytest.raises(ValueError, match="collides with another code-mode tool name"):
+        agent = Agent(
+            instructions="Read.", tools=[*tools, other_tool], programmatic_tool_calling=code_mode
+        )
+        message = "collides with another code-mode tool name" if code_mode else "shares a ToolRef"
+        with pytest.raises(ValueError, match=message):
+            agent.validate()
+        with pytest.raises(ValueError, match=message):
             async with agent.session():
-                pytest.fail("A colliding code-mode identity opened a Session")
+                pytest.fail("A colliding identity opened a Session")
         assert not native.requests
         assert not borrowed.calls
 

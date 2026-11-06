@@ -129,8 +129,8 @@ async def select_mcp_tools(
     Session. Omit tool_names to select every tool that passes the client's filter,
     or pass exact peer names to select a subset. An explicit empty list selects
     nothing. A requested name that is missing or filtered out fails selection.
-    A callable Classic filter requires its actual (run_context, agent) pair,
-    with the same application context.
+    Discovery with a callable Classic filter requires its actual (run_context,
+    agent) pair, with the same application context.
 
     Selection and native Session cleanup leave connection ownership with the
     caller. Keep the client's authentication scope stable while its bindings are
@@ -158,6 +158,17 @@ async def select_mcp_tools(
             raise ValueError("MCP tool_names must be unique")
     if approval is not None and not callable(approval):
         raise TypeError("MCP approval must be callable")
+    if filter_context is not None:
+        run_context, agent = filter_context
+        if (
+            not isinstance(run_context, RunContextWrapper)
+            or run_context.context is not context
+            or not isinstance(agent, AgentBase)
+        ):
+            raise TypeError("MCP filter_context requires matching Classic run context and agent")
+    if requested == ():
+        return ()
+
     server = namespace.server
     classic_approval = server._needs_approval_policy
     requires_classic_approval = (
@@ -174,18 +185,8 @@ async def select_mcp_tools(
         raise ValueError(
             "Selected MCP tools cannot use Classic execution policies; use Classic Runner"
         )
-    if filter_context is not None:
-        run_context, agent = filter_context
-        if (
-            not isinstance(run_context, RunContextWrapper)
-            or run_context.context is not context
-            or not isinstance(agent, AgentBase)
-        ):
-            raise TypeError("MCP filter_context requires matching Classic run context and agent")
-    elif callable(getattr(server, "tool_filter", None)):
+    if filter_context is None and callable(getattr(server, "tool_filter", None)):
         raise TypeError("Callable MCP filters require filter_context")
-    if requested == ():
-        return ()
 
     call_tool = server.call_tool
     use_structured_content = server.use_structured_content
@@ -285,7 +286,7 @@ def _capture_tool(
 def _mcp_output(result: CallToolResult, use_structured_content: bool) -> ToolOutput:
     success = not result_is_error(result)
     structured = result_structured_content(result)
-    if success and use_structured_content and structured is not None:
+    if success and use_structured_content and structured:
         return ToolOutput.text(json.dumps(structured, allow_nan=False))
     items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] = []
     for block in result.content:

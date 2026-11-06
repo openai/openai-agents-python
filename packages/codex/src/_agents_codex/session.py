@@ -1385,13 +1385,20 @@ def _direct_tool_namespaces(
 
 def _check_namespaced_tool_collisions(
     tools: Sequence[FunctionTool[Any, Any, Any]],
-    other_refs: set[ToolRef],
+    mcp_names: Sequence[dict[str, str]],
+    available: Sequence[Tool[Any]],
     programmatic_tool_calling: bool,
+    *,
+    environment: Environment[Any] | None = None,
+    native_agents: NativeAgents | None = None,
 ) -> None:
     python_refs = {tool.ref for tool in tools}
     namespaced = {ref for ref in python_refs if ref.namespace is not None}
     if not namespaced:
         return
+    other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
+        available, False, environment, native_agents
+    )
     if namespaced & other_refs:
         raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
     if not programmatic_tool_calling:
@@ -1765,9 +1772,10 @@ class Session(Generic[ContextT, OutputT]):
         mcp_names = _tool_names(allowed_mcp)
         _check_namespaced_tool_collisions(
             allowed_tools,
-            {ToolRef(**item) for item in mcp_names}
-            | _fixed_tool_refs(available, False, None, native_agents),
+            mcp_names,
+            available,
             programmatic_tool_calling,
+            native_agents=native_agents,
         )
         model = agent.model
         catalog = _capture_tools(0, tools, context)
@@ -1850,9 +1858,11 @@ class Session(Generic[ContextT, OutputT]):
             if executor is not None and programmatic_tool_calling:
                 _check_namespaced_tool_collisions(
                     allowed_tools,
-                    {ToolRef(**item) for item in mcp_names}
-                    | _fixed_tool_refs(available, False, executor, native_agents),
-                    True,
+                    mcp_names,
+                    available,
+                    programmatic_tool_calling,
+                    environment=executor,
+                    native_agents=native_agents,
                 )
             if state is not None:
                 current_policy = executor._network_policy_digest() if executor is not None else None

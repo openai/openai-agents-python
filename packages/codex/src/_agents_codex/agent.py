@@ -470,10 +470,18 @@ class Agent(Generic[ContextT, OutputT]):
         """
         from .mcp import _tool_names
         from .schema import _prepare_spec
-        from .session import _split_tools
+        from .session import _check_namespaced_tool_collisions, _split_tools
 
-        python_tools, mcp_tools, _ = _split_tools(self.tools, self.programmatic_tool_calling)
-        _tool_names(mcp_tools)
+        python_tools, mcp_tools, native_agents = _split_tools(
+            self.tools, self.programmatic_tool_calling
+        )
+        _check_namespaced_tool_collisions(
+            python_tools,
+            _tool_names(mcp_tools),
+            self.tools,
+            self.programmatic_tool_calling,
+            native_agents=native_agents,
+        )
         native = importlib.import_module("agents._native")
         native._validate_python_tool_declarations(
             json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
