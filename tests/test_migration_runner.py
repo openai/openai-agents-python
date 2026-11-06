@@ -13,7 +13,11 @@ from threading import Event as ThreadEvent
 from typing import Any
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputMessage
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseReasoningItem,
+)
 from pydantic import BaseModel
 
 from agents import NativeError
@@ -616,6 +620,53 @@ async def test_validate_whole_response_before_any_tool_runs(invalid: str) -> Non
     model = ScriptedModel([call("greet"), bad])
     with pytest.raises((UserError, ModelBehaviorError)):
         await SDKRunner.run(Agent("Validate", model=model, tools=[greet]), "hello")
+    assert effects == []
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    ['{"value":"synthetic-private-argument"', '{"value":"synthetic-private-argument","x":1e999}'],
+)
+async def test_invalid_arguments_do_not_escape_in_exception_chain(arguments: str) -> None:
+    effects = []
+
+    @function_tool
+    def greet(value: str) -> str:
+        effects.append(value)
+        return value
+
+    model = ScriptedModel([call("greet"), call("greet", call_id="bad", arguments=arguments)])
+    with pytest.raises(ModelBehaviorError, match="JSON object function arguments") as raised:
+        await SDKRunner.run(Agent("Validate", model=model, tools=[greet]), "hello")
+    assert raised.value.__context__ is None
+    assert raised.value.__cause__ is None
+    assert "synthetic-private-argument" not in str(raised.value)
+    assert len(model.requests) == 1
+    assert effects == []
+
+
+@pytest.mark.parametrize("kind", ["function_call", "reasoning", "message"])
+@pytest.mark.parametrize("provider_data", [{"thought_signature": "synthetic-signature"}, {}])
+async def test_provider_replay_metadata_fails_before_any_tool_runs(
+    kind: str, provider_data: dict[str, str]
+) -> None:
+    effects = []
+
+    @function_tool
+    def greet(value: str) -> str:
+        effects.append(value)
+        return value
+
+    item = {
+        "function_call": call("greet", call_id="signed"),
+        "reasoning": ResponseReasoningItem(id="rs_signed", type="reasoning", summary=[]),
+        "message": message("signed"),
+    }[kind].model_copy(update={"provider_data": provider_data})
+    model = ScriptedModel([call("greet"), item], [message("must not continue")])
+    with pytest.raises(UserError, match="provider_data") as raised:
+        await SDKRunner.run(Agent("Validate", model=model, tools=[greet]), "hello")
+    assert "synthetic-signature" not in str(raised.value)
+    assert len(model.requests) == 1
     assert effects == []
 
 

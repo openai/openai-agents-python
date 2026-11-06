@@ -75,7 +75,7 @@ It needs no model credentials and makes no external model requests. Its scripted
 | --- | --- |
 | One base Classic Agent | Supported; Agent subclasses are unsupported |
 | Static instructions and string input | Supported |
-| Explicit Classic Model, or model name plus explicit ModelProvider | Supported |
+| Explicit Classic Model, or model name plus explicit ModelProvider | Supported within the response limits below |
 | Eager Classic function tools with text results | Supported; the original tool validates arguments and invokes its callback |
 | Application context | Supported; pass `context=...` |
 | Text final output | Supported |
@@ -98,6 +98,10 @@ Tool callbacks receive the application context, cumulative usage, original tool 
 Ordinary `ModelSettings`, such as temperature, maximum output tokens, reasoning, verbosity, and provider response storage, pass to your selected Model. The adapter rejects `retry`, `timeout`, `context_management`, `extra_query`, `extra_body`, `extra_headers`, and `extra_args` when they are not `None`. These settings can require runner behavior or replace request fields that the adapter must control.
 
 The adapter validates each Model response before delivering it to native execution. A custom Model must return completed text messages, function calls, or both; reasoning records may accompany them. Unsupported output fails the run; earlier Model calls and tool effects may already have occurred.
+
+Response items with `provider_data` are unsupported. Providers can use this field for replay data, such as Gemini thought signatures or provider-native thinking blocks, that the native loop cannot preserve. The adapter rejects the whole response before any of its tools run. Keep workflows that require this metadata on `agents.classic.Runner`.
+
+Keep `OpenAIChatCompletionsModel` workflows on Classic, including plain text runs: that adapter adds `provider_data` to its responses for provider provenance. Standard Responses reasoning fields, including `encrypted_content`, remain supported.
 
 The private transport allows at most 4 MiB for each native request body and each encoded response event sequence. This is a transport limit, not a model token allowance. Keep larger workflows on Classic or port them to the native API.
 

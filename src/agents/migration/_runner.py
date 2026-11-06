@@ -260,6 +260,8 @@ def _response_bytes(response: ModelResponse, names: set[str], seen_calls: set[st
     if not output:
         raise ModelBehaviorError("SDKRunner requires text or function calls in the model response")
     for item in output:
+        if "provider_data" in item:
+            raise _unsupported("model response provider_data")
         if item["type"] == "message":
             if (
                 item.get("status") != "completed"
@@ -285,9 +287,9 @@ def _response_bytes(response: ModelResponse, names: set[str], seen_calls: set[st
                 arguments = json.loads(item["arguments"])
                 json.dumps(arguments, allow_nan=False)
             except (ValueError, TypeError):
-                raise ModelBehaviorError(
-                    "SDKRunner requires JSON object function arguments"
-                ) from None
+                # Raise outside the handler so parser exceptions cannot retain
+                # private arguments through the propagated exception context.
+                arguments = None
             if not isinstance(arguments, dict):
                 raise ModelBehaviorError("SDKRunner requires JSON object function arguments")
         elif item["type"] != "reasoning":
