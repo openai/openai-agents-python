@@ -49,6 +49,7 @@ class Peer:
     denied: bool = False
     annotations: dict[str, bool] | None = field(default_factory=lambda: {"readOnlyHint": True})
     is_error: bool = False
+    call_result: dict[str, Any] | None = None
 
     async def handle(self, request: web.Request) -> web.Response:
         body = await request.json()
@@ -94,11 +95,15 @@ class Peer:
             self.call_entered.set()
             if self.release_call is not None:
                 await self.release_call.wait()
-            result = {
-                "content": [{"type": "text", "text": self.label}],
-                "structuredContent": {"receipt": self.label},
-                "isError": self.is_error,
-            }
+            result = (
+                self.call_result
+                if self.call_result is not None
+                else {
+                    "content": [{"type": "text", "text": self.label}],
+                    "structuredContent": {"receipt": self.label},
+                    "isError": self.is_error,
+                }
+            )
         else:
             result = {}
         return web.json_response({"jsonrpc": "2.0", "id": body["id"], "result": result})
