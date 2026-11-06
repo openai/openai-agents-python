@@ -24,6 +24,7 @@ from agents import (
     InputImage,
     InputText,
     LocalStorage,
+    ModelRequestContext,
     NativeAgents,
     NativeError,
     NativeGoal,
@@ -364,6 +365,23 @@ assert_type(Agent(instructions="Choose.", output_type=Choice), Agent[None, Choic
 assert_type(Agent(instructions="Return null.", output_type=type(None)), Agent[None, None])
 assert_type(Agent(instructions="Report.", output_type=NativeOutput(Answer)), Agent[None, Answer])
 assert_type(Agent(instructions="Report.", output_type=PromptedOutput(Answer)), Agent[None, Answer])
+
+
+async def project_context(request: ModelRequestContext[Application]) -> Sequence[dict[str, Any]]:
+    assert_type(request.context, Application)
+    assert_type(request.items, tuple[dict[str, Any], ...])
+    assert_type(request.purpose, Literal["turn", "compaction", "output_repair"])
+    return request.items
+
+
+assert_type(
+    Agent(instructions="Answer.", transform_context=project_context), Agent[Application, str]
+)
+assert_type(
+    Agent(instructions="Answer.", output_type=Answer, transform_context=project_context),
+    Agent[Application, Answer],
+)
+
 assert_type(Agent(instructions="Answer.").with_output_type(NativeOutput(int)), Agent[None, int])
 assert_type(
     Agent(instructions="Answer.").with_output_type(PromptedOutput(Answer)), Agent[None, Answer]

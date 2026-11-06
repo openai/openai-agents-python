@@ -111,6 +111,7 @@ from .mcp import (
     _result_policies as _result_policies,
     _tool_names as _tool_names,
 )
+from .model_context import ModelRequestContext
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -1482,6 +1483,7 @@ class Session(Generic[ContextT, OutputT]):
                 provider=agent.provider if provider is None else provider,
                 output_type=cast(OutputSpec[OutputT], agent.output_type),
                 programmatic_tool_calling=agent.programmatic_tool_calling,
+                transform_context=agent.transform_context,
             )
         codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
@@ -1927,6 +1929,7 @@ class Session(Generic[ContextT, OutputT]):
                 if hosted_verification is not None and chatgpt_apps is not None:
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
+                    "_transform_context": agent.transform_context is not None,
                     **(
                         {"parent_trace": parent_trace.to_headers()}
                         if parent_trace is not None
@@ -2432,6 +2435,7 @@ class Session(Generic[ContextT, OutputT]):
         self._owned_provider: NativeProvider | None = None
         self._agent: Agent[ContextT, OutputT] | None = None
         self._opening_agent: Agent[ContextT, OutputT] | None = None
+        self._context_transform_purpose: Literal["turn", "output_repair"] = "turn"
         self._model_api_key: str | None = None
         self._parent_trace: TraceContext | None = None
         self._codex_account: CodexAccount | None = None
@@ -5711,11 +5715,12 @@ class Session(Generic[ContextT, OutputT]):
                 if captured.get(key) is not None
             },
         )
-        declaration = Agent(
+        declaration = Agent[ContextT, str](
             instructions="Correct the supplied JSON to match its schema. Return only JSON.",
             provider=provider,
             model=captured["model"],
             model_settings=settings,
+            transform_context=self._opening_agent.transform_context,
         )
         for _ in range(state.output.max_retries):
             # The original native turn has already settled. Its owner can
@@ -5724,13 +5729,15 @@ class Session(Generic[ContextT, OutputT]):
                 raise asyncio.CancelledError()
             if state.failure.done():
                 raise state.failure.result()
-            repair = await Session._open(
+            repair = await Session[ContextT, str]._open(
                 declaration,
+                context=self._context,
                 _captured_api_key=self._model_api_key,
                 _expected_codex_login_binding=self._codex_login_binding,
                 parent_trace=state.parent_trace,
             )
             repair._trace_context = state.tracing.context if state.tracing is not None else None
+            repair._context_transform_purpose = "output_repair"
             repair._observations.repair_parent = (self._observations, handle.submission_id)
             repair._rate_limit_parent = self
             try:
@@ -6356,6 +6363,82 @@ class Session(Generic[ContextT, OutputT]):
                 if not state.stopping and not state.failure.done():
                     state.failure.set_result(NativeError("Prepared request expired"))
 
+    async def _transform_context(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        with _owned_span("context callback", "callback", message.get("tracing_context")) as tracing:
+            await self._transform_context_body(state, message)
+            if tracing is not None and state.failure.done():
+                tracing.set_outcome(status="error", category="callback_error")
+
+    async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def active() -> bool:
+            if (
+                state.stopping
+                or state.failure.done()
+                or isinstance(state, _Submission)
+                and self._active is not state
+                or isinstance(state, _ChildCallbacks)
+                and state.completion.done()
+            ):
+                return False
+            try:
+                self._native._check_step(message["step_id"], message["thread"], message["instance"])
+            except RuntimeError:
+                return False
+            return True
+
+        replied = False
+        guard = _Invocation(self)
+        token = _invocation.set(guard)
+        try:
+            if not active():
+                return
+            assert self._opening_agent is not None
+            callback = self._opening_agent.transform_context
+            if callback is None:
+                raise NativeError("Model context callback has no application owner")
+            request = ModelRequestContext(
+                context=cast(ContextT, self._context),
+                items=tuple(message["items"]),
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                subagent_id=message["thread"] if message["instance"] is not None else None,
+                request_id=str(message["step_id"]),
+                model=message["model"],
+                purpose=(
+                    "compaction"
+                    if message["purpose"] == "compaction"
+                    else self._context_transform_purpose
+                ),
+            )
+            replacement = await _call_callback(callback, active, request)
+            if not active():
+                return
+            if replacement is not None and (
+                not isinstance(replacement, Sequence)
+                or isinstance(replacement, (str, bytes, bytearray))
+            ):
+                raise TypeError("transform_context must return input items or None")
+            items_json = json.dumps(
+                list(replacement) if replacement is not None else None, allow_nan=False
+            )
+            self._native._reply_context(
+                message["step_id"], items_json, message["thread"], message["instance"]
+            )
+            replied = True
+        except BaseException as error:
+            if not state.stopping and not state.failure.done():
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            if not replied:
+                with suppress(RuntimeError):
+                    self._native._reply_context(
+                        message["step_id"], None, message["thread"], message["instance"]
+                    )
+
     async def _select_step(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("step callback", "callback", message.get("tracing_context")) as tracing:
             await self._select_step_body(state, message)
@@ -6580,7 +6663,10 @@ class Session(Generic[ContextT, OutputT]):
                             )
                             child.failure.set_result(_model_failure_error(message))
                     continue
-                if message.get("type") == "_sdk_select_step" and message["thread"] != self.id:
+                if (
+                    message.get("type") in {"_sdk_select_step", "_sdk_transform_context"}
+                    and message["thread"] != self.id
+                ):
                     try:
                         self._native._check_step(
                             message["step_id"], message["thread"], message["instance"]
@@ -6590,7 +6676,12 @@ class Session(Generic[ContextT, OutputT]):
                     child = self._child_callback_state(
                         message["thread"], message["instance"], message["turn_id"]
                     )
-                    child.add_callback(asyncio.create_task(self._select_step(child, message)))
+                    callback = (
+                        self._transform_context
+                        if message["type"] == "_sdk_transform_context"
+                        else self._select_step
+                    )
+                    child.add_callback(asyncio.create_task(callback(child, message)))
                     continue
                 marker = message.get("_sdk_python_tool")
                 if marker is not None and marker["thread"] != self.id:
@@ -6782,6 +6873,8 @@ class Session(Generic[ContextT, OutputT]):
                 elif kind == "_sdk_select_step":
                     task = asyncio.create_task(self._select_step(state, message))
                     state.add_callback(task)
+                elif kind == "_sdk_transform_context":
+                    state.add_callback(asyncio.create_task(self._transform_context(state, message)))
                 elif kind == "token_count" and event["id"] == handle.turn_id:
                     self._observe_progress(event, handle, self.id)
                 elif (

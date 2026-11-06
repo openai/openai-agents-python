@@ -231,7 +231,11 @@
     {
       "path": "0051-terminal-authentication-retry.patch",
       "sha256": "d99ab93a7335f674875d1b9dfa5ec2406f6a9752b31c560a536ee840b87263d3"
+    },
+    {
+      "path": "0054-model-context-transform.patch",
+      "sha256": "6639ee84450ec3bd9f9915db2dc852e6a63c9bddb08b446cb07f4680597d05b0"
     }
   ],
-  "result_tree": "98e03aa3d38e9611ff19624d23fee637f20793cf"
+  "result_tree": "b4646ba06693042c09248f5e2e9dcf07c78352c4"
 }

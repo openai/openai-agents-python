@@ -517,6 +517,7 @@ pub struct Control {
     stopped: CancellationToken,
     creation_tracing: OnceLock<Option<Arc<codex_otel::sdk_trace::ContextLease>>>,
     direct_turn: Mutex<Option<Arc<DirectTurn>>>,
+    context_tools: OnceLock<Weak<crate::python_tools::PythonTools>>,
     // Only links to wrapper sessions this exact thread has used; never a host-wide
     // cell index. The sessions own cells, so this direction must stay weak.
     code_mode_sessions: Mutex<Vec<Weak<Session>>>,
@@ -547,6 +548,10 @@ struct PendingCodeImport {
 }
 
 impl Control {
+    pub(crate) fn bind_context_tools(&self, tools: &Arc<crate::python_tools::PythonTools>) {
+        let _ = self.context_tools.set(Arc::downgrade(tools));
+    }
+
     pub(crate) fn creation_tracing(&self) -> Option<Arc<codex_otel::sdk_trace::ContextLease>> {
         self.creation_tracing.get().cloned().flatten()
     }
@@ -617,6 +622,7 @@ impl Control {
             stopped: CancellationToken::new(),
             creation_tracing: OnceLock::new(),
             direct_turn: Mutex::new(None),
+            context_tools: OnceLock::new(),
             code_mode_sessions: Mutex::default(),
             pending_code_import: Mutex::default(),
             expiry_cleanup: TaskTracker::new(),
@@ -654,6 +660,7 @@ impl Control {
             stopped,
             creation_tracing: OnceLock::new(),
             direct_turn: Mutex::new(None),
+            context_tools: OnceLock::new(),
             code_mode_sessions: Mutex::default(),
             pending_code_import: Mutex::default(),
             expiry_cleanup: TaskTracker::new(),
@@ -2051,6 +2058,26 @@ impl TurnLifecycleContributor for Boundary {
 }
 
 impl ModelRequestContributor for Boundary {
+    fn transforms_context(&self, thread_id: &str) -> bool {
+        self.context_tools(thread_id)
+            .is_some_and(|tools| tools.transforms_context())
+    }
+
+    fn transform_context<'a>(
+        &'a self,
+        input: codex_extension_api::ModelContextInput<'a>,
+    ) -> ExtensionFuture<'a, std::result::Result<(), String>> {
+        Box::pin(async move {
+            let tools = self
+                .context_tools(input.thread_id)
+                .ok_or_else(|| "Expired model context owner".to_owned())?;
+            tools
+                .transform_context(input)
+                .await
+                .map_err(|_| "Model context transformation failed".to_owned())
+        })
+    }
+
     fn request(&self, input: ModelRequestInput<'_>) -> Option<Box<dyn ModelResponseInterceptor>> {
         let control = self
             .threads
@@ -2078,6 +2105,17 @@ impl ModelRequestContributor for Boundary {
 }
 
 impl Boundary {
+    fn context_tools(&self, thread_id: &str) -> Option<Arc<crate::python_tools::PythonTools>> {
+        self.threads
+            .lock()
+            .expect("interception index poisoned")
+            .get(thread_id)?
+            .upgrade()?
+            .context_tools
+            .get()?
+            .upgrade()
+    }
+
     pub(crate) fn response_admission(
         &self,
         thread: &str,
