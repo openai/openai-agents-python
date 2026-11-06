@@ -22,7 +22,7 @@ To start without model credentials, choose a [scripted recipe](../../docs/sdk/re
 
 ## Migrate a v0 workflow
 
-The source-only [migration example](migration.py) runs Classic function tools through the experimental `agents.migration.SDKRunner`. It uses a scripted Model and needs no model credentials. Follow the [migration guide](../../MIGRATION.md) for matching-source installation and supported features, then run `python examples/codex/migration.py` from the repository root.
+The source-only [migration example](migration.py) runs Classic function tools through the experimental `agents.migration.SDKRunner`. It uses a scripted Model and needs no model credentials. Follow the [migration guide](../../MIGRATION.md) for matching-source installation and supported features, then run `python examples/codex/migration.py` from the repository root. The [application Model example](migration_models.py) selects a named Model through an application provider. Run it with `--stream` to observe live Model events while the native loop executes the tools.
 
 ## Choose an agent task
 
