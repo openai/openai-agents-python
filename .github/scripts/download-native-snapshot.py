@@ -44,7 +44,7 @@ def main():
             artifact_id,
             digest,
             os.environ["NATIVE_SOURCE_RUN"],
-            "native-snapshot-" + identity,
+            selected["name"],
             archive,
         )
         with ZipFile(archive) as bundle:

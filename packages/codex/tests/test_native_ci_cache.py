@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
+import py_compile
 import re
+import shlex
+import shutil
 import subprocess
+import sys
 from fnmatch import fnmatchcase
 from pathlib import Path
 from zipfile import ZipFile
@@ -74,6 +79,257 @@ def _condition(expression: str, values: dict[str, str]) -> bool:
             {"__builtins__": {}},
         )
     )
+
+
+def test_native_provenance_command_ignores_checkout_imports(tmp_path: Path) -> None:
+    step = next(step for step in _steps() if step.get("id") == "producer-identity")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "pathlib.py").write_text("raise RuntimeError('CHECKOUT_IMPORT_MARKER')\n")
+    output = tmp_path / "output"
+    captured = json.dumps({"run_id": "123"})
+    env = os.environ.copy()
+    for key in ("PYTHONSAFEPATH", "PYTHONPATH", "PYTHONHOME"):
+        env.pop(key, None)
+    env.update(
+        PATH=str(Path(sys.executable).parent) + os.pathsep + env["PATH"],
+        GITHUB_EVENT_NAME="push",
+        CALLER_WORKFLOW_REF="example/repo/.github/workflows/tests.yml@refs/heads/feature",
+        GITHUB_REPOSITORY="example/repo",
+        NATIVE_PROVENANCE=captured,
+        GITHUB_OUTPUT=str(output),
+    )
+    command = [workflow_bash(ROOT), "-e", "-c"]
+    result = subprocess.run(
+        [*command, step["run"]], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "dist/native-provenance.json").read_text() == captured
+    unsafe = step["run"].replace("python -I -S ", "python -S ", 1)
+    result = subprocess.run(
+        [*command, unsafe], cwd=tmp_path, env=env, capture_output=True, text=True
+    )
+    assert result.returncode != 0
+    assert "CHECKOUT_IMPORT_MARKER" in result.stderr
+
+
+@pytest.mark.parametrize("script", ["native-dependencies.py", "download-native-snapshot.py"])
+def test_native_helper_commands_ignore_script_directory_imports(
+    tmp_path: Path, script: str
+) -> None:
+    step = next(
+        step for step in _steps() if f"python -I -S .github/scripts/{script}" in step.get("run", "")
+    )
+    directory = tmp_path / ".github/scripts"
+    directory.mkdir(parents=True)
+    (directory / script).write_bytes((ROOT / ".github/scripts" / script).read_bytes())
+    (directory / "pathlib.py").write_text("raise RuntimeError('CHECKOUT_IMPORT_MARKER')\n")
+    run = step["run"].replace(" restore", " --help")
+    env = os.environ.copy()
+    for key in ("PYTHONSAFEPATH", "PYTHONPATH", "PYTHONHOME"):
+        env.pop(key, None)
+    env.update(
+        PATH=str(Path(sys.executable).parent) + os.pathsep + env["PATH"],
+        RUNNER_OS="Linux",
+        RUNNER_ARCH="X64",
+        NATIVE_ARTIFACTS="{}",
+    )
+    command = [workflow_bash(ROOT), "-e", "-c"]
+    result = subprocess.run([*command, run], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert "CHECKOUT_IMPORT_MARKER" not in result.stderr
+    if script == "native-dependencies.py":
+        assert result.returncode == 0, result.stderr
+    else:
+        assert result.returncode != 0 and "Linux-X64" in result.stderr
+    result = subprocess.run(
+        [*command, run.replace("python -I -S ", "python -S ", 1)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "CHECKOUT_IMPORT_MARKER" in result.stderr
+
+
+@pytest.mark.parametrize("workflow", ["codex-python.yml", "codex-python-qualify.yml"])
+@pytest.mark.parametrize(
+    ("config", "symlink"),
+    [
+        (None, False),
+        (".python-version", False),
+        ("uv.toml", False),
+        (".venv", False),
+        (".python-version", True),
+        ("uv.toml", True),
+        (".venv", True),
+    ],
+)
+def test_native_build_configuration_is_rejected_before_uv(
+    tmp_path: Path, workflow: str, config: str | None, symlink: bool
+) -> None:
+    steps = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]["build"]["steps"]
+    guard = next(step for step in steps if step.get("name") == "Reject unbound build inputs")
+    assert steps.index(guard) == 1 and "actions/checkout@" in steps[0]["uses"]
+    if config:
+        path = tmp_path / config
+        if symlink:
+            try:
+                path.symlink_to(tmp_path / "missing")
+            except OSError as error:
+                pytest.skip(f"Cannot create symlink: {error}")
+        else:
+            path.write_text("unsupported override")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    reached_uv = tmp_path / "reached-uv"
+    result = subprocess.run(
+        [workflow_bash(ROOT), "-e", "-c", guard["run"] + "\nprintf ready > reached-uv\n"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert reached_uv.exists() is (config is None)
+    if config:
+        assert result.returncode != 0 and config in result.stderr
+    else:
+        assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="The benign interpreter fixture uses a POSIX script.")
+@pytest.mark.parametrize("workflow", ["codex-python.yml", "codex-python-qualify.yml"])
+def test_native_guard_blocks_checkout_venv_before_uv(tmp_path: Path, workflow: str) -> None:
+    uv = shutil.which("uv")
+    if uv is None:
+        pytest.skip("uv is unavailable")
+    steps = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]["build"]["steps"]
+    guard = next(step for step in steps if step.get("name") == "Reject unbound build inputs")
+    executable = tmp_path / ".venv/bin/python"
+    executable.parent.mkdir(parents=True)
+    executable.write_text(
+        '#!/bin/sh\nprintf marker > "$(dirname "$0")/../../venv-marker"\nexit 1\n'
+    )
+    executable.chmod(0o755)
+    (tmp_path / ".venv/pyvenv.cfg").write_text(f"home = {Path(sys.executable).parent}\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="probe"\nversion="0.0.0"\n'
+        '[build-system]\nrequires=[]\nbuild-backend="nonexistent"\n'
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    env = os.environ.copy()
+    for key in ("VIRTUAL_ENV", "CONDA_PREFIX", "UV_PYTHON", "PYTHONPATH", "PYTHONHOME"):
+        env.pop(key, None)
+    env["UV_CACHE_DIR"] = str(tmp_path.with_name(tmp_path.name + "-cache"))
+    command = [uv, "build", "--sdist", "--offline", "--no-python-downloads", "--no-managed-python"]
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True)
+    marker = tmp_path / "venv-marker"
+    assert marker.exists(), result.stderr
+    marker.unlink()
+    result = subprocess.run(
+        [workflow_bash(ROOT), "-e", "-c", guard["run"] + "\n" + shlex.join(command)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and ".venv" in result.stderr
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("workflow", ["codex-python.yml", "codex-python-qualify.yml"])
+@pytest.mark.parametrize(
+    ("name", "symlink"),
+    [
+        ("root.pyc", False),
+        ("deep/module.pyo", False),
+        ("deep/__pycache__/payload.bin", False),
+        ("deep/module.PYC", False),
+        pytest.param(
+            "odd\n'$(touch unsafe)/module.pyc",
+            False,
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows forbids newlines in paths."),
+        ),
+        ("__pycache__", True),
+        ("deep/__PyCache__", True),
+    ],
+)
+def test_native_guard_rejects_tracked_bytecode_paths(
+    tmp_path: Path, workflow: str, name: str, symlink: bool
+) -> None:
+    steps = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]["build"]["steps"]
+    guard = next(step for step in steps if step.get("name") == "Reject unbound build inputs")
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if symlink:
+        try:
+            path.symlink_to(tmp_path / "missing")
+        except OSError as error:
+            pytest.skip(f"Cannot create symlink: {error}")
+    else:
+        path.write_bytes(b"tracked generated input")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "--", name], check=True)
+    result = subprocess.run(
+        [workflow_bash(ROOT), "-e", "-c", guard["run"] + "\nprintf ready > reached-uv\n"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "tracked Python bytecode" in result.stderr
+    assert not (tmp_path / "reached-uv").exists()
+    assert not (tmp_path / "unsafe").exists()
+
+
+@pytest.mark.parametrize("workflow", ["codex-python.yml", "codex-python-qualify.yml"])
+def test_native_guard_blocks_unchecked_bytecode_before_import(
+    tmp_path: Path, workflow: str
+) -> None:
+    steps = yaml.load((ROOT / ".github/workflows" / workflow).read_text(), Loader=yaml.BaseLoader)[
+        "jobs"
+    ]["build"]["steps"]
+    guard = next(step for step in steps if step.get("name") == "Reject unbound build inputs")
+    symbols = next(
+        step for step in _steps() if step.get("name") == "Verify macOS executable symbol resolution"
+    )
+    source = tmp_path / "packages/codex/scripts/native_helpers.py"
+    source.parent.mkdir(parents=True)
+    source.write_bytes((ROOT / "packages/codex/scripts/native_helpers.py").read_bytes())
+    payload = tmp_path / "payload.py"
+    payload.write_text("raise RuntimeError('CHECKOUT_BYTECODE_MARKER')\n")
+    cache = Path(importlib.util.cache_from_source(str(source)))
+    cache.parent.mkdir()
+    py_compile.compile(
+        str(payload),
+        cfile=str(cache),
+        invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH,
+    )
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "--", str(cache)], check=True)
+    env = dict(os.environ, PATH=str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"])
+    result = subprocess.run(
+        [workflow_bash(ROOT), "-e", "-c", guard["run"] + "\n" + symbols["run"]],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0 and "tracked Python bytecode" in result.stderr
+    assert "CHECKOUT_BYTECODE_MARKER" not in result.stderr
+
+
+def test_native_guard_fails_closed_without_git_inventory(tmp_path: Path) -> None:
+    guard = next(step for step in _steps() if step.get("name") == "Reject unbound build inputs")
+    result = subprocess.run(
+        [workflow_bash(ROOT), "-e", "-c", guard["run"] + "\nprintf ready > reached-uv\n"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert not (tmp_path / "reached-uv").exists()
 
 
 @pytest.mark.parametrize(
@@ -342,7 +598,17 @@ def test_qualification_repack_receives_verified_overlay_in_its_environment(
 
 @pytest.mark.parametrize(
     "scenario",
-    ["valid", "digest", "metadata", "missing", "traversal", "duplicate", "tool_error", "inventory"],
+    [
+        "valid",
+        "digest",
+        "metadata",
+        "name",
+        "missing",
+        "traversal",
+        "duplicate",
+        "tool_error",
+        "inventory",
+    ],
 )
 def test_snapshot_download_checks_exact_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scenario: str
@@ -370,7 +636,14 @@ def test_snapshot_download_checks_exact_publication(
         "NATIVE_SOURCE_RUN": "123",
         "GITHUB_REPOSITORY": "openai/openai-agents-python",
         "NATIVE_ARTIFACTS": json.dumps(
-            {"Linux-X64": {"id": 456, "digest": digest, "provenance": {"source_sha": "fixture"}}}
+            {
+                "Linux-X64": {
+                    "id": 456,
+                    "digest": digest,
+                    "provenance": {"source_sha": "fixture"},
+                    "name": "native-snapshot-Linux-X64",
+                }
+            }
         ),
         "SNAPSHOT_DIRECTORY": str(tmp_path / "snapshot"),
     }.items():
@@ -383,7 +656,9 @@ def test_snapshot_download_checks_exact_publication(
         return json.dumps(
             {
                 "workflow_run": {"id": 999 if scenario == "metadata" else 123},
-                "name": "native-snapshot-Linux-X64",
+                "name": "different-native-snapshot"
+                if scenario == "name"
+                else "native-snapshot-Linux-X64",
                 "expired": False,
                 "digest": digest,
             }
