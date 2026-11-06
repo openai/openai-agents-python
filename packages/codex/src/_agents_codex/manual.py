@@ -42,7 +42,7 @@ if TYPE_CHECKING:
     from .native_agents import ChildInvocation
     from .session import Session
     from .telemetry import SpanContext
-    from .tools import ToolCallInfo
+    from .tools import ToolCallInfo, ToolRef
     from .turn import Turn
 
 
@@ -865,6 +865,10 @@ class _CapturedManual:
         response = value if isinstance(value, ToolOutput) else ToolOutput.text(text)
         response._validate()
         return json.dumps(response.to_native())
+
+    @property
+    def _ref(self) -> ToolRef:
+        return self.declaration.ref
 
     def request(
         self,

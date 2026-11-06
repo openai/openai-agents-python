@@ -1138,7 +1138,7 @@ def _split_tools(
                 current = next(
                     item
                     for item in available
-                    if isinstance(item, FunctionTool) and item.name == declaration.name
+                    if isinstance(item, FunctionTool) and item.ref == declaration.ref
                 )
                 admitted[declaration.ref] = current
             elif isinstance(declaration, (StdioMCP, HttpMCP)):
@@ -1226,15 +1226,21 @@ def _split_tools(
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         if isinstance(tool, FunctionTool):
-            if has_checklist and tool.name == "update_plan":
+            if has_checklist and tool.ref == ToolRef("update_plan"):
                 raise ValueError("Checklist reserves the tool name update_plan")
-            if has_goals and tool.name in ("create_goal", "get_goal", "update_goal"):
-                raise ValueError("NativeGoals reserves create_goal, get_goal and update_goal")
-            if programmatic_tool_calling and tool.name in ("exec", "wait"):
-                raise ValueError("programmatic_tool_calling reserves the tool names exec and wait")
-            if available is not None and any(
-                previous.name == tool.name for previous in python_tools
+            if (
+                has_goals
+                and tool.ref.namespace is None
+                and tool.name in ("create_goal", "get_goal", "update_goal")
             ):
+                raise ValueError("NativeGoals reserves create_goal, get_goal and update_goal")
+            if (
+                programmatic_tool_calling
+                and tool.ref.namespace is None
+                and tool.name in ("exec", "wait")
+            ):
+                raise ValueError("programmatic_tool_calling reserves the tool names exec and wait")
+            if available is not None and any(previous.ref == tool.ref for previous in python_tools):
                 raise CapabilityError("Operation tools must select distinct captured slots")
             python_tools.append(tool)
         elif isinstance(tool, (StdioMCP, HttpMCP)):
@@ -1319,6 +1325,101 @@ def _capture_tools(
         generation,
         tuple(tool._capture(context) for tool in tools),
     )
+
+
+def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    if spec.get("type") == "namespace":
+        tools = spec.get("tools")
+        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+            return None
+        namespace = spec.get("name")
+        name = tools[0].get("name")
+        if isinstance(namespace, str) and isinstance(name, str):
+            return ToolRef(name, namespace)
+    else:
+        name = spec.get("name")
+        if isinstance(name, str):
+            return ToolRef(name)
+    return None
+
+
+def _restore_python_catalog(
+    catalog: _ToolCatalog, specs: Sequence[Mapping[str, Any]]
+) -> _ToolCatalog:
+    # Use saved order with current bindings. Native rejects unknown or duplicate
+    # specs when comparing the complete catalogs.
+    by_ref = {tool._ref: tool for tool in catalog.tools}
+    refs = dict.fromkeys(map(_saved_python_ref, specs))
+    return _ToolCatalog(
+        catalog.generation, tuple(by_ref[ref] for ref in refs if ref is not None and ref in by_ref)
+    )
+
+
+def _restore_operation_slots(
+    catalog: _ToolCatalog,
+    selected: Sequence[FunctionTool[Any, Any, Any]],
+    pending_names: Sequence[str],
+) -> tuple[int, ...]:
+    available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
+    if any(tool.ref not in available for tool in selected):
+        raise ValueError("Saved operation names tools outside its native generation")
+    manual_names = {tool.name for tool in selected if tool._bind is None}
+    if any(name not in manual_names for name in pending_names):
+        raise ValueError("Saved operation does not admit its pending manual tools")
+    return tuple(available[tool.ref] for tool in selected)
+
+
+def _direct_tool_namespaces(
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    mcp: tuple[_MCP[Any], ...],
+    collaboration: bool,
+) -> list[str]:
+    namespaces = {
+        name["namespace"] for name in _tool_names(tuple(s for s in mcp if not s.defer_loading))
+    }
+    namespaces.update(ref.namespace for tool in tools if (ref := tool.ref).namespace is not None)
+    if collaboration:
+        namespaces.add("collaboration")
+    return ["functions", *sorted(namespaces - {"functions"})]
+
+
+def _check_namespaced_tool_collisions(
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    mcp_names: Sequence[dict[str, str]],
+    available: Sequence[Tool[Any]],
+    programmatic_tool_calling: bool,
+    *,
+    environment: Environment[Any] | None = None,
+    native_agents: NativeAgents | None = None,
+) -> None:
+    python_refs = {tool.ref for tool in tools}
+    namespaced = {ref for ref in python_refs if ref.namespace is not None}
+    if not namespaced:
+        return
+    other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
+        available, False, environment, native_agents
+    )
+    if namespaced & other_refs:
+        raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
+    if not programmatic_tool_calling:
+        return
+
+    # Core exposes generated-code tools as JavaScript identifiers and keeps the
+    # first tool if two identities project to the same identifier.
+    by_name: dict[str, ToolRef] = {}
+    for ref in python_refs | other_refs:
+        if ref.namespace == "collaboration":
+            continue  # Core keeps this namespace direct-only.
+        name = ref.name
+        if ref.namespace not in (None, "functions"):
+            separator = "" if ref.namespace.endswith("_") or name.startswith("_") else "__"
+            name = ref.namespace + separator + name
+        name = re.sub(r"^[^A-Za-z_$]|[^A-Za-z0-9_$]", "_", name) or "_"
+        if name in {"exec", "wait"}:
+            continue
+        previous = by_name.setdefault(name, ref)
+        if ref != previous and (ref in namespaced or previous in namespaced):
+            raise ValueError("A selected MCP tool collides with another code-mode tool name")
 
 
 def _same_opening_tools(left: Sequence[Tool[Any]], right: Sequence[Tool[Any]]) -> bool:
@@ -1669,6 +1770,13 @@ class Session(Generic[ContextT, OutputT]):
                 )
         output = _prepare_spec(agent.output_type)
         mcp_names = _tool_names(allowed_mcp)
+        _check_namespaced_tool_collisions(
+            allowed_tools,
+            mcp_names,
+            available,
+            programmatic_tool_calling,
+            native_agents=native_agents,
+        )
         model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
@@ -1679,20 +1787,7 @@ class Session(Generic[ContextT, OutputT]):
             and saved.managed_tool_specs is not None
             and (native_agents is not None or not manual_restore)
         ):
-            # The saved idle or native child generation may be a subset.
-            # Rebuild its import specs from current bindings in saved order. Native still
-            # compares full schemas, modes and manual slots, so unknown or
-            # duplicate saved declarations cannot become trusted grants.
-            names = [spec.get("name") for spec in saved.managed_tool_specs]
-            catalog = _ToolCatalog(
-                0,
-                tuple(
-                    sorted(
-                        (tool for tool in bound_tools if tool.name in names),
-                        key=lambda tool: names.index(tool.name),
-                    )
-                ),
-            )
+            catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
         # Carry the owned root's exact contract through this checked restore.
         # The opening default still applies to the next explicit request.
         restored_output = selected.output if selected is not None and manual_restore else output
@@ -1760,6 +1855,15 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if executor is not None and programmatic_tool_calling:
+                _check_namespaced_tool_collisions(
+                    allowed_tools,
+                    mcp_names,
+                    available,
+                    programmatic_tool_calling,
+                    environment=executor,
+                    native_agents=native_agents,
+                )
             if state is not None:
                 current_policy = executor._network_policy_digest() if executor is not None else None
                 if saved.network_policy_digest != current_policy:
@@ -1811,16 +1915,12 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if set(restored_operation_refs) != set(saved.operation_tools):
                     raise ValueError("Saved operation does not describe a canonical tool subset")
-                available_slots = {tool.name: slot for slot, tool in enumerate(catalog.tools)}
-                if any(tool.name not in available_slots for tool in selected_python):
-                    raise ValueError("Saved operation names tools outside its native generation")
-                operation_slots = tuple(available_slots[tool.name] for tool in selected_python)
                 assert continuation is not None
-                selected_names = {tool.name for tool in selected_python}
-                if any(
-                    pending.tool not in selected_names for pending in continuation.pending_manual
-                ):
-                    raise ValueError("Saved operation does not admit its pending manual tools")
+                operation_slots = _restore_operation_slots(
+                    catalog,
+                    selected_python,
+                    [pending.tool for pending in continuation.pending_manual],
+                )
             # Capture bindings at opening; acquire only a promoted operation's
             # selected servers. A manual restore already owns admitted work.
             if not manual_restore:
@@ -1932,22 +2032,11 @@ class Session(Generic[ContextT, OutputT]):
                         "direct_only_tool_namespaces": (
                             ["collaboration"]
                             if programmatic_tool_calling
-                            else [
-                                "functions",
-                                *sorted(
-                                    {
-                                        name["namespace"]
-                                        for server in allowed_mcp
-                                        if not server.defer_loading
-                                        for name in _tool_names((server,))
-                                    }
-                                ),
-                                *(
-                                    ["collaboration"]
-                                    if native_agents is not None or deferred_schemas
-                                    else []
-                                ),
-                            ]
+                            else _direct_tool_namespaces(
+                                allowed_tools,
+                                allowed_mcp,
+                                native_agents is not None or deferred_schemas,
+                            )
                         ),
                     },
                     "features.code_mode_interrupt": programmatic_tool_calling,
@@ -2091,7 +2180,7 @@ class Session(Generic[ContextT, OutputT]):
                         "allowed_tools": [
                             {
                                 "name": entry.name,
-                                "namespace": "functions",
+                                "namespace": entry.ref.namespace or "functions",
                             }
                             for entry in allowed_tools
                         ]
@@ -2306,7 +2395,7 @@ class Session(Generic[ContextT, OutputT]):
                     if restored_defaults is None:
                         # Older checkpoints lack exact persistent fixed selectors.
                         session._default_tools = (
-                            *(ToolRef(tool.name, tool.namespace) for tool in catalog.tools),
+                            *(tool._ref for tool in catalog.tools),
                             *restored_mcp_refs,
                             *restored_fixed_refs,
                         )
@@ -3429,7 +3518,7 @@ class Session(Generic[ContextT, OutputT]):
                 if (
                     not isinstance(entry, _CapturedManual)
                     or entry.name != message["tool"]
-                    or entry.namespace != message.get("namespace")
+                    or entry._ref.namespace != message.get("namespace")
                 ):
                     raise NativeError("Manual tool request does not match its declaration")
                 if not self._native._check_manual_tool(grant):
@@ -4269,7 +4358,7 @@ class Session(Generic[ContextT, OutputT]):
                             (
                                 i
                                 for i, captured in enumerate(self._bound_tools)
-                                if captured.name == tool.name
+                                if captured._ref == tool.ref
                             ),
                             None,
                         )
@@ -4496,7 +4585,7 @@ class Session(Generic[ContextT, OutputT]):
             # Explicit idle declarations replace bindings; refs only select.
             # Preserve every omitted opening slot and alias for later operations.
             supplied_python = {
-                tool.name: tool for tool in selection if isinstance(tool, FunctionTool)
+                tool.ref: tool for tool in selection if isinstance(tool, FunctionTool)
             }
             supplied_mcp = tuple(
                 tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP))
@@ -4504,7 +4593,7 @@ class Session(Generic[ContextT, OutputT]):
             bindings: list[Tool[ContextT]] = []
             for bound in self._bindings:
                 if isinstance(bound, FunctionTool):
-                    bindings.append(supplied_python.get(bound.name, bound))
+                    bindings.append(supplied_python.get(bound.ref, bound))
                 elif isinstance(bound, (HttpMCP, StdioMCP)):
                     if not any(server.name == bound.name for server in supplied_mcp):
                         bindings.append(bound)
@@ -4514,15 +4603,15 @@ class Session(Generic[ContextT, OutputT]):
             # Replace its old identities once; keep all current ones selectable.
             bindings.extend(supplied_mcp)
             selected = tuple(
-                supplied_python[bound.name]._capture(self._context)
-                if bound.name in supplied_python
+                supplied_python[bound._ref]._capture(self._context)
+                if bound._ref in supplied_python
                 else bound
                 for bound in self._bound_tools
             )
             bound_tools = selected
             if self._native_agents is not None:
-                names = {tool.name for tool in python}
-                selected = tuple(tool for tool in selected if tool.name in names)
+                refs = {tool.ref for tool in python}
+                selected = tuple(tool for tool in selected if tool._ref in refs)
             candidate = _ToolCatalog(self._catalog.generation + 1, selected)
 
             async def publish() -> None:
@@ -7591,7 +7680,8 @@ class Session(Generic[ContextT, OutputT]):
             entry = self._catalog.tools[marker["slot"]]
             if not isinstance(entry, _CapturedFunction):
                 raise NativeError("Native callback does not match a function declaration")
-            if message["tool"] != entry.name or message.get("namespace") != entry.namespace:
+            ref = entry._ref
+            if message["tool"] != ref.name or message.get("namespace") != ref.namespace:
                 raise NativeError("Native tool request does not match its captured declaration")
             # Pydantic validators are application code too. Admit the original
             # native request before argument validation can execute that code.
@@ -7604,8 +7694,8 @@ class Session(Generic[ContextT, OutputT]):
                 turn_id=state.handle.turn_id,
                 submission_id=state.handle.submission_id,
                 call_id=message["callId"],
-                name=entry.name,
-                namespace=entry.namespace,
+                name=ref.name,
+                namespace=ref.namespace,
             )
             self._observations.append(started)
             parsed = entry._parse_arguments(message["arguments"])
@@ -7621,7 +7711,7 @@ class Session(Generic[ContextT, OutputT]):
                 MappingProxyType(deepcopy(kwargs)),
                 trace_context=_native_trace_context(message.get("_sdk_trace")),
                 call=ToolCallInfo(
-                    tool=ToolRef(entry.name, entry.namespace),
+                    tool=ref,
                     session_id=self.id,
                     turn_id=state.handle.turn_id,
                     call_id=message["callId"] if code_origin is None else None,
@@ -8013,6 +8103,11 @@ class Session(Generic[ContextT, OutputT]):
                 "Cannot suspend an operation with before_step: "
                 "portable restore cannot recover its callback"
             )
+        if any(tool._ref.namespace is not None for tool in self._catalog.tools):
+            raise CapabilityError(
+                "Cannot suspend with selected MCP tools in the current catalog; "
+                "reply in the live Session"
+            )
 
     def _check_checkpoint_admission(self, active: _Submission | None) -> None:
         self._check_open()
@@ -8123,8 +8218,8 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                         )
-                        bound = {tool.name: tool for tool in self._bound_tools}
-                        selected = tuple(bound[tool.name] for tool in python)
+                        bound = {tool._ref: tool for tool in self._bound_tools}
+                        selected = tuple(bound[tool.ref] for tool in python)
                     idle_mcp = mcp
                     if selected != self._catalog.tools:
                         _, allowed_mcp, _ = _split_tools(opening)

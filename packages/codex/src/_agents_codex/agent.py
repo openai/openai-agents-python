@@ -470,10 +470,18 @@ class Agent(Generic[ContextT, OutputT]):
         """
         from .mcp import _tool_names
         from .schema import _prepare_spec
-        from .session import _split_tools
+        from .session import _check_namespaced_tool_collisions, _split_tools
 
-        python_tools, mcp_tools, _ = _split_tools(self.tools, self.programmatic_tool_calling)
-        _tool_names(mcp_tools)
+        python_tools, mcp_tools, native_agents = _split_tools(
+            self.tools, self.programmatic_tool_calling
+        )
+        _check_namespaced_tool_collisions(
+            python_tools,
+            _tool_names(mcp_tools),
+            self.tools,
+            self.programmatic_tool_calling,
+            native_agents=native_agents,
+        )
         native = importlib.import_module("agents._native")
         native._validate_python_tool_declarations(
             json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
@@ -902,6 +910,7 @@ class Agent(Generic[ContextT, OutputT]):
                     or environment is not None
                     or native_agents is not None
                     or before_step is not None
+                    or any(tool.ref.namespace is not None for tool in declared)
                     or (
                         mcp_tools
                         and (
@@ -912,8 +921,8 @@ class Agent(Generic[ContextT, OutputT]):
                 )
             ):
                 raise InteractionRequired(
-                    "Pausing for manual replies requires Python/manual tools, plain output or "
-                    "native strict output, "
+                    "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                    "plain output or native strict output, "
                     "no environment, children or before_step. "
                     "Pass on_interaction or use Agent.session() for live replies."
                 )
@@ -966,6 +975,7 @@ class Agent(Generic[ContextT, OutputT]):
                             "Running manual tools with prepare_request requires on_interaction. "
                             "Use Agent.session() to reply to requests directly."
                         )
+                    # Submit can republish bound tools beyond the restored idle catalog.
                     if any(tool is eligible for tool in selected for eligible in pause_manual) and (
                         opening.programmatic_tool_calling
                         or session._default_output.mode == "prompted"
@@ -973,12 +983,12 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._native_agents is not None
                         or session._storage is not None
                         or selected_mcp
+                        or any(tool._ref.namespace is not None for tool in session._bound_tools)
                         or any(isinstance(tool, WebSearch) for tool in opening.tools)
                     ):
                         raise InteractionRequired(
-                            "Pausing for manual replies requires Python/manual tools, "
-                            "plain output or "
-                            "native strict output, "
+                            "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                            "plain output or native strict output, "
                             "no local storage, environment, children or before_step. "
                             "Pass on_interaction or use Agent.session() for live replies."
                         )
