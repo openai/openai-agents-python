@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "45bea9443055fe61d1e2e79963e31c95c4e8dd0a",
+  "baseline_commit": "f65dd68d378cd26f4d12d6f83b332493f0f211ac",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -319,8 +319,7 @@
           "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Literal as Literal, Protocol as Protocol",
-          "from .native_interception import NativeToolCall as NativeToolCall",
-          "from .native_interception import StopTurn",
+          "from .native_interception import NativeToolCall as NativeToolCall, StopTurn",
           "from ._function_tools import Tool, ToolContext",
           "from .executor import Environment",
           "from .tools import ToolRef"
