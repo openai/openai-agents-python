@@ -704,6 +704,10 @@ class SandboxSession(BaseSandboxSession):
         await self._inner.write(path, data, user=user)
 
     @instrumented_op("write", data=_write_start_data)
+    async def _write_sensitive_file(self, path: Path, data: io.IOBase) -> None:
+        await self._inner._write_sensitive_file(path, data)
+
+    @instrumented_op("write", data=_write_start_data)
     async def _write_new_file(
         self,
         path: Path,
