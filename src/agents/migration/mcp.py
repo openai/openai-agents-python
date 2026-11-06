@@ -39,6 +39,7 @@ ContextT = TypeVar("ContextT")
 _Arguments = RootModel[dict[str, Any]]
 _Binder = Callable[[ContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]
 _Approval = Callable[[ToolContext[ContextT]], Allow | Deny | Awaitable[Allow | Deny]]
+_MCP_NAME = re.compile(r"[A-Za-z0-9_-]+")
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ class MCPNamespace(Generic[ContextT]):
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.name, str) or re.fullmatch(r"[A-Za-z0-9_-]+", self.name) is None:
+        if not isinstance(self.name, str) or _MCP_NAME.fullmatch(self.name) is None:
             raise ValueError("MCP namespace name must use letters, digits, underscores or hyphens")
         if self.name in {"functions", "tool_search", "_agents_sdk"}:
             raise ValueError("MCP namespace name is reserved")
@@ -131,6 +132,11 @@ async def select_mcp_tools(
     nothing. A requested name that is missing or filtered out fails selection.
     Discovery with a callable Classic filter requires its actual (run_context,
     agent) pair, with the same application context.
+
+    Selection preserves each selected peer name exactly. Names must use ASCII
+    letters, digits, underscores, or hyphens. The namespace and tool name,
+    including two separator bytes, must fit in 128 bytes. Selection rejects
+    unsupported names among the tools chosen after filtering.
 
     Selection and native Session cleanup leave connection ownership with the
     caller. Keep the client's authentication scope stable while its bindings are
@@ -211,7 +217,6 @@ async def select_mcp_tools(
     )
     by_name: dict[str, MCPTool] = {}
     for tool in discovered:
-        _launch_text(tool.name, "discovered tool name")
         if tool.name in by_name:
             raise ValueError("MCP discovery returned duplicate tool names")
         by_name[tool.name] = tool
@@ -238,6 +243,11 @@ def _capture_tool(
     approval: _Approval[ContextT] | None,
 ) -> _SelectedMCPTool[ContextT]:
     raw_name = tool.name
+    if _MCP_NAME.fullmatch(raw_name) is None or len(namespace.name) + 2 + len(raw_name) > 128:
+        raise ValueError(
+            "Selected MCP tool identity must use ASCII letters, digits, underscores or hyphens "
+            "and fit within 128 bytes including the namespace and separator"
+        )
     schema = tool_input_schema(tool)
     if not isinstance(schema, dict) or schema.get("type") != "object":
         raise ValueError("Selected MCP tools require an object input schema")

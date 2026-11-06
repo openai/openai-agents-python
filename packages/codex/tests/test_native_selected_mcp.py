@@ -133,21 +133,28 @@ async def test_application_selects_one_project_before_opening_session(
 async def test_namespaced_tools_keep_distinct_bindings_through_selection_and_restore(
     responses: ResponsesFixture,
 ) -> None:
-    original_first = Peer(label="original-first-peer")
-    original_second = Peer(label="original-second-peer")
-    current_first = Peer(label="current-first-peer")
-    current_second = Peer(label="current-second-peer")
+    leaf = "search-record"
+    peer_names = (leaf, "search.record", "récord")
+    original_first = Peer(names=peer_names, label="original-first-peer")
+    original_second = Peer(names=peer_names, label="original-second-peer")
+    current_first = Peer(names=peer_names, label="current-first-peer")
+    current_second = Peer(names=peer_names, label="current-second-peer")
     native_provider = provider(responses)
+    approved: list[ToolRef] = []
 
-    @function_tool(name="search")
+    @function_tool(name=leaf)
     def search(key: str) -> str:
         return "ordinary-python-tool:" + key
 
-    responses.respond(mcp_call("search", "first", "first-call"))
+    def approve(call: ToolContext[object]) -> Allow:
+        approved.append(call.call.tool)
+        return Allow()
+
+    responses.respond(mcp_call(leaf, "first", "first-call"))
     responses.respond(assistant_output("first done"))
-    responses.respond(mcp_call("search", "second", "second-call"))
+    responses.respond(mcp_call(leaf, "second", "second-call"))
     responses.respond(assistant_output("second done"))
-    responses.respond(function_call("search", {"key": "43"}, "python-call"))
+    responses.respond(function_call(leaf, {"key": "43"}, "python-call"))
     responses.respond(assistant_output("python done"))
 
     async with (
@@ -161,10 +168,10 @@ async def test_namespaced_tools_keep_distinct_bindings_through_selection_and_res
         ):
             source_context = object()
             first_tools = await select_mcp_tools(
-                MCPNamespace("first", first_client), context=source_context, tool_names=["search"]
+                MCPNamespace("first", first_client), context=source_context, tool_names=[leaf]
             )
             second_tools = await select_mcp_tools(
-                MCPNamespace("second", second_client), context=source_context, tool_names=["search"]
+                MCPNamespace("second", second_client), context=source_context, tool_names=[leaf]
             )
             source = Agent(
                 instructions="Read the record.",
@@ -176,7 +183,7 @@ async def test_namespaced_tools_keep_distinct_bindings_through_selection_and_res
                     pytest.fail("A different context opened a Session with these bindings")
 
             async with source.session(context=source_context) as session:
-                turn = await session.submit("First record", tools=[ToolRef("search", "first")])
+                turn = await session.submit("First record", tools=[ToolRef(leaf, "first")])
                 assert (await turn.get_result()).final_output == "first done"
                 await session.update(tools=second_tools)
                 state = await session.save_state()
@@ -193,12 +200,13 @@ async def test_namespaced_tools_keep_distinct_bindings_through_selection_and_res
         ):
             current_context = object()
             first_tools = await select_mcp_tools(
-                MCPNamespace("first", first_client), context=current_context, tool_names=["search"]
+                MCPNamespace("first", first_client), context=current_context, tool_names=[leaf]
             )
             second_tools = await select_mcp_tools(
                 MCPNamespace("second", second_client),
                 context=current_context,
-                tool_names=["search"],
+                tool_names=[leaf],
+                approval=approve,
             )
             destination = Agent(
                 instructions=source.instructions,
@@ -216,23 +224,48 @@ async def test_namespaced_tools_keep_distinct_bindings_through_selection_and_res
             len(original_second.requests),
         ) == original_request_counts
 
-    assert set(declarations(responses.requests[0])) == {("first", "search")}
+    assert set(declarations(responses.requests[0])) == {("first", leaf)}
     assert "original-first-peer" in tool_output(responses.requests[1], "first-call")
-    assert set(declarations(responses.requests[2])) == {("second", "search")}
+    assert set(declarations(responses.requests[2])) == {("second", leaf)}
     assert "current-second-peer" in tool_output(responses.requests[3], "second-call")
-    assert set(declarations(responses.requests[4])) == {("functions", "search")}
+    assert set(declarations(responses.requests[4])) == {("functions", leaf)}
     assert "ordinary-python-tool:43" in tool_output(responses.requests[5], "python-call")
     assert (
-        original_first.calls
-        == current_second.calls
-        == [{"name": "search", "arguments": {"key": "43"}}]
+        original_first.calls == current_second.calls == [{"name": leaf, "arguments": {"key": "43"}}]
     )
+    assert approved == [ToolRef(leaf, "second")]
     assert not original_second.calls and not current_first.calls
     assert all(header == auth_header for header in current_second.auth)
 
 
+@pytest.mark.parametrize(
+    ("name", "accepted"),
+    [("search.record", False), ("récord", False), ("x" * 119, True), ("x" * 120, False)],
+    ids=["dotted", "unicode", "128-bytes", "129-bytes"],
+)
+async def test_selected_mcp_requires_provider_compatible_identity(
+    name: str, accepted: bool
+) -> None:
+    peer = Peer(names=(name,))
+    async with (
+        timeout(10),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        namespace: MCPNamespace[None] = MCPNamespace("catalog", client)
+        if accepted:
+            tools = await select_mcp_tools(namespace, context=None)
+            assert [tool.ref for tool in tools] == [ToolRef(name, "catalog")]
+        else:
+            with pytest.raises(ValueError, match="^Selected MCP tool identity") as rejected:
+                await select_mcp_tools(namespace, context=None)
+            assert name not in str(rejected.value)
+        assert [tool.name for tool in await client.list_tools()] == [name]
+        assert not peer.calls
+
+
 async def test_empty_and_filtered_selections_do_not_install_tools() -> None:
-    peer = Peer()
+    peer = Peer(names=("search", "read.records"))
     auth_attempts = []
 
     async def authorize(context):
@@ -248,7 +281,7 @@ async def test_empty_and_filtered_selections_do_not_install_tools() -> None:
         assert not auth_attempts and not peer.requests
         async with client:
             with pytest.raises(ValueError, match="filtered out"):
-                await select_mcp_tools(namespace, context=None, tool_names=["excluded"])
+                await select_mcp_tools(namespace, context=None, tool_names=["read.records"])
             assert [tool.name for tool in await select_mcp_tools(namespace, context=None)] == [
                 "search"
             ]
