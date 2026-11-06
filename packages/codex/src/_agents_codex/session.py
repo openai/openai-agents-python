@@ -594,7 +594,7 @@ class Completed(Generic[OutputT]):
     prompted-output correction. Their per-turn usage is separate from usage,
     which still reports only the original thread. Missing usage remains None.
     final_output may be derived from a repair; native task history stays intact.
-    state is populated only on Agent.run/run_sync with return_state=True.
+    One-shot runners populate state when called with return_state=True.
     Existing native checkpoint restrictions still apply.
     """
 
