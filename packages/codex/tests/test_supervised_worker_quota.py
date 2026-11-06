@@ -34,7 +34,7 @@ from agents import (
 )
 from agents.observation import ApiRateLimitsUpdated
 from agents.rate_limits import ApiRateLimits, ApiRateLimitWindow
-from examples.supervised_worker import __main__ as worker, quota
+from examples.codex.supervised_worker import __main__ as worker, quota
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

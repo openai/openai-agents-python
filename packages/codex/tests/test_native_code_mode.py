@@ -23,7 +23,7 @@ from agents import (
     TurnStoppedError,
     function_tool,
 )
-from examples.validated_artifact import ArtifactContext, publish_xml
+from examples.codex.validated_artifact import ArtifactContext, publish_xml
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

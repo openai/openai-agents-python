@@ -761,15 +761,20 @@ jobs:
         env:
           AGENTS_REQUIRE_WEB_BROWSER: '1'
         run: |
-          npm ci --prefix packages/codex/examples/web_starter --ignore-scripts
-          npm run build --prefix packages/codex/examples/web_starter
-          npm exec --prefix packages/codex/examples/web_starter -- playwright install --with-deps chromium
+          npm ci --prefix examples/codex/web_starter --ignore-scripts
+          npm run build --prefix examples/codex/web_starter
+          npm exec --prefix examples/codex/web_starter -- playwright install --with-deps chromium
           uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_web_starter_browser.py
       - name: Verify the optional AG-UI example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         run: |
-          uv run --with-requirements packages/codex/examples/ag_ui/requirements.txt python -c 'import ag_ui.core'
-          uv run --with-requirements packages/codex/examples/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_ag_ui_example.py
+          uv run --with-requirements examples/codex/ag_ui/requirements.txt python -c 'import ag_ui.core'
+          uv run --with-requirements examples/codex/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_ag_ui_example.py
+      - name: Verify the optional Classic HTTP examples
+        if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
+        run: |
+          uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python -c 'import fastapi'
+          uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_twilio_sip_example.py packages/codex/tests/test_mcp_manager_example.py
       - name: Verify the optional MCP Tasks adapter
         if: steps.changes.outputs.run == 'true'
         run: |

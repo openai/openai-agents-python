@@ -262,8 +262,8 @@ logger-objects = ["agents.logger.logger"]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"packages/codex/examples/**/*.py" = ["ASYNC", "DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
-"packages/codex/examples/**/*.ipynb" = ["RUF100"]
+"examples/**/*.py" = ["ASYNC", "DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
+"examples/**/*.ipynb" = ["RUF100"]
 "packages/codex/tests/**/*.py" = ["ASYNC", "RUF006", "RUF012", "RUF100"]
 "packages/codex/scripts/*.py" = ["E402"]
 
@@ -317,7 +317,7 @@ exclude_also = [
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 testpaths = ["packages/codex/tests"]
-pythonpath = ["packages/codex"]
+pythonpath = [".", "packages/codex"]
 
 markers = [
   "allow_call_model_methods: mark test as allowing calls to real model implementations",

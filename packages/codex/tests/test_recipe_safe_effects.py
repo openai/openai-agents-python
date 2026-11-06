@@ -4,7 +4,7 @@ import pytest
 
 from agents import Agent, TurnStoppedError
 from agents.testing import ScriptedResponses, text, tool_call
-from examples.recipes.safe_effects import Application, FakeWriter, main, write_record
+from examples.codex.recipes.safe_effects import Application, FakeWriter, main, write_record
 
 
 async def test_fake_writer_deduplicates_real_tool_execution():

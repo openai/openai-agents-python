@@ -671,7 +671,7 @@ async def test_executor_example_using_installed_client_surface(
     import os
     import sys
 
-    script = Path(__file__).resolve().parents[1] / "examples" / "remote_executor.py"
+    script = Path(__file__).resolve().parents[3] / "examples" / "codex" / "remote_executor.py"
     async with timeout(40), ExecutorPeer(tmp_path / "remote").serve() as peer:
         trust(peer, tmp_path, monkeypatch)
         roots = peer.root / "recipe-root"

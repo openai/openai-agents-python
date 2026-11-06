@@ -1,7 +1,7 @@
 """Qualify the optional example against the pinned AG-UI event schema.
 
 Only the model is simulated. The SDK Turn, tools, event retention and cleanup
-run through the actual native runtime. Install packages/codex/examples/ag_ui/requirements.txt.
+run through the actual native runtime. Install examples/codex/ag_ui/requirements.txt.
 """
 
 from __future__ import annotations
@@ -24,10 +24,8 @@ from tests.native_fixtures import (
 )
 from tests.test_native_agent_observation import provider
 
-agui = pytest.importorskip(
-    "ag_ui.core", reason="optional: packages/codex/examples/ag_ui/requirements.txt"
-)
-from examples.ag_ui.stream import stream_turn  # noqa: E402
+agui = pytest.importorskip("ag_ui.core", reason="optional: examples/codex/ag_ui/requirements.txt")
+from examples.codex.ag_ui.stream import stream_turn  # noqa: E402
 
 PARSER = TypeAdapter(agui.Event)
 

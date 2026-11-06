@@ -17,8 +17,8 @@ from agents.testing import ScriptedResponses, text, tool_call
 
 pytest.importorskip("fcntl", reason="The starter requires POSIX flock and private directory modes")
 
-from examples.web_starter.app import Final, Identity, RunContext, Service, create_app
-from examples.web_starter.store import Store
+from examples.codex.web_starter.app import Final, Identity, RunContext, Service, create_app
+from examples.codex.web_starter.store import Store
 from tests.native_fixtures import responses as responses
 
 HEADERS = {"X-Web-Starter": "1"}
@@ -242,7 +242,7 @@ async def test_revocation_at_reply_and_mcp_boundary_and_credential_scope(tmp_pat
 
 async def test_model_summary_is_bounded_and_does_not_contain_full_data(tmp_path):
     # Exercise the public SDK and inspect the actual subsequent model request.
-    from examples.web_starter.app import read_report
+    from examples.codex.web_starter.app import read_report
 
     async with running(tmp_path) as (service, server, client, post, get):
         state = service.store.create("alice", "inspection", "payload", prompt="Read")
@@ -304,7 +304,7 @@ async def test_native_mcp_dispatch_uses_authenticated_user_credential(tmp_path, 
 
 async def test_native_gap_recovers_from_application_snapshot(tmp_path, responses):
     from agents import NativeProvider
-    from examples.web_starter.app import Work
+    from examples.codex.web_starter.app import Work
     from tests.native_fixtures import text_response
 
     async with running(tmp_path) as (service, server, client, post, get):
@@ -332,7 +332,7 @@ async def test_native_gap_recovers_from_application_snapshot(tmp_path, responses
 
 
 async def test_stale_native_approval_has_no_artifact_effect(tmp_path):
-    from examples.web_starter.app import Pending, Work, publish_report
+    from examples.codex.web_starter.app import Pending, Work, publish_report
 
     async with running(tmp_path) as (service, server, client, post, get):
         receipt = service.store.create("alice", "stale", "payload", prompt="Publish")["id"]
@@ -416,7 +416,7 @@ async def test_publication_failure_cannot_become_success(tmp_path, monkeypatch, 
 
 
 async def test_invalid_generated_xml_publishes_nothing(tmp_path):
-    from examples.web_starter.app import Pending, Work, publish_report
+    from examples.codex.web_starter.app import Pending, Work, publish_report
 
     async with running(tmp_path) as (service, server, client, post, get):
         receipt = service.store.create("alice", "invalid", "payload", prompt="Publish")["id"]
@@ -449,7 +449,7 @@ async def test_invalid_generated_xml_publishes_nothing(tmp_path):
 
 @pytest.mark.parametrize("encoding", [None, "utf-8", "utf-16", "iso-8859-1"])
 async def test_downloaded_xml_preserves_text_across_encoding_declarations(tmp_path, encoding):
-    from examples.web_starter.app import Pending, Work, publish_report
+    from examples.codex.web_starter.app import Pending, Work, publish_report
 
     declaration = f'<?xml version="1.0" encoding="{encoding}"?>' if encoding else ""
     value = "café&#13;line2&#10;line3&#9;tail"

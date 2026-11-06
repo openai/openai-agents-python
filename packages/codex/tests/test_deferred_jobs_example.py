@@ -15,9 +15,9 @@ import pytest
 from agents import NativeError
 from agents.experimental.deferred import JobBinding
 from agents.state import SessionState
-from examples.external_job.__main__ import ThumbnailProvider, run_order
-from examples.external_job.journal import Busy, Journal
-from examples.external_job.store import ThumbnailStore
+from examples.codex.external_job.__main__ import ThumbnailProvider, run_order
+from examples.codex.external_job.journal import Busy, Journal
+from examples.codex.external_job.store import ThumbnailStore
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -33,9 +33,9 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="The example uses a P
 @pytest.mark.parametrize("options", [[], ["--directory", ""], ["--directory", "relative"]])
 def test_worker_requires_host_chosen_state_directory(tmp_path: Path, options: list[str]) -> None:
     worker = subprocess.run(
-        [sys.executable, "-m", "examples.external_job", "worker", "new-order", *options],
+        [sys.executable, "-m", "examples.codex.external_job", "worker", "new-order", *options],
         cwd=tmp_path,
-        env={"PATH": os.defpath, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+        env={"PATH": os.defpath, "PYTHONPATH": str(Path(__file__).resolve().parents[3])},
         stdin=subprocess.DEVNULL,
         capture_output=True,
         timeout=8,
@@ -289,13 +289,13 @@ async def test_worker_result_resumes_one_original_call(
                 [
                     sys.executable,
                     "-m",
-                    "examples.external_job",
+                    "examples.codex.external_job",
                     "worker",
                     "order-one",
                     "--directory",
                     str(tmp_path),
                 ],
-                env={"PATH": os.defpath, "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+                env={"PATH": os.defpath, "PYTHONPATH": str(Path(__file__).resolve().parents[3])},
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
                 timeout=8,
@@ -378,12 +378,12 @@ async def test_identical_requests_have_independent_scoped_business_orders(
 
 async def test_documented_model_endpoint_runs_three_cli_commands(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[3]
-    env = {**os.environ, "PYTHONPATH": str(root / "packages" / "codex")}
+    env = {**os.environ, "PYTHONPATH": str(root)}
     env.pop("OPENAI_API_KEY", None)
     endpoint = await asyncio.create_subprocess_exec(
         sys.executable,
         "-m",
-        "examples.external_job.model",
+        "examples.codex.external_job.model",
         cwd=root,
         env=env,
         stdin=asyncio.subprocess.DEVNULL,
@@ -414,7 +414,7 @@ async def test_documented_model_endpoint_runs_three_cli_commands(tmp_path: Path)
             child = await asyncio.create_subprocess_exec(
                 sys.executable,
                 "-m",
-                "examples.external_job",
+                "examples.codex.external_job",
                 command,
                 "sample-01",
                 *options,

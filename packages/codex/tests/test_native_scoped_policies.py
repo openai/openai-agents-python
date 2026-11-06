@@ -1068,7 +1068,7 @@ async def test_environment_concurrent_stdin_input_owned_through_approval(
 async def test_callback_quota_recipe_limits_effects_without_new_runtime_budget(
     responses: ResponsesFixture,
 ):
-    from examples.callback_quota import Quota, lookup
+    from examples.codex.callback_quota import Quota, lookup
 
     responses.respond(
         function_call("lookup", {"record": "one"}, "one"),

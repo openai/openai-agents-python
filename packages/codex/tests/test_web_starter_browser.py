@@ -13,9 +13,9 @@ from aiohttp.test_utils import TestServer
 
 pytest.importorskip("fcntl", reason="The starter requires POSIX flock and private directory modes")
 
-from examples.web_starter.app import create_app
+from examples.codex.web_starter.app import create_app
 
-CLIENT = Path(__file__).resolve().parents[1] / "examples" / "web_starter"
+CLIENT = Path(__file__).resolve().parents[3] / "examples" / "codex" / "web_starter"
 
 
 async def test_browser_client_over_real_http(tmp_path):
@@ -27,7 +27,7 @@ async def test_browser_client_over_real_http(tmp_path):
     ):
         if os.environ.get("AGENTS_REQUIRE_WEB_BROWSER") == "1":
             pytest.fail(
-                "In packages/codex/examples/web_starter run npm ci, npm run build, "
+                "In examples/codex/web_starter run npm ci, npm run build, "
                 "and npx playwright install chromium"
             )
         pytest.skip("optional: install web starter browser dependencies and Chromium")

@@ -74,7 +74,7 @@ To run the example with a real model, set your key in this shell first:
 
 ```sh
 export OPENAI_API_KEY="your-key"
-.venv/bin/python "$SDK_ROOT/packages/codex/examples/basic.py"
+.venv/bin/python "$SDK_ROOT/examples/codex/basic.py"
 ```
 
 ## Use a qualified wheel for Python edits

@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 
 from agents.testing import ScriptedResponses, text, tool_call
-from examples.recipes.application_memory import MemoryScope, initialize, memory_agent
+from examples.codex.recipes.application_memory import MemoryScope, initialize, memory_agent
 from tests._asyncio import timeout
 from tests.test_native_agent import function_declarations
 

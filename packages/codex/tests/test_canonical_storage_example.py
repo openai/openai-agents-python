@@ -14,8 +14,8 @@ pytestmark = pytest.mark.skipif(os.name != "posix", reason="Reference adapter re
 
 @pytest.mark.asyncio
 async def test_example_creates_and_reopens_history_in_a_fresh_process(responses, tmp_path):
-    root = Path(__file__).resolve().parents[1]
-    script = root / "examples/canonical_storage/main.py"
+    root = Path(__file__).resolve().parents[3]
+    script = root / "examples/codex/canonical_storage/main.py"
     database = tmp_path / "example.sqlite"
     environment = {
         **os.environ,
