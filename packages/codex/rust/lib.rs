@@ -1126,6 +1126,22 @@ impl NativeThread {
         async_bridge::future_into_py(py, async move {
             let _context_operation = inner.engine.operation(false).map_err(py_error)?;
             let _mutation = inner.mutations.lock().await;
+            if id.is_none_or(|id| id == inner.id) {
+                use std::sync::atomic::Ordering::Acquire;
+
+                if inner.is_closed()
+                    || inner.engine.closed.load(Acquire)
+                    || inner.engine.context_retired.load(Acquire)
+                {
+                    return Err(py_error("native goal updates require an open root thread"));
+                }
+                let tools = inner
+                    .thread
+                    .thread_extension_data()
+                    .get::<python_tools::PythonTools>()
+                    .ok_or_else(|| py_error("native goal updates require a managed Session"))?;
+                tools.check_idle(&inner.thread).await.map_err(py_error)?;
+            }
             let result = goals::set_paused(&inner, &objective, id, token_budget)
                 .await
                 .map_err(py_error)?;

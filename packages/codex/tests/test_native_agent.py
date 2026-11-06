@@ -39,6 +39,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "checkpoint_status",
         "checklist",
         "goal",
+        "set_paused_goal",
         "fork",
         "items",
         "turns",
