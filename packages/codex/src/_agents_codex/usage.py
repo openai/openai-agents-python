@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable as Callable
 from dataclasses import dataclass as dataclass
-from typing import Any as Any
+from typing import Any as Any, Literal as Literal
 
 from ._public import preserve_module_identity as _preserve_module_identity
+
+_MAX_SAFE_INTEGER = 2**53 - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -18,6 +21,71 @@ class TokenUsage:
     output_tokens: int
     reasoning_output_tokens: int
     total_tokens: int
+
+
+@dataclass(frozen=True, slots=True)
+class RunBudget:
+    """Optional limits for the next root sampling admission in a direct native run.
+
+    Set at least one limit. Each limit is an integer from zero through
+    2**53 - 1. A zero limit blocks the first sampling admission. The SDK
+    stops at the next admission when any limit has been reached. An admitted
+    request can overshoot a token or cost limit and still return a final result.
+
+    max_requests counts root sampling-step admissions, including prompted
+    output repairs. Transport retries, internal requests such as compaction,
+    and child requests do not charge this counter. Token and cost limits use
+    reported response completions on the active root, including any reported
+    completions from internal requests on that root. They exclude child
+    responses and thread usage snapshots.
+
+    Before the next admission, the SDK checks known limits first. Under
+    the default policy, missing usage also blocks admission before any
+    estimates run. If a cost limit needs an estimate, the SDK calls
+    estimate_cost_micros synchronously with the response's TokenUsage.
+    Core fills omitted token details such as cached and reasoning tokens
+    with zero. Return an integer from zero through 2**53 - 1 in micro-USD
+    (millionths of a US dollar), or None for an unknown estimate.
+    Estimates can differ from actual charges.
+
+    Missing usage, a negative token total, an absent estimator for a cost
+    limit, or an unknown estimate blocks the next admission by default.
+    missing_usage="continue" lets the run continue using known values.
+    Reported zero is a known value. A request-only budget works without
+    usage or an estimator.
+
+    A blocked admission raises NativeError with code "run_budget_exceeded"
+    or "run_budget_usage_unavailable". An estimator that raises an exception
+    or returns an invalid value stops with "run_budget_invalid_estimate".
+
+    The budget follows live replies, same-run steering, and output repair.
+    Active runs with a budget cannot be captured or resumed from portable
+    checkpoints. An idle checkpoint can start a new run with a fresh budget.
+    """
+
+    max_requests: int | None = None
+    max_tokens: int | None = None
+    max_estimated_cost_micros: int | None = None
+    estimate_cost_micros: Callable[[TokenUsage], int | None] | None = None
+    missing_usage: Literal["stop", "continue"] = "stop"
+
+    def __post_init__(self) -> None:
+        limits = {
+            "max_requests": self.max_requests,
+            "max_tokens": self.max_tokens,
+            "max_estimated_cost_micros": self.max_estimated_cost_micros,
+        }
+        if all(limit is None for limit in limits.values()):
+            raise ValueError("RunBudget requires at least one limit")
+        for name, limit in limits.items():
+            if limit is not None and (
+                type(limit) is not int or not 0 <= limit <= _MAX_SAFE_INTEGER
+            ):
+                raise ValueError(f"RunBudget.{name} must be a nonnegative safe integer")
+        if self.estimate_cost_micros is not None and not callable(self.estimate_cost_micros):
+            raise TypeError("RunBudget.estimate_cost_micros must be callable")
+        if self.missing_usage not in ("stop", "continue"):
+            raise ValueError("RunBudget.missing_usage must be 'stop' or 'continue'")
 
 
 @dataclass(frozen=True, slots=True)
