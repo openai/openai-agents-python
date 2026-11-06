@@ -99,7 +99,9 @@ async def _exercise_app(mcp_port: int) -> None:
 
     async with app.router.lifespan_context(app):
         transport = httpx.ASGITransport(app=app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        async with httpx.AsyncClient(
+            transport=transport, base_url=f"http://{HOST}:{app_module.APP_PORT}"
+        ) as client:
             health_response = await client.get("/health")
             health_response.raise_for_status()
             health = health_response.json()

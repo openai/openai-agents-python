@@ -72,9 +72,16 @@ def runner_dry_run(tmp_path, relative_path, *, include_external=False):
         "sandbox/docker/docker_runner.py",
         "sandbox/extensions/daytona/daytona_runner.py",
         "sandbox/external_provider/src/example_docker_provider/demo.py",
+        "model_providers/any_llm_auto.py",
+        "model_providers/any_llm_provider.py",
+        "model_providers/custom_example_agent.py",
+        "model_providers/custom_example_global.py",
+        "model_providers/custom_example_provider.py",
+        "model_providers/litellm_auto.py",
+        "model_providers/litellm_provider.py",
     ],
 )
-def test_sandbox_provider_examples_require_explicit_external_opt_in(tmp_path, relative_path):
+def test_provider_examples_require_explicit_external_opt_in(tmp_path, relative_path):
     default = runner_dry_run(tmp_path, relative_path)
     assert "Interactive mode: prompt" in default
     assert f"- SKIP examples/classic/{relative_path}" in default

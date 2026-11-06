@@ -35,8 +35,8 @@ PRODUCTION FEATURES (provided by Dapr):
 PREREQUISITES:
 1. Install Dapr CLI: https://docs.dapr.io/getting-started/install-dapr-cli/
 2. Install Docker (for running Redis and optionally Dapr containers)
-3. Install openai-agents with dapr in your environment:
-        pip install openai-agents[classic-dapr]
+3. Install the matching SDK with Dapr support from the repository root:
+        python -m pip install '.[classic-dapr]'
 4. Export POSTGRES_PASSWORD with a strong, unique single-line password (not "postgres") using your
    shell's hidden-input prompt or secret manager. Do not put the password in shell history.
    Use the built-in helper for first-time local setup on POSIX systems (requires Docker):

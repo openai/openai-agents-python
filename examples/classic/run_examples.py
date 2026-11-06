@@ -504,7 +504,12 @@ def detect_tags(path: Path, source: str) -> set[str]:
     relative_path = path.relative_to(EXAMPLES_DIR).as_posix()
     if (
         relative_path.startswith(
-            ("sandbox/docker/", "sandbox/extensions/", "sandbox/external_provider/")
+            (
+                "sandbox/docker/",
+                "sandbox/extensions/",
+                "sandbox/external_provider/",
+                "model_providers/",
+            )
         )
         or relative_path
         in {

@@ -23,6 +23,8 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
 
 ## Setup
 
+Use this example only for controlled testing. It accepts any incoming caller routed to the configured number; the event signature does not authenticate the telephone caller. Calls incur charges. The example has no caller admission, concurrency, call duration, or spending limits. Applications must choose and enforce any required restrictions before `accept_call`.
+
 1. Install dependencies:
    ```bash
    uv pip install -r examples/classic/realtime/twilio_sip/requirements.txt

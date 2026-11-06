@@ -1,13 +1,13 @@
 # MCP Manager Example (FastAPI)
 
-This repository example targets MCP Python SDK v2 and is intended to run with the repository's locked development environment. The Agents SDK client itself supports both MCP v1 and v2.
+This repository example targets MCP Python SDK v2. The commands below use the repository's development environment and add FastAPI explicitly. The Agents SDK client itself supports both MCP v1 and v2.
 
 This example shows how to use `MCPServerManager` to keep MCP server lifecycle management in a single task inside a FastAPI app with the Streamable HTTP transport.
 
 ## Run the MCP server (Streamable HTTP)
 
 ```
-uv run python examples/classic/mcp/manager_example/mcp_server.py
+uv run --extra classic python examples/classic/mcp/manager_example/mcp_server.py
 ```
 
 The server listens at `http://localhost:8000/mcp` by default.
@@ -29,17 +29,19 @@ export INACTIVE_MCP_SERVER_URL=http://localhost:8001/mcp
 ## Run the FastAPI app
 
 ```
-uv run python examples/classic/mcp/manager_example/app.py
+uv run --extra classic --with 'fastapi>=0.150.0' python -m examples.classic.mcp.manager_example.app
 ```
 
 The app listens at `http://127.0.0.1:9001`.
+
+Run this unauthenticated demo only on a private host where all local users and processes are trusted. It accepts only `localhost` and `127.0.0.1` Host headers. It does not authenticate callers or isolate local users. Do not expose it through a public listener, proxy, or tunnel. FastAPI 0.150.0 or later is required for its strict JSON content-type checks; the app does not enable CORS.
 
 ## Run the smoke test
 
 To verify the MCP manager and app integration without calling a model:
 
 ```
-uv run python -m examples.classic.mcp.manager_example.smoke_test
+uv run --extra classic --with 'fastapi>=0.150.0' python -m examples.classic.mcp.manager_example.smoke_test
 ```
 
 The smoke test starts the local MCP server on a temporary port, points both app MCP server settings at that server, and checks `/health`, `/tools`, and `/add`.

@@ -770,11 +770,11 @@ jobs:
         run: |
           uv run --with-requirements examples/codex/ag_ui/requirements.txt python -c 'import ag_ui.core'
           uv run --with-requirements examples/codex/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_ag_ui_example.py
-      - name: Verify the optional Classic SIP webhook example
+      - name: Verify the optional Classic HTTP examples
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         run: |
           uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python -c 'import fastapi'
-          uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_twilio_sip_example.py
+          uv run --with-requirements examples/classic/realtime/twilio_sip/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_twilio_sip_example.py packages/codex/tests/test_mcp_manager_example.py
       - name: Verify the optional MCP Tasks adapter
         if: steps.changes.outputs.run == 'true'
         run: |

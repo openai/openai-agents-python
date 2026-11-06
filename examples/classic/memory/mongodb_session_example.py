@@ -78,5 +78,5 @@ async def main():
 
 
 if __name__ == "__main__":
-    # pip install "openai-agents[classic-mongodb]"
+    # From the repository root: python -m pip install '.[classic-mongodb]'
     asyncio.run(main())

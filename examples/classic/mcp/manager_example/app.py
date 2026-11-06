@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from agents.classic import Agent, Runner
 from agents.classic.mcp import MCPServer, MCPServerManager, MCPServerStreamableHttp
@@ -53,6 +54,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1"], www_redirect=False
+)
 
 
 @app.get("/health")
