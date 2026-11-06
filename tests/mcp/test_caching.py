@@ -7,6 +7,7 @@ from mcp.types import CallToolResult, PaginatedRequestParams, TextContent
 from agents import Agent
 from agents.exceptions import UserError
 from agents.mcp import MCPServerStdio
+from agents.mcp._compat import tool_input_schema
 from agents.run_context import RunContextWrapper
 
 from .helpers import DummyStreamsContextManager, tee
@@ -223,7 +224,7 @@ async def test_older_concurrent_refresh_does_not_overwrite_newer_cache(
 
         assert first_result[0].description == "first-started"
         assert (server.cached_tools or [])[0].description == "second-started"
-        assert (server.cached_tools or [])[0].input_schema == {"required": ["latest"]}
+        assert tool_input_schema((server.cached_tools or [])[0]) == {"required": ["latest"]}
         assert request_count == 2
 
 
@@ -408,7 +409,7 @@ async def test_cached_tools_returns_a_snapshot(
         assert snapshot is not None
         snapshot.append(MCPTool(name="injected", inputSchema={}))
         snapshot[0].description = "mutated"
-        snapshot[0].input_schema["required"] = []
+        tool_input_schema(snapshot[0])["required"] = []
 
         later_cached = server.cached_tools
         later_listed = await server.list_tools(run_context, agent)
@@ -416,8 +417,8 @@ async def test_cached_tools_returns_a_snapshot(
         assert [tool.name for tool in later_listed] == ["tool1", "tool2"]
         assert (later_cached or [])[0].description is None
         assert later_listed[0].description is None
-        assert (later_cached or [])[0].input_schema.get("required") == ["q"]
-        assert later_listed[0].input_schema.get("required") == ["q"]
+        assert tool_input_schema((later_cached or [])[0]).get("required") == ["q"]
+        assert tool_input_schema(later_listed[0]).get("required") == ["q"]
 
 
 @pytest.mark.asyncio
@@ -446,15 +447,15 @@ async def test_list_tools_snapshots_tool_objects(
         cached = server.cached_tools
         assert cached is not None
         assert returned[0] is not cached[0]
-        assert returned[0].input_schema is not cached[0].input_schema
+        assert tool_input_schema(returned[0]) is not tool_input_schema(cached[0])
 
-        returned[0].input_schema["required"] = []
+        tool_input_schema(returned[0])["required"] = []
         returned[0].description = "mutated"
 
         later = await server.list_tools(run_context, agent)
         assert later[0].description is None
-        assert later[0].input_schema.get("required") == ["q"]
-        assert (server.cached_tools or [])[0].input_schema.get("required") == ["q"]
+        assert tool_input_schema(later[0]).get("required") == ["q"]
+        assert tool_input_schema((server.cached_tools or [])[0]).get("required") == ["q"]
         assert mock_list_tools.call_count == 1
 
 
@@ -489,7 +490,7 @@ async def test_list_tools_mutation_cannot_bypass_required_parameter_validation(
         run_context = RunContextWrapper(context=None)
         agent = Agent(name="test_agent", instructions="Test agent")
         returned = await server.list_tools(run_context, agent)
-        returned[0].input_schema["required"] = []
+        tool_input_schema(returned[0])["required"] = []
 
         with pytest.raises(UserError, match="missing required parameters: q"):
             await server.call_tool("tool1", {})
@@ -519,7 +520,7 @@ async def test_dynamic_filter_mutation_cannot_corrupt_cached_tool_schemas(
     }
 
     def mutating_filter(_context, tool: MCPTool) -> bool:
-        tool.input_schema["required"] = []
+        tool_input_schema(tool)["required"] = []
         tool.description = "mutated"
         return True
 
@@ -540,10 +541,10 @@ async def test_dynamic_filter_mutation_cannot_corrupt_cached_tool_schemas(
         later = await server.list_tools(run_context, agent)
         cached = server.cached_tools
 
-        assert first[0].input_schema.get("required") == ["q"]
-        assert later[0].input_schema.get("required") == ["q"]
+        assert tool_input_schema(first[0]).get("required") == ["q"]
+        assert tool_input_schema(later[0]).get("required") == ["q"]
         assert cached is not None
-        assert cached[0].input_schema.get("required") == ["q"]
+        assert tool_input_schema(cached[0]).get("required") == ["q"]
         assert first[0].description is None
         assert later[0].description is None
         assert cached[0].description is None

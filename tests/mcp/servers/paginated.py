@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from importlib.metadata import version
-from typing import Any
+from typing import Any, cast
 
 import anyio
 from mcp.server import Server
@@ -91,7 +91,7 @@ if MCP_V2:
     async def call_tool_v2(_context: Any, params: Any) -> CallToolResult:
         return tool_result(params.name)
 
-    server = Server(
+    server = cast(Any, Server)(
         "paginated-test-server",
         on_list_tools=list_tools_v2,
         on_list_prompts=list_prompts_v2,

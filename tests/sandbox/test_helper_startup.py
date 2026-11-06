@@ -38,6 +38,7 @@ if TYPE_CHECKING or sys.platform != "win32":
             return session
 
 
+@pytest.mark.requires_native_macos_sandbox
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval", [None, False, True], ids=["file-only", "rejected", "approved"])
 async def test_runner_snapshot_does_not_execute_workspace_startup_files(
@@ -119,6 +120,7 @@ async def test_runner_snapshot_does_not_execute_workspace_startup_files(
             await client.delete(session)
 
 
+@pytest.mark.requires_native_macos_sandbox
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["read", "write", "mkdir", "rm", "same-file"])
 async def test_fixed_file_checks_do_not_load_workspace_profile(

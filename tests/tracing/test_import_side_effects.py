@@ -77,10 +77,11 @@ print(
     assert payload["shutdown_handler_registered"] is False
 
 
-def test_core_imports_do_not_require_legacy_httpx() -> None:
+def test_core_imports_respect_mcp_httpx_dependency() -> None:
     payload = _run_python(
         """
 import importlib.abc
+from importlib.metadata import version
 import json
 import sys
 
@@ -93,7 +94,9 @@ class BlockLegacyHttpx(importlib.abc.MetaPathFinder):
             )
         return None
 
-sys.meta_path.insert(0, BlockLegacyHttpx())
+mcp_requires_legacy_httpx = version("mcp").split(".", 1)[0] == "1"
+if not mcp_requires_legacy_httpx:
+    sys.meta_path.insert(0, BlockLegacyHttpx())
 
 import httpx2
 import agents
@@ -111,6 +114,7 @@ print(
             "agents_name": agents.__name__,
             "mcp_server_name": MCPServerStreamableHttp.__name__,
             "legacy_httpx_loaded": "httpx" in sys.modules,
+            "mcp_requires_legacy_httpx": mcp_requires_legacy_httpx,
             "network_error": normalized.is_network_error,
             "generic_network_error": generic.is_network_error,
         }
@@ -121,7 +125,8 @@ print(
 
     assert payload["agents_name"] == "agents"
     assert payload["mcp_server_name"] == "MCPServerStreamableHttp"
-    assert payload["legacy_httpx_loaded"] is False
+    if not payload["mcp_requires_legacy_httpx"]:
+        assert payload["legacy_httpx_loaded"] is False
     assert payload["network_error"] is True
     assert payload["generic_network_error"] is False
 
