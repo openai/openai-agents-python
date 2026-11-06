@@ -731,6 +731,7 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
             | NativeAgents
         ]
         | None
+        | StopTurn
         | Awaitable[
             Sequence[
                 ToolRef
@@ -739,6 +740,7 @@ class _BeforeStep(Protocol[_SelectionContextT_contra]):
                 | NativeAgents
             ]
             | None
+            | StopTurn
         ]
     ): ...
 
@@ -2969,9 +2971,12 @@ class Session(Generic[ContextT, OutputT]):
         settlement before later work starts.
         before_step(turn, *, step_index) may narrow admitted tools before
         sampling. Return None to use the captured operation default, or a
-        sequence of admitted declarations and ToolRefs.
+        sequence of admitted declarations and ToolRefs. Return StopTurn to
+        stop this root before the next model request. get_result() then raises
+        TurnStoppedError after owned cleanup. Independent children keep running.
         step_index counts preparations in that Turn from zero: a preparation
-        can be cancelled before any model request.
+        can be cancelled before any model request. This hook does not count
+        transport retries, compaction or separate output-repair requests.
         Keep this Turn to wait with the chosen type, steer or cancel exactly it.
 
         trace_options overrides linkage and adds native tracing restrictions.
@@ -6363,6 +6368,7 @@ class Session(Generic[ContextT, OutputT]):
         except RuntimeError:
             return
         selected_json = None
+        replied = False
         guard = _Invocation(self)
         token = _invocation.set(guard)
         try:
@@ -6411,6 +6417,18 @@ class Session(Generic[ContextT, OutputT]):
                     step_index=index,
                 )
             if not active():
+                return
+            if isinstance(selection, StopTurn):
+                if not self._native._stop_step(
+                    message["step_id"], message["thread"], message["instance"]
+                ):
+                    return
+                replied = True
+                # Native rejected the preparation and fenced its captured turn.
+                # Keep the application's reason out of native and public errors.
+                state.policy_stop = "requested"
+                state.stopping = True
+                state.failure.set_result(NativeError("Turn stopped by policy"))
                 return
             defaults = {
                 ToolRef(item["name"], item["namespace"] or "functions")
@@ -6480,9 +6498,10 @@ class Session(Generic[ContextT, OutputT]):
             guard.active = False
             _invocation.reset(token)
             try:
-                self._native._reply_step(
-                    message["step_id"], selected_json, message["thread"], message["instance"]
-                )
+                if not replied:
+                    self._native._reply_step(
+                        message["step_id"], selected_json, message["thread"], message["instance"]
+                    )
             except RuntimeError:
                 # Cancellation can retire this exact native nonce first.
                 # A child's native nonce can retire before its terminal receipt.

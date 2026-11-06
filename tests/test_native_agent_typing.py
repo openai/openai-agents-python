@@ -35,6 +35,7 @@ from agents import (
     ReplaceArguments,
     ResponseIntegrityReason,
     Session,
+    StopTurn,
     Tool,
     ToolContext,
     ToolOutput,
@@ -605,6 +606,32 @@ async def before_step_types(session: Session[Application, Answer]) -> None:
         agent.run_sync("select", context=Application("a"), before_step=select_step),
         Completed[Answer],
     )
+
+
+def stop_step(current: Turn[Any], *, step_index: int) -> StopTurn | None:
+    return StopTurn("Step limit reached") if step_index >= 3 else None
+
+
+async def stop_step_async(current: Turn[Any], *, step_index: int) -> StopTurn | list[ToolRef]:
+    return StopTurn("Step limit reached") if step_index >= 3 else [lookup.ref]
+
+
+async def stop_child_step(child: ChildInvocation, *, step_index: int) -> StopTurn | None:
+    return StopTurn("Step limit reached") if step_index >= 3 else None
+
+
+async def step_stop_types(session: Session[Application, Answer]) -> None:
+    assert_type(await session.submit("stop", before_step=stop_step), Turn[Answer])
+    assert_type(await session.submit("stop", before_step=stop_step_async), Turn[Answer])
+    assert_type(
+        await agent.run("stop", context=Application("a"), before_step=stop_step_async),
+        Completed[Answer],
+    )
+    assert_type(
+        agent.run_sync("stop", context=Application("a"), before_step=stop_step),
+        Completed[Answer],
+    )
+    assert_type(NativeAgents(before_step=stop_child_step), NativeAgents)
 
 
 async def prepared_request_types(agent: Agent[None, str], session: Session[None, str]) -> None:

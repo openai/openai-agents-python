@@ -1690,6 +1690,17 @@ impl NativeThread {
         tools.check_step(id, thread, instance).map_err(py_error)
     }
 
+    #[pyo3(signature = (id, thread=None, instance=None))]
+    fn _stop_step(&self, id: u64, thread: Option<&str>, instance: Option<&str>) -> PyResult<bool> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Step selection requires Python tools"))?;
+        Ok(tools.stop_owned_step(id, thread, instance))
+    }
+
     #[pyo3(signature = (id, names_json, thread=None, instance=None))]
     fn _reply_step(
         &self,
