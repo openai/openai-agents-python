@@ -1,60 +1,129 @@
-# Agent, Session and Turn
+# Agents SDK architecture
 
-An `Agent` defines instructions and tools that you can reuse across conversations. Open a `Session` for one live conversation, then submit input to get a `Turn`. Await `turn.get_result()` to receive a `Completed` result with the final output. A Turn can include several model requests and tool calls.
+The Agents SDK lets you build applications that use a model to reason and tools to act. In the native v1 design, the embedded Codex runtime coordinates the conversation: it requests model responses, routes tool calls, records results, and continues the task. You write Python for your application, functions, and policies.
 
-| Object | What it owns or represents | When to use it |
-| --- | --- | --- |
-| `Agent` | Immutable instructions, tools, and output defaults. Construction does not start a model request or execute a tool. | Reuse the declaration for independent conversations. |
-| `Session` | One live Codex conversation, with its callbacks and resources. | Keep conversation history across submissions, stream observations or save state. Open it with `async with`. |
-| `Turn` | A handle for accepted work. A root handle also tracks work continued by accepted steering input. | Await `turn.get_result()` for completion. Keep the handle to control that work. |
-| `Completed` | The completed output and available usage information. | Read `final_output`, which is text by default or your configured output type. |
-| Observation | A passive event, such as an output text delta. | Update a display. Events can be dropped. Use the completed result for the final answer. |
+The **Codex harness** is the runtime around the model. The model chooses what to do next; the harness carries out those choices through the capabilities you allow. You get Codex's execution model through a library that runs in a process you control.
 
-Use `turn.get_result()` to determine completion. A native `TurnFinished` observation marks a native step ending. SDK callbacks, result validation, or accepted steering input can continue the logical Turn after that step. If you enable delegation, independent native children can still run after the root Turn finishes. See [Turn lifetime and child controls](sessions.md) for those cases.
+The native v1 API is under development. These guides describe the development branch, including APIs added after the downloadable preview. Use the [guides for your installed build](versions.md). The [v0 comparison](#compare-with-v0240) below uses stable v0.24.0.
 
-## Choose the smallest interface you need
+## What you can build
 
-| Your application needs | Start with |
+An agent investigating a failed build can read source files and run a test in a selected workspace. It can query your build service through a function, then use the results to explain the failure. Codex coordinates the requests and tool results within that conversation. Your application can display progress, restrict tools, and stop the work through the same Session.
+
+Choose the capabilities the task needs:
+
+- An [Environment](execution.md) supplies local or remote command and file operations with configured permissions.
+- [Model Context Protocol (MCP) tools](mcp.md) can add access to a build service or issue tracker.
+- [Native children](delegation.md) can investigate independent questions using shared selected tools and policies. They require a compatible explicit model and Environment.
+- [Programmatic tool calling](configuration.md#programmatic-tool-calling) lets model-generated JavaScript coordinate declared tools in a separate bundled V8 host process. Your functions remain Python.
+
+Ordinary Python function tools run in your worker without an Environment. The design puts the loop and native tools in Codex and keeps application integration in Python. You can use it for coding workflows or assistants that work with documents and business systems.
+
+## Agent, Session, and Turn
+
+| Object | Role |
 | --- | --- |
-| One answer in an async application | `await agent.run(input)`, which opens and closes its own Session. |
-| One answer in synchronous code | `agent.run_sync(input)`, outside an existing event loop. |
-| Several messages in one conversation | [An explicit Session](sessions.md). |
-| Text as it arrives | [A Turn observer running alongside completion](sessions.md#stream-observations). |
-| A typed result | [`output_type`](configuration.md#structured-output). |
-| Approval or a result supplied by your application | [An interaction handler](approvals.md#answer-interactions-during-a-one-shot-run). |
-| A conversation that survives Session closure | [Choose a persistence method](state.md#choose-how-to-store-a-conversation). |
+| `Agent` | Reusable, immutable instructions, tools, model settings, and output defaults. Declaring it starts no model request or tool execution. |
+| `Session` | One live conversation, its callbacks, and native resources. Open it with `async with`. |
+| `Turn` | A handle for submitted work, which can include several model requests and tool calls. Await `turn.get_result()`. |
+| `Completed` | Settled output in `final_output`, plus available usage information. |
 
-In a notebook or async web handler, use `await`; do not call `asyncio.run()` or `run_sync()` inside that running event loop. The complete scripts in these guides use `asyncio.run(main())` because they start a new Python process.
+For one async answer, `await agent.run(input)` opens and closes its own Session. For follow-up messages, use [an explicit Session](sessions.md), submit input, and await each Turn. Reusing the Agent alone does not reuse a conversation. Use `agent.run_sync(input)` only outside an existing event loop. Configure [`output_type`](configuration.md#structured-output) for a typed answer.
 
-## Keep application state and conversation state separate
+## What runs in your worker
 
-Conversation content includes instructions, submitted input, tool arguments, and tool results. Application `context` supplies Python objects to callbacks, such as an account or database client. The SDK excludes the `ToolContext` parameter from the tool schema. Returning context data from a tool sends that data to the model, so select the public result carefully. See the [complete context example](tools.md#application-context).
-
-A checkpoint records conversation state. It does not transfer live Python objects, credentials, or open handles. When restoring a checkpoint, your application supplies the current callbacks, context, and permissions. Follow the [save and restore rules](state.md#save-and-restore-a-portable-checkpoint).
-
-## How the runtime fits
+Public `agents` imports forward to the private `_agents_codex` Python implementation. Python manages Sessions, validates values, and invokes application callbacks. The PyO3 extension connects Python to the embedded Codex Rust runtime. These components ship in one `openai-agents` distribution.
 
 ```mermaid
-flowchart LR
-    App["Python application: Agent and Session"] --> Core["Embedded Codex: model turns and canonical history"]
-    Core --> Provider["Current model provider"]
-    Core --> Code["Bundled JavaScript host (opt-in)"]
-    Code --> Core
-    Core --> Python["Declared Python functions and application context"]
-    Core --> MCP["Selected MCP servers"]
-    Core --> Exec["Declared executor connection"]
-    Exec --> Workspace["Application-owned workspace"]
-    Core --> Children["Declared native children"]
-    Children --> Core
-    App --> State["Trusted application checkpoint storage"]
+flowchart TB
+    subgraph Worker["Application process"]
+        App["Application: Agent, Session, Turn"] --> SDK["Python runtime: validation and callbacks"]
+        SDK <--> Binding["PyO3 extension"]
+        Binding <--> Core["Codex: loop, context, conversation history"]
+        SDK <--> Functions["Python functions and application context"]
+    end
+    Core <--> Provider["Responses provider"]
+    Core <--> MCP["Selected MCP servers"]
+    Core <--> Executor["Optional local or remote executor"]
+    Core <--> Code["Optional bundled JavaScript host process"]
 ```
 
-Codex runs the model loop inside your application. Your Python code declares agents and tools and handles callbacks. The application owns its workers, credentials, storage, and any execution workspace.
+With direct `NativeProvider`, Codex sends Responses requests to the configured endpoint. Follow the [provider checks](providers.md) for custom endpoints; text compatibility alone does not establish tool or WebSocket support. The migration adapter's Classic Model connection uses a different path, described below.
 
-Add these features only when the application needs them:
+Async Python callbacks run in the application event loop; synchronous callbacks run in SDK-owned worker threads. Executor permissions apply to executor operations. Your Python callbacks run with your application's permissions, and MCP servers have their own execution environments. See [tool execution](tools.md#execution-and-cancellation) and the [source ownership map](https://github.com/openai/openai-agents-python/blob/62a72bbcd78a7412713e33978f948d2479c33c19/packages/codex/MAINTAINING.md#runtime-ownership).
 
-- [Programmatic tool calling](configuration.md#programmatic-tool-calling) lets the model generate JavaScript to coordinate tool calls. The SDK executes the JavaScript in its bundled V8-based Codex Code Mode host. Your application and function tools still run in Python.
-- An [Environment](execution.md) connects file and process operations to an application-selected executor.
-- [Delegation](delegation.md) lets the model start native child agents.
+## Follow a Turn
 
-See [Choose how to run your agent](choosing.md) to compare this application-owned runtime with the hosted Agents API.
+`Session.submit()` returns before native admission completes. A busy Session rejects another submission by default; [queueing and steering](sessions.md#queue-or-steer-active-work) are explicit choices.
+
+```mermaid
+sequenceDiagram
+    participant App as Application
+    participant SDK as Python SDK
+    participant Core as Codex
+    participant Model as Responses provider
+    App->>SDK: Submit input
+    SDK-->>App: Turn handle
+    SDK->>Core: Request native admission
+    loop Model responses and permitted tools
+        Core->>Model: Context and selected tool schemas
+        Model-->>Core: Tool call or answer
+        opt Python tool requested
+            Core->>SDK: Exact call and arguments
+            SDK->>SDK: Validate, apply policies, invoke callback
+            SDK-->>Core: Accepted tool reply
+        end
+    end
+    Core-->>SDK: Native work settles
+    SDK->>SDK: Settle callbacks and validate output
+    SDK-->>App: Awaited result or failure
+```
+
+Await `turn.get_result()` for completion. [Passive observations](sessions.md#stream-observations) support a display but can have gaps. A `TurnFinished` observation describes one native step; accepted steering can continue the logical Turn. Independent children can also remain active after the root result.
+
+Answer approvals, forms, and manual calls through [live interaction handles](approvals.md), not passive events. Cancelling a result waiter or closing an observation cursor leaves work running. Use [Turn cancellation or Session closure](sessions.md#interrupt-work) to stop owned work and join cleanup. Cancellation cannot undo external effects, and a running synchronous callback cannot be forcibly stopped.
+
+Configure [native telemetry](observability.md) separately before opening the first Session, then shut it down after Sessions close. Diagnose failures using traces, retained history, and application effect records together.
+
+## Control tools, requests, and approvals
+
+| Extension point | Scope |
+| --- | --- |
+| [Agent and Session configuration](configuration.md#choose-tools-and-workspace-access) | Bind opening tools, instructions, provider, context, and executor policy. |
+| [`before_step`](sessions.md#select-tools-before-each-model-step) | Select among available tools for the next model step or return `StopTurn`; cannot add capabilities. |
+| [`prepare_request`](configuration.md#edit-the-next-sampling-request) | Edit a copy of the next model request, within its supported feature profile. Tool routing, validators, and approval policies still apply. |
+| [Function `before` and `after`](tools.md#execution-and-cancellation) | Allow, deny, or replace validated arguments before execution; transform the reply afterward. |
+| [Live interactions](approvals.md) | Reply to an exact pending call, approval, or form. |
+| [Observations](sessions.md#stream-observations) | Read progress without controlling execution. |
+
+**Canonical history** is Codex's accepted conversation record. The **model request** contains the instructions, input, and tool descriptions prepared for one model call; editing that copy does not rewrite history. An application-supplied [compaction summary](state.md#supply-a-trusted-summary) can change future model context while preserving the record.
+
+Application [`context`](tools.md#application-context) holds Python objects such as a database client. The SDK excludes `ToolContext` from the model's tool schema. Returning context data from a tool makes that data model-visible. A policy can restrict a callback's arguments or reply, but changing the reply cannot undo an effect already performed.
+
+## Retain conversations and recover effects
+
+An ordinary Session lives in memory. Choose [storage](state.md#choose-how-to-store-a-conversation) before opening it. Portable `SessionState` captures eligible idle conversations or supported settled manual requests. Restore requires a matching Codex revision, compatible tools, and current callbacks, credentials, context, and permissions. Workspace files and live processes do not transfer.
+
+`LocalStorage` retains a native profile and Session ID; it cannot export portable checkpoints and rejects Code Mode on this branch. `CustomStorage` supports root conversations with automatic Python tools; it excludes MCP, workspace executors, and native children. Check [storage and capture limits](choosing.md#choose-feature-combinations) before combining capabilities.
+
+If a process stops after an external action but before its result is recorded, history cannot establish whether the action occurred. Check application records and [reconcile unknown effects](state.md#recover-after-interruption) before continuing. Use durable business operation IDs to deduplicate actions; storage does not guarantee exactly-once effects.
+
+## Compare with v0.24.0
+
+The [stable v0.24.0 SDK](https://github.com/openai/openai-agents-python/tree/17d994bd3045dae71acda676a4ef4762ed8ecd94) already provides model/tool loops, Sessions, and resumable runs. Native execution changes their ownership and contracts.
+
+| Concern | v0.24.0 | Native API |
+| --- | --- | --- |
+| Loop | Python `Runner` calls a Python `Model`, executes tools or handoffs, and repeats. | Embedded Codex coordinates model turns and permitted tools. |
+| Session | History-store protocol used by the runner | Live conversation and resource owner; storage is separate |
+| Run entry | `Runner.run(agent, input)` | `agent.run(input)` or Session submission and Turn completion |
+| Model integration | Python `Model` and `ModelProvider` | `NativeProvider` and the Responses protocol, or a supported migration adapter |
+| Saved work | Session history and `RunState` | Native checkpoints or configured storage, with their own restore contracts |
+
+Choose a route per workflow:
+
+- **Classic:** Keep the Python execution contract through `agents.classic` imports. Keep related agents, tools, runners, and state together. Classic includes later fixes beyond v0.24.0; test the exact build and install its required extras. See the [Classic contract](https://github.com/openai/openai-agents-python/blob/62a72bbcd78a7412713e33978f948d2479c33c19/CLASSIC.md).
+- **SDKRunner:** Reuse an eligible Classic Agent, explicit Model, and function tools through a private loopback connection to native execution. This experimental adapter supports a constrained subset and buffers streamed events until success. Check [migration limits](https://github.com/openai/openai-agents-python/blob/62a72bbcd78a7412713e33978f948d2479c33c19/MIGRATION.md) for approvals, providers, guardrails, handoffs, and state.
+- **Native APIs:** Design around `Agent`, `Session`, and `Turn`, with the capabilities your application needs. An import change alone does not convert Classic conversations or checkpoints.
+
+Classic and SDKRunner require a matching development build beyond the published preview. Classic extras retain native platform requirements. For a new native application, check [installation](installation.md) and follow the [quickstart](index.md).
