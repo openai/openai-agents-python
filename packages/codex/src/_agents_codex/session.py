@@ -82,6 +82,7 @@ from .agent import (
     _copy_model_settings as _copy_model_settings,
 )
 from .canonical_storage import CustomStorage as CustomStorage
+from .compaction import CompactionContext
 from .executor import (
     Environment as Environment,
     EnvironmentSource as EnvironmentSource,
@@ -1696,6 +1697,7 @@ class Session(Generic[ContextT, OutputT]):
                 output_type=cast(OutputSpec[OutputT], agent.output_type),
                 programmatic_tool_calling=agent.programmatic_tool_calling,
                 transform_context=agent.transform_context,
+                before_compact=agent.before_compact,
             )
         codex_login = agent.provider.auth if agent.provider is not None else None
         programmatic_tool_calling = agent.programmatic_tool_calling
@@ -2154,6 +2156,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_transform_context": agent.transform_context is not None,
+                    "_before_compact": agent.before_compact is not None,
                     **(
                         {"parent_trace": parent_trace.to_headers()}
                         if parent_trace is not None
@@ -6033,6 +6036,7 @@ class Session(Generic[ContextT, OutputT]):
             model=captured["model"],
             model_settings=settings,
             transform_context=self._opening_agent.transform_context,
+            before_compact=self._opening_agent.before_compact,
         )
         for _ in range(state.output.max_retries):
             # The original native turn has already settled. Its owner can
@@ -6690,13 +6694,16 @@ class Session(Generic[ContextT, OutputT]):
                 if not state.stopping and not state.failure.done():
                     state.failure.set_result(NativeError("Prepared request expired"))
 
-    async def _transform_context(self, state: _CallbackState, message: dict[str, Any]) -> None:
-        with _owned_span("context callback", "callback", message.get("tracing_context")) as tracing:
-            await self._transform_context_body(state, message)
-            if tracing is not None and state.failure.done():
-                tracing.set_outcome(status="error", category="callback_error")
+    async def _run_owned_context_callback(
+        self,
+        state: _CallbackState,
+        message: dict[str, Any],
+        prepare: Callable[[], tuple[Callable[..., Any], object]],
+        reply: Callable[[Any], None],
+        reject: Callable[[], None],
+    ) -> None:
+        """Own a context or compaction callback through its final native reply."""
 
-    async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
         def active() -> bool:
             if (
                 state.stopping
@@ -6719,6 +6726,32 @@ class Session(Generic[ContextT, OutputT]):
         try:
             if not active():
                 return
+            callback, request = prepare()
+            result = await _call_callback(callback, active, request)
+            if not active():
+                return
+            reply(result)
+            replied = True
+        except BaseException as error:
+            if not state.stopping and not state.failure.done():
+                state.failure.set_result(error)
+            elif not isinstance(error, asyncio.CancelledError):
+                state.retain_cleanup_error(error)
+        finally:
+            guard.active = False
+            _invocation.reset(token)
+            if not replied:
+                with suppress(RuntimeError):
+                    reject()
+
+    async def _transform_context(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        with _owned_span("context callback", "callback", message.get("tracing_context")) as tracing:
+            await self._transform_context_body(state, message)
+            if tracing is not None and state.failure.done():
+                tracing.set_outcome(status="error", category="callback_error")
+
+    async def _transform_context_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def prepare() -> tuple[Callable[..., Any], ModelRequestContext[ContextT]]:
             assert self._opening_agent is not None
             callback = self._opening_agent.transform_context
             if callback is None:
@@ -6737,9 +6770,9 @@ class Session(Generic[ContextT, OutputT]):
                     else self._context_transform_purpose
                 ),
             )
-            replacement = await _call_callback(callback, active, request)
-            if not active():
-                return
+            return callback, request
+
+        def reply(replacement: Any) -> None:
             if replacement is not None and (
                 not isinstance(replacement, Sequence)
                 or isinstance(replacement, (str, bytes, bytearray))
@@ -6751,20 +6784,55 @@ class Session(Generic[ContextT, OutputT]):
             self._native._reply_context(
                 message["step_id"], items_json, message["thread"], message["instance"]
             )
-            replied = True
-        except BaseException as error:
-            if not state.stopping and not state.failure.done():
-                state.failure.set_result(error)
-            elif not isinstance(error, asyncio.CancelledError):
-                state.retain_cleanup_error(error)
-        finally:
-            guard.active = False
-            _invocation.reset(token)
-            if not replied:
-                with suppress(RuntimeError):
-                    self._native._reply_context(
-                        message["step_id"], None, message["thread"], message["instance"]
-                    )
+
+        def reject() -> None:
+            self._native._reply_context(
+                message["step_id"], None, message["thread"], message["instance"]
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
+
+    async def _before_compact(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        with _owned_span(
+            "compaction callback", "callback", message.get("tracing_context")
+        ) as tracing:
+            await self._before_compact_body(state, message)
+            if tracing is not None and state.failure.done():
+                tracing.set_outcome(status="error", category="callback_error")
+
+    async def _before_compact_body(self, state: _CallbackState, message: dict[str, Any]) -> None:
+        def prepare() -> tuple[Callable[..., Any], CompactionContext[ContextT]]:
+            assert self._opening_agent is not None
+            callback = self._opening_agent.before_compact
+            if callback is None:
+                raise NativeError("Compaction callback has no application owner")
+            request = CompactionContext(
+                context=cast(ContextT, self._context),
+                items=tuple(message["items"]),
+                session_id=self.id,
+                turn_id=message["turn_id"],
+                subagent_id=message["thread"] if message["instance"] is not None else None,
+                model=message["model"],
+                trigger=message["trigger"],
+            )
+            return callback, request
+
+        def reply(summary: Any) -> None:
+            if summary is not None:
+                if not isinstance(summary, str):
+                    raise TypeError("before_compact must return a summary string or None")
+                if not summary.strip():
+                    raise ValueError("before_compact summary must not be empty")
+            self._native._reply_compaction(
+                message["step_id"], summary, message["thread"], message["instance"]
+            )
+
+        def reject() -> None:
+            self._native._reply_compaction(
+                message["step_id"], None, message["thread"], message["instance"], error=True
+            )
+
+        await self._run_owned_context_callback(state, message, prepare, reply, reject)
 
     async def _select_step(self, state: _CallbackState, message: dict[str, Any]) -> None:
         with _owned_span("step callback", "callback", message.get("tracing_context")) as tracing:
@@ -6996,7 +7064,8 @@ class Session(Generic[ContextT, OutputT]):
                             child.failure.set_result(_model_failure_error(message))
                     continue
                 if (
-                    message.get("type") in {"_sdk_select_step", "_sdk_transform_context"}
+                    message.get("type")
+                    in {"_sdk_select_step", "_sdk_transform_context", "_sdk_before_compact"}
                     and message["thread"] != self.id
                 ):
                     try:
@@ -7011,6 +7080,8 @@ class Session(Generic[ContextT, OutputT]):
                     callback = (
                         self._transform_context
                         if message["type"] == "_sdk_transform_context"
+                        else self._before_compact
+                        if message["type"] == "_sdk_before_compact"
                         else self._select_step
                     )
                     child.add_callback(asyncio.create_task(callback(child, message)))
@@ -7211,6 +7282,8 @@ class Session(Generic[ContextT, OutputT]):
                 elif kind == "_sdk_select_step":
                     task = asyncio.create_task(self._select_step(state, message))
                     state.add_callback(task)
+                elif kind == "_sdk_before_compact":
+                    state.add_callback(asyncio.create_task(self._before_compact(state, message)))
                 elif kind == "_sdk_transform_context":
                     state.add_callback(asyncio.create_task(self._transform_context(state, message)))
                 elif kind == "token_count" and event["id"] == handle.turn_id:

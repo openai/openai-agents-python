@@ -534,6 +534,7 @@ impl EngineState {
         .then_some(&self.service_config);
         let manual_slots = std::mem::take(&mut options.manual_tool_slots);
         let transform_context = options.transform_context;
+        let before_compact = options.before_compact;
         let resume = options.sdk_resume_thread_id;
         let sdk_history = options.take_sdk_history(history.is_some(), python_specs.is_some())?;
         let (mut startup, instructions) = self.build_startup(options, initial_config).await?;
@@ -584,6 +585,7 @@ impl EngineState {
                 specs,
                 &manual_slots,
                 transform_context,
+                before_compact,
             )?;
         }
         if let Some(items) = sdk_history {
@@ -775,6 +777,7 @@ impl EngineState {
             .as_ref()
             .context("local recovery requires native local storage")?;
         let transform_context = options.transform_context;
+        let before_compact = options.before_compact;
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let receipt = receipt.into();
         // Compaction holds the source context lease through this handoff.
@@ -795,7 +798,12 @@ impl EngineState {
             None
         };
         startup.initial_history = self.history(&state.id.to_string()).await?;
-        crate::python_tools::PythonTools::install(&mut startup, specs, transform_context)?;
+        crate::python_tools::PythonTools::install(
+            &mut startup,
+            specs,
+            transform_context,
+            before_compact,
+        )?;
         // Compare and publish under the same retained writer, including the
         // ordinary missing-result append. Preparation alone is not publication.
         store
@@ -954,6 +962,7 @@ impl EngineState {
     ) -> anyhow::Result<NativeThread> {
         let _guard = self.lifecycle.lock().await;
         let transform_context = options.transform_context;
+        let before_compact = options.before_compact;
         let (mut startup, instructions) = self.build_startup(options, None).await?;
         let mut managed_parent = false;
         let mut source_code = None;
@@ -1066,7 +1075,12 @@ impl EngineState {
             // The native fork will select its own boundary. Install against
             // that source's fixed header, not a fresh startup's empty history.
             startup.initial_history = history.clone();
-            crate::python_tools::PythonTools::install(&mut startup, specs, transform_context)?;
+            crate::python_tools::PythonTools::install(
+                &mut startup,
+                specs,
+                transform_context,
+                before_compact,
+            )?;
         }
         let new = self
             .manager

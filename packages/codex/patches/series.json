@@ -243,7 +243,11 @@
     {
       "path": "req682-hosted-search-evidence.patch",
       "sha256": "9999a2376c507d69d7a0e37e813c3c63730546ee045aa787a6257429aaa8778e"
+    },
+    {
+      "path": "0055-compaction-callback.patch",
+      "sha256": "5cf5df20f97b17d042d91359a2291bee3f0b4a73f7830834d6f7624038291015"
     }
   ],
-  "result_tree": "fb464454292f8fce401effec67728cf00c4ae42a"
+  "result_tree": "8e99da88f37c3dca89897ab1849d8d66bddfc66c"
 }
