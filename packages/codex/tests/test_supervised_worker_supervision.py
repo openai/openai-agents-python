@@ -16,7 +16,7 @@ from typing import cast
 import pytest
 
 from agents import Turn
-from examples.supervised_worker import __main__ as worker
+from examples.codex.supervised_worker import __main__ as worker
 from tests._asyncio import timeout
 
 

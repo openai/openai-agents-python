@@ -10,7 +10,7 @@ import pytest
 
 pytest.importorskip("a2a")
 
-from examples.observability.trace_walkthrough import Collector
+from examples.codex.observability.trace_walkthrough import Collector
 
 
 def test_exported_native_graph_crosses_real_a2a_http_boundary(tmp_path):

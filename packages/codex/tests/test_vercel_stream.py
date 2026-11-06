@@ -15,7 +15,7 @@ import pytest
 
 from agents import Agent, NativeError, TurnStoppedError, function_tool
 from agents.observation import EventGap, OutputTextDelta, TurnStarted
-from examples.vercel_stream import export_metadata, passive_wait, stream_turn, wait_owned_turn
+from examples.codex.vercel_stream import export_metadata, passive_wait, stream_turn, wait_owned_turn
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -512,7 +512,7 @@ async def test_response_body_rejects_non_plain_output_before_open(
     from pydantic import BaseModel
 
     from agents import PromptedOutput
-    from examples.vercel_stream import response_body
+    from examples.codex.vercel_stream import response_body
 
     class Answer(BaseModel):
         value: int
@@ -536,7 +536,7 @@ async def test_response_body_rejects_non_plain_output_before_open(
 async def test_response_body_accepts_plain_text_output(
     responses: ResponsesFixture, output: type[str] | None
 ) -> None:
-    from examples.vercel_stream import response_body
+    from examples.codex.vercel_stream import response_body
 
     responses.respond(*text_response("plain-item", "plain text"))
     frames = await read_body(

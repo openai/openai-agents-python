@@ -1,4 +1,4 @@
-from examples.recipes.concurrent_tools import run_example
+from examples.codex.recipes.concurrent_tools import run_example
 
 
 async def test_two_sessions_cannot_overspend_shared_quota():

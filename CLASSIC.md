@@ -53,7 +53,7 @@ Change imports for each existing workflow together:
 
 The same prefix change applies to other public v0 submodules. Keep each workflow's Agent, tools, Runner, configuration, tracing and session objects within classic. Libraries that import `agents` internally also need an update before they can work with classic objects. An import change in your application does not rewrite those libraries.
 
-Run `python packages/codex/examples/classic.py` for a deterministic tool workflow. It needs no API key and sends no model or tracing requests. For live workflows, configure the classic provider and credentials as you did in v0.
+Run `python examples/codex/classic.py` for a deterministic tool workflow. It needs no API key and sends no model or tracing requests. For live workflows, configure the classic provider and credentials as you did in v0.
 
 ## Introduce native workflows separately
 
@@ -71,3 +71,5 @@ For a supported single-agent workflow, the experimental [SDKRunner migration ada
 Test application behavior after changing imports, including tool effects, guardrail ordering, streamed events, provider settings and saved-state restoration. Application-defined callback and class locations may also participate in saved identity checks; keep those locations stable while testing the namespace change.
 
 Keep a copy of persisted data and the previous dependency lock while migrating. Returning to the prior v0 environment remains an application deployment decision; do not write native checkpoints into a classic store.
+
+The [Classic example collection](examples/classic/README.md) includes the established runtime examples, with explicit `agents.classic` imports.

@@ -5,8 +5,8 @@ from pydantic import ValidationError
 
 from agents import Agent
 from agents.testing import ScriptedResponses, tool_call
-from examples.recipes.inspect_requests import function_declarations
-from examples.recipes.typed_tools import Ledger, Line, record, run_example
+from examples.codex.recipes.inspect_requests import function_declarations
+from examples.codex.recipes.typed_tools import Ledger, Line, record, run_example
 
 
 async def test_nested_coercion_json_result_and_native_schema():

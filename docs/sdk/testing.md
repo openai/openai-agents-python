@@ -110,4 +110,4 @@ Three trials per case can catch obvious failures, but cannot give a reliable suc
 
 Keep live evaluations separate from deterministic pytest tests so service failures and model variation do not obscure application regressions. Passing one does not replace passing the other.
 
-Follow the [evaluation runner guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/evaluation/README.md) to repeat cases, record configurations, compare a baseline and save failure details. The runner's scripted mode checks the test setup. Live results need outcome review. Neither scripted responses nor model confidence shows that confidence matches the actual success rate.
+Follow the [evaluation runner guide](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/codex/evaluation/README.md) to repeat cases, record configurations, compare a baseline and save failure details. The runner's scripted mode checks the test setup. Live results need outcome review. Neither scripted responses nor model confidence shows that confidence matches the actual success rate.

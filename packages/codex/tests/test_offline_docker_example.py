@@ -8,7 +8,7 @@ from uuid import uuid4
 
 import pytest
 
-from examples.offline_docker import create_offline_job, open_exec_stdio
+from examples.codex.offline_docker import create_offline_job, open_exec_stdio
 
 CONTAINER_ID = "ba" * 32
 EXEC_SERVER = "/usr/local/bin/exec-server"
@@ -139,7 +139,7 @@ def test_shutdown_joins_inspection_before_propagating_cancellation(monkeypatch):
             assert release.wait(10)
             finished.set()
 
-        monkeypatch.setattr("examples.offline_docker._inspect", inspect)
+        monkeypatch.setattr("examples.codex.offline_docker._inspect", inspect)
         attachment = asyncio.create_task(attach())
         await asyncio.wait_for(started.wait(), 10)
         # Let asyncio.run release the worker when it cancels this sibling task.

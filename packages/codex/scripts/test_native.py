@@ -27,7 +27,7 @@ def main() -> None:
     environment.setdefault("RUST_MIN_STACK", str(16 * 1024 * 1024))
     pythonpath = environment.get("PYTHONPATH")
     environment["PYTHONPATH"] = os.pathsep.join(
-        str(path) for path in (root.parents[1] / "src", root / "src", root)
+        str(path) for path in (root.parents[1] / "src", root / "src", root, root.parents[1])
     )
     if pythonpath:
         environment["PYTHONPATH"] += os.pathsep + pythonpath

@@ -24,7 +24,7 @@ Each Session captures fresh credentials and settings and owns its Core runtime, 
 - `scripts/prepare_codex.py`: prepares the pinned upstream source without changing its source repository.
 - `scripts/build.py` and `scripts/native_env.py`: build the extension and matching runtime helpers.
 - `tests/`: Python and native integration tests, typing checks, and execution fixtures.
-- `examples/`: current Python examples.
+- `../../examples/codex/`: current Python examples.
 - `../../docs/sdk/`: supported API contracts.
 - `../../.github/workflows/codex-python.yml`: builds the SDK wheel and test executor for the platform selected by the caller. See [wheel verification](MAINTAINING.md#verify-the-delivered-wheel).
 

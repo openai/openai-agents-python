@@ -5,7 +5,7 @@ import json
 import pytest
 
 from agents.testing import ScriptedResponses, text, tool_call
-from examples.recipes.retrieval import answer_question
+from examples.codex.recipes.retrieval import answer_question
 from tests._asyncio import timeout
 from tests.test_native_agent import function_declarations
 

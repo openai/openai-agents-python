@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, Environment
-from examples import offline_unix_sockets, remote_executor
+from examples.codex import offline_unix_sockets, remote_executor
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
