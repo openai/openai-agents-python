@@ -5,7 +5,7 @@ live SDK session, not durable API resources or replay cursors. Required-action
 variants extend Managed Agents where it has no matching native interaction.
 """
 
-from ._runtime._events import (
+from _agents_codex._events import (
     ApprovalDecision as ApprovalDecision,
     ApprovalRejection as ApprovalRejection,
     CloseSubagentCallItem as CloseSubagentCallItem,

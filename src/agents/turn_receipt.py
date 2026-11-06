@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.turn_receipt import (
+from _agents_codex.turn_receipt import (
     _TURN_RECEIPT as _TURN_RECEIPT,
     Any as Any,
     ExecutorNetworkReceipt as ExecutorNetworkReceipt,

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.prepared_request import (
+from _agents_codex.prepared_request import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     Awaitable as Awaitable,

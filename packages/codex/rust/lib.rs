@@ -1679,6 +1679,37 @@ impl NativeThread {
         Ok(())
     }
 
+    #[pyo3(signature = (id, items_json, thread=None, instance=None))]
+    fn _reply_context(
+        &self,
+        id: u64,
+        items_json: Option<&str>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Model context transformation requires Python tools"))?;
+        let update = items_json
+            .map(|text| {
+                serde_json::from_str::<Option<Vec<codex_protocol::models::ResponseItem>>>(text)
+                    .map(|items| {
+                        items.map_or(
+                            python_tools::ModelContextUpdate::Keep,
+                            python_tools::ModelContextUpdate::Replace,
+                        )
+                    })
+                    .map_err(|_| py_error("Invalid model context items"))
+            })
+            .transpose()?;
+        tools
+            .reply_context(id, update, thread, instance)
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, thread=None, instance=None))]
     fn _check_step(&self, id: u64, thread: Option<&str>, instance: Option<&str>) -> PyResult<()> {
         let inner = self.current()?;
@@ -1688,6 +1719,17 @@ impl NativeThread {
             .get::<python_tools::PythonTools>()
             .ok_or_else(|| py_error("Step selection requires Python tools"))?;
         tools.check_step(id, thread, instance).map_err(py_error)
+    }
+
+    #[pyo3(signature = (id, thread=None, instance=None))]
+    fn _stop_step(&self, id: u64, thread: Option<&str>, instance: Option<&str>) -> PyResult<bool> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Step selection requires Python tools"))?;
+        Ok(tools.stop_owned_step(id, thread, instance))
     }
 
     #[pyo3(signature = (id, names_json, thread=None, instance=None))]

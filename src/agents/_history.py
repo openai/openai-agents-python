@@ -1,6 +1,6 @@
 """Project canonical rollout records without synthesizing model output."""
 
-from ._runtime._history import (
+from _agents_codex._history import (
     _EXECUTION_TYPES as _EXECUTION_TYPES,
     Any as Any,
     EventProjector as EventProjector,

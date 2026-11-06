@@ -21,7 +21,7 @@ jobs:
   build_docs:
     env:
       UV_NO_SYNC: "1"
-      PYTHONPATH: src
+      PYTHONPATH: src:packages/codex/src
     if: github.repository == 'openai/openai-agents-python'
     runs-on: ${{ fromJSON(github.repository == 'openai/openai-agents-python' && '{"group":"codex-runners","labels":"codex-linux-x64"}' || '"ubuntu-latest"') }}
     permissions:

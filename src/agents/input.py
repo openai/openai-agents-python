@@ -1,6 +1,6 @@
 """Responses-shaped user messages for native sessions."""
 
-from ._runtime.input import (
+from _agents_codex.input import (
     Any as Any,
     InputImage as InputImage,
     InputText as InputText,

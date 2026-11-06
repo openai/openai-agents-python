@@ -212,7 +212,10 @@ def test_standard_wheel_owns_native_assets_once_without_gitignore(
         description = metadata.split("\n\n", 1)[1]
         assert description.strip() == (repository / "packages/codex/README.md").read_text().strip()
         assert "uses Codex to run model turns" in description
-        assert "github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/reference.md" in description
+        assert (
+            "github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/reference.md"
+            in description
+        )
 
 
 @pytest.mark.parametrize("version", ["standard", "editable"])

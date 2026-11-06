@@ -10,7 +10,7 @@ SSE framing and notifications. A reply above that limit cannot establish a write
 
 from __future__ import annotations
 
-from .._runtime.experimental._mcp_tasks_wire import (
+from _agents_codex.experimental._mcp_tasks_wire import (
     _CALL_RESULT as _CALL_RESULT,
     _EGRESS_ERROR as _EGRESS_ERROR,
     _MAX_RESPONSE_BYTES as _MAX_RESPONSE_BYTES,

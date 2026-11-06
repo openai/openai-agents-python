@@ -7,7 +7,7 @@ DeferredTools.prepare and advance for the two sides of the portable boundary.
 
 from __future__ import annotations
 
-from .._runtime.experimental.deferred import (
+from _agents_codex.experimental.deferred import (
     _CLOSED_BEFORE_START as _CLOSED_BEFORE_START,
     _INPUT_ERROR as _INPUT_ERROR,
     _RESULT_ERROR as _RESULT_ERROR,

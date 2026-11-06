@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.agent import (
+from _agents_codex.agent import (
     _PROVIDER_LOCK as _PROVIDER_LOCK,
     TYPE_CHECKING as TYPE_CHECKING,
     AbstractAsyncContextManager as AbstractAsyncContextManager,

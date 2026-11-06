@@ -6,7 +6,7 @@ durable log. Use Turn.get_result and canonical history for authoritative results
 
 from __future__ import annotations
 
-from ._runtime.observation import (
+from _agents_codex.observation import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     ApiRateLimits as ApiRateLimits,

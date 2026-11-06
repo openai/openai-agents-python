@@ -63,8 +63,8 @@ class RepoSkillRunnerTests(unittest.TestCase):
                 f"    def test_value(self): self.assertEqual(VALUE, {name!r})\n",
             )
             suite.with_name("helper.py").write_text(f"VALUE = {name!r}\n", encoding="utf-8")
-        sdk_suite = self.repo / "tests/test_sdk.py"
-        sdk_suite.parent.mkdir()
+        sdk_suite = self.repo / "packages/codex/tests/test_sdk.py"
+        sdk_suite.parent.mkdir(parents=True)
         sdk_suite.write_text("raise RuntimeError('SDK suite must not be collected')\n")
         result = self.run_cli()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

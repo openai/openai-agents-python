@@ -241,7 +241,7 @@ Native output and `PromptedOutput(max_retries=0)` are supported. Separate prompt
 
 An active edited operation cannot suspend or export portable state. Save after it settles. Automatic compaction needed before or during sampling fails before the hidden compaction request; earlier tool effects remain. Shorten the input or start a new operation without the editor after checking those effects. Compaction due after completion does not discard the completed answer.
 
-The complete synthetic [prepared-request recipe](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/prepared_request.py) edits a request after a real Python tool result and checks the outgoing instructions, input, and schema. From the matching source root, run `python -m examples.recipes.prepared_request`. It needs no model key and uses a local HTTP Responses peer.
+The complete synthetic [prepared-request recipe](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/prepared_request.py) edits a request after a real Python tool result and checks the outgoing instructions, input, and schema. From the matching source root, run `PYTHONPATH=packages/codex python -m examples.recipes.prepared_request`. It needs no model key and uses a local HTTP Responses peer.
 
 ## Telemetry
 

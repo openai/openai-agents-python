@@ -304,7 +304,7 @@ Python callbacks can run fixed operations directly in the application's worker, 
 
 ### Docker creation and restore checks
 
-Use the [Docker gateway helper](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/offline_docker.py) to check Linux Docker networking at creation and attachment:
+Use the [Docker gateway helper](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/offline_docker.py) to check Linux Docker networking at creation and attachment:
 
 1. `create_offline_job` starts a private container with `--network none`.
 2. On every authenticated gateway attachment, use `open_exec_stdio`, including for restore. It inspects the same full container ID passed to `docker exec -i`.

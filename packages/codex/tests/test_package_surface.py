@@ -40,6 +40,7 @@ class ForbiddenRuntime(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, ForbiddenRuntime())
 import agents
 from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool
+from agents import ModelRequestContext
 from agents.state import SessionState
 
 def reject_socket(*args, **kwargs):
@@ -90,7 +91,8 @@ def test_package_root_has_one_public_surface():
     import agents
 
     contract_path = (
-        Path(__file__).resolve().parents[3] / "tests/fixtures/released_api_contract.json"
+        Path(__file__).resolve().parents[3]
+        / "packages/codex/tests/fixtures/released_api_contract.json"
     )
     contract = json.loads(contract_path.read_text())
     assert set(agents.__all__) == set(contract["public_api"]["root_exports"])

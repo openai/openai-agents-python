@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.native_agents import (
+from _agents_codex.native_agents import (
     _BUILTIN_ROLES as _BUILTIN_ROLES,
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     TYPE_CHECKING as TYPE_CHECKING,

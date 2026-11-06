@@ -1,0 +1,1246 @@
+{
+  "baseline": "v0.24.0-alpha.6",
+  "baseline_commit": "3ce2bda7356e2d82504b29f1552a32798f4df6cf",
+  "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
+  "public_api": {
+    "modules": {
+      "agents.agent": {
+        "declarations": [
+          "ContextT = TypeVar('ContextT', default=None)",
+          "OutputT = TypeVar('OutputT', default=str)",
+          "SessionContextT = TypeVar('SessionContextT')",
+          "NewOutputT = TypeVar('NewOutputT')",
+          "TextAgentT = TypeVar('TextAgentT', bound='Agent[Any, str]')",
+          "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None",
+          "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
+          "@dataclass(frozen=True, kw_only=True)\nclass NativeProvider:\n    base_url: str | None = field(default=None, repr=False)\n    api_key: str | None = field(default=None, repr=False)\n    supports_websockets: bool | None = None\n    auth: CodexLogin | None = field(default=None, repr=False)\n\n    async def aclose(self) -> None:\n        pass\n\n    async def __aenter__(self) -> NativeProvider:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass",
+          "@dataclass(init=False, eq=False, repr=False)\nclass Agent(Generic[ContextT, OutputT]):\n    instructions: str\n    name: str | None\n    tools: tuple[Tool[ContextT], ...]\n    model: str | None\n    model_settings: ModelSettings\n    provider: NativeProvider | None\n    output_type: OutputSpec[OutputT] | None\n    programmatic_tool_calling: bool\n    transform_context: _ContextTransform[ContextT] | None\n    if TYPE_CHECKING:\n\n        @overload\n        def __new__(cls: type[TextAgentT], *args: Any, tools: Sequence[Tool[ContextT]] | None=None, output_type: None=None, transform_context: _ContextTransform[ContextT] | None=None, **kwargs: Any) -> TextAgentT:\n            pass\n\n        @overload\n        def __new__(cls: type[TypedAgentT], *args: Any, output_type: OutputSpec[OutputT], tools: Sequence[Tool[ContextT]] | None=None, transform_context: _ContextTransform[ContextT] | None=None, **kwargs: Any) -> TypedAgentT:\n            pass\n\n        @overload\n        def __new__(cls: type[TypedAgentT], *args: Any, **kwargs: Any) -> TypedAgentT:\n            pass\n\n        def __new__(cls, *args: Any, **kwargs: Any) -> Agent[Any, Any]:\n            pass\n\n    @overload\n    def __init__(self: Agent[ContextT, str], *, instructions: str, name: str | None=None, tools: Sequence[Tool[ContextT]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, output_type: None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None) -> None:\n        pass\n\n    @overload\n    def __init__(self, *, instructions: str, name: str | None=None, output_type: OutputSpec[OutputT], tools: Sequence[Tool[ContextT]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None) -> None:\n        pass\n\n    def __init__(self, *, instructions: str, name: str | None=None, tools: Sequence[Tool[ContextT]] | None=None, model: str | None=None, model_settings: ModelSettings | None=None, provider: NativeProvider | None=None, output_type: OutputSpec[OutputT] | None=None, programmatic_tool_calling: bool=False, transform_context: _ContextTransform[ContextT] | None=None) -> None:\n        pass\n\n    def validate(self) -> None:\n        pass\n\n    def with_output_type(self, output_type: OutputSpec[NewOutputT]) -> Agent[ContextT, NewOutputT]:\n        pass\n\n    @overload\n    def session(self: Agent[None, OutputT], *, context: None=None, state: SessionState | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[Tool[None]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None) -> AbstractAsyncContextManager[Session[None, OutputT]]:\n        pass\n\n    @overload\n    def session(self: Agent[object, OutputT], *, context: object=None, state: SessionState | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[Tool[object]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None) -> AbstractAsyncContextManager[Session[object, OutputT]]:\n        pass\n\n    @overload\n    def session(self, *, context: ContextT, state: SessionState | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[Tool[ContextT]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None) -> AbstractAsyncContextManager[Session[ContextT, OutputT]]:\n        pass\n\n    @asynccontextmanager\n    async def session(self: Agent[SessionContextT, OutputT], *, context: SessionContextT | None=None, state: SessionState | None=None, storage: LocalStorage | CustomStorage | None=None, resume: str | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[Tool[SessionContextT]] | None=None, instruction_files: Sequence[Path]=(), reconciled_calls: Sequence[ReconciledCall]=(), parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None) -> AsyncIterator[Session[SessionContextT, OutputT]]:\n        pass\n\n    @overload\n    async def run(self: Agent[None, OutputT], input: UserInput | None, *, context: None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None=None, before_step: _BeforeStep[None] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    async def run(self: Agent[object, OutputT], input: UserInput | None, *, context: object=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None=None, before_step: _BeforeStep[object] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    async def run(self, input: UserInput | None, *, context: ContextT, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    async def run(self: Agent[SessionContextT, OutputT], input: UserInput | None, *, context: SessionContextT | None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents] | None=None, before_step: _BeforeStep[SessionContextT] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self: Agent[None, OutputT], input: UserInput | None, *, context: None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[None] | None=None, tools: Sequence[ToolRef | Tool[None] | Environment[None] | NativeAgents] | None=None, before_step: _BeforeStep[None] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self: Agent[object, OutputT], input: UserInput | None, *, context: object=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[object] | None=None, tools: Sequence[ToolRef | Tool[object] | Environment[object] | NativeAgents] | None=None, before_step: _BeforeStep[object] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    @overload\n    def run_sync(self, input: UserInput | None, *, context: ContextT, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[ContextT] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass\n\n    def run_sync(self: Agent[SessionContextT, OutputT], input: UserInput | None, *, context: SessionContextT | None=None, on_interaction: _InteractionHandler | None=None, provider: NativeProvider | None=None, model: str | None=None, model_settings: ModelSettings | None=None, environment: EnvironmentSource[SessionContextT] | None=None, tools: Sequence[ToolRef | Tool[SessionContextT] | Environment[SessionContextT] | NativeAgents] | None=None, before_step: _BeforeStep[SessionContextT] | None=None, state: SessionState | None=None, return_state: bool=False, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Completed[OutputT]:\n        pass"
+        ],
+        "exports": {
+          "Agent": "agents.agent.Agent",
+          "CodexAccount": "agents.agent.CodexAccount",
+          "CodexLogin": "agents.agent.CodexLogin",
+          "ContextT": "ContextT",
+          "ModelSettings": "agents.agent.ModelSettings",
+          "NativeProvider": "agents.agent.NativeProvider",
+          "NewOutputT": "NewOutputT",
+          "OutputT": "OutputT",
+          "SessionContextT": "SessionContextT",
+          "TextAgentT": "TextAgentT",
+          "TypedAgentT": "TypedAgentT"
+        },
+        "imports": [
+          "from collections.abc import AsyncIterator as AsyncIterator, Mapping as Mapping, Sequence as Sequence",
+          "from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager, asynccontextmanager as asynccontextmanager",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from pathlib import Path as Path",
+          "from types import TracebackType as TracebackType",
+          "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, overload as overload",
+          "from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar",
+          "from ._trace_context import TraceContext as TraceContext",
+          "from .model_context import _ContextTransform",
+          "from ._function_tools import Tool",
+          "from .canonical_storage import CustomStorage",
+          "from .executor import Environment, EnvironmentSource",
+          "from .input import UserInput",
+          "from .native_agents import NativeAgents",
+          "from .prepared_request import _PrepareRequest",
+          "from .recovery import ReconciledCall",
+          "from .schema import OutputSpec",
+          "from .session import Completed, Session, _BeforeStep, _InteractionHandler",
+          "from .state import LocalStorage, SessionState",
+          "from .telemetry import TraceOptions",
+          "from .tools import ToolRef"
+        ],
+        "references": {
+          "Completed": "agents.session.Completed",
+          "CustomStorage": "agents.canonical_storage.CustomStorage",
+          "Environment": "agents.executor.Environment",
+          "EnvironmentSource": "agents.executor.EnvironmentSource",
+          "LocalStorage": "agents.state.LocalStorage",
+          "NativeAgents": "agents.native_agents.NativeAgents",
+          "OutputSpec": "agents.schema.OutputSpec",
+          "ReconciledCall": "agents.recovery.ReconciledCall",
+          "Session": "agents.session.Session",
+          "SessionState": "agents.state.SessionState",
+          "Tool": "agents._function_tools.Tool",
+          "ToolRef": "agents.tools.ToolRef",
+          "TraceContext": "agents._trace_context.TraceContext",
+          "TraceOptions": "agents.telemetry.TraceOptions",
+          "UserInput": "agents.input.UserInput",
+          "_BeforeStep": "agents.session._BeforeStep",
+          "_ContextTransform": "agents.model_context._ContextTransform",
+          "_InteractionHandler": "agents.session._InteractionHandler",
+          "_PrepareRequest": "agents.prepared_request._PrepareRequest"
+        }
+      },
+      "agents.canonical_storage": {
+        "declarations": [
+          "@runtime_checkable\nclass SessionStore(Protocol):\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass",
+          "@dataclass(frozen=True)\nclass CustomStorage:\n    backend: SessionStore\n\n    async def reconcile(self, session_id: str, *, turn_id: str, call_id: str, output: str | ToolOutput) -> None:\n        pass",
+          "class SQLiteSessionStore:\n\n    def __init__(self, path: Path):\n        pass\n\n    def acquire(self, session_id: str) -> str:\n        pass\n\n    def read(self, session_id: str, token: str) -> str | None:\n        pass\n\n    def commit(self, session_id: str, token: str, expected_revision: int, write_id: str, payload: str) -> None:\n        pass\n\n    def flush(self, session_id: str, token: str) -> None:\n        pass\n\n    def release(self, session_id: str, token: str) -> None:\n        pass"
+        ],
+        "exports": {
+          "CustomStorage": "agents.canonical_storage.CustomStorage",
+          "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
+          "SessionStore": "agents.canonical_storage.SessionStore"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass",
+          "from pathlib import Path as Path",
+          "from typing import Protocol as Protocol, runtime_checkable as runtime_checkable",
+          "from .tools import ToolOutput as ToolOutput"
+        ],
+        "references": {
+          "ToolOutput": "agents.tools.ToolOutput"
+        }
+      },
+      "agents.config": {
+        "declarations": [
+          "if TYPE_CHECKING:\n    JsonValue: TypeAlias = 'None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]'\nelse:\n    JsonValue = TypeAliasType('JsonValue', bool | int | float | str | list['JsonValue'] | dict[str, 'JsonValue'] | None)",
+          "ReasoningEffort = TypeAliasType('ReasoningEffort', str)",
+          "ReasoningSummary = TypeAliasType('ReasoningSummary', Literal['auto', 'concise', 'detailed', 'none'])",
+          "Verbosity = TypeAliasType('Verbosity', Literal['low', 'medium', 'high'])",
+          "Personality = TypeAliasType('Personality', Literal['none', 'friendly', 'pragmatic'])",
+          "FileSystemAccessMode = TypeAliasType('FileSystemAccessMode', Literal['read', 'write', 'deny'])"
+        ],
+        "exports": {
+          "FileSystemAccessMode": "FileSystemAccessMode",
+          "JsonValue": "JsonValue",
+          "Personality": "Personality",
+          "ReasoningEffort": "ReasoningEffort",
+          "ReasoningSummary": "ReasoningSummary",
+          "Verbosity": "Verbosity"
+        },
+        "imports": [
+          "from typing import TYPE_CHECKING, Literal, TypeAlias",
+          "from typing_extensions import TypeAliasType"
+        ],
+        "references": {}
+      },
+      "agents.executor": {
+        "declarations": [
+          "ContextT_co = TypeVar('ContextT_co', covariant=True, default=None)",
+          "ContextT_contra = TypeVar('ContextT_contra', contravariant=True, default=object)",
+          "ExecutorToolName = Literal['exec_command', 'write_stdin', 'apply_patch']",
+          "@dataclass(frozen=True, kw_only=True)\nclass NetworkPolicy:\n    allowed_domains: Sequence[str] = field(default=(), repr=False)\n    denied_domains: Sequence[str] = field(default=(), repr=False)\n    allow_all_unix_sockets: bool = False\n    allow_local_binding: bool = False",
+          "@dataclass(frozen=True)\nclass ExecutorContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    tool_name: ExecutorToolName\n    thread_id: str\n    turn_id: str\n    outer_call_id: str | None\n    cell_id: str | None\n    runtime_tool_call_id: str | None\n    call_id: str | None = None\n    session: Session[Any, Any] = field(repr=False, kw_only=True)\n    agent: Agent[Any, Any] = field(repr=False, kw_only=True)\n    agent_role: str | None = field(default=None, kw_only=True)\n    model: str | None = field(default=None, kw_only=True)",
+          "@dataclass(frozen=True, kw_only=True)\nclass Environment(Generic[ContextT_contra]):\n    _is_local: ClassVar[bool] = False\n    url: str = field(repr=False)\n    cwd: str\n    tools: Sequence[ExecutorToolName] = ()\n    headers: Mapping[str, str] = field(default_factory=dict, repr=False)\n    connect_timeout: float | None = None\n    capability_directories: Sequence[str] | None = None\n    approval: Callable[[ExecutorContext[ContextT_contra], Any], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    transform_arguments: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None = field(default=None, repr=False)\n    transform_result: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None = field(default=None, repr=False)\n    policy_timeout: float = 30\n    network: NetworkPolicy | RuntimeNetworkPolicy | None = None\n    writable_roots: Sequence[str | PathLike[str]] | None = None\n\n    @classmethod\n    def local(cls, *, cwd: str | PathLike[str], tools: Sequence[ExecutorToolName]=(), writable_roots: Sequence[str | PathLike[str]]=(), network: NetworkPolicy | RuntimeNetworkPolicy | None=None, capability_directories: Sequence[str] | None=None, approval: Callable[[ExecutorContext[ContextT_contra], Any], bool | StopTurn | Awaitable[bool | StopTurn]] | None=None, transform_arguments: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None=None, transform_result: Callable[[ExecutorContext[ContextT_contra], Any], Any | Awaitable[Any]] | None=None, policy_timeout: float=30) -> Environment[ContextT_contra]:\n        pass",
+          "EnvironmentSource: TypeAlias = Environment[ContextT_contra] | AbstractAsyncContextManager[Environment[ContextT_contra]]"
+        ],
+        "exports": {
+          "ContextT_co": "ContextT_co",
+          "ContextT_contra": "ContextT_contra",
+          "Environment": "agents.executor.Environment",
+          "EnvironmentSource": "EnvironmentSource",
+          "ExecutorContext": "agents.executor.ExecutorContext",
+          "ExecutorToolName": "typing.Literal",
+          "NetworkPolicy": "agents.executor.NetworkPolicy"
+        },
+        "imports": [
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
+          "from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from os import PathLike as PathLike",
+          "from typing import Any as Any, ClassVar as ClassVar, Generic as Generic, Literal as Literal, TypeAlias as TypeAlias",
+          "from typing_extensions import TypeVar as TypeVar",
+          "from ._options import RuntimeNetworkPolicy as RuntimeNetworkPolicy",
+          "from .agent import Agent",
+          "from .native_agents import ChildInvocation",
+          "from .native_interception import StopTurn",
+          "from .session import Session",
+          "from .turn import Turn"
+        ],
+        "references": {
+          "Agent": "agents.agent.Agent",
+          "ChildInvocation": "agents.native_agents.ChildInvocation",
+          "RuntimeNetworkPolicy": "agents._options.RuntimeNetworkPolicy",
+          "Session": "agents.session.Session",
+          "StopTurn": "agents.native_interception.StopTurn",
+          "Turn": "agents.turn.Turn"
+        }
+      },
+      "agents.history": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass ModelContext:\n    revision: str\n    items: tuple[dict[str, Any], ...]",
+          "class ReceivedInputTokensDetails(TypedDict, total=False):\n    cached_tokens: int\n    cache_write_tokens: int",
+          "class ReceivedOutputTokensDetails(TypedDict, total=False):\n    reasoning_tokens: int",
+          "class ReceivedTokenUsage(TypedDict, total=False):\n    input_tokens: int\n    input_tokens_details: ReceivedInputTokensDetails\n    output_tokens: int\n    output_tokens_details: ReceivedOutputTokensDetails\n    total_tokens: int",
+          "class RecordedResponse(TypedDict):\n    id: str | None\n    thread_id: str\n    turn_id: str\n    response_id: str | None\n    usage_source: Literal['received', 'native_normalized']\n    usage: ReceivedTokenUsage | TokenUsage | None\n    status: NotRequired[Literal['completed', 'incomplete', 'failed']]\n    incomplete_reason: NotRequired[Literal['content_filter', 'max_output_tokens', 'interrupted', 'unknown']]",
+          "class RecordedTurn(TypedDict):\n    id: str\n    object: Literal['agent.session.turn']\n    session_id: str\n    subagent_id: str | None\n    status: Literal['in_progress', 'completed', 'failed', 'cancelled']\n    created_at: int | None\n    started_at: int | None\n    completed_at: int | None\n    error: Failure | None\n    usage: TokenUsage | None\n    parent_session_id: NotRequired[str]\n    parent_turn_id: NotRequired[str]\n    receipt: NotRequired[TurnReceipt]\n    responses: NotRequired[list[RecordedResponse]]"
+        ],
+        "exports": {
+          "ModelContext": "agents.history.ModelContext",
+          "ReceivedInputTokensDetails": "agents.history.ReceivedInputTokensDetails",
+          "ReceivedOutputTokensDetails": "agents.history.ReceivedOutputTokensDetails",
+          "ReceivedTokenUsage": "agents.history.ReceivedTokenUsage",
+          "RecordedResponse": "agents.history.RecordedResponse",
+          "RecordedTurn": "agents.history.RecordedTurn"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass",
+          "from typing import Any as Any, Literal as Literal",
+          "from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict",
+          "from ._events import Failure as Failure, TokenUsage as TokenUsage",
+          "from .turn_receipt import TurnReceipt as TurnReceipt"
+        ],
+        "references": {
+          "Failure": "agents._events.Failure",
+          "TokenUsage": "agents._events.TokenUsage",
+          "TurnReceipt": "agents.turn_receipt.TurnReceipt"
+        }
+      },
+      "agents.input": {
+        "declarations": [
+          "class InputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
+          "class InputImage(TypedDict):\n    type: Literal['input_image']\n    image_url: str\n    detail: NotRequired[Literal['auto']]",
+          "class UserMessage(TypedDict):\n    role: Literal['user']\n    content: str | Sequence[InputText | InputImage]\n    type: NotRequired[Literal['message']]",
+          "UserInput: TypeAlias = str | UserMessage"
+        ],
+        "exports": {
+          "InputImage": "agents.input.InputImage",
+          "InputText": "agents.input.InputText",
+          "UserInput": "UserInput",
+          "UserMessage": "agents.input.UserMessage"
+        },
+        "imports": [
+          "from collections.abc import Sequence as Sequence",
+          "from typing import Literal as Literal, TypeAlias as TypeAlias",
+          "from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict"
+        ],
+        "references": {}
+      },
+      "agents.manual": {
+        "declarations": [
+          "InputT = TypeVar('InputT', bound=BaseModel)",
+          "ResultT = TypeVar('ResultT')",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass ActionReply(Generic[ResultT]):\n    _request: Interaction = field(repr=False)\n    _value: ResultT = field(repr=False)\n\n    def __new__(cls) -> ActionReply[ResultT]:\n        pass",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass ActionRequested(Generic[InputT, ResultT]):\n    session_id: str\n    subagent_id: str | None\n    submission_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    namespace: str | None\n    arguments: InputT = field(repr=False)\n    type: Literal['action_requested'] = field(default='action_requested', init=False)\n    _declaration: object = field(repr=False)\n    _grant: Any = field(repr=False)\n    _invocation: int = field(repr=False)\n    _slot: int = field(repr=False)\n    _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)\n    call: ToolCallInfo\n    _tracing_context: str | None = field(default=None, init=False, repr=False, compare=False)\n\n    def __new__(cls) -> ActionRequested[InputT, ResultT]:\n        pass\n\n    def reply(self, value: ResultT) -> ActionReply[ResultT]:\n        pass\n\n    async def respond(self, value: ResultT) -> None:\n        pass",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass _NativeQuestion:\n    session_id: str\n    subagent_id: str | None\n    submission_id: str | None\n    turn_id: str | None\n    description: str = field(repr=False)\n    _message: dict[str, Any] = field(repr=False)\n    _session: ReferenceType[Session[Any, Any]] = field(repr=False, compare=False)\n    _tracing: SpanContext | None = field(default=None, init=False, repr=False, compare=False)\n\n    def __new__(cls) -> _NativeQuestion:\n        pass\n\n    @property\n    def call(self) -> ToolCallInfo | None:\n        pass",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass ApprovalRequest(_NativeQuestion):\n    submission_id: str\n    turn_id: str\n    type: Literal['approval_request'] = field(default='approval_request', init=False)\n\n    def reply(self, decision: Literal['allow_once', 'deny']) -> ActionReply[Literal['allow_once', 'deny']]:\n        pass\n\n    async def respond(self, decision: Literal['allow_once', 'deny']) -> None:\n        pass",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass ElicitationRequest(_NativeQuestion):\n    type: Literal['elicitation_request'] = field(default='elicitation_request', init=False)\n    _validator: Draft202012Validator | None = field(default=None, repr=False, compare=False)\n    _url_completion: asyncio.Future[bool] | None = field(default=None, repr=False, compare=False)\n\n    @property\n    def url(self) -> str | None:\n        pass\n\n    @property\n    def elicitation_id(self) -> str | None:\n        pass\n\n    def reply_url_accept(self) -> ActionReply[object]:\n        pass\n\n    async def accept_url(self) -> None:\n        pass\n\n    async def wait_url_completion(self, *, timeout: float) -> None:\n        pass\n\n    def reply(self, value: Mapping[str, Any] | None) -> ActionReply[Mapping[str, Any] | None]:\n        pass\n\n    @property\n    def schema(self) -> Mapping[str, Any]:\n        pass\n\n    async def respond(self, value: Mapping[str, Any]) -> None:\n        pass\n\n    async def decline(self) -> None:\n        pass",
+          "@dataclass(frozen=True, slots=True)\nclass VerificationProof:\n    credential_id: str = field(repr=False)\n    signature: str = field(repr=False)",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass VerificationRequest(_NativeQuestion):\n    type: Literal['verification_request'] = field(default='verification_request', init=False)\n    _registration: HostedVerificationMCP[Any] | ChatGPTAppsMCP[Any] = field(repr=False, compare=False)\n\n    @property\n    def title(self) -> str:\n        pass\n\n    @property\n    def challenge(self) -> bytes:\n        pass\n\n    @property\n    def server_name(self) -> str:\n        pass\n\n    def reply(self, proof: VerificationProof | None) -> ActionReply[VerificationProof | None]:\n        pass\n\n    async def respond(self, proof: VerificationProof) -> None:\n        pass\n\n    async def decline(self) -> None:\n        pass",
+          "Interaction: TypeAlias = ActionRequested[Any, Any] | ApprovalRequest | ElicitationRequest | VerificationRequest",
+          "@dataclass(frozen=True)\nclass _CapturedManual:\n    name: str\n    spec_json: str\n    declaration: FunctionTool[Any, Any, Any] = field(repr=False)\n    input_adapter: TypeAdapter[Any] = field(repr=False)\n    output_adapter: TypeAdapter[Any] = field(repr=False)\n    namespace: None = field(default=None, init=False)\n\n    def request(self, grant: Any, invocation: int, slot: int, session: Session[Any, Any], handle: Turn[Any] | ChildInvocation, call_id: str, arguments: Any, code_origin: dict[str, Any] | None, *, model: str | None=None, tracing_context: str | None=None) -> ActionRequested[Any, Any]:\n        pass"
+        ],
+        "exports": {
+          "ActionReply": "agents.manual.ActionReply",
+          "ActionRequested": "agents.manual.ActionRequested",
+          "ApprovalRequest": "agents.manual.ApprovalRequest",
+          "ElicitationRequest": "agents.manual.ElicitationRequest",
+          "Interaction": "Interaction",
+          "VerificationProof": "agents.manual.VerificationProof",
+          "VerificationRequest": "agents.manual.VerificationRequest"
+        },
+        "imports": [
+          "import asyncio as asyncio",
+          "from collections.abc import Mapping as Mapping",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Generic as Generic, Literal as Literal, TypeAlias as TypeAlias, TypeVar as TypeVar",
+          "from weakref import ReferenceType as ReferenceType",
+          "from pydantic import BaseModel as BaseModel, TypeAdapter as TypeAdapter",
+          "from jsonschema import Draft202012Validator",
+          "from ._function_tools import FunctionTool",
+          "from .mcp import ChatGPTAppsMCP, HostedVerificationMCP",
+          "from .native_agents import ChildInvocation",
+          "from .session import Session",
+          "from .telemetry import SpanContext",
+          "from .tools import ToolCallInfo",
+          "from .turn import Turn"
+        ],
+        "references": {
+          "ChatGPTAppsMCP": "agents.mcp.ChatGPTAppsMCP",
+          "ChildInvocation": "agents.native_agents.ChildInvocation",
+          "FunctionTool": "agents._function_tools.FunctionTool",
+          "HostedVerificationMCP": "agents.mcp.HostedVerificationMCP",
+          "Session": "agents.session.Session",
+          "SpanContext": "agents.telemetry.SpanContext",
+          "ToolCallInfo": "agents.tools.ToolCallInfo",
+          "Turn": "agents.turn.Turn"
+        }
+      },
+      "agents.mcp": {
+        "declarations": [
+          "ContextT_co = TypeVar('ContextT_co', covariant=True, default=None)",
+          "ContextT_contra = TypeVar('ContextT_contra', contravariant=True, default=object)",
+          "@dataclass(frozen=True)\nclass MCPResultContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    server_name: str\n    tool_name: str",
+          "@dataclass(frozen=True)\nclass MCPCallContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call: ToolCallInfo\n    server_name: str\n    tool_name: str",
+          "@dataclass(frozen=True, kw_only=True)\nclass _MCP(Generic[ContextT_contra]):\n    name: str\n    tools: Sequence[str]\n    approval_mode: Literal['auto', 'approve'] = 'auto'\n    startup_timeout: float = 10\n    execution_timeout: float = 60\n    transform_result: Callable[[MCPResultContext[ContextT_contra], dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]] | None = field(default=None, repr=False)\n    transform_result_timeout: float | None = None\n    before: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], Allow | StopTurn | ReplaceArguments | Awaitable[Allow | StopTurn | ReplaceArguments]] | None = field(default=None, repr=False)\n    approval: Callable[[MCPCallContext[ContextT_contra], NativeToolCall], bool | StopTurn | Awaitable[bool | StopTurn]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n\n    def tool(self, raw_name: str) -> ToolRef:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass StdioMCP(_MCP[ContextT_contra]):\n    command: str = field(repr=False)\n    args: Sequence[str] = field(default=(), repr=False)\n    env_vars: Sequence[str] = field(default=(), repr=False)\n    cwd: str | None = field(default=None, repr=False)\n    location: Literal['host', 'environment'] = 'host'",
+          "@dataclass(frozen=True, kw_only=True)\nclass HttpMCP(_MCP[ContextT_contra]):\n    url: str = field(repr=False)\n    bearer_token: str | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass HostedVerificationMCP(HttpMCP[ContextT_contra]):\n    name: Literal['codex_apps'] = field(default='codex_apps', init=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass ChatGPTAppsMCP(HttpMCP[ContextT_contra]):\n    name: Literal['codex_apps'] = field(default='codex_apps', init=False)\n    url: str = field(default='https://chatgpt.com/backend-api/ps/mcp', init=False, repr=False)\n    bearer_token: None = field(default=None, init=False, repr=False)\n    access_token: str = field(repr=False)\n    account_id: str = field(repr=False)"
+        ],
+        "exports": {
+          "ChatGPTAppsMCP": "agents.mcp.ChatGPTAppsMCP",
+          "ContextT_co": "ContextT_co",
+          "ContextT_contra": "ContextT_contra",
+          "HostedVerificationMCP": "agents.mcp.HostedVerificationMCP",
+          "HttpMCP": "agents.mcp.HttpMCP",
+          "MCPCallContext": "agents.mcp.MCPCallContext",
+          "MCPResultContext": "agents.mcp.MCPResultContext",
+          "StdioMCP": "agents.mcp.StdioMCP"
+        },
+        "imports": [
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Generic as Generic, Literal as Literal",
+          "from typing_extensions import TypeVar as TypeVar",
+          "from .tools import ToolCallInfo as ToolCallInfo, ToolRef as ToolRef",
+          "from .native_agents import ChildInvocation",
+          "from .native_interception import Allow, NativeToolCall, ReplaceArguments, StopTurn",
+          "from .turn import Turn"
+        ],
+        "references": {
+          "Allow": "agents.native_interception.Allow",
+          "ChildInvocation": "agents.native_agents.ChildInvocation",
+          "NativeToolCall": "agents.native_interception.NativeToolCall",
+          "ReplaceArguments": "agents.native_interception.ReplaceArguments",
+          "StopTurn": "agents.native_interception.StopTurn",
+          "ToolCallInfo": "agents.tools.ToolCallInfo",
+          "ToolRef": "agents.tools.ToolRef",
+          "Turn": "agents.turn.Turn"
+        }
+      },
+      "agents.model_context": {
+        "declarations": [
+          "ContextT = TypeVar('ContextT')",
+          "@dataclass(frozen=True)\nclass ModelRequestContext(Generic[ContextT]):\n    context: ContextT = field(repr=False)\n    items: tuple[dict[str, Any], ...] = field(repr=False)\n    session_id: str\n    turn_id: str\n    subagent_id: str | None\n    request_id: str\n    model: str\n    purpose: Literal['turn', 'compaction', 'output_repair']",
+          "_ContextTransform: TypeAlias = Callable[[ModelRequestContext[ContextT]], Sequence[dict[str, Any]] | None | Awaitable[Sequence[dict[str, Any]] | None]]"
+        ],
+        "exports": {
+          "ContextT": "ContextT",
+          "ModelRequestContext": "agents.model_context.ModelRequestContext"
+        },
+        "imports": [
+          "from collections.abc import Awaitable, Callable, Sequence",
+          "from dataclasses import dataclass, field",
+          "from typing import Any, Generic, Literal, TypeAlias, TypeVar"
+        ],
+        "references": {}
+      },
+      "agents.native_agents": {
+        "declarations": [
+          "@dataclass(frozen=True, kw_only=True)\nclass NativeRole:\n    name: str\n    instructions: str = field(repr=False)\n    description: str\n    model: str | None = None\n    model_settings: Mapping[Literal['reasoning_effort'], str] | None = None",
+          "class _ChildBeforeStep(Protocol):\n\n    def __call__(self, child: ChildInvocation, /, *, step_index: int) -> Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | StopTurn]:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass NativeAgents:\n    additional_roles: Sequence[NativeRole] = ()\n    max_children: int | None = None\n    approval: Callable[[ToolContext[Any], NativeToolCall], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    max_depth: int = 1\n    before_step: _ChildBeforeStep | None = field(default=None, repr=False)\n    interactions: bool = False",
+          "@dataclass(frozen=True, slots=True)\nclass ChildInvocation:\n    session_id: str\n    child_id: str\n    instance_id: str\n    turn_id: str\n\n    @property\n    def submission_id(self) -> str:\n        pass"
+        ],
+        "exports": {
+          "ChildInvocation": "agents.native_agents.ChildInvocation",
+          "NativeAgents": "agents.native_agents.NativeAgents",
+          "NativeRole": "agents.native_agents.NativeRole"
+        },
+        "imports": [
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Literal as Literal, Protocol as Protocol",
+          "from .native_interception import NativeToolCall as NativeToolCall, StopTurn",
+          "from ._function_tools import Tool, ToolContext",
+          "from .executor import Environment",
+          "from .tools import ToolRef"
+        ],
+        "references": {
+          "Environment": "agents.executor.Environment",
+          "NativeToolCall": "agents.native_interception.NativeToolCall",
+          "StopTurn": "agents.native_interception.StopTurn",
+          "Tool": "agents._function_tools.Tool",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "ToolRef": "agents.tools.ToolRef"
+        }
+      },
+      "agents.native_interception": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass StopTurn:\n    reason: str = field(repr=False)",
+          "@dataclass(frozen=True)\nclass Allow:\n    pass",
+          "@dataclass(frozen=True)\nclass Deny:\n    reason: str = field(repr=False)",
+          "@dataclass(frozen=True)\nclass ReplaceArguments:\n    arguments: Any = field(repr=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass NativeToolCall:\n    thread_id: str\n    turn_id: str\n    call_id: str | None\n    name: str\n    namespace: str | None\n    phase: Literal['before', 'after']\n    route: Literal['direct', 'extension', 'programmatic_tool_calling', 'mcp']\n    boundary: Literal['pre_dispatch', 'executor_return', 'nested_return', 'cell_return']\n    tool_kind: Literal['function_json', 'function', 'freeform', 'tool_search']\n    input: Any = field(repr=False)\n    result: Any = field(repr=False)\n    outer_call_id: str | None = None\n    cell_id: str | None = None\n    runtime_tool_call_id: str | None = None\n    agent_role: str | None = None\n    model: str | None = None"
+        ],
+        "exports": {
+          "Allow": "agents.native_interception.Allow",
+          "Deny": "agents.native_interception.Deny",
+          "NativeToolCall": "agents.native_interception.NativeToolCall",
+          "ReplaceArguments": "agents.native_interception.ReplaceArguments",
+          "StopTurn": "agents.native_interception.StopTurn"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Literal as Literal"
+        ],
+        "references": {}
+      },
+      "agents.observation": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass _Event:\n    session_id: str\n    sequence: int = 0",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass _SubmissionEvent(_Event):\n    submission_id: str\n    turn_id: str\n    parent_submission_id: str | None = None",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelRequestDispatching(_SubmissionEvent):\n    request_id: str\n    thread_id: str\n    model: str\n    reasoning_effort: str | int | None\n    reasoning_summary: str | None\n    service_tier: str | None\n    wire: Literal['responses', 'responses_lite']\n    transport: Literal['http_sse', 'websocket']\n    type: Literal['model_request_dispatching'] = field(default='model_request_dispatching', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelResponseLinked(_SubmissionEvent):\n    request_id: str\n    thread_id: str\n    response_observation_id: str\n    type: Literal['model_response_linked'] = field(default='model_response_linked', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnStarted(_SubmissionEvent):\n    type: Literal['turn_started'] = field(default='turn_started', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnFinished(_SubmissionEvent):\n    status: Literal['completed', 'failed', 'cancelled']\n    error_type: str | None = None\n    type: Literal['turn_finished'] = field(default='turn_finished', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass OutputTextDelta(_SubmissionEvent):\n    item_id: str\n    delta: str\n    type: Literal['output_text_delta'] = field(default='output_text_delta', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UsageUpdated(_SubmissionEvent):\n    usage: TokenUsageInfo | None\n    type: Literal['usage_updated'] = field(default='usage_updated', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitsUpdated(_SubmissionEvent):\n    snapshot: ApiRateLimits\n    type: Literal['api_rate_limits_updated'] = field(default='api_rate_limits_updated', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ContextCompacted(_SubmissionEvent):\n    item_id: str\n    type: Literal['context_compacted'] = field(default='context_compacted', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ToolStarted(_SubmissionEvent):\n    call_id: str\n    name: str\n    namespace: str | None\n    family: Literal['function', 'mcp'] = 'function'\n    type: Literal['tool_started'] = field(default='tool_started', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ToolFinished(_SubmissionEvent):\n    call_id: str\n    name: str\n    namespace: str | None\n    status: Literal['completed', 'failed', 'cancelled']\n    family: Literal['function', 'mcp'] = 'function'\n    type: Literal['tool_finished'] = field(default='tool_finished', init=False)",
+          "class _ExecutionItemReference(TypedDict):\n    type: Literal['command_execution', 'patch_execution', 'mcp_call']\n    id: str\n    call_id: str\n    thread_id: str | None\n    turn_id: str\n    status: FunctionCallStatus\n    native_status: str | None",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ExecutionItemCompleted(_SubmissionEvent):\n    item: ExecutionItem | _ExecutionItemReference\n    type: Literal['execution_item_completed'] = field(default='execution_item_completed', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SubagentLifecycle(_Event):\n    subagent_id: str\n    parent_agent_id: str\n    status: str\n    kind: Literal['created', 'active', 'closed', 'snapshot'] = 'snapshot'\n    type: Literal['subagent_lifecycle'] = field(default='subagent_lifecycle', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SessionEnded(_Event):\n    reason: Literal['closed', 'failed']\n    type: Literal['session_ended'] = field(default='session_ended', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass EventGap(_Event):\n    first_sequence: int\n    type: Literal['gap'] = field(default='gap', init=False)",
+          "Observation: TypeAlias = TurnStarted | ModelRequestDispatching | ModelResponseLinked | TurnFinished | SubagentLifecycle | OutputTextDelta | UsageUpdated | ApiRateLimitsUpdated | ContextCompacted | ToolStarted | ToolFinished | ExecutionItemCompleted | SessionEnded | EventGap",
+          "_ObservationT = TypeVar('_ObservationT', bound=Observation)",
+          "class _ObservationBuffer:\n\n    def __init__(self, session_id: str) -> None:\n        pass\n\n    def notify(self) -> None:\n        pass\n\n    def turn_started(self, turn_id: str) -> TurnStarted | None:\n        pass\n\n    def append(self, event: _ObservationT) -> _ObservationT | None:\n        pass\n\n    def finish(self, reason: Literal['closed', 'failed']) -> None:\n        pass",
+          "class EventStream(AsyncIterator[Observation]):\n\n    def __init__(self, buffer: _ObservationBuffer, *, after: int, _turn: Turn[Any] | None=None, _include_execution_details: bool=False) -> None:\n        pass\n\n    def __aiter__(self) -> EventStream:\n        pass\n\n    async def __anext__(self) -> Observation:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
+        ],
+        "exports": {
+          "ApiRateLimitsUpdated": "agents.observation.ApiRateLimitsUpdated",
+          "ContextCompacted": "agents.observation.ContextCompacted",
+          "EventGap": "agents.observation.EventGap",
+          "EventStream": "agents.observation.EventStream",
+          "ExecutionItemCompleted": "agents.observation.ExecutionItemCompleted",
+          "ModelRequestDispatching": "agents.observation.ModelRequestDispatching",
+          "ModelResponseLinked": "agents.observation.ModelResponseLinked",
+          "Observation": "Observation",
+          "OutputTextDelta": "agents.observation.OutputTextDelta",
+          "SessionEnded": "agents.observation.SessionEnded",
+          "SubagentLifecycle": "agents.observation.SubagentLifecycle",
+          "ToolFinished": "agents.observation.ToolFinished",
+          "ToolStarted": "agents.observation.ToolStarted",
+          "TurnFinished": "agents.observation.TurnFinished",
+          "TurnStarted": "agents.observation.TurnStarted",
+          "UsageUpdated": "agents.observation.UsageUpdated"
+        },
+        "imports": [
+          "from collections.abc import AsyncIterator as AsyncIterator",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Literal as Literal, TypeAlias as TypeAlias, TypeVar as TypeVar",
+          "from typing_extensions import TypedDict as TypedDict",
+          "from ._events import ExecutionItem as ExecutionItem, FunctionCallStatus as FunctionCallStatus",
+          "from .rate_limits import ApiRateLimits as ApiRateLimits",
+          "from .usage import TokenUsageInfo as TokenUsageInfo",
+          "from .turn import Turn"
+        ],
+        "references": {
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
+          "ExecutionItem": "agents._events.ExecutionItem",
+          "FunctionCallStatus": "agents._events.FunctionCallStatus",
+          "TokenUsageInfo": "agents.usage.TokenUsageInfo",
+          "Turn": "agents.turn.Turn"
+        }
+      },
+      "agents.prepared_request": {
+        "declarations": [
+          "class PreparedToolPresentation(TypedDict, closed=True):\n    namespace: str | None\n    name: str\n    kind: Literal['function']\n    strict: bool\n    defer_loading: bool | None\n    description: str\n    parameters: dict[str, Any]",
+          "class PreparedRequest(TypedDict, closed=True):\n    instructions: str\n    input: list[dict[str, Any]]\n    tools: list[PreparedToolPresentation]",
+          "class _PrepareRequest(Protocol):\n\n    def __call__(self, turn: Turn[Any], request: PreparedRequest, /, *, preparation_index: int, recovery_attempt: int) -> PreparedRequest | None | Awaitable[PreparedRequest | None]:\n        pass"
+        ],
+        "exports": {
+          "PreparedRequest": "agents.prepared_request.PreparedRequest",
+          "PreparedToolPresentation": "agents.prepared_request.PreparedToolPresentation"
+        },
+        "imports": [
+          "from collections.abc import Awaitable as Awaitable",
+          "from typing import Any as Any, Literal as Literal, Protocol as Protocol",
+          "from typing_extensions import TypedDict as TypedDict",
+          "from .turn import Turn"
+        ],
+        "references": {
+          "Turn": "agents.turn.Turn"
+        }
+      },
+      "agents.rate_limits": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitWindow:\n    limit: int | None = None\n    remaining: int | None = None\n    reset_after_seconds: Decimal | None = None",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimits:\n    requests: ApiRateLimitWindow | None = None\n    tokens: ApiRateLimitWindow | None = None\n    project_tokens: ApiRateLimitWindow | None = None\n    retry_after_seconds: int | None = None\n    retry_at: datetime | None = None"
+        ],
+        "exports": {
+          "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass",
+          "from datetime import datetime as datetime",
+          "from decimal import Decimal as Decimal"
+        ],
+        "references": {}
+      },
+      "agents.recovery": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UncertainCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue = field(repr=False)\n\n    def reconcile(self, *, outcome: Literal['applied', 'not_applied'], result: str) -> ReconciledCall:\n        pass",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ReconciledCall:\n    thread_id: str\n    turn_id: str\n    call_id: str\n    outcome: Literal['applied', 'not_applied']\n    result: str = field(repr=False)",
+          "class LocalRecoveryRequired(RuntimeError):\n\n    def __init__(self, calls: tuple[UncertainCall, ...], turns: tuple[RecordedTurn, ...], items: tuple[SessionItem, ...]) -> None:\n        pass"
+        ],
+        "exports": {
+          "LocalRecoveryRequired": "agents.recovery.LocalRecoveryRequired",
+          "ReconciledCall": "agents.recovery.ReconciledCall",
+          "UncertainCall": "agents.recovery.UncertainCall"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Literal as Literal",
+          "from pydantic import JsonValue as JsonValue",
+          "from ._events import SessionItem as SessionItem",
+          "from .history import RecordedTurn as RecordedTurn"
+        ],
+        "references": {
+          "RecordedTurn": "agents.history.RecordedTurn",
+          "SessionItem": "agents._events.SessionItem"
+        }
+      },
+      "agents.schema": {
+        "declarations": [
+          "OutputT = TypeVar('OutputT')",
+          "@dataclass(frozen=True)\nclass NativeOutput(Generic[OutputT]):\n    type_: type[OutputT]",
+          "@dataclass(frozen=True)\nclass PromptedOutput(Generic[OutputT]):\n    type_: type[OutputT]\n    max_retries: int = 0",
+          "OutputSpec: TypeAlias = type[OutputT] | NativeOutput[OutputT] | PromptedOutput[OutputT]",
+          "class OutputValidationError(ValueError):\n\n    def __init__(self, raw_output: str) -> None:\n        pass",
+          "@dataclass(frozen=True)\nclass _PreparedOutput:\n    mode: Literal['plain', 'native', 'prompted']\n    adapter: TypeAdapter[Any] | None\n    schema: dict[str, Any] | None\n    wrapped: bool = False\n    max_retries: int = 0\n\n    @property\n    def fingerprint(self) -> str:\n        pass\n\n    def validate(self, text: str) -> Any:\n        pass",
+          "def output_schema(output_type: Any) -> dict[str, Any] | None:\n    pass"
+        ],
+        "exports": {
+          "NativeOutput": "agents.schema.NativeOutput",
+          "OutputSpec": "OutputSpec",
+          "OutputT": "OutputT",
+          "OutputValidationError": "agents.schema.OutputValidationError",
+          "PromptedOutput": "agents.schema.PromptedOutput",
+          "output_schema": "agents.schema.output_schema"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass",
+          "from typing import Any as Any, Generic as Generic, Literal as Literal, TypeAlias as TypeAlias, TypeVar as TypeVar",
+          "from pydantic import TypeAdapter as TypeAdapter"
+        ],
+        "references": {}
+      },
+      "agents.session": {
+        "declarations": [
+          "_TurnT = TypeVar('_TurnT')",
+          "_SelectionContextT_contra = TypeVar('_SelectionContextT_contra', contravariant=True)",
+          "class SessionBusyError(RuntimeError):\n    pass",
+          "class CapabilityError(ValueError):\n    pass",
+          "class StaleTurnError(RuntimeError):\n    pass",
+          "class InteractionExpiredError(RuntimeError):\n    pass",
+          "class TurnStoppedError(RuntimeError):\n    pass",
+          "@dataclass(frozen=True)\nclass FeatureSupport:\n    status: Literal['supported', 'limited', 'unsupported']\n    reason: str\n    scope: str",
+          "FeatureName: TypeAlias = Literal['native_output', 'prompted_output', 'manual_suspend', 'native_output_manual_restore', 'tool_selection', 'function_policy', 'mcp_before_policy', 'mcp_result_policy', 'environment_before_policy', 'environment_code_result_policy', 'native_agents', 'remote_skills', 'checklist']",
+          "class Capabilities:\n\n    def __init__(self, session: Session[Any, Any]) -> None:\n        pass\n\n    @property\n    def websockets_allowed(self) -> bool:\n        pass\n\n    def get(self, feature: FeatureName) -> FeatureSupport:\n        pass\n\n    def require(self, feature: FeatureName, *, allow_limited: bool=False) -> None:\n        pass",
+          "ResponseIntegrityReason: TypeAlias = Literal['undecodable_output_item', 'provider_owned_tool_receipt', 'unfinished_assistant_item', 'missing_supported_terminal_output']",
+          "class NativeError(RuntimeError):\n    _effects: Literal['not_started', 'unknown', 'recorded'] = 'unknown'\n    _interrupted: bool = False\n\n    def __init__(self, *args: object, status_code: int | None=None, code: str | None=None, request_id: str | None=None, category: str | None=None) -> None:\n        pass\n\n    @property\n    def response_integrity_reason(self) -> ResponseIntegrityReason | None:\n        pass\n\n    @property\n    def effects(self) -> Literal['not_started', 'unknown', 'recorded']:\n        pass",
+          "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
+          "@dataclass(frozen=True)\nclass Completed(Generic[OutputT]):\n    turn: Turn[OutputT]\n    final_output: OutputT\n    usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()",
+          "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
+          "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | StopTurn]:\n        pass",
+          "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    @property\n    def codex_account(self) -> CodexAccount | None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None, writable_roots: None=None, parent_trace: None=None, trace_options: None=None, prepare_request: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Turn[Any]:\n        pass\n\n    async def compact(self, *, summary: str | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass"
+        ],
+        "exports": {
+          "Capabilities": "agents.session.Capabilities",
+          "CapabilityError": "agents.session.CapabilityError",
+          "Completed": "agents.session.Completed",
+          "FeatureName": "typing.Literal",
+          "FeatureSupport": "agents.session.FeatureSupport",
+          "InteractionExpiredError": "agents.session.InteractionExpiredError",
+          "InteractionRequired": "agents.session.InteractionRequired",
+          "NativeError": "agents.session.NativeError",
+          "ResponseIntegrityReason": "typing.Literal",
+          "Session": "agents.session.Session",
+          "SessionBusyError": "agents.session.SessionBusyError",
+          "StaleTurnError": "agents.session.StaleTurnError",
+          "TurnStoppedError": "agents.session.TurnStoppedError"
+        },
+        "imports": [
+          "from collections.abc import AsyncIterator as AsyncIterator, Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from os import PathLike as PathLike",
+          "from tempfile import TemporaryDirectory as TemporaryDirectory",
+          "from typing import Any as Any, Generic as Generic, Literal as Literal, Protocol as Protocol, TypeAlias as TypeAlias, TypeVar as TypeVar, overload as overload",
+          "from ._events import SessionItem as SessionItem",
+          "from ._function_tools import Tool as Tool",
+          "from ._trace_context import TraceContext as TraceContext",
+          "from .agent import CodexAccount as CodexAccount, ContextT as ContextT, ModelSettings as ModelSettings, OutputT as OutputT",
+          "from .executor import Environment as Environment",
+          "from .history import RecordedTurn as RecordedTurn",
+          "from .input import UserInput as UserInput",
+          "from .manual import ActionReply as ActionReply, Interaction as Interaction",
+          "from .mcp import _MCP as _MCP",
+          "from .native_agents import NativeAgents as NativeAgents",
+          "from .native_interception import StopTurn as StopTurn",
+          "from .observation import EventStream as EventStream",
+          "from .prepared_request import _PrepareRequest as _PrepareRequest",
+          "from .rate_limits import ApiRateLimits as ApiRateLimits",
+          "from .schema import OutputSpec as OutputSpec, _PreparedOutput as _PreparedOutput",
+          "from .state import ChecklistState as ChecklistState, CheckpointStatus as CheckpointStatus, NativeGoal as NativeGoal, SessionState as SessionState",
+          "from .subagents import Subagent as Subagent",
+          "from .telemetry import TraceOptions as TraceOptions",
+          "from .tools import ToolRef as ToolRef, _ToolCatalog as _ToolCatalog",
+          "from .turn import Turn as Turn",
+          "from .usage import TokenUsageInfo as TokenUsageInfo"
+        ],
+        "references": {
+          "ActionReply": "agents.manual.ActionReply",
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
+          "ChecklistState": "agents.state.ChecklistState",
+          "CheckpointStatus": "agents.state.CheckpointStatus",
+          "CodexAccount": "agents.agent.CodexAccount",
+          "ContextT": "agents.agent.ContextT",
+          "Environment": "agents.executor.Environment",
+          "EventStream": "agents.observation.EventStream",
+          "Interaction": "agents.manual.Interaction",
+          "ModelSettings": "agents.agent.ModelSettings",
+          "NativeAgents": "agents.native_agents.NativeAgents",
+          "NativeGoal": "agents.state.NativeGoal",
+          "OutputSpec": "agents.schema.OutputSpec",
+          "OutputT": "agents.agent.OutputT",
+          "RecordedTurn": "agents.history.RecordedTurn",
+          "SessionItem": "agents._events.SessionItem",
+          "SessionState": "agents.state.SessionState",
+          "StopTurn": "agents.native_interception.StopTurn",
+          "Subagent": "agents.subagents.Subagent",
+          "TokenUsageInfo": "agents.usage.TokenUsageInfo",
+          "Tool": "agents._function_tools.Tool",
+          "ToolRef": "agents.tools.ToolRef",
+          "TraceContext": "agents._trace_context.TraceContext",
+          "TraceOptions": "agents.telemetry.TraceOptions",
+          "Turn": "agents.turn.Turn",
+          "UserInput": "agents.input.UserInput",
+          "_MCP": "agents.mcp._MCP",
+          "_PrepareRequest": "agents.prepared_request._PrepareRequest",
+          "_PreparedOutput": "agents.schema._PreparedOutput",
+          "_ToolCatalog": "agents.tools._ToolCatalog"
+        }
+      },
+      "agents.state": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass LocalStorage:\n    path: Path",
+          "@dataclass(frozen=True)\nclass CheckpointStatus:\n    status: Literal['ready', 'not_ready', 'unknown']\n    reasons: tuple[str, ...]",
+          "class ChecklistStep(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    step: str\n    status: Literal['pending', 'in_progress', 'completed']",
+          "class ChecklistState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    thread_id: str = Field(min_length=1)\n    turn_id: str = Field(min_length=1)\n    explanation: str | None = None\n    plan: list[ChecklistStep]",
+          "class GoalState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    thread_id: str = Field(min_length=1)\n    objective: str = Field(min_length=1, max_length=4000)\n    status: Literal['paused', 'complete']\n    token_budget: int | None = Field(default=None, gt=0, le=9223372036854775807)\n    tokens_used: int = Field(default=0, ge=0, le=9223372036854775807)\n    time_used_seconds: int = Field(default=0, ge=0, le=9223372036854775807)\n    created_at: int | None = Field(default=None, ge=0, le=9223372036854775807)\n    updated_at: int | None = Field(default=None, ge=0, le=9223372036854775807)",
+          "class NativeGoal(TypedDict):\n    threadId: str\n    objective: str\n    status: Literal['active', 'paused', 'blocked', 'usageLimited', 'budgetLimited', 'complete']\n    tokenBudget: NotRequired[int]\n    tokensUsed: int\n    timeUsedSeconds: int\n    createdAt: int\n    updatedAt: int",
+          "class CheckpointThread(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    thread_id: str\n    parent_thread_id: str\n    status: Literal['active', 'closed']\n    closed_at: int | None = Field(default=None, ge=0)\n    metadata: dict[str, Any]\n    history: list[dict[str, Any]]\n    memory_mode: Literal['enabled', 'disabled'] | None = None\n    checklist: ChecklistState | None = None\n    goal: GoalState | None = None\n    code_mode: dict[str, Any] | None = None\n\n    @model_validator(mode='after')\n    def validate_closed_at(self) -> 'CheckpointThread':\n        pass",
+          "class CheckpointRecovery(TypedDict):\n    interrupted_thread_ids: list[str]\n    expired_actions: list[RequiredAction]",
+          "class _RootToolOrigin(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    turn_id: str = Field(min_length=1)\n    originating_item_id: str = Field(min_length=1)",
+          "class _StepMcpTool(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    server: str\n    name: str",
+          "class _PendingManual(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    call_id: str\n    tool: str\n    arguments: str",
+          "class _ManualContinuation(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True)\n    turn_id: str\n    seen_call_ids: list[str]\n    turn_usage: TokenUsage\n    reply_order: list[str]\n    accepted_replies: dict[str, dict[str, Any]]\n    pending_manual: list[_PendingManual]\n    output_schema: dict[str, Any] | None = None",
+          "class SessionState(BaseModel):\n    model_config = ConfigDict(extra='forbid', frozen=True, strict=True, hide_input_in_errors=True)\n    format_version: Literal[2, 3, 4, 5, 6, 7]\n    codex_revision: str\n    source_session_id: str\n    history: list[dict[str, Any]]\n    subagents: dict[str, SubagentConfig] = Field(default_factory=dict)\n    root_metadata: dict[str, Any] | None = None\n    root_memory_mode: Literal['enabled', 'disabled'] | None = None\n    root_checklist: ChecklistState | None = None\n    root_goal: GoalState | None = None\n    root_code_mode: dict[str, Any] | None = None\n    descendants: list[CheckpointThread] = Field(default_factory=list)\n    interrupted_thread_ids: list[str] = Field(default_factory=list)\n    pending_actions: list[RequiredAction] = Field(default_factory=list)\n    agent_options: dict[str, Any] = Field(default_factory=dict)\n    recovery: CheckpointRecovery | None = None\n    managed_tool_specs: list[dict[str, Any]] | None = None\n    root_tool_origins: dict[str, _RootToolOrigin] = Field(default_factory=dict)\n    step_mcp_tools: list[_StepMcpTool] | None = None\n    native_continuation: _ManualContinuation | None = None\n    output_version: Literal[1] | None = None\n    output_fingerprint: str | None = None\n    operation_tools: list[ToolRef] | None = None\n    repair_turns: list[RecordedTurn] = Field(default_factory=list)\n    repair_items: list[SessionItem] = Field(default_factory=list)\n    network_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    executor_policy_digest: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n    codex_login_binding: str | None = Field(default=None, pattern='^[0-9a-f]{64}$')\n\n    @model_validator(mode='after')\n    def validate_tree(self) -> 'SessionState':\n        pass\n\n    @property\n    def instructions(self) -> str:\n        pass\n\n    def to_json(self) -> str:\n        pass\n\n    @classmethod\n    def from_json(cls, value: str) -> 'SessionState':\n        pass"
+        ],
+        "exports": {
+          "ChecklistState": "agents.state.ChecklistState",
+          "ChecklistStep": "agents.state.ChecklistStep",
+          "CheckpointRecovery": "agents.state.CheckpointRecovery",
+          "CheckpointStatus": "agents.state.CheckpointStatus",
+          "CheckpointThread": "agents.state.CheckpointThread",
+          "GoalState": "agents.state.GoalState",
+          "LocalStorage": "agents.state.LocalStorage",
+          "NativeGoal": "agents.state.NativeGoal",
+          "SessionState": "agents.state.SessionState"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass",
+          "from pathlib import Path as Path",
+          "from typing import Any as Any, Literal as Literal",
+          "from pydantic import BaseModel as BaseModel, ConfigDict as ConfigDict, Field as Field, model_validator as model_validator",
+          "from typing_extensions import NotRequired as NotRequired, TypedDict as TypedDict",
+          "from ._events import RequiredAction as RequiredAction, SessionItem as SessionItem",
+          "from .history import RecordedTurn as RecordedTurn",
+          "from .subagents import SubagentConfig as SubagentConfig",
+          "from .tools import ToolRef as ToolRef",
+          "from .usage import TokenUsage as TokenUsage"
+        ],
+        "references": {
+          "RecordedTurn": "agents.history.RecordedTurn",
+          "RequiredAction": "agents._events.RequiredAction",
+          "SessionItem": "agents._events.SessionItem",
+          "SubagentConfig": "agents.subagents.SubagentConfig",
+          "TokenUsage": "agents.usage.TokenUsage",
+          "ToolRef": "agents.tools.ToolRef"
+        }
+      },
+      "agents.subagents": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True, init=False)\nclass Subagent:\n    id: str\n    session_id: str\n    name: str | None\n    parent_agent_id: str\n    status: Literal['active', 'closed']\n    opened_at: int\n    closed_at: int | None\n    turn: Turn[str] | None\n    _session: Session[Any, Any] = field(repr=False, compare=False)\n    _instance_id: int | None = field(repr=False, compare=False)\n    _incarnation: str | None = field(repr=False, compare=False)\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Subagent:\n        pass\n\n    @property\n    def is_live(self) -> bool:\n        pass\n\n    async def start(self, input: UserInput) -> Turn[str]:\n        pass\n\n    async def try_cancel(self, turn: Turn[str]) -> bool:\n        pass",
+          "def _nonblank(value: str) -> str:\n    pass",
+          "def _unique_names(names: list[str]) -> list[str]:\n    pass",
+          "_Nonblank = TypeAliasType('_Nonblank', Annotated[str, AfterValidator(_nonblank)])",
+          "_Nickname = TypeAliasType('_Nickname', Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, pattern='^[a-zA-Z0-9 _-]+$')])",
+          "@with_config(ConfigDict(extra='forbid', strict=True))\nclass SubagentConfig(TypedDict, total=False, closed=True):\n    description: Required[_Nonblank]\n    developer_instructions: _Nonblank\n    model: str\n    model_reasoning_effort: Annotated[ReasoningEffort, Field(min_length=1)]\n    model_reasoning_summary: ReasoningSummary\n    model_verbosity: Verbosity\n    personality: Personality\n    nickname_candidates: Annotated[list[_Nickname], Field(min_length=1), AfterValidator(_unique_names)]"
+        ],
+        "exports": {
+          "Subagent": "agents.subagents.Subagent",
+          "SubagentConfig": "agents.subagents.SubagentConfig"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Annotated as Annotated, Any as Any, Literal as Literal",
+          "from pydantic import AfterValidator as AfterValidator, ConfigDict as ConfigDict, Field as Field, StringConstraints as StringConstraints, with_config as with_config",
+          "from typing_extensions import Required as Required, TypeAliasType as TypeAliasType, TypedDict as TypedDict",
+          "from .config import Personality as Personality, ReasoningEffort as ReasoningEffort, ReasoningSummary as ReasoningSummary, Verbosity as Verbosity",
+          "from .turn import Turn as Turn",
+          "from .input import UserInput",
+          "from .session import Session"
+        ],
+        "references": {
+          "Personality": "agents.config.Personality",
+          "ReasoningEffort": "agents.config.ReasoningEffort",
+          "ReasoningSummary": "agents.config.ReasoningSummary",
+          "Session": "agents.session.Session",
+          "Turn": "agents.turn.Turn",
+          "UserInput": "agents.input.UserInput",
+          "Verbosity": "agents.config.Verbosity"
+        }
+      },
+      "agents.telemetry": {
+        "declarations": [
+          "@dataclass(frozen=True, kw_only=True)\nclass OtelTlsConfig:\n    ca_certificate: str | Path | None = field(default=None, repr=False)\n    client_certificate: str | Path | None = field(default=None, repr=False)\n    client_private_key: str | Path | None = field(default=None, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass OtlpGrpc:\n    endpoint: str = field(repr=False)\n    headers: Mapping[str, str] | None = field(default=None, repr=False)\n    tls: OtelTlsConfig | None = None",
+          "@dataclass(frozen=True, kw_only=True)\nclass OtlpHttp:\n    endpoint: str = field(repr=False)\n    protocol: Literal['binary', 'json'] = 'binary'\n    headers: Mapping[str, str] | None = field(default=None, repr=False)\n    tls: OtelTlsConfig | None = None",
+          "Exporter: TypeAlias = OtlpGrpc | OtlpHttp",
+          "async def configure(*, traces: Exporter | None=None, logs: Exporter | None=None, metrics: Exporter | None=None, environment: str='dev', span_attributes: Mapping[str, str] | None=None, log_user_prompt: bool=False, log_agent_responses: bool=False, tool_result_max_bytes: int=0, processors: Sequence[TraceProcessor]=()) -> None:\n    pass",
+          "async def shutdown(*, timeout_ms: int | None=None) -> None:\n    pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass TraceExportCredentials:\n    headers: Mapping[str, str] = field(repr=False)\n\n    def __init__(self, *, headers: Mapping[str, str]) -> None:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass SpanContext:\n    trace_id: str\n    span_id: str\n    parent_span_id: str | None\n    disabled: bool\n    include_sensitive_data: bool\n    _handle: str = field(repr=False, compare=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass TraceOptions:\n    parent: SpanContext | None = None\n    detached: bool = False\n    trace_id: str | None = None\n    group_id: str | None = None\n    metadata: Mapping[str, Any] = field(default_factory=dict)\n    disabled: bool | None = None\n    include_sensitive_data: bool | None = None\n    export_credentials: TraceExportCredentials | None = field(default=None, repr=False)",
+          "def current_context() -> SpanContext | None:\n    pass",
+          "class TraceScope:\n\n    def __init__(self, name: str, kind: str, options: TraceOptions | Mapping[str, Any] | None, *, _restrictions: tuple[str, ...]=()):\n        pass\n\n    @property\n    def context(self) -> SpanContext:\n        pass\n\n    def start(self) -> TraceScope:\n        pass\n\n    def end(self) -> None:\n        pass\n\n    def __enter__(self) -> TraceScope:\n        pass\n\n    def set_outcome(self, *, status: str, category: str | None=None) -> None:\n        pass\n\n    def __exit__(self, exc_type: Any, exc: Any, traceback: Any) -> None:\n        pass",
+          "def trace(name: str, *, options: TraceOptions | Mapping[str, Any] | None=None) -> TraceScope:\n    pass",
+          "def span(name: str, *, options: TraceOptions | Mapping[str, Any] | None=None) -> TraceScope:\n    pass",
+          "class TraceLifecycleEvent(TypedDict):\n    sequence: ReadOnly[int]\n    processor_ids: ReadOnly[Sequence[str]]\n    lifecycle: ReadOnly[Literal['start', 'end']]\n    trace_id: ReadOnly[str]\n    span_id: ReadOnly[str]\n    parent_span_id: ReadOnly[str | None]\n    name: ReadOnly[str]\n    kind: ReadOnly[str]\n    start_time_unix_nanos: ReadOnly[str]\n    end_time_unix_nanos: ReadOnly[str | None]\n    attributes: ReadOnly[Mapping[str, Any]]\n    dropped_attributes_count: ReadOnly[int]\n    outcome: ReadOnly[Literal['ok', 'error', 'unset']]",
+          "class TraceProcessor(Protocol):\n\n    def on_trace_event(self, event: TraceLifecycleEvent) -> Any:\n        pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass FlushResult:\n    status: Literal['success', 'partial', 'timeout', 'failure']\n    dropped_records: int\n    failed_deliveries: int\n    barrier: int",
+          "def add_trace_processor(processor: TraceProcessor) -> None:\n    pass",
+          "def set_trace_processors(processors: Sequence[TraceProcessor]) -> None:\n    pass",
+          "async def force_flush(*, timeout_ms: int=10000) -> FlushResult:\n    pass"
+        ],
+        "exports": {
+          "Exporter": "Exporter",
+          "FlushResult": "agents.telemetry.FlushResult",
+          "OtelTlsConfig": "agents.telemetry.OtelTlsConfig",
+          "OtlpGrpc": "agents.telemetry.OtlpGrpc",
+          "OtlpHttp": "agents.telemetry.OtlpHttp",
+          "SpanContext": "agents.telemetry.SpanContext",
+          "TraceContext": "agents._trace_context.TraceContext",
+          "TraceExportCredentials": "agents.telemetry.TraceExportCredentials",
+          "TraceLifecycleEvent": "agents.telemetry.TraceLifecycleEvent",
+          "TraceOptions": "agents.telemetry.TraceOptions",
+          "TraceProcessor": "agents.telemetry.TraceProcessor",
+          "TraceScope": "agents.telemetry.TraceScope",
+          "add_trace_processor": "agents.telemetry.add_trace_processor",
+          "configure": "agents.telemetry.configure",
+          "current_context": "agents.telemetry.current_context",
+          "force_flush": "agents.telemetry.force_flush",
+          "set_trace_processors": "agents.telemetry.set_trace_processors",
+          "shutdown": "agents.telemetry.shutdown",
+          "span": "agents.telemetry.span",
+          "trace": "agents.telemetry.trace"
+        },
+        "imports": [
+          "from collections.abc import Mapping as Mapping, Sequence as Sequence",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from pathlib import Path as Path",
+          "from typing import Any as Any, Literal as Literal, Protocol as Protocol, TypeAlias as TypeAlias",
+          "from typing_extensions import ReadOnly as ReadOnly, TypedDict as TypedDict",
+          "from ._trace_context import TraceContext as TraceContext"
+        ],
+        "references": {
+          "TraceContext": "agents._trace_context.TraceContext"
+        }
+      },
+      "agents.testing": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass _ScriptItem:\n    encoded: str",
+          "def text(value: str) -> _ScriptItem:\n    pass",
+          "def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) -> _ScriptItem:\n    pass",
+          "class ScriptedResponses(AbstractAsyncContextManager['ScriptedResponses']):\n\n    def __init__(self, *responses: Sequence[_ScriptItem]) -> None:\n        pass\n\n    async def __aenter__(self) -> ScriptedResponses:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass\n\n    @property\n    def provider(self) -> NativeProvider:\n        pass\n\n    @property\n    def requests(self) -> tuple[Mapping[str, JsonValue], ...]:\n        pass\n\n    def tool_output(self, call_id: str) -> str | None:\n        pass\n\n    def assert_exhausted(self) -> None:\n        pass"
+        ],
+        "exports": {
+          "ScriptedResponses": "agents.testing.ScriptedResponses",
+          "text": "agents.testing.text",
+          "tool_call": "agents.testing.tool_call"
+        },
+        "imports": [
+          "from collections.abc import Mapping as Mapping, Sequence as Sequence",
+          "from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager",
+          "from dataclasses import dataclass as dataclass",
+          "from types import TracebackType as TracebackType",
+          "from .agent import NativeProvider as NativeProvider",
+          "from .config import JsonValue as JsonValue"
+        ],
+        "references": {
+          "JsonValue": "agents.config.JsonValue",
+          "NativeProvider": "agents.agent.NativeProvider"
+        }
+      },
+      "agents.tools": {
+        "declarations": [
+          "@dataclass(frozen=True)\nclass Checklist:\n    pass",
+          "@dataclass(frozen=True, kw_only=True)\nclass WebSearch:\n    mode: Literal['cached', 'live'] = 'cached'\n    route: Literal['standalone', 'hosted'] = 'standalone'",
+          "@dataclass(frozen=True)\nclass NativeGoals:\n    pass",
+          "@dataclass(frozen=True)\nclass ToolRef:\n    name: str\n    namespace: str | None = None",
+          "@dataclass(frozen=True)\nclass ToolCallInfo:\n    tool: ToolRef\n    session_id: str\n    turn_id: str\n    call_id: str | None\n    child_id: str | None\n    child_incarnation: str | None\n    role: str | None\n    model: str | None\n    route: Literal['direct', 'code']\n    outer_call_id: str | None = None\n    cell_id: str | None = None\n    nested_call_id: str | None = None",
+          "@dataclass(frozen=True)\nclass ToolOutputText:\n    text: str",
+          "@dataclass(frozen=True)\nclass ToolOutputImage:\n    image_url: str",
+          "@dataclass\nclass ToolOutput:\n    content_items: list[dict[str, Any] | ToolOutputText | ToolOutputImage] | list[dict[str, Any]]\n    success: bool = True\n\n    @classmethod\n    def text(cls, value: str) -> ToolOutput:\n        pass\n\n    @classmethod\n    def image(cls, image_url: str) -> ToolOutput:\n        pass\n\n    @classmethod\n    def error(cls, message: str) -> ToolOutput:\n        pass\n\n    def to_native(self) -> dict[str, Any]:\n        pass",
+          "@dataclass(frozen=True)\nclass _CapturedFunction:\n    name: str\n    spec_json: str\n    model: type[BaseModel]\n    field_names: tuple[str, ...]\n    output_adapter: TypeAdapter[Any] = field(repr=False)\n    callback: Callable[..., Any]\n    context_parameter: inspect.Parameter | None\n    callback_timeout: float | None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None\n    context: Any = field(repr=False)\n    namespace: None = field(default=None, init=False)",
+          "@dataclass(frozen=True)\nclass _ToolCatalog:\n    generation: int\n    tools: tuple[_CapturedFunction | _CapturedManual, ...]\n\n    def manual_slots(self) -> list[int]:\n        pass\n\n    def native_specs(self) -> str:\n        pass"
+        ],
+        "exports": {
+          "Checklist": "agents.tools.Checklist",
+          "NativeGoals": "agents.tools.NativeGoals",
+          "ToolCallInfo": "agents.tools.ToolCallInfo",
+          "ToolOutput": "agents.tools.ToolOutput",
+          "ToolOutputImage": "agents.tools.ToolOutputImage",
+          "ToolOutputText": "agents.tools.ToolOutputText",
+          "ToolRef": "agents.tools.ToolRef",
+          "WebSearch": "agents.tools.WebSearch"
+        },
+        "imports": [
+          "import inspect as inspect",
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Literal as Literal",
+          "from pydantic import BaseModel as BaseModel, TypeAdapter as TypeAdapter",
+          "from .manual import _CapturedManual as _CapturedManual",
+          "from ._function_tools import ToolContext",
+          "from .native_interception import Allow, Deny, ReplaceArguments"
+        ],
+        "references": {
+          "Allow": "agents.native_interception.Allow",
+          "Deny": "agents.native_interception.Deny",
+          "ReplaceArguments": "agents.native_interception.ReplaceArguments",
+          "ToolContext": "agents._function_tools.ToolContext",
+          "_CapturedManual": "agents.manual._CapturedManual"
+        }
+      },
+      "agents.turn": {
+        "declarations": [
+          "OutputT = TypeVar('OutputT')",
+          "@dataclass(frozen=True)\nclass PendingRequests(Generic[OutputT]):\n    turn: Turn[OutputT]\n    requests: tuple[Interaction, ...] = field(repr=False)",
+          "@dataclass(frozen=True, slots=True)\nclass SteeringReceipt:\n    session_id: str\n    turn_id: str\n    submission_id: str\n    input_id: str",
+          "@dataclass(frozen=True, slots=True)\nclass TurnNeedsAttention:\n    reason: Literal['interrupted', 'connection_lost', 'quota_blocked', 'rate_limited']\n    error: NativeError | TurnStoppedError\n    rate_limits: ApiRateLimits",
+          "@dataclass(frozen=True, slots=True, init=False)\nclass Turn(Generic[OutputT]):\n    session_id: str\n    turn_id: str | None = field(compare=False)\n    submission_id: str\n    child_id: str | None\n    instance_id: int | None\n    _session: Session[Any, Any] = field(repr=False, compare=False)\n    _owner: object = field(repr=False, compare=False)\n    _completion: asyncio.Future[Any] | None = field(repr=False, compare=False)\n    _continuation: asyncio.Future[Turn[OutputT]] | None = field(repr=False, compare=False)\n    _result: asyncio.Task[Completed[OutputT]] | None = field(repr=False, compare=False)\n    _native: Any = field(repr=False, compare=False)\n\n    def __new__(cls, *args: Any, **kwargs: Any) -> Turn[Any]:\n        pass\n\n    async def get_result(self) -> Completed[OutputT]:\n        pass\n\n    async def wait_for_request_or_result(self) -> Completed[OutputT] | PendingRequests[OutputT]:\n        pass\n\n    async def wait_for_attention(self) -> Completed[OutputT] | PendingRequests[OutputT] | TurnNeedsAttention:\n        pass\n\n    async def steer(self, input: UserInput) -> None:\n        pass\n\n    async def steer_exact(self, input: UserInput, *, expected_turn_id: str) -> SteeringReceipt:\n        pass\n\n    async def cancel(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass"
+        ],
+        "exports": {
+          "OutputT": "OutputT",
+          "PendingRequests": "agents.turn.PendingRequests",
+          "SteeringReceipt": "agents.turn.SteeringReceipt",
+          "Turn": "agents.turn.Turn",
+          "TurnNeedsAttention": "agents.turn.TurnNeedsAttention"
+        },
+        "imports": [
+          "import asyncio as asyncio",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Generic as Generic, Literal as Literal, TypeVar as TypeVar",
+          "from .input import UserInput",
+          "from .manual import Interaction",
+          "from .observation import EventStream",
+          "from .rate_limits import ApiRateLimits",
+          "from .session import Completed, NativeError, Session, TurnStoppedError"
+        ],
+        "references": {
+          "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
+          "Completed": "agents.session.Completed",
+          "EventStream": "agents.observation.EventStream",
+          "Interaction": "agents.manual.Interaction",
+          "NativeError": "agents.session.NativeError",
+          "Session": "agents.session.Session",
+          "TurnStoppedError": "agents.session.TurnStoppedError",
+          "UserInput": "agents.input.UserInput"
+        }
+      },
+      "agents.turn_receipt": {
+        "declarations": [
+          "class InstructionFileReceipt(TypedDict):\n    path: str\n    source: Literal['application_file', 'native_user', 'native_thread', 'native_project']\n    sha256: str",
+          "class ExecutorNetworkReceipt(TypedDict):\n    requires_proxy: bool\n    domains: dict[str, Literal['allow', 'deny']] | None\n    allow_all_unix_sockets: bool\n    allow_local_binding: bool | None",
+          "class ExecutorPolicyReceipt(TypedDict):\n    environment_id: str\n    transport: Literal['local', 'remote']\n    cwd: str\n    writable_roots: list[str]\n    network_sandbox: Literal['restricted', 'enabled']\n    network_policy: ExecutorNetworkReceipt | None",
+          "class TurnReceipt(TypedDict):\n    thread_id: str\n    turn_id: str\n    model: str\n    reasoning_effort: str | None\n    instruction_revision: str | None\n    developer_instructions_sha256: str | None\n    instruction_files: list[InstructionFileReceipt]\n    user_config_applied: bool\n    codex_revision: str\n    codex_source_tree: str\n    approval_policy: str | dict[str, Any]\n    executors: list[ExecutorPolicyReceipt] | None"
+        ],
+        "exports": {
+          "ExecutorNetworkReceipt": "agents.turn_receipt.ExecutorNetworkReceipt",
+          "ExecutorPolicyReceipt": "agents.turn_receipt.ExecutorPolicyReceipt",
+          "InstructionFileReceipt": "agents.turn_receipt.InstructionFileReceipt",
+          "TurnReceipt": "agents.turn_receipt.TurnReceipt"
+        },
+        "imports": [
+          "from typing import Any as Any, Literal as Literal",
+          "from typing_extensions import TypedDict as TypedDict"
+        ],
+        "references": {}
+      },
+      "agents.usage": {
+        "declarations": [
+          "@dataclass(frozen=True, slots=True)\nclass TokenUsage:\n    input_tokens: int\n    cached_input_tokens: int\n    cache_write_input_tokens: int\n    output_tokens: int\n    reasoning_output_tokens: int\n    total_tokens: int",
+          "@dataclass(frozen=True, slots=True)\nclass TokenUsageInfo:\n    total_token_usage: TokenUsage\n    last_token_usage: TokenUsage\n    model_context_window: int | None"
+        ],
+        "exports": {
+          "TokenUsage": "agents.usage.TokenUsage",
+          "TokenUsageInfo": "agents.usage.TokenUsageInfo"
+        },
+        "imports": [
+          "from dataclasses import dataclass as dataclass"
+        ],
+        "references": {}
+      },
+      "agents.version": {
+        "exports": {
+          "__version__": "str"
+        }
+      }
+    },
+    "root_bindings": {
+      "ActionReply": "agents.manual.ActionReply",
+      "ActionRequested": "agents.manual.ActionRequested",
+      "Agent": "agents.agent.Agent",
+      "Allow": "agents.native_interception.Allow",
+      "ApiRateLimitWindow": "agents.rate_limits.ApiRateLimitWindow",
+      "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
+      "ApprovalRequest": "agents.manual.ApprovalRequest",
+      "Capabilities": "agents.session.Capabilities",
+      "CapabilityError": "agents.session.CapabilityError",
+      "ChatGPTAppsMCP": "agents.mcp.ChatGPTAppsMCP",
+      "Checklist": "agents.tools.Checklist",
+      "ChecklistState": "agents.state.ChecklistState",
+      "ChecklistStep": "agents.state.ChecklistStep",
+      "CheckpointStatus": "agents.state.CheckpointStatus",
+      "ChildInvocation": "agents.native_agents.ChildInvocation",
+      "CodexAccount": "agents.agent.CodexAccount",
+      "CodexLogin": "agents.agent.CodexLogin",
+      "Completed": "agents.session.Completed",
+      "CustomStorage": "agents.canonical_storage.CustomStorage",
+      "Deny": "agents.native_interception.Deny",
+      "ElicitationRequest": "agents.manual.ElicitationRequest",
+      "Environment": "agents.executor.Environment",
+      "EnvironmentSource": "agents.executor.EnvironmentSource",
+      "ExecutorContext": "agents.executor.ExecutorContext",
+      "ExecutorNetworkReceipt": "agents.turn_receipt.ExecutorNetworkReceipt",
+      "ExecutorPolicyReceipt": "agents.turn_receipt.ExecutorPolicyReceipt",
+      "FeatureName": "agents.session.FeatureName",
+      "FeatureSupport": "agents.session.FeatureSupport",
+      "FunctionTool": "agents._function_tools.FunctionTool",
+      "HostedVerificationMCP": "agents.mcp.HostedVerificationMCP",
+      "HttpMCP": "agents.mcp.HttpMCP",
+      "InputImage": "agents.input.InputImage",
+      "InputText": "agents.input.InputText",
+      "InstructionFileReceipt": "agents.turn_receipt.InstructionFileReceipt",
+      "Interaction": "agents.manual.Interaction",
+      "InteractionExpiredError": "agents.session.InteractionExpiredError",
+      "InteractionRequired": "agents.session.InteractionRequired",
+      "LocalRecoveryRequired": "agents.recovery.LocalRecoveryRequired",
+      "LocalStorage": "agents.state.LocalStorage",
+      "MCPCallContext": "agents.mcp.MCPCallContext",
+      "MCPResultContext": "agents.mcp.MCPResultContext",
+      "ModelRequestContext": "agents.model_context.ModelRequestContext",
+      "ModelSettings": "agents.agent.ModelSettings",
+      "NativeAgents": "agents.native_agents.NativeAgents",
+      "NativeError": "agents.session.NativeError",
+      "NativeGoal": "agents.state.NativeGoal",
+      "NativeGoals": "agents.tools.NativeGoals",
+      "NativeOutput": "agents.schema.NativeOutput",
+      "NativeProvider": "agents.agent.NativeProvider",
+      "NativeRole": "agents.native_agents.NativeRole",
+      "NativeToolCall": "agents.native_interception.NativeToolCall",
+      "NetworkPolicy": "agents.executor.NetworkPolicy",
+      "OutputSpec": "agents.schema.OutputSpec",
+      "OutputValidationError": "agents.schema.OutputValidationError",
+      "PendingRequests": "agents.turn.PendingRequests",
+      "PreparedRequest": "agents.prepared_request.PreparedRequest",
+      "PreparedToolPresentation": "agents.prepared_request.PreparedToolPresentation",
+      "PromptedOutput": "agents.schema.PromptedOutput",
+      "ReconciledCall": "agents.recovery.ReconciledCall",
+      "ReplaceArguments": "agents.native_interception.ReplaceArguments",
+      "ResponseIntegrityReason": "agents.session.ResponseIntegrityReason",
+      "SQLiteSessionStore": "agents.canonical_storage.SQLiteSessionStore",
+      "Session": "agents.session.Session",
+      "SessionBusyError": "agents.session.SessionBusyError",
+      "SessionState": "agents.state.SessionState",
+      "SessionStore": "agents.canonical_storage.SessionStore",
+      "StaleTurnError": "agents.session.StaleTurnError",
+      "StdioMCP": "agents.mcp.StdioMCP",
+      "SteeringReceipt": "agents.turn.SteeringReceipt",
+      "StopTurn": "agents.native_interception.StopTurn",
+      "Subagent": "agents.subagents.Subagent",
+      "Tool": "agents._function_tools.Tool",
+      "ToolCallInfo": "agents.tools.ToolCallInfo",
+      "ToolContext": "agents._function_tools.ToolContext",
+      "ToolOutput": "agents.tools.ToolOutput",
+      "ToolOutputImage": "agents.tools.ToolOutputImage",
+      "ToolOutputText": "agents.tools.ToolOutputText",
+      "ToolRef": "agents.tools.ToolRef",
+      "TraceContext": "agents._trace_context.TraceContext",
+      "Turn": "agents.turn.Turn",
+      "TurnNeedsAttention": "agents.turn.TurnNeedsAttention",
+      "TurnReceipt": "agents.turn_receipt.TurnReceipt",
+      "TurnStoppedError": "agents.session.TurnStoppedError",
+      "UncertainCall": "agents.recovery.UncertainCall",
+      "UserInput": "agents.input.UserInput",
+      "UserMessage": "agents.input.UserMessage",
+      "VerificationProof": "agents.manual.VerificationProof",
+      "VerificationRequest": "agents.manual.VerificationRequest",
+      "WebSearch": "agents.tools.WebSearch",
+      "function_tool": "agents._function_tools.function_tool"
+    },
+    "root_declarations": [],
+    "root_definitions": {
+      "agents._events": {
+        "declarations": [
+          "class InputTokensDetails(TypedDict):\n    cached_tokens: int\n    cache_write_tokens: NotRequired[int]",
+          "class OutputTokensDetails(TypedDict):\n    reasoning_tokens: int",
+          "class TokenUsage(TypedDict):\n    input_tokens: int\n    input_tokens_details: InputTokensDetails\n    output_tokens: int\n    output_tokens_details: OutputTokensDetails\n    total_tokens: int",
+          "class Failure(TypedDict):\n    code: str\n    message: str | None\n    http_status_code: NotRequired[int]",
+          "class ExecApproval(TypedDict):\n    kind: Literal['exec']\n    call_id: str\n    command: list[str]\n    cwd: str\n    reason: str | None\n    available_decisions: list[JsonValue] | None\n    additional_permissions: NotRequired[JsonValue]\n    network_approval_context: NotRequired[JsonValue]\n    proposed_execpolicy_amendment: NotRequired[JsonValue]\n    proposed_network_policy_amendments: NotRequired[JsonValue]",
+          "class PatchApproval(TypedDict):\n    kind: Literal['patch']\n    call_id: str\n    changes: dict[str, JsonValue]\n    reason: str | None\n    grant_root: NotRequired[str | None]",
+          "class ElicitationMetadata(TypedDict):\n    _meta: NotRequired[JsonValue]",
+          "class FormElicitation(ElicitationMetadata):\n    mode: Literal['form', 'openai/form', 'openaiForm']\n    message: str\n    requested_schema: JsonValue",
+          "class UrlElicitation(ElicitationMetadata):\n    mode: Literal['url']\n    message: str\n    url: str\n    elicitation_id: str",
+          "class VerificationElicitation(ElicitationMetadata):\n    mode: Literal['openai/userVerification']\n    title: str\n    description: str\n    challenge: str",
+          "ElicitationRequest = TypeAliasType('ElicitationRequest', FormElicitation | UrlElicitation | VerificationElicitation)",
+          "class McpApproval(TypedDict):\n    kind: Literal['mcp']\n    server_label: str\n    request: ElicitationRequest",
+          "class _ActionSource(TypedDict):\n    subagent_id: NotRequired[str]",
+          "class FunctionCallRequiredAction(_ActionSource):\n    type: Literal['function_call']\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue\n    admitted_arguments: NotRequired[dict[str, JsonValue]]",
+          "class FunctionApproval(TypedDict):\n    kind: Literal['function']\n    name: str\n    namespace: str | None\n    call_id: str\n    arguments: dict[str, JsonValue]",
+          "class ToolApprovalRequiredAction(_ActionSource):\n    type: Literal['tool_approval']\n    request_id: str\n    turn_id: str | None\n    approval: ExecApproval | PatchApproval | McpApproval | FunctionApproval",
+          "class McpElicitationRequiredAction(_ActionSource):\n    type: Literal['mcp_elicitation']\n    request_id: str\n    turn_id: str | None\n    server_label: str\n    request: ElicitationRequest",
+          "class QuestionOption(TypedDict):\n    label: str\n    description: str",
+          "class UserInputQuestion(TypedDict):\n    id: str\n    header: str\n    question: str\n    is_other: bool\n    is_secret: bool\n    options: list[QuestionOption] | None",
+          "class UserInputRequiredAction(_ActionSource):\n    type: Literal['user_input']\n    request_id: str\n    turn_id: str | None\n    questions: list[UserInputQuestion]\n    is_blocking: bool",
+          "class PermissionsRequiredAction(_ActionSource):\n    type: Literal['permissions']\n    request_id: str\n    turn_id: str | None\n    permissions: dict[str, JsonValue]\n    reason: str | None",
+          "class EnvironmentConnectionRequiredAction(_ActionSource):\n    type: Literal['environment_connection']\n    environment_id: str",
+          "RequiredAction = TypeAliasType('RequiredAction', FunctionCallRequiredAction | ToolApprovalRequiredAction | McpElicitationRequiredAction | UserInputRequiredAction | PermissionsRequiredAction | EnvironmentConnectionRequiredAction)",
+          "class OutputText(TypedDict):\n    type: Literal['output_text']\n    text: str",
+          "class InputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
+          "class InputImage(TypedDict):\n    type: Literal['input_image']\n    image_url: str",
+          "class SummaryText(TypedDict):\n    type: Literal['summary_text']\n    text: str",
+          "OutputItemStatus = TypeAliasType('OutputItemStatus', Literal['in_progress', 'completed', 'incomplete'])",
+          "FunctionCallStatus = TypeAliasType('FunctionCallStatus', Literal['in_progress', 'completed', 'failed', 'incomplete'])",
+          "class MessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['assistant']\n    status: OutputItemStatus\n    content: list[OutputText]\n    phase: Literal['commentary', 'final_answer'] | None",
+          "class ReasoningItem(TypedDict):\n    type: Literal['reasoning']\n    id: str\n    turn_id: str\n    summary: list[SummaryText]\n    status: OutputItemStatus | None",
+          "class WebSearchActionSearch(TypedDict):\n    type: Literal['search']\n    query: str | None\n    queries: list[str] | None",
+          "class WebSearchActionOpenPage(TypedDict):\n    type: Literal['open_page']\n    url: str | None",
+          "class WebSearchActionFindInPage(TypedDict):\n    type: Literal['find_in_page']\n    url: str | None\n    pattern: str | None",
+          "class WebSearchActionOther(TypedDict):\n    type: Literal['other']",
+          "WebSearchAction = TypeAliasType('WebSearchAction', WebSearchActionSearch | WebSearchActionOpenPage | WebSearchActionFindInPage | WebSearchActionOther)",
+          "class WebSearchCallItem(TypedDict):\n    type: Literal['web_search_call']\n    id: str\n    turn_id: str\n    status: OutputItemStatus\n    action: WebSearchAction | None",
+          "class FunctionCallItem(TypedDict):\n    type: Literal['function_call']\n    id: str\n    turn_id: str\n    call_id: str\n    name: str\n    arguments: JsonValue\n    status: FunctionCallStatus",
+          "class FunctionCallOutputItem(TypedDict):\n    type: Literal['function_call_output']\n    id: str\n    turn_id: str\n    call_id: str\n    status: FunctionCallStatus\n    output: str | list[InputText | InputImage] | None\n    error: str | None\n    reconciliation: NotRequired[Literal['applied', 'not_applied']]",
+          "class McpCallItem(TypedDict):\n    type: Literal['mcp_call']\n    id: str\n    turn_id: str\n    server_label: str\n    name: str\n    arguments: JsonValue\n    status: FunctionCallStatus\n    output: JsonValue\n    error: JsonValue\n    call_id: NotRequired[str]\n    thread_id: NotRequired[str | None]\n    native_status: NotRequired[str | None]",
+          "class CommandExecutionItem(TypedDict):\n    type: Literal['command_execution']\n    id: str\n    turn_id: str\n    command: str\n    cwd: str | None\n    status: FunctionCallStatus\n    output: str | None\n    exit_code: int | None\n    duration_ms: int | None\n    argv: NotRequired[list[str]]\n    call_id: NotRequired[str]\n    thread_id: NotRequired[str | None]\n    native_status: NotRequired[str | None]",
+          "class PatchExecutionItem(TypedDict):\n    type: Literal['patch_execution']\n    id: str\n    turn_id: str\n    thread_id: str | None\n    call_id: str\n    status: FunctionCallStatus\n    native_status: str | None\n    changes: dict[str, JsonValue]\n    stdout: str | None\n    stderr: str | None",
+          "ExecutionItem = TypeAliasType('ExecutionItem', CommandExecutionItem | PatchExecutionItem | McpCallItem)",
+          "class _SubagentCallItem(TypedDict):\n    id: str\n    turn_id: str\n    status: FunctionCallStatus",
+          "class CreateSubagentCallItem(_SubagentCallItem):\n    type: Literal['create_subagent_call']\n    agent_id: str\n    subagent_id: str | None",
+          "class _RecipientSubagentCallItem(_SubagentCallItem):\n    sender_agent_id: str\n    recipient_agent_id: str",
+          "class SendSubagentInputCallItem(_RecipientSubagentCallItem):\n    type: Literal['send_subagent_input_call']",
+          "class ResumeSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['resume_subagent_call']",
+          "class InterruptSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['interrupt_subagent_call']",
+          "class CloseSubagentCallItem(_RecipientSubagentCallItem):\n    type: Literal['close_subagent_call']",
+          "class WaitForSubagentsCallItem(_SubagentCallItem):\n    type: Literal['wait_for_subagents_call']\n    sender_agent_id: str",
+          "OutputItem = TypeAliasType('OutputItem', MessageItem | ReasoningItem | FunctionCallItem | ExecutionItem | CreateSubagentCallItem | SendSubagentInputCallItem | ResumeSubagentCallItem | InterruptSubagentCallItem | CloseSubagentCallItem | WaitForSubagentsCallItem | WebSearchCallItem)",
+          "class UserMessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['user']\n    status: Literal['completed']\n    phase: None\n    content: list[InputText | InputImage]",
+          "SessionItem = TypeAliasType('SessionItem', OutputItem | FunctionCallOutputItem | UserMessageItem)"
+        ],
+        "exports": {},
+        "imports": [
+          "from typing import Literal as Literal",
+          "from typing_extensions import NotRequired as NotRequired, TypeAliasType as TypeAliasType, TypedDict as TypedDict",
+          "from .config import JsonValue as JsonValue"
+        ],
+        "references": {
+          "JsonValue": "agents.config.JsonValue"
+        }
+      },
+      "agents._function_tools": {
+        "declarations": [
+          "ToolContextT = TypeVar('ToolContextT')",
+          "ContextT_co = TypeVar('ContextT_co', covariant=True, default=None)",
+          "BinderT_co = TypeVar('BinderT_co', bound=Callable[..., _CapturedFunction] | None, covariant=True, default=None)",
+          "ParametersT = ParamSpec('ParametersT')",
+          "@dataclass(frozen=True)\nclass ToolContext(Generic[ContextT_co]):\n    context: ContextT_co = field(repr=False)\n    submission: Turn[Any] | ChildInvocation\n    call_id: str\n    original_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    effective_arguments: Mapping[str, Any] = field(default_factory=dict, repr=False)\n    call: ToolCallInfo = field(kw_only=True)\n    trace_context: TraceContext | None = field(default=None, kw_only=True, repr=False)",
+          "@dataclass(frozen=True, kw_only=True)\nclass FunctionTool(Generic[InputT, ResultT, BinderT_co]):\n    name: str\n    description: str\n    input_type: type[InputT]\n    output_type: type[ResultT]\n    _bind: BinderT_co | None = field(default=None, repr=False)\n    _requires_context: bool = field(default=False, repr=False)\n    callback_timeout: float | None = None\n    before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None = field(default=None, repr=False)\n    after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None = field(default=None, repr=False)\n    defer_loading: bool = False\n\n    def match(self, event: object) -> ActionRequested[InputT, ResultT] | None:\n        pass\n\n    @property\n    def ref(self) -> ToolRef:\n        pass",
+          "_PythonTool: TypeAlias = FunctionTool[Any, Any, Callable[[ToolContextT, FunctionTool[Any, Any, Any]], _CapturedFunction]]",
+          "Tool: TypeAlias = _PythonTool[ToolContextT] | FunctionTool[Any, Any] | HttpMCP[object] | StdioMCP[object] | HttpMCP[ToolContextT] | StdioMCP[ToolContextT] | Checklist | NativeGoals | WebSearch | NativeAgents",
+          "class _ToolDecorator(Protocol):\n\n    @overload\n    def __call__(self, function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any], /) -> _PythonTool[ToolContextT]:\n        pass\n\n    @overload\n    def __call__(self, function: Callable[ParametersT, Any], /) -> _PythonTool[object]:\n        pass",
+          "def _requires_context(annotation: Any) -> bool:\n    pass",
+          "@overload\ndef function_tool(function: Callable[Concatenate[ToolContext[ToolContextT], ParametersT], Any], /) -> _PythonTool[ToolContextT]:\n    pass",
+          "@overload\ndef function_tool(function: Callable[ParametersT, Any], /) -> _PythonTool[object]:\n    pass",
+          "@overload\ndef function_tool(*, name: str | None=None, description: str | None=None, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None=None, defer_loading: bool=False) -> _ToolDecorator:\n    pass",
+          "def function_tool(function: Callable[..., Any] | None=None, /, *, name: str | None=None, description: str | None=None, callback_timeout: float | None=None, before: Callable[[ToolContext[Any]], Allow | Deny | ReplaceArguments | Awaitable[Allow | Deny | ReplaceArguments]] | None=None, after: Callable[[ToolContext[Any], ToolOutput], ToolOutput | Awaitable[ToolOutput]] | None=None, defer_loading: bool=False) -> _PythonTool[Any] | _ToolDecorator:\n    pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping",
+          "from dataclasses import dataclass as dataclass, field as field",
+          "from typing import Any as Any, Concatenate as Concatenate, Generic as Generic, Protocol as Protocol, TypeAlias as TypeAlias, overload as overload",
+          "from typing_extensions import ParamSpec as ParamSpec, TypeVar as TypeVar",
+          "from ._trace_context import TraceContext as TraceContext",
+          "from .manual import ActionRequested as ActionRequested, InputT as InputT, ResultT as ResultT",
+          "from .mcp import HttpMCP as HttpMCP, StdioMCP as StdioMCP",
+          "from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents",
+          "from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments",
+          "from .tools import Checklist as Checklist, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolRef as ToolRef, WebSearch as WebSearch, _CapturedFunction as _CapturedFunction",
+          "from .turn import Turn"
+        ],
+        "references": {
+          "ActionRequested": "agents.manual.ActionRequested",
+          "Allow": "agents.native_interception.Allow",
+          "Checklist": "agents.tools.Checklist",
+          "ChildInvocation": "agents.native_agents.ChildInvocation",
+          "Deny": "agents.native_interception.Deny",
+          "HttpMCP": "agents.mcp.HttpMCP",
+          "InputT": "agents.manual.InputT",
+          "NativeAgents": "agents.native_agents.NativeAgents",
+          "NativeGoals": "agents.tools.NativeGoals",
+          "ReplaceArguments": "agents.native_interception.ReplaceArguments",
+          "ResultT": "agents.manual.ResultT",
+          "StdioMCP": "agents.mcp.StdioMCP",
+          "ToolCallInfo": "agents.tools.ToolCallInfo",
+          "ToolOutput": "agents.tools.ToolOutput",
+          "ToolRef": "agents.tools.ToolRef",
+          "TraceContext": "agents._trace_context.TraceContext",
+          "Turn": "agents.turn.Turn",
+          "WebSearch": "agents.tools.WebSearch",
+          "_CapturedFunction": "agents.tools._CapturedFunction"
+        }
+      },
+      "agents._options": {
+        "declarations": [
+          "class RuntimeNetworkPolicy(TypedDict, total=False, closed=True):\n    allowed_domains: Sequence[str]\n    denied_domains: Sequence[str]\n    allow_all_unix_sockets: bool\n    allow_local_binding: bool"
+        ],
+        "exports": {},
+        "imports": [
+          "from collections.abc import Sequence as Sequence",
+          "from typing_extensions import TypedDict as TypedDict"
+        ],
+        "references": {}
+      },
+      "agents._trace_context": {
+        "declarations": [
+          "@dataclass(frozen=True, kw_only=True)\nclass TraceContext:\n    traceparent: str = field(repr=False)\n    tracestate: str | None = field(default=None, repr=False)\n\n    def to_headers(self) -> dict[str, str]:\n        pass"
+        ],
+        "exports": {},
+        "imports": [
+          "from dataclasses import dataclass as dataclass, field as field"
+        ],
+        "references": {}
+      }
+    },
+    "root_exports": [
+      "ActionReply",
+      "ActionRequested",
+      "Agent",
+      "Allow",
+      "ApiRateLimitWindow",
+      "ApiRateLimits",
+      "ApprovalRequest",
+      "Capabilities",
+      "CapabilityError",
+      "ChatGPTAppsMCP",
+      "Checklist",
+      "ChecklistState",
+      "ChecklistStep",
+      "CheckpointStatus",
+      "ChildInvocation",
+      "CodexAccount",
+      "CodexLogin",
+      "Completed",
+      "CustomStorage",
+      "Deny",
+      "ElicitationRequest",
+      "Environment",
+      "EnvironmentSource",
+      "ExecutorContext",
+      "ExecutorNetworkReceipt",
+      "ExecutorPolicyReceipt",
+      "FeatureName",
+      "FeatureSupport",
+      "FunctionTool",
+      "HostedVerificationMCP",
+      "HttpMCP",
+      "InputImage",
+      "InputText",
+      "InstructionFileReceipt",
+      "Interaction",
+      "InteractionExpiredError",
+      "InteractionRequired",
+      "LocalRecoveryRequired",
+      "LocalStorage",
+      "MCPCallContext",
+      "MCPResultContext",
+      "ModelRequestContext",
+      "ModelSettings",
+      "NativeAgents",
+      "NativeError",
+      "NativeGoal",
+      "NativeGoals",
+      "NativeOutput",
+      "NativeProvider",
+      "NativeRole",
+      "NativeToolCall",
+      "NetworkPolicy",
+      "OutputSpec",
+      "OutputValidationError",
+      "PendingRequests",
+      "PreparedRequest",
+      "PreparedToolPresentation",
+      "PromptedOutput",
+      "ReconciledCall",
+      "ReplaceArguments",
+      "ResponseIntegrityReason",
+      "SQLiteSessionStore",
+      "Session",
+      "SessionBusyError",
+      "SessionState",
+      "SessionStore",
+      "StaleTurnError",
+      "StdioMCP",
+      "SteeringReceipt",
+      "StopTurn",
+      "Subagent",
+      "Tool",
+      "ToolCallInfo",
+      "ToolContext",
+      "ToolOutput",
+      "ToolOutputImage",
+      "ToolOutputText",
+      "ToolRef",
+      "TraceContext",
+      "Turn",
+      "TurnNeedsAttention",
+      "TurnReceipt",
+      "TurnStoppedError",
+      "UncertainCall",
+      "UserInput",
+      "UserMessage",
+      "VerificationProof",
+      "VerificationRequest",
+      "WebSearch",
+      "function_tool"
+    ],
+    "root_imports": [
+      "from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext, function_tool as function_tool",
+      "from ._trace_context import TraceContext as TraceContext",
+      "from .agent import Agent as Agent, CodexAccount as CodexAccount, CodexLogin as CodexLogin, ModelSettings as ModelSettings, NativeProvider as NativeProvider",
+      "from .canonical_storage import CustomStorage as CustomStorage, SessionStore as SessionStore, SQLiteSessionStore as SQLiteSessionStore",
+      "from .executor import Environment as Environment, EnvironmentSource as EnvironmentSource, ExecutorContext as ExecutorContext, NetworkPolicy as NetworkPolicy",
+      "from .input import InputImage as InputImage, InputText as InputText, UserInput as UserInput, UserMessage as UserMessage",
+      "from .manual import ActionReply as ActionReply, ActionRequested as ActionRequested, ApprovalRequest as ApprovalRequest, ElicitationRequest as ElicitationRequest, Interaction as Interaction, VerificationProof as VerificationProof, VerificationRequest as VerificationRequest",
+      "from .mcp import ChatGPTAppsMCP as ChatGPTAppsMCP, HostedVerificationMCP as HostedVerificationMCP, HttpMCP as HttpMCP, MCPCallContext as MCPCallContext, MCPResultContext as MCPResultContext, StdioMCP as StdioMCP",
+      "from .model_context import ModelRequestContext as ModelRequestContext",
+      "from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as NativeAgents, NativeRole as NativeRole",
+      "from .native_interception import Allow as Allow, Deny as Deny, NativeToolCall as NativeToolCall, ReplaceArguments as ReplaceArguments, StopTurn as StopTurn",
+      "from .prepared_request import PreparedRequest as PreparedRequest, PreparedToolPresentation as PreparedToolPresentation",
+      "from .rate_limits import ApiRateLimits as ApiRateLimits, ApiRateLimitWindow as ApiRateLimitWindow",
+      "from .recovery import LocalRecoveryRequired as LocalRecoveryRequired, ReconciledCall as ReconciledCall, UncertainCall as UncertainCall",
+      "from .schema import NativeOutput as NativeOutput, OutputSpec as OutputSpec, OutputValidationError as OutputValidationError, PromptedOutput as PromptedOutput",
+      "from .session import Capabilities as Capabilities, CapabilityError as CapabilityError, Completed as Completed, FeatureName as FeatureName, FeatureSupport as FeatureSupport, InteractionExpiredError as InteractionExpiredError, InteractionRequired as InteractionRequired, NativeError as NativeError, ResponseIntegrityReason as ResponseIntegrityReason, Session as Session, SessionBusyError as SessionBusyError, StaleTurnError as StaleTurnError, TurnStoppedError as TurnStoppedError",
+      "from .state import ChecklistState as ChecklistState, ChecklistStep as ChecklistStep, CheckpointStatus as CheckpointStatus, LocalStorage as LocalStorage, NativeGoal as NativeGoal, SessionState as SessionState",
+      "from .subagents import Subagent as Subagent",
+      "from .tools import Checklist as Checklist, NativeGoals as NativeGoals, ToolCallInfo as ToolCallInfo, ToolOutput as ToolOutput, ToolOutputImage as ToolOutputImage, ToolOutputText as ToolOutputText, ToolRef as ToolRef, WebSearch as WebSearch",
+      "from .turn import PendingRequests as PendingRequests, SteeringReceipt as SteeringReceipt, Turn as Turn, TurnNeedsAttention as TurnNeedsAttention",
+      "from .turn_receipt import ExecutorNetworkReceipt as ExecutorNetworkReceipt, ExecutorPolicyReceipt as ExecutorPolicyReceipt, InstructionFileReceipt as InstructionFileReceipt, TurnReceipt as TurnReceipt"
+    ]
+  }
+}

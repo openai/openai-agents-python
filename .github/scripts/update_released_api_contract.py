@@ -21,7 +21,7 @@ else:
     import tomli as tomllib
 
 ROOT = Path(__file__).resolve().parents[2]
-CONTRACT = ROOT / "tests/fixtures/released_api_contract.json"
+CONTRACT = ROOT / "packages/codex/tests/fixtures/released_api_contract.json"
 _PROTOCOL_METHODS = {
     "__init__",
     "__new__",
@@ -113,7 +113,7 @@ def _references(declaration: ast.stmt) -> set[str]:
 
 def _public_type_aliases(module: ModuleType, source: ModuleType, tree: ast.Module) -> None:
     """Read public-owner alias construction as the original type declaration."""
-    if source.__name__ not in {"agents._runtime._events", "agents._runtime.subagents"}:
+    if source.__name__ not in {"_agents_codex._events", "_agents_codex.subagents"}:
         return
     declarations = [
         node
@@ -172,7 +172,7 @@ def _module_contract(
             owner = importlib.util.resolve_name(
                 "." * node.level + (node.module or ""), module.__package__
             )
-            if owner.startswith("agents._runtime.") and _public_owner(owner) == module.__name__:
+            if owner.startswith("_agents_codex.") and _public_owner(owner) == module.__name__:
                 source = importlib.import_module(owner)
                 assert source.__file__ is not None
                 tree = ast.parse(Path(source.__file__).read_text())
@@ -246,9 +246,9 @@ def _module_contract(
                         "." * node.level + (node.module or ""), source.__package__
                     )
                     owner = _public_owner(owner)
-                    if source is not module and node.level:
-                        # The runtime is one package level deeper. Preserve the
-                        # reviewed logical import, including shared root leaves.
+                    if source is not module:
+                        # Preserve reviewed logical imports from the public owner,
+                        # including shared declarations outside the implementation.
                         package = module.__package__ or ""
                         if owner.startswith(package + "."):
                             node.level = 1
@@ -278,11 +278,11 @@ def _module_contract(
 
 
 def _public_owner(name: str) -> str:
-    return name.replace("agents._runtime.", "agents.", 1)
+    return name.replace("_agents_codex.", "agents.", 1)
 
 
 def public_api() -> dict[str, Any]:
-    sys.path.insert(0, str(ROOT / "src"))
+    sys.path[:0] = [str(ROOT / "src"), str(ROOT / "packages/codex/src")]
     import agents
 
     root_exports = sorted(agents.__all__)

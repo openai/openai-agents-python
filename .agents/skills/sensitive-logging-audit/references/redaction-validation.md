@@ -41,7 +41,7 @@ The sensitive object itself must not remain attached even when its string repres
 
 ## Review procedure
 
-1. Run the collector against all of `src/agents`.
+1. Run the collector against all of `src/agents` and `packages/codex/src/_agents_codex`.
 2. Run the supplemental `rg` searches from `SKILL.md` and inspect aliases and dynamic dispatch.
 3. Review raw output and ambiguous receivers first.
 4. Review caught values, `logger.exception`, `exc_info`, `extra`, and formatting arguments.

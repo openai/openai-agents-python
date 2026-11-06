@@ -280,14 +280,20 @@ jobs:
                       return False
                   changed.remove(filename.encode())
               allowed = re.compile(
-                  rb'(?:src/agents/|packages/codex/tests/|tests/|examples/).+\.py\Z'
-                  rb'|(?:README|CHANGELOG-alpha|examples/README|packages/codex/README|\.github/RELEASING|docs/.+)\.md\Z'
+                  rb'(?:src/agents/|packages/codex/src/_agents_codex/|packages/codex/tests/|packages/codex/examples/|tests/|examples/).+\.py\Z'
+                  rb'|(?:README|CHANGELOG-alpha|examples/README|packages/codex/examples/README|packages/codex/README|\.github/RELEASING|docs/.+)\.md\Z'
                   rb'|(?:release-please-config|\.release-please-manifest|pyrightconfig)\.json\Z'
-                  rb'|tests/fixtures/released_api_contract\.json\Z'
+                  rb'|(?:tests|packages/codex/tests)/fixtures/released_api_contract\.json\Z'
+                  rb'|(?:tests|packages/codex/tests)/(?:fixtures/(?:native_planning_receipt|vercel_ui_v1)|fixtures/classic/original_pending_approval(?:\.identity)?|vercel-client/package(?:-lock)?|pyright-negative)\.json\Z'
+                  rb'|(?:tests|packages/codex/tests)/(?:macos_trust_observer|fixtures/(?:detached_child|local_ingress_process))\.c\Z'
+                  rb'|(?:tests|packages/codex/tests)/qualification/(?:run_offline_ipc|offline_executor)\.sh\Z'
+                  rb'|(?:tests|packages/codex/tests)/vercel-client/read-stream\.mjs\Z'
+                  rb'|(?:examples|packages/codex/examples)/(?:web_starter/(?:client|browser-test)\.mjs|web_starter/package(?:-lock)?\.json|web_starter/index\.html|(?:web_starter|ag_ui)/requirements\.txt|evaluation/(?:config|cases)\.json)\Z'
+                  rb'|packages/codex/src/_agents_codex/py\.typed\Z'
                   rb'|packages/codex/(?:AGENTS|MAINTAINING)\.md\Z'
                   rb'|packages/codex/docs/.+\.md\Z'
                   rb'|packages/codex/scripts/verify_installed\.py\Z'
-                  rb'|(?:Makefile|mkdocs\.yml|tests/README\.md)\Z'
+                  rb'|(?:Makefile|mkdocs\.yml|(?:tests|packages/codex/tests)/README\.md)\Z'
                   rb'|\.github/workflows/alpha-install\.yml\Z'
                   rb'|docs/assets/images/.+\.(?:png|jpg|jpeg|gif|svg|webp)\Z'
               )
@@ -511,7 +517,7 @@ jobs:
       (needs.changes.outputs.windows == 'false' && needs.produce-windows.result == 'skipped'))))
     env:
       UV_NO_SYNC: "1"
-      PYTHONPATH: src
+      PYTHONPATH: src:packages/codex/src
     runs-on: ubuntu-latest
     timeout-minutes: 100
     steps:
@@ -718,7 +724,7 @@ jobs:
         env:
           AGENTS_REQUIRE_TRACING_QUALIFICATION: '1'
         run: |
-          uv run --with grpcio==1.85.0 --with opentelemetry-proto==1.45.1 python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_tracing_native.py tests/test_telemetry_transports.py
+          uv run --with grpcio==1.85.0 --with opentelemetry-proto==1.45.1 python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_tracing_native.py packages/codex/tests/test_telemetry_transports.py
       - name: Verify the qualified wheel archive
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         env:
@@ -729,7 +735,7 @@ jobs:
         run: |
           uv pip install --no-deps --target "$RUNNER_TEMP/docs-wheel" "$OPENAI_AGENTS_NATIVE_WHEEL"
           PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python .github/scripts/check_docs.py
-          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q tests/test_docs_code.py
+          PYTHONPATH="$RUNNER_TEMP/docs-wheel" uv run --no-sync python -m pytest -q packages/codex/tests/test_docs_code.py
       - name: Set up Node for the optional Vercel client example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -740,27 +746,27 @@ jobs:
         env:
           AGENTS_REQUIRE_VERCEL_CLIENT: '1'
         run: |
-          npm ci --prefix tests/vercel-client --ignore-scripts
-          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_vercel_client.py
+          npm ci --prefix packages/codex/tests/vercel-client --ignore-scripts
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_vercel_client.py
       - name: Verify the complete browser starter with ai 6.0.315
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         env:
           AGENTS_REQUIRE_WEB_BROWSER: '1'
         run: |
-          npm ci --prefix examples/web_starter --ignore-scripts
-          npm run build --prefix examples/web_starter
-          npm exec --prefix examples/web_starter -- playwright install --with-deps chromium
-          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_web_starter_browser.py
+          npm ci --prefix packages/codex/examples/web_starter --ignore-scripts
+          npm run build --prefix packages/codex/examples/web_starter
+          npm exec --prefix packages/codex/examples/web_starter -- playwright install --with-deps chromium
+          uv run --no-sync python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_web_starter_browser.py
       - name: Verify the optional AG-UI example
         if: steps.changes.outputs.run == 'true' && matrix.python-version == '3.11'
         run: |
-          uv run --with-requirements examples/ag_ui/requirements.txt python -c 'import ag_ui.core'
-          uv run --with-requirements examples/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_ag_ui_example.py
+          uv run --with-requirements packages/codex/examples/ag_ui/requirements.txt python -c 'import ag_ui.core'
+          uv run --with-requirements packages/codex/examples/ag_ui/requirements.txt python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_ag_ui_example.py
       - name: Verify the optional MCP Tasks adapter
         if: steps.changes.outputs.run == 'true'
         run: |
           uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python -c 'from agents.experimental.mcp_tasks import MCPTasksProvider'
-          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python packages/codex/scripts/test_native.py --sdk -m pytest -q tests/test_deferred_mcp_response_budget.py tests/test_deferred_mcp_tasks.py tests/test_deferred_mcp_tasks_import.py tests/test_deferred_mcp_wire_primitives.py tests/test_deferred_mcp_worker_context.py
+          uv run --with mcp==2.0.0 --with mcp-types==2.0.0 --with uvicorn --with starlette python packages/codex/scripts/test_native.py --sdk -m pytest -q packages/codex/tests/test_deferred_mcp_response_budget.py packages/codex/tests/test_deferred_mcp_tasks.py packages/codex/tests/test_deferred_mcp_tasks_import.py packages/codex/tests/test_deferred_mcp_wire_primitives.py packages/codex/tests/test_deferred_mcp_worker_context.py
       - name: Skip tests
         if: steps.changes.outputs.run != 'true'
         run: echo "Skipping tests for non-code changes."
@@ -868,7 +874,7 @@ jobs:
     timeout-minutes: 100
     env:
       UV_NO_SYNC: "1"
-      PYTHONPATH: src
+      PYTHONPATH: src:packages/codex/src
       OPENAI_API_KEY: fake-for-tests
     steps:
       - name: Checkout repository

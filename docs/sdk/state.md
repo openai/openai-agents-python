@@ -29,7 +29,7 @@ In development builds after `0.24.0-alpha.6`, `LocalStorage` rejects `programmat
 
 `CustomStorage`, also added after alpha.6, supports root Sessions with automatic Python tools. Use a [matching development build](installation.md#examples-and-upgrades). It rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools, and cannot export or restore portable checkpoints.
 
-For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage). Storage does not guarantee exactly-once external actions.
+For the synchronous `SessionStore` contract, persistent SQLite adapter, and recovery of calls with unknown outcomes, see the [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/packages/codex/examples/canonical_storage). Storage does not guarantee exactly-once external actions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 
