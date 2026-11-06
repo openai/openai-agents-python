@@ -853,7 +853,7 @@ async def test_executor_transform_without_asyncio_timeout_keeps_reentrancy_and_d
     from tests.test_native_executor_tools import declaration
     from tests.test_native_manual_tools import provider
 
-    session_module = importlib.import_module("agents.session")
+    session_module = importlib.import_module("agents._runtime.session")
 
     class Python310Asyncio:
         def __getattr__(self, name):

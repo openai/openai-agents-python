@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 from agents import telemetry
+from agents._runtime import telemetry as runtime_telemetry
 from tests.test_tracing_scopes import NativeTracing
 
 
@@ -25,17 +26,20 @@ def _assert_no_exporter_credentials(error: BaseException) -> None:
 
     seen: set[int] = set()
     current_error: BaseException | None = error
+    telemetry_frames = 0
     while current_error is not None and id(current_error) not in seen:
         seen.add(id(current_error))
         current = current_error.__traceback__
         while current is not None:
             frame = current.tb_frame
-            if frame.f_code.co_filename == telemetry.__file__:
+            if frame.f_code.co_filename == runtime_telemetry.__file__:
+                telemetry_frames += 1
                 # Exporter repr deliberately hides these fields. Inspect the
                 # retained objects too, as a traceback-local collector can.
                 assert "traceback-secret" not in repr(reveal(frame.f_locals))
             current = current.tb_next
         current_error = current_error.__cause__ or current_error.__context__
+    assert telemetry_frames > 0
 
 
 def _private_exporter() -> telemetry.OtlpHttp:
@@ -58,7 +62,7 @@ def test_exporter_conversion_drops_hidden_credential_arguments(failure: str) -> 
             tls=telemetry.OtelTlsConfig(client_private_key=cast(Any, 7)),
         )
     with pytest.raises((TypeError, ValueError)) as raised:
-        telemetry._exporter(exporter, "traces")
+        runtime_telemetry._exporter(exporter, "traces")
     _assert_no_exporter_credentials(raised.value)
     assert exporter.headers == {"authorization": "traceback-secret-header"}
 
@@ -80,16 +84,16 @@ async def test_configure_drops_hidden_exporters_from_error_frames(
             raise RuntimeError("native initialization failed")
 
     monkeypatch.setattr(_native, "configure_telemetry", initialize)
-    monkeypatch.setattr(telemetry, "_engine_options", None)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", None)
     if failure == "import":
-        original_import = telemetry.importlib.import_module
+        original_import = runtime_telemetry.importlib.import_module
 
         def unavailable(name: str, package: str | None = None) -> Any:
             if name == "agents._native":
                 raise ImportError("native addon unavailable")
             return original_import(name, package)
 
-        monkeypatch.setattr(telemetry.importlib, "import_module", unavailable)
+        monkeypatch.setattr(runtime_telemetry.importlib, "import_module", unavailable)
     exporter = _private_exporter()
     options: dict[str, Any] = {"traces": exporter, "logs": exporter, "metrics": exporter}
     if failure == "conversion":
@@ -115,9 +119,9 @@ async def test_processor_callback_rejects_flush_without_blocking_delivery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native = NativeTracing()
-    monkeypatch.setattr(telemetry, "_native_tracing", lambda: native)
-    monkeypatch.setattr(telemetry, "_engine_options", "{}")
-    monkeypatch.setattr(telemetry, "_processors", {})
+    monkeypatch.setattr(runtime_telemetry, "_native_tracing", lambda: native)
+    monkeypatch.setattr(runtime_telemetry, "_engine_options", "{}")
+    monkeypatch.setattr(runtime_telemetry, "_processors", {})
     delivered: list[int] = []
 
     class Processor:
@@ -126,7 +130,7 @@ async def test_processor_callback_rejects_flush_without_blocking_delivery(
                 await telemetry.force_flush()
             delivered.append(event["sequence"])
 
-    route = telemetry._ProcessorRoute(Processor())
+    route = runtime_telemetry._ProcessorRoute(Processor())
     for sequence in (1, 2):
         await route._invoke(cast(telemetry.TraceLifecycleEvent, {"sequence": sequence}))
     assert delivered == [1, 2]

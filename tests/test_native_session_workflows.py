@@ -16,7 +16,7 @@ from agents import (
     ToolContext,
     function_tool,
 )
-from agents._native_async import _NativeCompletionError
+from agents._runtime._native_async import _NativeCompletionError
 from agents.observation import (
     ModelRequestDispatching,
     ModelResponseLinked,

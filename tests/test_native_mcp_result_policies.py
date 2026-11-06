@@ -181,7 +181,7 @@ async def test_native_rejects_invalid_late_and_cancelled_decisions(
 async def test_cancellation_before_policy_starts_returns_native_notice(
     responses: ResponsesFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agents.session import _Submission
+    from agents._runtime.session import _Submission
 
     peer = Peer()
     cancelled: list[asyncio.Task[None]] = []

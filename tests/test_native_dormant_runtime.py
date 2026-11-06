@@ -236,7 +236,7 @@ async def test_cancel_dormant_stdio_activation_joins_receipt_and_process_cleanup
     monkeypatch: pytest.MonkeyPatch,
     bad_generation: bool,
 ) -> None:
-    import agents.session as session_module
+    import agents._runtime.session as session_module
 
     log, release = tmp_path / "stdio", tmp_path / "list-release"
     agent = Agent(instructions="Read.", provider=provider(responses))

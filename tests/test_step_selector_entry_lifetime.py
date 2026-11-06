@@ -11,7 +11,8 @@ from unittest.mock import patch
 import pytest
 
 from agents import StopTurn
-from agents.session import Session, _ChildCallbacks
+from agents._runtime.session import _ChildCallbacks
+from agents.session import Session
 
 
 def owner(callback):

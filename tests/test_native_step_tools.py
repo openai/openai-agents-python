@@ -823,10 +823,10 @@ async def test_incremental_configuration_uses_exact_replacement_only_for_selecte
 ) -> None:
     import json
 
-    from agents import telemetry
+    from agents._runtime import telemetry as runtime_telemetry
 
     monkeypatch.setattr(
-        telemetry, "_engine_options", json.dumps({"features.incremental_tools": True})
+        runtime_telemetry, "_engine_options", json.dumps({"features.incremental_tools": True})
     )
     effects = []
 

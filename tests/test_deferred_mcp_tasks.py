@@ -382,7 +382,7 @@ def clean_egress(monkeypatch):
 
 
 def test_stalled_caller_leaves_released_worker_available():
-    from agents.experimental._mcp_tasks_wire import _Workers
+    from agents._runtime.experimental._mcp_tasks_wire import _Workers
 
     workers = _Workers()
 
@@ -594,6 +594,8 @@ async def test_https_loads_current_host_ca_before_sending(
     ],
 )
 def test_endpoint_rejection_has_no_raw_exception(endpoint):
+    from agents._runtime.experimental import mcp_tasks as runtime_mcp_tasks
+
     with pytest.raises(ValueError) as caught:
         MCPTasksProvider(endpoint=endpoint, tool="render", authorize=authorize)
     assert caught.value.args == ("Use a fixed HTTPS endpoint or a loopback HTTP endpoint",)
@@ -602,7 +604,7 @@ def test_endpoint_rejection_has_no_raw_exception(endpoint):
     sdk_frames = [
         (frame, line)
         for frame, line in traceback.walk_tb(caught.value.__traceback__)
-        if frame.f_globals["__name__"] == MCPTasksProvider.__module__
+        if frame.f_globals is vars(runtime_mcp_tasks)
     ]
     assert sdk_frames
     captured = traceback.StackSummary.extract(sdk_frames, capture_locals=True)
@@ -904,7 +906,7 @@ async def test_invalid_host_result_fails_before_journaling(tmp_path, invalid):
 
 
 async def test_receipt_poll_deadline_binding_and_terminal_outcomes(tmp_path, caplog, monkeypatch):
-    import agents.experimental.mcp_tasks as adapter
+    import agents._runtime.experimental.mcp_tasks as adapter
 
     clock = [time.time()]
     monkeypatch.setattr(adapter, "time", SimpleNamespace(time=lambda: clock[0]))
@@ -1252,7 +1254,7 @@ async def _observed_form(p):
 
 
 async def test_public_unsent_form_remains_available(tmp_path, responses, reservations, monkeypatch):
-    from agents.experimental import mcp_tasks
+    from agents._runtime.experimental import mcp_tasks
 
     journal = ControlJournal()
     clock = time.time()
@@ -2173,7 +2175,7 @@ async def test_denials_clear_private_journal_locals(tmp_path, reservations, acti
 
 @pytest.mark.parametrize("action", ["respond", "cancel"])
 async def test_control_uses_fresh_task_before_poll(tmp_path, reservations, monkeypatch, action):
-    from agents.experimental import mcp_tasks
+    from agents._runtime.experimental import mcp_tasks
 
     monkeypatch.setattr(mcp_tasks, "time", SimpleNamespace(time=lambda: 1000.0))
     peer = Peer(tmp_path)
