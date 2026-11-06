@@ -8120,6 +8120,29 @@ class Session(Generic[ContextT, OutputT]):
         value = await self._native.read_goal()
         return cast(NativeGoal | None, json.loads(value))
 
+    async def set_paused_goal(
+        self, objective: str, *, token_budget: int | None = None
+    ) -> NativeGoal:
+        """Create or update the idle root's goal without starting a model request.
+
+        Open the Session with LocalStorage and include NativeGoals in its opening
+        tools. Omitting token_budget keeps an existing budget or uses the native
+        default for a new goal. Core preserves the existing goal's identity and
+        usage. The result reports Core's actual status, which can remain
+        budgetLimited. If the goal database rejects an update, the prior goal
+        stays unchanged. The instruction may already be recorded in history.
+        Cancellation waits for the write to settle. A committed goal stays saved.
+        """
+        self._check_idle_update()
+        if not isinstance(self._storage, LocalStorage):
+            raise CapabilityError("Setting a paused goal requires LocalStorage")
+
+        async def write() -> NativeGoal:
+            value = await self._native.set_paused_goal(objective, token_budget=token_budget)
+            return cast(NativeGoal, json.loads(value))
+
+        return await self._join_mutation(asyncio.create_task(write()))
+
     async def save_state(self) -> SessionState:
         """Snapshot an idle session without retiring it.
 

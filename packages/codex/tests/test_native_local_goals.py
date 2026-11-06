@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import replace
 from pathlib import Path
 
@@ -15,9 +17,12 @@ from agents import (
     Agent,
     CapabilityError,
     Checklist,
+    CustomStorage,
     LocalStorage,
     NativeGoals,
     NativeProvider,
+    SessionBusyError,
+    SQLiteSessionStore,
     function_tool,
 )
 from tests._asyncio import timeout
@@ -94,6 +99,194 @@ async def _start(responses, tmp_path, mode, identity=""):
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
+
+
+async def test_set_paused_goal_persists_without_model_requests(responses, tmp_path):
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-paused-goal")
+    agent = Agent(instructions="Inspect a record.", tools=[NativeGoals()], provider=provider)
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(30), provider, agent.session(storage=storage) as session:
+        identity = session.id
+        assert await session.goal() is None
+        assert await session.checklist() is None
+        created = await session.set_paused_goal("Review the record")
+        assert created["threadId"] == identity
+        assert created["objective"] == "Review the record" and created["status"] == "paused"
+        assert "tokenBudget" not in created
+        assert created["tokensUsed"] == created["timeUsedSeconds"] == 0
+
+        updated = await session.set_paused_goal("Review the revised record", token_budget=4000)
+        assert updated["threadId"] == identity and updated["status"] == "paused"
+        assert (
+            updated["objective"] == "Review the revised record" and updated["tokenBudget"] == 4000
+        )
+        assert await session.goal() == updated
+        assert await session.checklist() is None
+        with pytest.raises(RuntimeError, match="goal objective"):
+            await session.set_paused_goal("   ")
+        with pytest.raises(RuntimeError, match="budgets must be positive"):
+            await session.set_paused_goal("Invalid budget", token_budget=0)
+        assert await session.goal() == updated
+
+    with pytest.raises(RuntimeError, match="Session is closed"):
+        await session.set_paused_goal("Closed owner")
+
+    reopened = await _start(responses, tmp_path, "inspect", identity)
+    code, rows, err = await _collect(reopened)
+    assert code == 0, (rows, err)
+    assert rows[0]["opened"] == identity and rows[0]["pid"] != os.getpid()
+    assert rows[1]["before"] == updated
+    assert not responses.requests
+
+
+async def test_set_paused_goal_requires_current_local_authority(responses, tmp_path):
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-goal-authority")
+    agent = Agent(instructions="Inspect a record.", tools=[NativeGoals()], provider=provider)
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(30), provider:
+        async with agent.session(storage=storage) as original:
+            prior = await original.set_paused_goal("Preserve the authorized goal")
+        async with agent.session(storage=storage, resume=original.id, tools=[]) as denied:
+            with pytest.raises(RuntimeError, match="goal storage|features.goals"):
+                await denied.set_paused_goal("Historical tools cannot authorize a write")
+        async with agent.session(storage=storage, resume=original.id) as current:
+            with pytest.raises(RuntimeError, match="Session is closed"):
+                await original.set_paused_goal("Retired owner cannot replace the goal")
+            assert await current.goal() == prior
+
+        async with agent.session(tools=[]) as ephemeral:
+            with pytest.raises(CapabilityError, match="LocalStorage"):
+                await ephemeral.set_paused_goal("No local profile")
+        if os.name == "posix":
+            custom = CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
+            async with agent.session(storage=custom, tools=[]) as unsupported:
+                with pytest.raises(CapabilityError, match="LocalStorage"):
+                    await unsupported.set_paused_goal("Custom storage cannot own a goal")
+    assert not responses.requests
+
+
+async def test_set_paused_goal_rejects_active_turn_and_its_callback(responses, tmp_path):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        with pytest.raises(RuntimeError, match="tool callback cannot"):
+            await session.set_paused_goal("Callback cannot replace the goal")
+        entered.set()
+        await release.wait()
+        return "released"
+
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-goal-busy")
+    agent = Agent(
+        instructions="Run the requested tool.",
+        model="gpt-5.1-codex",
+        tools=[NativeGoals(), hold],
+        provider=provider,
+    )
+    responses.respond(function_call("hold", {}, "held"))
+    responses.respond(assistant_output("done"))
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(30), provider, agent.session(storage=storage) as session:
+        prior = await session.set_paused_goal("Preserve the idle goal")
+        turn = await session.submit("Run the held tool.")
+        try:
+            await entered.wait()
+            with pytest.raises(RuntimeError, match="Session is busy"):
+                await session.set_paused_goal("Active turn cannot replace the goal")
+            with pytest.raises(RuntimeError, match="idle, open native thread"):
+                await session._native.set_paused_goal("Native root is also busy")
+        finally:
+            release.set()
+        assert (await turn.get_result()).final_output == "done"
+        assert await session.goal() == prior
+    assert len(responses.requests) == 2
+
+
+async def test_set_paused_goal_joins_cancellation_and_context_exit(
+    responses, tmp_path, monkeypatch
+):
+    entered, release, close_entered = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    native_stop = asyncio.Event()
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-goal-join")
+    agent = Agent(instructions="Inspect a record.", tools=[NativeGoals()], provider=provider)
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(30), provider:
+        scope = agent.session(storage=storage)
+        session = await scope.__aenter__()
+        native = session._native
+        close_session = session._close_session
+
+        class HeldGoalWrite:
+            def __getattr__(self, name):
+                return getattr(native, name)
+
+            async def set_paused_goal(self, objective, *, token_budget):
+                entered.set()
+                await release.wait()
+                return await native.set_paused_goal(objective, token_budget=token_budget)
+
+            def _interrupt_graph(self, mode):
+                native_stop.set()
+                return native._interrupt_graph(mode)
+
+        async def observe_close():
+            close_entered.set()
+            await close_session()
+
+        monkeypatch.setattr(session, "_native", HeldGoalWrite())
+        monkeypatch.setattr(session, "_close_session", observe_close)
+        writer = asyncio.create_task(session.set_paused_goal("Joined write", token_budget=4000))
+        exiting = None
+        try:
+            await entered.wait()
+            writer.cancel()
+            await asyncio.sleep(0)
+            assert not writer.done()
+            with pytest.raises(SessionBusyError):
+                await session.submit("Cannot start during the write")
+            with pytest.raises(RuntimeError, match="Session is busy"):
+                await session.set_paused_goal("Cannot replace a pending write")
+
+            exiting = asyncio.create_task(scope.__aexit__(None, None, None))
+            await close_entered.wait()
+            with pytest.raises(RuntimeError, match="Session is closed"):
+                await session.set_paused_goal("Cannot start while closing")
+            assert not exiting.done() and not writer.done()
+            assert not native_stop.is_set()
+        finally:
+            release.set()
+            if exiting is None:
+                await scope.__aexit__(None, None, None)
+            else:
+                await exiting
+        with pytest.raises(asyncio.CancelledError):
+            await writer
+        async with agent.session(storage=storage, resume=session.id) as reopened:
+            goal = await reopened.goal()
+            assert goal is not None and goal["objective"] == "Joined write"
+            assert goal["status"] == "paused" and goal["tokenBudget"] == 4000
+    assert not responses.requests
+
+
+async def test_set_paused_goal_keeps_prior_goal_when_database_rejects_update(responses, tmp_path):
+    provider = NativeProvider(base_url=responses.url, api_key="synthetic-goal-storage")
+    agent = Agent(instructions="Inspect a record.", tools=[NativeGoals()], provider=provider)
+    storage = LocalStorage(tmp_path / "profile")
+    async with timeout(30), provider:
+        async with agent.session(storage=storage) as session:
+            prior = await session.set_paused_goal("Preserve the prior goal", token_budget=4000)
+            (path,) = storage.path.glob("goals_*.sqlite")
+            with closing(sqlite3.connect(path)) as database:
+                database.execute(
+                    "CREATE TRIGGER reject_update BEFORE UPDATE ON thread_goals "
+                    "BEGIN SELECT RAISE(ABORT, 'synthetic goal update failure'); END"
+                )
+            with pytest.raises(RuntimeError, match="failed to update thread goal"):
+                await session.set_paused_goal("Record intent but reject the database update")
+            assert await session.goal() == prior
+        async with agent.session(storage=storage, resume=session.id) as reopened:
+            assert await reopened.goal() == prior
+    assert not responses.requests
 
 
 async def test_actual_core_goal_uses_native_profile_and_survives_new_process(responses, tmp_path):
@@ -303,13 +496,28 @@ async def test_native_goal_budget_status_is_reported_from_core(responses, tmp_pa
         provider=provider,
         model="gpt-5.1-codex",
     )
-    async with timeout(25), agent.session(storage=LocalStorage(tmp_path / "budget")) as session:
+    storage = LocalStorage(tmp_path / "budget")
+    async with timeout(25), provider, agent.session(storage=storage) as session:
         value = await (await session.submit("Create a goal with token budget 1.")).get_result()
         assert value.final_output == "Budget used."
         goal = await session.goal()
         assert goal is not None and goal["tokenBudget"] == 1
         assert goal["tokensUsed"] >= goal["tokenBudget"]
         assert goal["status"] == "budgetLimited"
+        (path,) = storage.path.glob("goals_*.sqlite")
+        with closing(sqlite3.connect(path)) as database:
+            # The public ThreadGoal exposes the thread ID. The database also
+            # records a separate native goal ID for updates and accounting.
+            query = "SELECT goal_id FROM thread_goals WHERE thread_id = ?"
+            original_id = database.execute(query, (session.id,)).fetchone()
+            assert original_id is not None
+            updated = await session.set_paused_goal("Revised objective at the same budget")
+            assert database.execute(query, (session.id,)).fetchone() == original_id
+        assert updated["objective"] == "Revised objective at the same budget"
+        assert updated["status"] == "budgetLimited"
+        for key in ("threadId", "tokenBudget", "tokensUsed", "timeUsedSeconds", "createdAt"):
+            assert updated[key] == goal[key]
+        assert await session.goal() == updated
     assert len(responses.requests) == 2
 
 
