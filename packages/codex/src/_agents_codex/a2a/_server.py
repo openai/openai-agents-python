@@ -544,8 +544,10 @@ class NativeA2AExecutor(AgentExecutor):
                                         def before_seal() -> None:
                                             live.session = None
 
-                                        state = await session._suspend(before_seal=before_seal)
-                                        continuation = state.native_continuation
+                                        suspended_state = await session._suspend(
+                                            before_seal=before_seal
+                                        )
+                                        continuation = suspended_state.native_continuation
                                         if (
                                             continuation is None
                                             or len(continuation.pending_manual) != 1
@@ -556,7 +558,7 @@ class NativeA2AExecutor(AgentExecutor):
                                             raise ValueError(
                                                 "Only one settled root manual request is supported"
                                             )
-                                        checkpoint = state.to_json()
+                                        checkpoint = suspended_state.to_json()
                                         if len(checkpoint.encode()) > self.limits.checkpoint_bytes:
                                             raise ValueError(
                                                 "Native checkpoint exceeds configured byte limit"
