@@ -28,7 +28,7 @@ from agents import (
 )
 from agents.testing import ScriptedResponses, text, tool_call
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[3]
 PARENT = "00-11111111111111111111111111111111-2222222222222222-01"
 OVERRIDE = "00-33333333333333333333333333333333-4444444444444444-01"
 WORKER = "00-55555555555555555555555555555555-6666666666666666-01"
@@ -190,7 +190,7 @@ def test_unsupported_native_metadata_remains_optional() -> None:
 def _run_case(case: str, collector: str, output: Path) -> dict[str, Any]:
     environment = {key: value for key, value in os.environ.items() if key != "OPENAI_API_KEY"}
     # PYTHONSAFEPATH can omit cwd in subprocesses; import only this trusted tree.
-    environment["PYTHONPATH"] = str(ROOT)
+    environment["PYTHONPATH"] = os.pathsep.join((str(ROOT), str(ROOT / "packages/codex")))
     result = subprocess.run(
         [
             sys.executable,
@@ -244,7 +244,7 @@ def _assert_parent(span: dict[str, Any], parent: str) -> None:
 
 
 def test_native_graph_covers_queued_override_callback_and_cancellation(tmp_path: Path) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         receipt = _run_case("graph", collector.url, tmp_path / "graph.json")
@@ -287,7 +287,7 @@ def test_native_graph_covers_queued_override_callback_and_cancellation(tmp_path:
 def test_model_compaction_uses_session_parent_after_overridden_turn(
     tmp_path: Path, workflow: bool
 ) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         receipt = _run_case(
@@ -301,7 +301,7 @@ def test_model_compaction_uses_session_parent_after_overridden_turn(
 
 @pytest.mark.parametrize("flags", ["02", "03"])
 def test_native_defined_flags_preserve_callback_headers(flags: str, tmp_path: Path) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         receipt = _run_case("flags-" + flags, collector.url, tmp_path / "flags.json")
@@ -313,7 +313,7 @@ def test_native_defined_flags_preserve_callback_headers(flags: str, tmp_path: Pa
 
 
 def test_native_manual_request_limit_excludes_trace_metadata(tmp_path: Path) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         receipt = _run_case("manual-limit", collector.url, tmp_path / "limit.json")
@@ -324,7 +324,7 @@ def test_native_manual_request_limit_excludes_trace_metadata(tmp_path: Path) -> 
 def test_fresh_process_manual_resume_uses_current_worker_parent(
     tmp_path: Path, workflow: bool
 ) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     output = tmp_path / "manual.json"
     with Collector().serve() as collector:
@@ -361,7 +361,7 @@ def test_fresh_process_manual_resume_uses_current_worker_parent(
     os.name != "posix", reason="SQLiteSessionStore reference adapter requires POSIX locking"
 )
 def test_custom_storage_reopen_uses_current_trace_parent(tmp_path: Path) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         receipt = _run_case("store-reopen", collector.url, tmp_path / "store.json")
@@ -373,7 +373,7 @@ def test_custom_storage_reopen_uses_current_trace_parent(tmp_path: Path) -> None
 
 
 def test_same_parent_keeps_concurrent_workflow_policies_separate(tmp_path: Path) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         receipt = _run_case("policy-isolation", collector.url, tmp_path / "policy.json")
@@ -406,7 +406,7 @@ def test_disabled_tracing_preserves_sync_run_and_callback(tmp_path: Path) -> Non
 
 
 def test_unsupported_native_carrier_does_not_fail_the_callback(tmp_path: Path) -> None:
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     with Collector().serve() as collector:
         assert _run_case("unsupported", collector.url, tmp_path / "unsupported.json") == {

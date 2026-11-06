@@ -186,9 +186,9 @@ jobs:
         if: runner.os == 'Linux' || runner.os == 'macOS'
         run: |
           stage=$(mktemp -d "$RUNNER_TEMP/canonical-storage.XXXXXX")
-          mkdir -p "$stage/packages/codex/examples/canonical_storage"
+          mkdir -p "$stage/examples/codex/canonical_storage" "$stage/packages/codex"
           cp -R packages/codex/tests "$stage/packages/codex/tests"
-          cp packages/codex/examples/canonical_storage/main.py "$stage/packages/codex/examples/canonical_storage"
+          cp examples/codex/canonical_storage/main.py "$stage/examples/codex/canonical_storage"
           uv venv --seed --python 3.10 "$stage/venv"
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null

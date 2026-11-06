@@ -22,7 +22,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from agents import Agent, Environment, LocalStorage, NativeProvider, Session
-from examples.supervised_worker import __main__ as worker
+from examples.codex.supervised_worker import __main__ as worker
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,
@@ -61,7 +61,7 @@ async def second_provider() -> AsyncIterator[ResponsesFixture]:
 async def process(
     command: str, directory: Path, url: str, *options: str
 ) -> AsyncIterator[asyncio.subprocess.Process]:
-    repository = Path(__file__).resolve().parents[1]
+    repository = Path(__file__).resolve().parents[3]
     env = {
         name: value
         for name, value in os.environ.items()
@@ -77,7 +77,7 @@ async def process(
         sys.executable,
         "-B",
         "-m",
-        "examples.supervised_worker",
+        "examples.codex.supervised_worker",
         command,
         str(directory),
         *options,
@@ -128,8 +128,8 @@ async def wait_for_file(path: Path, owner: asyncio.subprocess.Process) -> None:
 
 
 async def test_readme_shell_runs_both_workers_and_publishes(tmp_path: Path) -> None:
-    repository = Path(__file__).resolve().parents[1]
-    readme = (repository / "examples/supervised_worker/README.md").read_text()
+    repository = Path(__file__).resolve().parents[3]
+    readme = (repository / "examples/codex/supervised_worker/README.md").read_text()
     script = readme.split("```sh\n", 1)[1].split("```", 1)[0]
     # macOS mktemp can use its per-user directory instead of TMPDIR.
     # Read the path from the shell without changing the README commands or their exit status.
@@ -182,7 +182,7 @@ async def test_readme_shell_runs_both_workers_and_publishes(tmp_path: Path) -> N
             "/bin/sh",
             "-c",
             script,
-            cwd=repository.parents[1],
+            cwd=repository,
             env=env,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

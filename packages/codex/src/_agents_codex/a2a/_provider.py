@@ -72,7 +72,7 @@ class A2AJobProvider(Generic[_Input]):
     storing, or releasing it to a model. ``project`` admits completed task content;
     ``JobJournal.record`` admits receipts and pending values. Journal ``claim`` and
     ``authorize`` must also check saved data before reuse after a worker restart.
-    See ``packages/codex/examples/a2a/README.md`` for the required admission and rotation policy.
+    See ``examples/codex/a2a/README.md`` for the required admission and rotation policy.
     """
 
     def __init__(

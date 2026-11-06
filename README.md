@@ -92,13 +92,13 @@ The [quickstart](docs/sdk/index.md) explains the first run and links to the next
 
 ## More examples
 
-Follow the [example setup](docs/sdk/installation.md#examples-and-upgrades) to download the matching source archive. In this checkout, run `python packages/codex/examples/basic.py` from the repository root. The four examples listed below call a live model and need an [OpenAI API key](docs/published.md#set-an-openai-api-key). The full example index also includes no-key tests and local service examples.
+Follow the [example setup](docs/sdk/installation.md#examples-and-upgrades) to download the matching source archive. In this checkout, run `python examples/codex/basic.py` from the repository root. The four examples listed below call a live model and need an [OpenAI API key](docs/published.md#set-an-openai-api-key). The full example index also includes no-key tests and local service examples.
 
-- [Function tools](packages/codex/examples/basic.py): Call a Python greeting tool.
-- [Typed application context](packages/codex/examples/typed_context.py): Return structured output using application context.
-- [Conversation and streaming](packages/codex/examples/conversation.py): Stream a conversation and restore saved state.
-- [Validated artifacts](packages/codex/examples/validated_artifact.py): Validate an artifact before writing it.
-- [All examples](packages/codex/examples/README.md): Find workflow recipes and their setup requirements.
+- [Function tools](examples/codex/basic.py): Call a Python greeting tool.
+- [Typed application context](examples/codex/typed_context.py): Return structured output using application context.
+- [Conversation and streaming](examples/codex/conversation.py): Stream a conversation and restore saved state.
+- [Validated artifacts](examples/codex/validated_artifact.py): Validate an artifact before writing it.
+- [All examples](examples/codex/README.md): Find workflow recipes and their setup requirements.
 
 ## Get help
 

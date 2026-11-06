@@ -135,7 +135,7 @@ def test_manual_verification_checks_unchanged_tree_without_deploying(
         ("packages/codex/tests/test_release_provenance.py", True, False, False, False),
         ("packages/codex/tests/test_package_surface.py", True, False, False, False),
         ("examples/basic.py", True, False, False, False),
-        ("packages/codex/examples/basic.py", True, False, False, False),
+        ("examples/codex/basic.py", True, False, False, False),
         (".github/scripts/detect-changes.sh", True, False, False, False),
         (".github/scripts/check_optional_truthiness.py", True, False, False, False),
         (".github/scripts/run_serial_tests.py", True, False, False, False),
@@ -1279,13 +1279,13 @@ def test_native_build_selection(
         "packages/codex/demos/data/shop/README.md",
         "packages/codex/demos/data/shop/shop.py",
         "packages/codex/demos/data/shop/test_shop.py",
-        "packages/codex/examples/approvals.py",
-        "packages/codex/examples/cancellation.py",
-        "packages/codex/examples/checkpoint.py",
-        "packages/codex/examples/managed_jobs.py",
-        "packages/codex/examples/sessions.py",
-        "packages/codex/examples/subagents.py",
-        "packages/codex/examples/tools_streaming.py",
+        "examples/codex/approvals.py",
+        "examples/codex/cancellation.py",
+        "examples/codex/checkpoint.py",
+        "examples/codex/managed_jobs.py",
+        "examples/codex/sessions.py",
+        "examples/codex/subagents.py",
+        "examples/codex/tools_streaming.py",
     )
     retired_model_test = '  "packages/codex/tests/test_turn_model_step_limit.py",\n'
     if scenario.startswith("retired_realtime_extra"):
@@ -1484,7 +1484,7 @@ def test_native_build_selection(
             "packages/codex/docs/SURFACE.md",
             "packages/codex/docs/TOOL_ELIGIBILITY.md",
             "packages/codex/docs/WORKFLOW_CONTRACTS.md",
-            "packages/codex/examples/agents_as_tools.py",
+            "examples/codex/agents_as_tools.py",
         )
         if scenario == "push_package_demos_native_build_changed":
             additional_paths += ("packages/codex/scripts/native_env.py",)

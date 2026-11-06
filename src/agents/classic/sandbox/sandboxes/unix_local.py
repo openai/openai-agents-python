@@ -1175,6 +1175,15 @@ class UnixLocalSandboxSession(BaseSandboxSession):
         except OSError as e:
             raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
 
+    async def _write_sensitive_file(self, path: Path, data: io.IOBase) -> None:
+        payload = coerce_write_payload(path=path, data=data)
+        requested = Path(path)
+        workspace_path = self.normalize_path(requested.parent, for_write=True) / requested.name
+        try:
+            self._files.write_sensitive(workspace_path, payload.stream)
+        except OSError as e:
+            raise WorkspaceArchiveWriteError(path=workspace_path, cause=e) from e
+
     async def mv(
         self,
         source: Path | str,

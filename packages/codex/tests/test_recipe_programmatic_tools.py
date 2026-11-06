@@ -2,7 +2,7 @@
 
 import json
 
-from examples.recipes.programmatic_tools import Sales, sales_agent
+from examples.codex.recipes.programmatic_tools import Sales, sales_agent
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

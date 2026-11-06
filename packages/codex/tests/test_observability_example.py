@@ -12,7 +12,7 @@ from urllib.parse import urlsplit
 
 import pytest
 
-ROOT = Path(__file__).parents[1]
+ROOT = Path(__file__).parents[3]
 
 
 def rows(artifact, signal):
@@ -51,7 +51,7 @@ def test_native_export_reaches_real_collector(tmp_path, scenario, outcome):
         [
             sys.executable,
             "-m",
-            "examples.observability.trace_walkthrough",
+            "examples.codex.observability.trace_walkthrough",
             "--scenario",
             scenario,
             "--output",
@@ -99,7 +99,7 @@ def test_native_export_reaches_real_collector(tmp_path, scenario, outcome):
 
 
 async def test_history_reader_preserves_absent_fields_and_unpaired_results():
-    from examples.observability.history_reader import read_history
+    from examples.codex.observability.history_reader import read_history
 
     class RecordedSession:
         async def turns(self):
@@ -132,7 +132,7 @@ async def test_history_reader_preserves_absent_fields_and_unpaired_results():
 def test_viewer_escapes_received_content():
     from urllib.request import urlopen
 
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     collector = Collector()
     collector.batches.append({"synthetic": "<script>alert(1)</script>"})
@@ -143,7 +143,7 @@ def test_viewer_escapes_received_content():
 
 
 def test_numeric_loopback_collector_serves_without_reverse_dns(monkeypatch):
-    from examples.observability.trace_walkthrough import Collector
+    from examples.codex.observability.trace_walkthrough import Collector
 
     def forbidden_lookup(*args, **kwargs):
         raise AssertionError("Numeric loopback must not require reverse DNS")

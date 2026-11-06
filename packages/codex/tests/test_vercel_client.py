@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 
 from agents import Agent, function_tool
-from examples.vercel_stream import stream_turn
+from examples.codex.vercel_stream import stream_turn
 from tests._asyncio import timeout
 from tests.native_fixtures import (
     ResponsesFixture,

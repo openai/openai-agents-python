@@ -13,6 +13,7 @@ import io
 import json
 import os
 import pwd
+import secrets
 import shutil
 import stat
 from collections.abc import Iterator
@@ -125,6 +126,37 @@ class _FileOps:
             raise
         with out:
             shutil.copyfileobj(stream, out)
+
+    def write_sensitive(self, path: Path, stream: io.IOBase) -> None:
+        """Replace mount credentials without exposing bytes through a public inode."""
+        with self.parent(path, for_write=True, create_parents=True) as (parent_fd, name):
+            try:
+                existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if not stat.S_ISREG(existing.st_mode) or existing.st_uid != os.geteuid():
+                    raise OSError(errno.EINVAL, "Unsafe sensitive-file destination", str(path))
+            temporary = f".mount-config-{secrets.token_hex(16)}"
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            try:
+                # A restrictive umask may remove owner permissions; never change the
+                # process-wide umask or write through an existing, possibly open inode.
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb", closefd=False) as output:
+                    shutil.copyfileobj(stream, output)
+                os.replace(temporary, name, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+            finally:
+                os.close(fd)
+                try:
+                    os.unlink(temporary, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    pass
 
     def write_new(self, path: Path, stream: io.IOBase) -> None:
         """Create a file that must not already exist.

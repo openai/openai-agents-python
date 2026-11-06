@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from examples.evaluation.run import Case, Configuration, compare, evaluate, score
+from examples.codex.evaluation.run import Case, Configuration, compare, evaluate, score
 
-FOLDER = Path(__file__).parents[1] / "examples" / "evaluation"
+FOLDER = Path(__file__).parents[3] / "examples" / "codex" / "evaluation"
 
 
 async def test_scripted_trials_record_real_tool_behavior_and_configuration(monkeypatch):

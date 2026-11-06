@@ -109,10 +109,7 @@ async def _write_sensitive_config_file(
 ) -> None:
     """Write generated mount credentials/config with owner-only permissions."""
 
-    await session.write(path, io.BytesIO(payload))
-    await session._exec_checked_nonzero(
-        "chmod", "0600", sandbox_path_str(session.normalize_path(path))
-    )
+    await session._write_sensitive_file(path, io.BytesIO(payload))
 
 
 def _render_shell_exports(env_vars: list[tuple[str, str]]) -> bytes:

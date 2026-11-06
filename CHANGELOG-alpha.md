@@ -2,6 +2,12 @@
 
 Release notes for previews of the OpenAI Agents SDK. Versions alpha.5 and earlier were distributed through the earlier preview program; their release tags are not hosted in this repository.
 
+## Unreleased
+
+### Fixed
+
+- Keep generated Classic mount credential files private throughout creation and replacement on UnixLocal, including when the workspace root is shared with other local accounts.
+
 ## 0.24.0-alpha.6 (2026-11-03)
 
 Changes since `0.24.0-alpha.5`. This preview expands conversation control, state recovery, and tool policies, and includes public API changes.

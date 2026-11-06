@@ -1,6 +1,6 @@
 import json
 
-from examples.recipes.inspect_requests import function_declarations, lookup, run_example
+from examples.codex.recipes.inspect_requests import function_declarations, lookup, run_example
 
 
 async def test_native_schema_and_effective_arguments():
