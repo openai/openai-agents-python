@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from contextlib import AsyncExitStack
+from dataclasses import replace
 
 import pytest
 
@@ -15,6 +17,7 @@ from agents import (
     Deny,
     FunctionTool,
     HttpMCP,
+    InteractionRequired,
     ToolContext,
     ToolRef,
     TurnStoppedError,
@@ -32,8 +35,10 @@ from tests.native_fixtures import (
     tool_output,
 )
 from tests.test_native_agent import provider
+from tests.test_native_code_mode import code_call, code_output
 from tests.test_native_manual_tools import LookupArgs, next_request
 from tests.test_native_mcp_tools import Peer, declarations, mcp_call
+from tests.test_native_schema_discovery import discovered, search
 from tests.test_native_sync_tools import HeldInterrupt
 
 
@@ -287,6 +292,47 @@ async def test_classic_execution_policies_are_rejected_before_authentication(pol
         assert not peer.requests
 
 
+@pytest.mark.parametrize(
+    ("tool_names", "filtered", "rejected"),
+    [
+        (["search"], False, False),
+        (["excluded"], False, True),
+        (None, True, False),
+        (None, False, True),
+    ],
+    ids=["explicit-allowed", "explicit-rejected", "filtered-all", "unfiltered-all"],
+)
+async def test_classic_approval_mapping_is_scoped_to_selected_tools(
+    tool_names: list[str] | None, filtered: bool, rejected: bool
+) -> None:
+    peer = Peer()
+    authenticated = False
+    async with timeout(10), peer.serve() as url, AsyncExitStack() as connections:
+        client = MCPServerStreamableHttp(
+            params={"url": url},
+            require_approval={"excluded": "always"},
+            tool_filter=create_static_tool_filter(allowed_tool_names=["search"])
+            if filtered
+            else None,
+        )
+
+        async def authenticate(context: None) -> None:
+            nonlocal authenticated
+            authenticated = True
+            await connections.enter_async_context(client)
+
+        namespace = MCPNamespace("catalog", client, authenticate=authenticate)
+        if rejected:
+            with pytest.raises(ValueError, match="Classic execution policies"):
+                await select_mcp_tools(namespace, context=None, tool_names=tool_names)
+        else:
+            tools = await select_mcp_tools(namespace, context=None, tool_names=tool_names)
+            assert [tool.ref for tool in tools] == [ToolRef("search", "catalog")]
+        assert authenticated is (tool_names is None or not rejected)
+        assert any(request["method"] == "tools/list" for request in peer.requests) is authenticated
+        assert not peer.calls
+
+
 @pytest.mark.parametrize("code_mode", [False, True], ids=["native", "code-mode"])
 async def test_selected_mcp_rejects_native_and_code_mode_identity_collisions(
     code_mode: bool,
@@ -486,3 +532,117 @@ async def test_manual_suspend_refuses_namespaced_catalog_without_spending_live_r
             assert (await turn.get_result()).final_output == "live reply accepted"
         assert {tool.name for tool in await client.list_tools()} == {"search", "excluded"}
         assert not peer.calls
+
+
+@pytest.mark.parametrize("selection", ["default", "manual-only", "delegated-restore"])
+async def test_manual_run_refuses_selected_mcp_before_sampling(
+    responses: ResponsesFixture, selection: str
+) -> None:
+    peer = Peer()
+    manual = FunctionTool(
+        name="lookup", description="Read a record", input_type=LookupArgs, output_type=str
+    )
+    responses.respond(function_call("lookup", {"key": "43"}, "manual-call"))
+    async with (
+        timeout(20),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        tools = await select_mcp_tools(MCPNamespace("catalog", client), context=None)
+        agent = Agent(instructions="Read.", provider=provider(responses), tools=[manual, *tools])
+        runner = agent
+        state = None
+        if selection == "delegated-restore":
+            async with agent.session() as source:
+                await source.update(tools=[manual])
+                state = await source.save_state()
+            assert state.managed_tool_specs is not None
+            assert [spec["name"] for spec in state.managed_tool_specs] == ["lookup"]
+
+            class DelegatingAgent(Agent[None, str]):
+                def session(self, **options):
+                    return agent.session(**options)
+
+            runner = DelegatingAgent(instructions="Read.", tools=[manual])
+
+        with pytest.raises(InteractionRequired, match="on_interaction") as stopped:
+            await runner.run(
+                "Read", state=state, tools=[manual.ref] if selection == "manual-only" else None
+            )
+        assert stopped.value.state is None
+        assert not responses.requests and not peer.calls
+
+
+async def test_code_mode_search_surface_is_distinct_from_selected_mcp_identifier(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(names=("search",), label="nested selected receipt")
+
+    @function_tool(description="Find a deferred invoice record", defer_loading=True)
+    def deferred_lookup(key: str) -> str:
+        pytest.fail("Discovering the deferred tool must not execute it")
+
+    responses.respond(search("deferred invoice record", "schema-search"))
+    responses.respond(code_call('text(await tools.tool_search({key:"nested"}));', "exec-call"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(25),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        tools = await select_mcp_tools(MCPNamespace("tool_", client), context=None)
+        agent = Agent(
+            instructions="Read.",
+            model="gpt-5.5",
+            provider=provider(responses),
+            tools=[*tools, deferred_lookup],
+            programmatic_tool_calling=True,
+        )
+        async with agent.session() as session:
+            assert (await (await session.submit("Read")).get_result()).final_output == "done"
+
+        offered = responses.requests[0]["tools"]
+        assert any(tool.get("name") == "exec" for tool in offered)
+        assert any(tool["type"] == "tool_search" for tool in offered)
+        assert "deferred_lookup" in json.dumps(discovered(responses, "schema-search")["tools"])
+        assert peer.label in code_output(responses.requests[-1], "exec-call")
+        assert peer.calls == [{"name": "search", "arguments": {"key": "nested"}}]
+
+
+async def test_direct_and_deferred_selected_leaves_share_a_namespace(
+    responses: ResponsesFixture,
+) -> None:
+    peer = Peer(names=("direct_record", "deferred_record", "omitted_record"))
+    responses.respond(search("synthetic record", "schema-search"))
+    responses.respond(mcp_call("deferred_record", "catalog", "deferred-call"))
+    responses.respond(assistant_output("done"))
+    async with (
+        timeout(25),
+        peer.serve() as url,
+        MCPServerStreamableHttp(params={"url": url}) as client,
+    ):
+        direct, deferred, omitted = await select_mcp_tools(
+            MCPNamespace("catalog", client), context=None
+        )
+        agent = Agent(
+            instructions="Read.",
+            model="gpt-5.5",
+            provider=provider(responses),
+            tools=[
+                direct,
+                replace(deferred, defer_loading=True),
+                replace(omitted, defer_loading=True),
+            ],
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Read", tools=[direct.ref, deferred.ref])
+            assert (await turn.get_result()).final_output == "done"
+
+        first = responses.requests[0]
+        assert set(declarations(first)) == {("catalog", "direct_record")}
+        assert any(tool["type"] == "tool_search" for tool in first["tools"])
+        found = discovered(responses, "schema-search")["tools"]
+        assert set(declarations({"tools": found, "input": []})) == {("catalog", "deferred_record")}
+        assert "omitted_record" not in json.dumps(responses.requests)
+        assert peer.label in tool_output(responses.requests[-1], "deferred-call")
+        assert peer.calls == [{"name": "deferred_record", "arguments": {"key": "43"}}]

@@ -144,9 +144,10 @@ async def select_mcp_tools(
     catalog cannot suspend for portable manual restore. Reply in the live Session.
 
     The optional per-call approval receives the native ToolContext and returns
-    Allow() or Deny(reason), directly or through an awaitable. Classic approval,
-    metadata and result hooks, error policies, and guardrails are supported by
-    the Classic Runner.
+    Allow() or Deny(reason), directly or through an awaitable. Classic approval
+    mappings apply only to selected names. Use Classic Runner for tools that
+    require Classic approval or for servers with metadata and result hooks,
+    error policies, or guardrails.
     """
     if isinstance(tool_names, (str, bytes)):
         raise TypeError("MCP tool_names must be a sequence of names")
@@ -171,20 +172,24 @@ async def select_mcp_tools(
 
     server = namespace.server
     classic_approval = server._needs_approval_policy
-    requires_classic_approval = (
-        any(classic_approval.values()) if isinstance(classic_approval, dict) else classic_approval
+
+    def requires_classic_approval(names: tuple[str, ...]) -> bool:
+        if isinstance(classic_approval, dict):
+            return any(classic_approval.get(name, False) for name in names)
+        return classic_approval is not False
+
+    unsupported_policy = (
+        "Selected MCP tools cannot use Classic execution policies; use Classic Runner"
     )
     if (
-        requires_classic_approval
+        requires_classic_approval(() if requested is None else requested)
         or server.tool_meta_resolver is not None
         or server.custom_data_extractor is not None
         or server.tool_input_guardrails
         or server.tool_output_guardrails
         or server._failure_error_function is not _UNSET
     ):
-        raise ValueError(
-            "Selected MCP tools cannot use Classic execution policies; use Classic Runner"
-        )
+        raise ValueError(unsupported_policy)
     if filter_context is None and callable(getattr(server, "tool_filter", None)):
         raise TypeError("Callable MCP filters require filter_context")
 
@@ -211,6 +216,8 @@ async def select_mcp_tools(
             raise ValueError("MCP discovery returned duplicate tool names")
         by_name[tool.name] = tool
     names = tuple(by_name) if requested is None else requested
+    if requested is None and requires_classic_approval(names):
+        raise ValueError(unsupported_policy)
     if any(name not in by_name for name in names):
         raise ValueError("Requested MCP tools were not discovered or were filtered out")
 
