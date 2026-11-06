@@ -149,9 +149,7 @@ def _build_manifest(skills_root: Path) -> Manifest:
                 )
             ),
             "notes/input.txt": File(content=b"source=filesystem\n"),
-            "examples/classic/image.png": LocalFile(
-                src=Path(__file__).parent.parent.parent / "docs/assets/images/graph.png"
-            ),
+            "examples/classic/image.png": LocalFile(src=Path(__file__).parent / "assets/graph.png"),
         },
     )
 

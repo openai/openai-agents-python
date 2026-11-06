@@ -12,16 +12,12 @@ From the SDK repository root, with Python 3.10+, `uv`, and a running Docker daem
 
 ```sh
 uv venv /tmp/agents-provider-demo
-uv pip install --python /tmp/agents-provider-demo/bin/python ./examples/classic/sandbox/external_provider
+uv pip install --python /tmp/agents-provider-demo/bin/python . ./examples/classic/sandbox/external_provider
 docker pull python:3.14-slim
 /tmp/agents-provider-demo/bin/python -m example_docker_provider.demo
 ```
 
-On Windows, use the environment's `Scripts/python.exe` in place of `bin/python`. This example is not published on PyPI; install it from this directory. The package declares the SDK range `>=0.24.0a6,<0.25.0`; widen that range only after compatibility testing. To validate against your SDK checkout instead of a published SDK, install both local projects in the same command:
-
-```sh
-uv pip install --python /tmp/agents-provider-demo/bin/python . ./examples/classic/sandbox/external_provider
-```
+On Windows, use the environment's `Scripts/python.exe` in place of `bin/python`. This example is not published on PyPI; install it from this directory. The package declares the SDK range `>=0.24.0a6,<0.25.0`; widen that range only after compatibility testing. The install command uses both local projects so the provider imports the matching SDK's `agents.classic` namespace. Follow the [Classic source setup](../../../../CLASSIC.md#install-from-the-matching-source) for its build prerequisites.
 
 Expected output:
 

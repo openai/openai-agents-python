@@ -2,6 +2,8 @@
 
 A conversational coding agent that runs as a durable Temporal workflow with support for multiple sandbox backends (Daytona, Docker, E2B, local unix).
 
+These restored examples require a Temporal OpenAI Agents plugin that imports `agents.classic`. The pinned `temporalio==1.34.0` plugin imports the root `agents` API and cannot run with this SDK's Classic namespace. Installing `classic-temporal` alone does not update those imports. Use an updated plugin before following the commands below, or run the original examples with the established v0 SDK in a separate environment. See [Classic library compatibility](../../../../../CLASSIC.md#change-imports-before-changing-behavior).
+
 ## Quickstart
 
 **Prerequisites:** Docker (for the Docker backend) and API keys for any cloud backends you want to use. The local and Docker sandboxes work without any cloud provider API keys.

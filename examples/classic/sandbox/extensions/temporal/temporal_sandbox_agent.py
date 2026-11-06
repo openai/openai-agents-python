@@ -18,11 +18,11 @@ Start a local Temporal server (requires the Temporal CLI)::
 
 In one terminal, start the worker::
 
-    python examples/classic/sandbox/extensions/temporal_sandbox_agent.py worker
+    python examples/classic/sandbox/extensions/temporal/temporal_sandbox_agent.py worker
 
 In another terminal, start the TUI::
 
-    python examples/classic/sandbox/extensions/temporal_sandbox_agent.py run
+    python examples/classic/sandbox/extensions/temporal/temporal_sandbox_agent.py run
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ from agents.classic.sandbox.snapshot import SnapshotBase
 
 # Allow sibling and repo-root imports.
 _THIS_DIR = _os.path.dirname(_os.path.abspath(__file__))
-_REPO_ROOT = _os.path.abspath(_os.path.join(_THIS_DIR, "..", "..", "..", ".."))
+_REPO_ROOT = _os.path.abspath(_os.path.join(_THIS_DIR, "..", "..", "..", "..", ".."))
 for _p in (_THIS_DIR, _REPO_ROOT):
     if _p not in sys.path:
         sys.path.insert(0, _p)
