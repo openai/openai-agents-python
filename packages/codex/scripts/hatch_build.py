@@ -12,11 +12,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    import tomli as tomllib
-
 from hatchling.builders.hooks.plugin.interface import BuildHookInterface
 from packaging.tags import sys_tags
 from packaging.utils import parse_wheel_filename
@@ -25,6 +20,7 @@ from packaging.utils import parse_wheel_filename
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from native_helpers import native_helpers, remove_obsolete_helpers
 from source_integrity import (
+    native_inputs as _native_inputs,
     object_id,
     patch_series,
     rmcp_patch_series,
@@ -57,48 +53,6 @@ def check_wheel_budget(path):
                     "Review packages/codex/MAINTAINING.md before changing the limits."
                 )
             break
-
-
-def _native_inputs(native):
-    """Bind source-distribution inputs, not application Python or host cache paths."""
-    paths = [native / name for name in ("Cargo.toml", "Cargo.lock", "CODEX_REVISION")]
-    paths.extend(
-        native / "scripts" / name
-        for name in (
-            "hatch_build.py",
-            "build.py",
-            "prepare_codex.py",
-            "prepare_rmcp.py",
-            "native_env.py",
-            "native_helpers.py",
-            "source_integrity.py",
-        )
-    )
-    series = patch_series(native)
-    paths.append(native / "patches/series.json")
-    paths.extend(native / "patches" / entry["path"] for entry in series["patches"])
-    rmcp_series = rmcp_patch_series(native)
-    paths.append(native / "rmcp-patches/series.json")
-    paths.extend(native / "rmcp-patches" / entry["path"] for entry in rmcp_series["patches"])
-    rust = sorted((native / "rust").rglob("*"))
-    if not rust:
-        raise ValueError("Native source inputs are missing; run a fresh native build")
-    paths.extend(path for path in rust if path.is_symlink() or not path.is_dir())
-    project = native.parents[1]
-    inputs = {}
-    for path in paths:
-        if path.is_symlink() or not path.is_file():
-            raise ValueError("Native source inputs must be regular files; run a fresh native build")
-        inputs[path.relative_to(project).as_posix()] = _wheel_digest(path)
-    with (project / "pyproject.toml").open("rb") as source:
-        config = tomllib.load(source)
-    for name, value in (
-        ("tool.maturin", config["tool"]["maturin"]),
-        ("build-system", config["build-system"]),
-    ):
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-        inputs["pyproject.toml::" + name] = hashlib.sha256(encoded).hexdigest()
-    return dict(sorted(inputs.items()))
 
 
 def _qualified_source(native, qualification):

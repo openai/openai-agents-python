@@ -2400,34 +2400,32 @@ async def test_initial_authorization_cleanup_keeps_bearer_out_of_traceback(inter
         sending.cancel("original")
     with pytest.raises(expected) as error:
         await sending
-    if interrupt == "timeout":
-        assert marker not in _sdk_traceback_locals(error.value)
+    assert marker not in _sdk_traceback_locals(error.value)
 
 
 def _sdk_traceback_frames(error):
-    return (
-        (frame, line)
-        for frame, line in traceback.walk_tb(error.__traceback__)
-        if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex."))
-    )
+    # Asyncio can retain the SDK cancellation in a chained exception.
+    pending = [error]
+    seen = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        pending.extend(
+            chained for chained in (error.__cause__, error.__context__) if chained is not None
+        )
+        yield from (
+            (frame, line)
+            for frame, line in traceback.walk_tb(error.__traceback__)
+            if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex."))
+        )
 
 
 def _sdk_traceback_locals(error):
-    return _format_sdk_traceback_locals(list(_sdk_traceback_frames(error)))
-
-
-def _format_sdk_traceback_locals(frames):
+    frames = list(_sdk_traceback_frames(error))
     assert frames, "No SDK traceback frames were inspected."
     return "".join(traceback.StackSummary.extract(frames, capture_locals=True).format())
-
-
-async def _capture_sdk_traceback_frames(operation, frames):
-    try:
-        return await operation
-    except (asyncio.CancelledError, PermissionError) as error:
-        # Python 3.10 can drop these frames when another task awaits a cancelled task.
-        frames.extend(_sdk_traceback_frames(error))
-        raise
 
 
 @pytest.mark.parametrize("failure", ["stale", "denial", "cancel"])
@@ -2461,16 +2459,15 @@ async def test_failed_form_approval_keeps_answers_out_of_traceback(tmp_path, fai
             peer.input_key = "replacement"
             update = await backend.observe(replace(claim, action="observe"))
             claim = replace(claim, update=update)
-        frames = []
-        sending = asyncio.create_task(
-            _capture_sdk_traceback_frames(backend.respond(claim, answer), frames)
-        )
+        sending = asyncio.create_task(backend.respond(claim, answer))
         if failure == "cancel":
             await asyncio.wait_for(entered.wait(), 3)
             sending.cancel("original")
-        with pytest.raises(asyncio.CancelledError if failure == "cancel" else PermissionError):
+        with pytest.raises(
+            asyncio.CancelledError if failure == "cancel" else PermissionError
+        ) as error:
             await sending
-        captured = _format_sdk_traceback_locals(frames)
+        captured = _sdk_traceback_locals(error.value)
         assert not any(
             text in captured for text in (TASK, PROMPT, marker, repr(claim.update.receipt))
         )
@@ -2500,23 +2497,23 @@ async def test_start_releases_issued_credentials(tmp_path, finish):
 
     async with timeout(8), serving(peer) as endpoint:
         backend = peer.provider(endpoint=endpoint, tool="render", authorize=credential)
-        frames = []
-        sending = asyncio.create_task(
-            _capture_sdk_traceback_frames(backend.start(starting(), Args(pages=3)), frames)
-        )
+        sending = asyncio.create_task(backend.start(starting(), Args(pages=3)))
         if finish == "success":
             assert (await sending).status == "pending"
         elif finish == "denial":
-            with pytest.raises(PermissionError):
+            with pytest.raises(PermissionError) as failure:
                 await sending
         else:
             await entered.wait()
             sending.cancel()
-            with pytest.raises(asyncio.CancelledError):
+            with pytest.raises(asyncio.CancelledError) as failure:
                 await sending
-        # Keep the provider, finished task, and SDK frames alive through collection.
+        # Keep the provider and finished task alive, including its exception traceback.
         if finish != "success":
-            assert TOKEN not in _format_sdk_traceback_locals(frames)
+            frames = list(_sdk_traceback_frames(failure.value))
+            assert frames, "No SDK traceback frames were inspected."
+            summary = traceback.StackSummary.extract(frames, capture_locals=True)
+            assert TOKEN not in "".join(summary.format())
         gc.collect()
         assert references and all(ref() is None for ref in references)
 

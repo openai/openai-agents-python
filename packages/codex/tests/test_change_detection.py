@@ -927,6 +927,24 @@ def test_native_selection_only_runs_for_trusted_code_events(
     "scenario",
     [
         "reuse",
+        "host_autocrlf",
+        "python_dependencies_changed",
+        "sdk_license_changed",
+        "packaging_exclusions_changed",
+        "new_build_module",
+        "build_bytecode_noise",
+        "python_fixture_changed",
+        "native_fixture_data_changed",
+        "hatch_controls_changed",
+        "uv_build_controls_changed",
+        "native_setup_changed",
+        "detector_changed",
+        "old_snapshot_after_docs",
+        "snapshot_index_filtered",
+        "snapshot_index_page_bound",
+        "snapshot_index_run_bound",
+        "snapshot_index_duplicate_runs",
+        "snapshot_index_empty",
         "branch_same",
         "branch_merge_python",
         "branch_merge_native_changed",
@@ -1064,6 +1082,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "dependencies_dependency_lock_changed",
         "dependencies_native_workflow_changed",
         "dependencies_selector_changed",
+        "dependencies_detector_changed",
         "dependencies_untrusted",
         "dependencies_failed_run",
         "dependencies_in_progress",
@@ -1097,8 +1116,52 @@ def test_native_build_selection(
     pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
     scenario = scenario.removeprefix("pending_python_")
     repo, initial = change_repo
+    # Preserve authored fixture bytes when the selector runs Git archive.
+    _git(repo, "config", "core.autocrlf", "false")
+    if scenario == "host_autocrlf":
+        config = repo.parent / "host-gitconfig"
+        config.write_text("[core]\n\tautocrlf = true\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+        scenario = "reuse"
     workflow_path = ".github/workflows/tests.yml"
     workflow_text = (ROOT / workflow_path).read_text()
+    (repo / "LICENSE").write_text("Synthetic SDK license\n")
+    (repo / ".gitignore").write_text("__pycache__/\n*.py[cod]\n")
+    # Supply the real identity implementation and a minimal complete native closure.
+    for name in (
+        "build.py",
+        "hatch_build.py",
+        "prepare_codex.py",
+        "prepare_rmcp.py",
+        "native_env.py",
+        "native_helpers.py",
+        "source_integrity.py",
+    ):
+        path = repo / "packages/codex/scripts" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((ROOT / "packages/codex/scripts" / name).read_bytes())
+    for name in (
+        "Cargo.toml",
+        "Cargo.lock",
+        "CODEX_REVISION",
+        "rust/lib.rs",
+        "tests/fixtures/exec_server.rs",
+    ):
+        path = repo / "packages/codex" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("synthetic " + name)
+    for name in ("patches", "rmcp-patches"):
+        path = repo / "packages/codex" / name / "series.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"patches": [], "result_tree": "0" * 40}))
+    for name in (
+        ".github/actions/setup-native/action.yml",
+        ".github/scripts/native-dependencies.py",
+        ".github/scripts/detect-changes.sh",
+    ):
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes((ROOT / name).read_bytes())
     payload_files = [
         repo / "packages/codex/scripts" / name
         for name in ("build.py", "hatch_build.py", "native_helpers.py")
@@ -1142,7 +1205,7 @@ def test_native_build_selection(
         target.write_text(contents, encoding="utf-8", newline="\n")
     if scenario in {"selector_changed", "historical_repack"}:
         (repo / workflow_path).write_text(
-            workflow_text.replace("# Search a bounded history.", "# Prior selector."),
+            workflow_text.replace("# Discover exact matching artifacts,", "# Prior selector."),
             encoding="utf-8",
             newline="\n",
         )
@@ -1185,7 +1248,7 @@ def test_native_build_selection(
         )
     project = (
         '[project]\nname = "openai-agents"\nversion = "0.23.1"\n'
-        '[build-system]\nrequires = ["hatchling"]\n'
+        '[build-system]\nrequires = ["hatchling"]\n[tool.maturin]\nmodule-name = "agents._native"\n'
     )
     lock = (
         '[[package]]\nname = "openai-agents"\nversion = "0.23.1"\n'
@@ -1309,6 +1372,47 @@ def test_native_build_selection(
             target = repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("Alpha release\n")
+    if scenario == "python_dependencies_changed":
+        path = repo / "pyproject.toml"
+        path.write_text(
+            path.read_text().replace(
+                'version = "0.23.1"', 'version = "0.23.1"\ndependencies = ["new-python-dep"]'
+            )
+        )
+    elif scenario in {"hatch_controls_changed", "uv_build_controls_changed"}:
+        path = repo / "pyproject.toml"
+        setting = (
+            '[tool.hatch.build.hooks.custom]\npath="other.py"\n'
+            if scenario.startswith("hatch")
+            else '[tool.uv]\nbuild-constraint-dependencies=["maturin>=99"]\n'
+        )
+        path.write_text(path.read_text() + setting)
+    elif scenario == "sdk_license_changed":
+        (repo / "LICENSE").write_text("Updated synthetic SDK license\n")
+    elif scenario == "packaging_exclusions_changed":
+        path = repo / ".gitignore"
+        path.write_text(path.read_text() + "!packages/codex/scripts/argparse.pyc\n")
+    elif scenario == "new_build_module":
+        (repo / "packages/codex/scripts/argparse.py").write_text("# Additional build import\n")
+    elif scenario == "build_bytecode_noise":
+        path = repo / "packages/codex/scripts/__pycache__/source_integrity.cpython-312.pyc"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"synthetic generated bytecode")
+    elif scenario in {"python_fixture_changed", "native_fixture_data_changed"}:
+        name = (
+            "tests/fixtures/other_contract.json"
+            if scenario == "python_fixture_changed"
+            else "packages/codex/rust/released_api_contract.json"
+        )
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{"new": "fixture data"}\n')
+    elif scenario == "native_setup_changed":
+        path = repo / ".github/actions/setup-native/action.yml"
+        path.write_text(path.read_text() + "\n# New toolchain setup\n")
+    elif scenario == "detector_changed":
+        path = repo / ".github/scripts/detect-changes.sh"
+        path.write_text(path.read_text() + "\n# Changed pre-selection executable\n")
     if scenario == "producer_changed":
         (repo / workflow_path).write_text(
             workflow_text.replace("runner: windows-latest", "runner: windows-2022"),
@@ -1688,9 +1792,14 @@ def test_native_build_selection(
         jobs[0].update(status="in_progress", conclusion=None)
     if scenario in {"missing_job", "pre_native"}:
         jobs.pop()
+    import runpy
+
+    native_identity = runpy.run_path(str(ROOT / "packages/codex/scripts/source_integrity.py"))[
+        "native_bundle_identity"
+    ](repo)
     artifacts = [
         {
-            "name": name,
+            "name": name + "-" + native_identity,
             "expired": scenario == "expired",
             "id": index + 1000,
             "digest": "sha256:" + "a" * 64,
@@ -1710,7 +1819,11 @@ def test_native_build_selection(
         for artifact in artifacts:
             if prefer_wheel and artifact["id"] < 2000:
                 continue
-            artifact["name"] = artifact["name"].replace("native-snapshot-", "native-dependencies-")
+            artifact["name"] = (
+                artifact["name"]
+                .removesuffix("-" + native_identity)
+                .replace("native-snapshot-", "native-dependencies-")
+            )
     if scenario == "missing_artifact":
         artifacts.pop()
     if scenario in {
@@ -1897,11 +2010,18 @@ def test_native_build_selection(
 
     monkeypatch.setattr(subprocess, "run", tool)
 
+    requests = []
+
     def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
         url = request.full_url
+        requests.append(url)
         if scenario == "api_error":
             raise urllib.error.URLError("API unavailable")
         if "/workflows/" in url:
+            if scenario == "old_snapshot_after_docs":
+                pytest.fail(
+                    "Exact matching snapshots must survive a recent history of docs-only runs"
+                )
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
             assert query["event"] in [["push"], ["pull_request"]]
             if scenario in {"branch_running", "branch_queued"}:
@@ -1930,8 +2050,68 @@ def test_native_build_selection(
                     ],
                 }
                 response["workflow_runs"].insert(0, active)
+        elif "/actions/artifacts?" in url:
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
+            assert query["name"] == ["native-snapshot-Linux-X64-" + native_identity]
+            assert query["per_page"] == ["100"]
+            matches = [
+                dict(
+                    artifact,
+                    workflow_run={
+                        "id": 123,
+                        "repository_id": 10,
+                        "head_repository_id": 10,
+                        "head_branch": source["head_branch"],
+                    },
+                )
+                for artifact in artifacts
+                if artifact["name"] == query["name"][0]
+            ]
+            if scenario == "no_history" or dependency_cache and not prefer_wheel:
+                matches = []
+            if scenario in {"snapshot_index_filtered", "snapshot_index_page_bound"}:
+                rejected = (
+                    {"repository_id": 20},
+                    {"head_repository_id": 20},
+                    {"head_branch": "unrelated"},
+                )
+                matches = [
+                    dict(
+                        matches[0],
+                        workflow_run={
+                            **matches[0]["workflow_run"],
+                            "id": 1000 + index,
+                            **rejected[index % len(rejected)],
+                        },
+                    )
+                    for index in range(100 if scenario == "snapshot_index_page_bound" else 99)
+                ] + matches
+            if scenario in {"snapshot_index_run_bound", "snapshot_index_duplicate_runs"}:
+                matches = [
+                    dict(
+                        matches[0],
+                        workflow_run={
+                            **matches[0]["workflow_run"],
+                            "id": 1000 + index if scenario == "snapshot_index_run_bound" else 1000,
+                        },
+                    )
+                    for index in range(20 if scenario == "snapshot_index_run_bound" else 80)
+                ] + matches
+            if scenario == "snapshot_index_empty":
+                matches = []
+            response = {
+                "total_count": 1 if scenario == "snapshot_index_empty" else len(matches),
+                "artifacts": matches[:100],
+            }
         elif url.endswith("/runs/123"):
-            pytest.fail("CI polled a pending native build")
+            response = source
+        elif "/runs/" in url and url.rsplit("/", 1)[1].isdigit():
+            assert scenario in {"snapshot_index_run_bound", "snapshot_index_duplicate_runs"}
+            response = {
+                **source,
+                "id": int(url.rsplit("/", 1)[1]),
+                "path": ".github/workflows/other.yml",
+            }
         elif "/pulls/" in url:
             response = {
                 "merged": True,
@@ -2028,6 +2208,21 @@ def test_native_build_selection(
             exec(compile(script, workflow_path, "exec"), {})
     else:
         exec(compile(script, workflow_path, "exec"), {})
+    if scenario.startswith("snapshot_index_"):
+        assert sum("/actions/artifacts?" in url for url in requests) == 1
+        run_details = [
+            url for url in requests if "/runs/" in url and url.rsplit("/", 1)[1].isdigit()
+        ]
+        assert (
+            len(run_details)
+            == {
+                "snapshot_index_filtered": 1,
+                "snapshot_index_page_bound": 0,
+                "snapshot_index_run_bound": 20,
+                "snapshot_index_duplicate_runs": 2,
+                "snapshot_index_empty": 0,
+            }[scenario]
+        )
     assert (output.read_text() if output.exists() else "") == (
         (
             "dependency_run=123\ndependencies="
@@ -2040,6 +2235,11 @@ def test_native_build_selection(
                     "id": index + 1000,
                     "digest": "sha256:" + "a" * 64,
                     "provenance": provenance,
+                    **(
+                        {}
+                        if dependency_cache and not prefer_wheel
+                        else {"name": "native-snapshot-" + identity + "-" + native_identity}
+                    ),
                 }
                 for index, identity in enumerate(("Linux-X64", "Windows-X64", "macOS-ARM64"))
                 if identity != "Windows-X64" or os.environ["REQUIRE_WINDOWS"] != "false"
@@ -2052,6 +2252,16 @@ def test_native_build_selection(
         and scenario
         in {
             "reuse",
+            "python_dependencies_changed",
+            "build_bytecode_noise",
+            "python_fixture_changed",
+            "old_snapshot_after_docs",
+            "snapshot_index_filtered",
+            "snapshot_index_duplicate_runs",
+            "dependency_lock_changed",
+            "retired_realtime_extra",
+            "retired_realtime_extra_dependency_changed",
+            "push_package_demos",
             "trusted_push_to_pr",
             "stacked_pr",
             "queued_sdk",
