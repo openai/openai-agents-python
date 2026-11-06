@@ -63,6 +63,62 @@ def test_a2a_routes_accept_remote_tls_and_loopback_http(url):
     assert endpoint(url).rpc_url == url + "/rpc"
 
 
+@pytest.mark.parametrize(
+    ("card_origin", "rpc_origin"),
+    [
+        ("https://peer.example", "https://peer.example:443"),
+        ("https://peer.example:443", "https://peer.example"),
+        ("http://localhost", "http://localhost:80"),
+        ("http://localhost:80", "http://localhost"),
+    ],
+)
+def test_a2a_routes_use_effective_default_ports(card_origin, rpc_origin):
+    card_url = card_origin + "/.well-known/agent-card.json"
+    rpc_url = rpc_origin + "/rpc"
+    configured = A2AEndpoint(name="peer", card_url=card_url, rpc_url=rpc_url)
+    assert configured.card_url == card_url
+    assert configured.rpc_url == rpc_url
+
+
+@pytest.mark.parametrize(
+    ("card_origin", "rpc_origin"),
+    [
+        ("http://localhost", "https://localhost"),
+        ("https://peer.example", "https://other.example"),
+        ("https://peer.example", "https://peer.example:8443"),
+        ("http://localhost", "http://localhost:0"),
+    ],
+    ids=["scheme", "host", "nondefault-port", "explicit-zero"],
+)
+def test_a2a_routes_reject_different_origins(card_origin, rpc_origin):
+    with pytest.raises(ValueError, match="configured origin"):
+        A2AEndpoint(
+            name="peer",
+            card_url=card_origin + "/.well-known/agent-card.json",
+            rpc_url=rpc_origin + "/rpc",
+        )
+
+
+async def test_card_admission_keeps_exact_configured_rpc_url(monkeypatch):
+    from a2a.client.card_resolver import A2ACardResolver
+
+    async def resolve(_resolver):
+        return card("https://peer.example")
+
+    async def credentials():
+        pytest.fail("Credentials must not be acquired before exact card admission")
+
+    monkeypatch.setattr(A2ACardResolver, "get_agent_card", resolve)
+    configured = A2AEndpoint(
+        name="peer",
+        card_url="https://peer.example/.well-known/agent-card.json",
+        rpc_url="https://peer.example:443/rpc",
+    )
+    with pytest.raises(ValueError, match="no configured A2A 1.0 JSONRPC interface"):
+        async with connect_a2a(configured, authorization=credentials):
+            pytest.fail("Nonexact card interface was admitted")
+
+
 async def completed(client, task_id):
     for _ in range(200):
         task = await client.get_task(p.GetTaskRequest(id=task_id))

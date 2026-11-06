@@ -74,7 +74,10 @@ class A2AEndpoint:
             parts = urlsplit(value)
             valid = False
             try:
-                origins.append((parts.scheme, parts.hostname, parts.port))
+                port = parts.port
+                if port is None:
+                    port = 443 if parts.scheme == "https" else 80
+                origins.append((parts.scheme, parts.hostname, port))
                 valid = bool(parts.hostname) and parts.scheme in {"https", "http"}
             except ValueError:
                 pass
