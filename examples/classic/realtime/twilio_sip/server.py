@@ -28,6 +28,7 @@ logging.basicConfig(level=logging.INFO)
 
 logger = logging.getLogger("twilio_sip_example")
 LOG_TRANSCRIPTS = os.getenv("TWILIO_SIP_LOG_TRANSCRIPTS") == "1"
+MAX_WEBHOOK_BYTES = 64 * 1024
 
 
 def _get_env(name: str) -> str:
@@ -186,10 +187,14 @@ def _track_call_task(call_id: str) -> None:
 
 @app.post("/openai/webhook")
 async def openai_webhook(request: Request) -> Response:
-    body = await request.body()
+    body = bytearray()
+    async for chunk in request.stream():
+        if len(chunk) > MAX_WEBHOOK_BYTES - len(body):
+            raise HTTPException(status_code=413, detail="OpenAI webhook is too large")
+        body.extend(chunk)
 
     try:
-        event = client.webhooks.unwrap(body, request.headers)
+        event = client.webhooks.unwrap(bytes(body), request.headers)
     except InvalidWebhookSignatureError as exc:
         raise HTTPException(status_code=400, detail="Invalid webhook signature") from exc
 

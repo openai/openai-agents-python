@@ -13,7 +13,7 @@ This example shows how to handle OpenAI Realtime SIP calls with the Agents SDK. 
 ## Configure OpenAI
 
 1. In [platform settings](https://platform.openai.com/settings) select your project.
-2. Create a webhook pointing to `https://<your-public-host>/openai/webhook` with "realtime.call.incoming" event type and note the signing secret. The example verifies each webhook with `OPENAI_WEBHOOK_SECRET`.
+2. Create a webhook pointing to `https://<your-public-host>/openai/webhook` with "realtime.call.incoming" event type and note the signing secret. The example verifies each webhook with `OPENAI_WEBHOOK_SECRET`. The server rejects request bodies larger than 64 KiB with HTTP 413 before signature verification.
 
 ## Configure Twilio Elastic SIP Trunking
 

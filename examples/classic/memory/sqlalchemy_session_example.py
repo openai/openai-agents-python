@@ -73,6 +73,6 @@ async def main():
 
 
 if __name__ == "__main__":
-    # To run this example, you need to install the sqlalchemy extras:
-    # pip install "agents[sqlalchemy]"
+    # From the repository root, install the matching source and SQLite driver:
+    # python -m pip install '.[classic-sqlalchemy]' aiosqlite
     asyncio.run(main())

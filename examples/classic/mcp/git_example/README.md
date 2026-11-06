@@ -5,7 +5,7 @@ This example uses the [git MCP server](https://github.com/modelcontextprotocol/s
 Run it via:
 
 ```
-uv run python examples/classic/mcp/git_example/main.py
+uv run python -m examples.classic.mcp.git_example.main
 ```
 
 ## Details

@@ -165,7 +165,7 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 """
-$ python examples/classic/basic/lifecycle_example.py
+$ python -m examples.classic.basic.lifecycle_example
 
 Enter a max number: 250
 ### 1: Agent Start Agent started. Usage: 0 requests, 0 input tokens, 0 output tokens, 0 total tokens

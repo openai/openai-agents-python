@@ -11,7 +11,7 @@ Python port of the JS `examples/classic/mcp/get-all-mcp-tools-example.ts`. It de
 Run it with:
 
 ```bash
-uv run python examples/classic/mcp/get_all_mcp_tools_example/main.py
+uv run python -m examples.classic.mcp.get_all_mcp_tools_example.main
 ```
 
 Prerequisites:

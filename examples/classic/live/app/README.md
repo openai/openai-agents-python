@@ -80,7 +80,7 @@ When setup fails after creation, the server attempts to attach only to close the
 
 ## Offline checks
 
-From the repository root, run `uv run pytest tests/test_live_example.py` for delegation and server lifecycle tests. With Node.js 18 or later, run `node --test examples/classic/live/app/test_ui.cjs` for the controlled browser callback test. These checks do not connect to the OpenAI API.
+From the repository root, with Node.js 18 or later, run `node --test examples/classic/live/app/test_ui.cjs` for the controlled browser callback test. This check does not connect to the OpenAI API.
 
 ## References
 

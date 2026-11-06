@@ -501,7 +501,20 @@ def detect_tags(path: Path, source: str) -> set[str]:
     if any(keyword in lower_source for keyword in ("sounddevice", "microphone", "audioinput")):
         tags.add("audio")
 
-    if any(keyword in lower_source for keyword in ("redis", "dapr", "twilio", "playwright")):
+    relative_path = path.relative_to(EXAMPLES_DIR).as_posix()
+    if (
+        relative_path.startswith(
+            ("sandbox/docker/", "sandbox/extensions/", "sandbox/external_provider/")
+        )
+        or relative_path
+        in {
+            "sandbox/basic.py",
+            "sandbox/tax_prep.py",
+            "sandbox/memory_s3.py",
+            "sandbox/sandbox_agent_with_remote_snapshot.py",
+        }
+        or any(keyword in lower_source for keyword in ("redis", "dapr", "twilio", "playwright"))
+    ):
         tags.add("external")
 
     return tags

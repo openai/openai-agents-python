@@ -31,9 +31,9 @@ You can run it with 3 options:
     results, and chooses to use the first tool result to generate the final output.
 
 Usage:
-python examples/classic/agent_patterns/forcing_tool_use.py -t default
-python examples/classic/agent_patterns/forcing_tool_use.py -t first_tool
-python examples/classic/agent_patterns/forcing_tool_use.py -t custom
+python -m examples.classic.agent_patterns.forcing_tool_use -t default
+python -m examples.classic.agent_patterns.forcing_tool_use -t first_tool
+python -m examples.classic.agent_patterns.forcing_tool_use -t custom
 """
 
 

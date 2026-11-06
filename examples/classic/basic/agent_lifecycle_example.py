@@ -125,7 +125,7 @@ async def main() -> None:
 if __name__ == "__main__":
     asyncio.run(main())
 """
-$ python examples/classic/basic/agent_lifecycle_example.py
+$ python -m examples.classic.basic.agent_lifecycle_example
 
 Enter a max number: 250
 ### (Start Agent) 1: Agent Start Agent started
