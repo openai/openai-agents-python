@@ -41,6 +41,10 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 
 if TYPE_CHECKING:
+
+    class _TracingOpeningOptions(TypedDict, total=False, closed=True):
+        _tracing_context: str
+
     from ._function_tools import Tool
     from .canonical_storage import CustomStorage
     from .executor import Environment, EnvironmentSource
@@ -641,7 +645,10 @@ class Agent(Generic[ContextT, OutputT]):
                 instruction_files=instruction_files,
                 reconciled_calls=reconciled_calls,
                 parent_trace=parent_trace,
-                **({"_tracing_context": captured.context} if captured.context is not None else {}),
+                **cast(
+                    "_TracingOpeningOptions",
+                    {"_tracing_context": captured.context} if captured.context is not None else {},
+                ),
             )
             session._trace_context = captured.context
             try:

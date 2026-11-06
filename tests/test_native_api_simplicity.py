@@ -34,7 +34,7 @@ before = set(sys.modules)
 assert set(agents.__all__) <= set(dir(agents))
 assert set(sys.modules) == before
 assert 'agents._native' not in sys.modules
-assert importlib.util.find_spec('agents.migration') is None
+assert importlib.util.find_spec('agents.migration') is not None
 assert 'ModelRequestLimitExceeded' not in dir(agents)
 assert agents.Agent is agents.Agent
 for removed in ("Runner", "ValidationIssue", "ValidationReport"):
@@ -46,6 +46,9 @@ for removed in ("Runner", "ValidationIssue", "ValidationReport"):
         pass
     else:
         raise AssertionError(removed + " is still importable")
+assert not any(
+    name.startswith(('agents.migration', 'agents.classic')) for name in sys.modules
+)
 """,
         ],
         check=True,
