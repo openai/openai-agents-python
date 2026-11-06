@@ -63,6 +63,21 @@ def runner_dry_run(tmp_path, relative_path, *, include_external=False):
 
 
 @pytest.mark.parametrize(
+    "filter_text", ["sandbox/basic.py", "sandbox\\basic.py", "SANDBOX\\BASIC.PY"]
+)
+def test_runner_filters_accept_both_separators_and_ignore_case(tmp_path, filter_text):
+    output = runner_dry_run(tmp_path, filter_text, include_external=True)
+    assert "- RUN  examples/classic/sandbox/basic.py" in output
+
+
+@pytest.mark.parametrize("filter_text", ["tools/", "tools\\"])
+def test_runner_filters_preserve_trailing_directory_separator(filter_text):
+    modules = {example.module for example in discover_examples([filter_text])}
+    assert "examples.classic.tools.web_search" in modules
+    assert "examples.classic.agent_patterns.agents_as_tools" not in modules
+
+
+@pytest.mark.parametrize(
     "relative_path",
     [
         "sandbox/basic.py",

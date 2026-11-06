@@ -526,7 +526,7 @@ def detect_tags(path: Path, source: str) -> set[str]:
 
 
 def discover_examples(filters: Iterable[str]) -> list[ExampleScript]:
-    filters_lower = [f.lower() for f in filters]
+    filters_lower = [f.replace("\\", "/").lower() for f in filters]
     examples: list[ExampleScript] = []
 
     for path in EXAMPLES_DIR.rglob("*.py"):
@@ -545,9 +545,7 @@ def discover_examples(filters: Iterable[str]) -> list[ExampleScript]:
         if relpath in DISCOVERY_EXCLUDE:
             continue
 
-        if filters_lower and not any(
-            f in str(path.relative_to(ROOT_DIR)).lower() for f in filters_lower
-        ):
+        if filters_lower and not any(f in relpath.lower() for f in filters_lower):
             continue
 
         tags = detect_tags(path, source)
