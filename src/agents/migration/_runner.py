@@ -13,8 +13,8 @@ import os
 import sys
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from copy import copy, deepcopy
-from dataclasses import dataclass, replace
-from typing import Any, Generic, TypeVar, cast
+from dataclasses import replace
+from typing import Any, TypeVar, cast
 from uuid import uuid4
 
 from openai.types.responses import ResponseFunctionToolCall, ResponseFunctionToolCallParam
@@ -27,7 +27,7 @@ from _agents_codex.canonical_storage import CustomStorage
 from _agents_codex.native_interception import Allow, Deny
 from _agents_codex.prepared_request import PreparedRequest
 from _agents_codex.recovery import ReconciledCall
-from _agents_codex.session import Completed, Session, _close_after_error, _validate_storage_opening
+from _agents_codex.session import Session, _close_after_error, _validate_storage_opening
 from _agents_codex.state import LocalStorage, SessionState
 from _agents_codex.tools import _CapturedFunction
 from _agents_codex.turn import Turn
@@ -41,20 +41,12 @@ from ..classic.run_context import RunContextWrapper
 from ..classic.tool import FunctionTool as ClassicFunctionTool, ToolOriginType
 from ..classic.tool_context import ToolContext as ClassicToolContext
 from ..classic.usage import Usage, model_usage_to_span_usage
+from ._result import SDKRunResult, SDKRunResultStreaming, _ResultProjection
 from ._transport import _CARRIER_MODEL, _ResponseCarrier
 
-__all__ = ("SDKRunner", "SDKRunResult")
+__all__ = ("SDKRunner",)
 
 ContextT = TypeVar("ContextT")
-
-
-@dataclass(frozen=True)
-class SDKRunResult(Generic[ContextT]):
-    """Text output, the original agent, and its completed native turn."""
-
-    final_output: str
-    last_agent: classic.Agent[ContextT]
-    native_result: Completed[str]
 
 
 def _unsupported(feature: str) -> UserError:
@@ -412,6 +404,7 @@ class SDKRunner:
             raise TypeError("model_provider.get_model must return a Classic Model")
         usage = Usage()
         run_context = RunContextWrapper(context=context, usage=usage)
+        projection = _ResultProjection(starting_agent, run_context, input, tools=tools)
         current_calls: dict[str, ResponseFunctionToolCall] = {}
         native_tools = [
             _native_tool(tool, starting_agent, run_context, current_calls, on_approval)
@@ -444,6 +437,7 @@ class SDKRunner:
                 for item in translated
                 if item.get("type") == "function_call"
             )
+            projection.accept_prepared_input(translated)
             input_snapshot = deepcopy(translated)
             response = await model.get_response(
                 system_instructions=instructions,
@@ -462,6 +456,7 @@ class SDKRunner:
             if not carrier.active:
                 raise asyncio.CancelledError
             payload = _response_bytes(response, {tool.name for tool in tools}, seen_calls)
+            projection.accept_response(response)
             # Core waits for every tool before its next sampling callback.
             # These data belong only to this validated response's invocations.
             current_calls.clear()
@@ -534,4 +529,37 @@ class SDKRunner:
             await close()
             # The single terminal-success boundary for result projection
             # and history consumers. The exact turn and cleanup have settled.
-            return SDKRunResult(result.final_output, starting_agent, result)
+            return projection.finish(result)
+
+    @staticmethod
+    def run_streamed(
+        starting_agent: classic.Agent[ContextT],
+        input: str,
+        *,
+        context: ContextT | None = None,
+        max_turns: int = 10,
+        model_provider: ModelProvider | None = None,
+        state: SessionState | None = None,
+        storage: LocalStorage | CustomStorage | None = None,
+        resume: str | None = None,
+        reconciled_calls: Sequence[ReconciledCall] = (),
+        return_state: bool = False,
+        on_approval: Callable[[ClassicToolContext[ContextT]], Awaitable[Allow | Deny]]
+        | None = None,
+    ) -> SDKRunResultStreaming[ContextT]:
+        """Start a run in the current event loop and buffer its semantic events."""
+        return SDKRunResultStreaming(
+            SDKRunner.run(
+                starting_agent,
+                input,
+                context=context,
+                max_turns=max_turns,
+                model_provider=model_provider,
+                state=state,
+                storage=storage,
+                resume=resume,
+                reconciled_calls=reconciled_calls,
+                return_state=return_state,
+                on_approval=on_approval,
+            )
+        )

@@ -89,7 +89,8 @@ It needs no model credentials and makes no external model requests. Its scripted
 | Handoffs and agents used as tools | Unsupported |
 | Custom tool-use behavior | Unsupported; keep `tool_use_behavior="run_llm_again"` and `reset_tool_choice=True` |
 | MCP, hosted tools, sandbox tools, voice, or realtime | Unsupported |
-| Streaming or synchronous runner methods | Unsupported; use the asynchronous `run` method |
+| Buffered semantic events | Use `SDKRunner.run_streamed()` inside async code |
+| Synchronous execution to completion | Unsupported |
 | Native persistence | Idle portable state, `LocalStorage`, and root-only `CustomStorage` |
 | Classic Session stores, conversation history input, Classic RunState, or same-turn continuation | Unsupported |
 
@@ -179,13 +180,51 @@ async def approve(call_context):
 result = await SDKRunner.run(agent_with_approval_tool, "Greet Ada.", on_approval=approve)
 ```
 
-The run waits for the callback and keeps the Model selected at the start of that invocation. The pending callback stays in the live run. Portable capture happens after the turn completes. Cancellation invalidates approval for that turn, so a late allow cannot start the tool.
+The run waits for the callback and keeps the Model selected at the start of that invocation. Portable capture happens after the turn completes. Cancellation invalidates approval for that turn, so a late allow cannot start the tool.
 
 ## Read the result and handle failures
 
-The returned `SDKRunResult` exposes `final_output`, the original `last_agent`, and the settled `native_result`. Read native identifiers from `result.native_result.turn.session_id` and `result.native_result.turn.turn_id`. The owned Session is closed before the runner returns.
+`SDKRunner.run()` returns an `SDKRunResult` after the owned native Session closes. Both `SDKRunResult` and `SDKRunResultStreaming` are available from `agents.migration`.
 
-Use `native_result` for native turn metadata and any requested portable state. The result has no Classic `to_input_list()`, streaming events, or serialized RunState. Keep existing Classic conversations on the Classic runtime. SDKRunner supports new turns and leaves same-turn continuation to the native or Classic APIs that own that state.
+| Field | Value |
+| --- | --- |
+| `final_output` | Final answer as text |
+| `last_agent` | The original Classic Agent |
+| `input` | The SDK input for this invocation |
+| `context_wrapper` | The Classic `RunContextWrapper`. Its `.context` holds your typed application context or `None`. Its `.usage` holds cumulative Classic `Usage` for this run. |
+| `new_items` | Classic `RunItem` values from this invocation, in observed order |
+| `raw_responses` | Detached Classic `ModelResponse` snapshots from the selected Model |
+| `last_response_id` | The last Model response's ID, or `None` if that response has no ID |
+| `interruptions` | An empty list after a successful run, including a run that handled live approval |
+| `native_result` | The completed native result, with `turn.session_id`, `turn.turn_id`, and any requested portable `state` |
+
+`result.to_input_list()` exports a detached list of Responses input items. The list starts with this invocation's SDK input and includes its new items in order. Both `mode="preserve_all"` and `mode="normalized"` return the same items. Model items keep their original IDs when supplied. Confirmed tool outputs keep the original call ID and exact text, including empty strings.
+
+Generated native receipt IDs and history from earlier native turns stay with the native Session. Use the persistence options above to reopen that conversation. Use `agents.classic.Runner` for Classic `RunState`, cold approval, or provider continuation IDs.
+
+### Consume buffered events
+
+Call `SDKRunner.run_streamed()` inside an async function. It starts a task with the same options as `SDKRunner.run()`, including `on_approval` and the native persistence options.
+
+```python
+from agents.migration import SDKRunner
+
+stream = SDKRunner.run_streamed(agent, "Greet Ada.", context=app_context)
+async for event in stream.stream_events():
+    if event.type == "run_item_stream_event":
+        print(event.name)
+
+result = await stream.get_result()
+print(result.final_output)
+```
+
+The iterator waits for the run to succeed and close its native Session. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `stream_events()` on a settled `SDKRunResult`. Use `agents.classic.Runner` for live Model events, raw provider frames, or token deltas.
+
+The iterator yields no events while `on_approval` waits for a decision. If the Model completes the turn after a denial, the iterator includes the recorded denial as a `tool_output` event.
+
+If the run fails or is cancelled, `stream_events()` raises before yielding any events. `get_result()` also raises. Call `stream.cancel()` and await `stream.get_result()` to join cleanup. Cancelling a task waiting for either method also cancels the run and joins cleanup.
+
+### Handle failures and cancellation
 
 `max_turns` limits model requests, not individual tool calls or wall-clock time. Native request and stream retries are disabled for the adapter. The selected Model's underlying client can still apply its own transport retry policy. The adapter does not add another retry loop.
 
