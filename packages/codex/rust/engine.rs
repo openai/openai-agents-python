@@ -35,6 +35,9 @@ pub(crate) const CLOSE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub struct EngineState {
     pub manager: Arc<ThreadManager>,
+    #[cfg(test)]
+    pub(crate) session_template_witness:
+        Option<std::sync::Weak<crate::provider_owner::SessionTemplate>>,
     pub context_gate: Arc<AsyncRwLock<()>>,
     pub context_retired: AtomicBool,
     pub store: Arc<dyn ThreadStore>,
@@ -63,6 +66,7 @@ pub struct EngineState {
     extension_events: Arc<extensions::Events>,
     cloud_config: codex_config::CloudConfigBundleLoader,
     pub(crate) service_config: Config,
+    pub(crate) model_http_pool: Option<codex_http_client::SdkModelHttpPool>,
     initial_config_available: AtomicBool,
     pub(crate) interception: Arc<crate::native_interception::Boundary>,
     pub restored_creation_times: Mutex<HashMap<ThreadId, SystemTime>>,
@@ -164,6 +168,9 @@ impl EngineState {
             api_key,
             initial_model,
             None,
+            false,
+            None,
+            false,
         )
         .await
     }
@@ -175,17 +182,54 @@ impl EngineState {
         api_key: Option<String>,
         initial_model: Option<String>,
         canonical_store: Option<pyo3::Py<pyo3::PyAny>>,
+        session_initial_config: bool,
+        session_template_lease: Option<Arc<crate::provider_owner::Lease>>,
+        session_template_config_only: bool,
     ) -> anyhow::Result<Self> {
         telemetry::engine_starting().await?;
-        let runtime_json = config::prepare_runtime(&runtime_json)?;
-        let (mut config, cloud_config) = config::load(&config_json, &runtime_json, None).await?;
-        let native_turn_control = config::native_turn_control(&runtime_json)?;
-        let sdk_user_input_enabled = config::sdk_native_config(&runtime_json)?
+        let prepared_runtime = config::prepare_runtime(&runtime_json)?;
+        let recipe = if session_template_lease.is_some()
+            && session_initial_config
+            && !checkpoint
+            && canonical_store.is_none()
+            && api_key.as_ref().is_some_and(|key| !key.trim().is_empty())
+        {
+            config::SdkConfigRecipe::capture(&config_json, &runtime_json, &prepared_runtime)
+        } else {
+            None
+        };
+        let runtime_json = prepared_runtime;
+        let cached = match (&recipe, &session_template_lease, &api_key) {
+            (Some(recipe), Some(lease), Some(key)) => {
+                lease.session_template(&crate::provider_owner::SessionTemplate::key(recipe, key))
+            }
+            _ => None,
+        };
+        let mut session_template = None;
+        let bound = match (&recipe, cached) {
+            (Some(recipe), Some(entry)) => match recipe.bind(&entry.config).await {
+                Some(bound) => {
+                    session_template = Some(entry);
+                    Some(bound)
+                }
+                None => None,
+            },
+            _ => None,
+        };
+        let (mut config, mut cloud_config) = match bound {
+            Some(bound) => bound,
+            None => config::load(&config_json, &runtime_json, None).await?,
+        };
+        // Capture one typed runtime at the original first accessor decode point.
+        let mut runtime_options = config::RuntimeOptions::parse(&runtime_json)?;
+        let native_turn_control = runtime_options.native_turn_control();
+        let sdk_user_input_enabled = runtime_options
+            .sdk_native_config()
             .then_some(config.experimental_request_user_input_enabled);
         if native_turn_control {
             Self::check_controlled_config(&config)?;
         }
-        let native_agents = config::native_agents(&runtime_json)?;
+        let native_agents = runtime_options.native_agents();
         if native_agents {
             if let Some(model) = &initial_model {
                 config.model = Some(model.clone());
@@ -209,7 +253,7 @@ impl EngineState {
         let local_home = if checkpoint {
             None
         } else {
-            config::native_thread_store(&runtime_json)?
+            runtime_options.native_thread_store()
         };
         if local_home.is_some() {
             ensure!(
@@ -217,7 +261,33 @@ impl EngineState {
                 "native local SDK storage requires non-ephemeral threads"
             );
         }
-        let (auth, codex_account) = if let Some(login) = config::sdk_codex_login(&runtime_json)? {
+        if session_template.is_none()
+            && session_template_lease
+                .as_ref()
+                .is_some_and(|lease| lease.can_prepare_session_template())
+            && let (Some(recipe), Some(key)) = (&recipe, &api_key)
+            && let Some((entry, bound, cloud)) = crate::provider_owner::SessionTemplate::prepare(
+                recipe,
+                &config,
+                key,
+                session_template_config_only,
+            )
+            .await
+        {
+            config = bound;
+            cloud_config = cloud;
+            session_template = Some(entry);
+        }
+        // Config-only requests must not borrow a credentialed entry's
+        // services, including through independently callable private inputs.
+        let shared_services = (!session_template_config_only)
+            .then(|| {
+                session_template
+                    .as_ref()
+                    .and_then(|entry| entry.services.as_ref())
+            })
+            .flatten();
+        let (auth, codex_account) = if let Some(login) = runtime_options.sdk_codex_login() {
             ensure!(
                 api_key.is_none(),
                 "A saved Codex login cannot use an API key"
@@ -228,10 +298,12 @@ impl EngineState {
                 &format!("{CODEX_LOGIN_PROVIDER_PREFIX}{}", account.binding),
             )?;
             (manager, Some(account))
+        } else if let Some((auth, _)) = shared_services {
+            (auth.clone(), None)
         } else {
             (crate::auth::manager(&config, api_key).await?, None)
         };
-        let goals_enabled = config::native_goal_store_enabled(&runtime_json)?;
+        let goals_enabled = runtime_options.native_goal_store_enabled();
         let storage_home = (goals_enabled || local_home.is_some()).then(|| LocalStorageHome {
             path: config.sqlite_config().home(),
             persistent_rollouts: local_home.is_some(),
@@ -242,7 +314,7 @@ impl EngineState {
                 .as_ref()
                 .map(|account| account.auth_file.as_path()),
         };
-        let environment_options = config::environment(&runtime_json)?;
+        let environment_options = runtime_options.environment()?;
         // A local executor must pass its storage check before the profile opens.
         let local_environment = match (&environment_options, storage_home) {
             (Some(environment), Some(home)) if environment.is_local() => {
@@ -299,7 +371,7 @@ impl EngineState {
                 None => Arc::new(crate::storage::MemoryThreadStore::default()),
             }
         };
-        if let Some(id) = config::sdk_resume_thread_id(&runtime_json)?
+        if let Some(id) = runtime_options.sdk_resume_thread_id()
             && local_checklist_store.is_some()
         {
             let stored = store
@@ -311,11 +383,16 @@ impl EngineState {
                 .await?;
             Self::validate_resume_provider(&stored.model_provider, &config.model_provider_id)?;
         }
-        let provider = codex_model_provider::create_model_provider(
-            config.model_provider.clone(),
-            Some(auth.clone()),
-        );
-        let models = provider.models_manager_without_cache(config.model_catalog.clone());
+        let models = match shared_services {
+            Some((_, models)) => models.clone(),
+            None => {
+                let provider = codex_model_provider::create_model_provider(
+                    config.model_provider.clone(),
+                    Some(auth.clone()),
+                );
+                provider.models_manager_without_cache(config.model_catalog.clone())
+            }
+        };
         models.set_api_key_model_discovery_enabled(
             config.features.enabled(Feature::ApiKeyModelDiscovery),
         );
@@ -343,7 +420,7 @@ impl EngineState {
                     // Portable imports still use their separately validated model.
                     let requested = if config.model.is_some() {
                         config.model.clone()
-                    } else if let Some(id) = config::sdk_resume_thread_id(&runtime_json)? {
+                    } else if let Some(id) = runtime_options.sdk_resume_thread_id() {
                         ensure!(
                             local_checklist_store.is_some()
                                 || store
@@ -389,7 +466,7 @@ impl EngineState {
             }
             models
         };
-        let deferred_environment = config::deferred_environment(&runtime_json)?.is_some();
+        let deferred_environment = runtime_options.deferred_environment().is_some();
         let (environment, local_environment_error) = match (local_environment, environment_options)
         {
             (Some(environment), _) => (environment, None),
@@ -406,7 +483,7 @@ impl EngineState {
         let installation_id = ThreadId::new().to_string();
         let user_instructions = Arc::new(options::EmptyUserInstructions);
         let extension_events = Arc::new(extensions::Events::new());
-        let code_mode = config::code_mode_provider(&runtime_json, &config)?.or_else(|| {
+        let code_mode = runtime_options.code_mode_provider(&config).or_else(|| {
             // Mirror ThreadManager's pinned default if no package helper was
             // selected, so every enabled native Code Mode session uses the same
             // owning delegate. Disabled Code Mode still uses Core's default.
@@ -415,6 +492,7 @@ impl EngineState {
                     as Arc<dyn codex_code_mode::CodeModeSessionProvider>
             })
         });
+        drop(runtime_options);
         let interception = Arc::new(crate::native_interception::Boundary::new(
             agent_graph.clone(),
         ));
@@ -473,7 +551,7 @@ impl EngineState {
                 None => manager,
             }
         });
-        Ok(Self {
+        let result = Self {
             manager,
             context_gate: Arc::new(AsyncRwLock::new(())),
             context_retired: AtomicBool::new(false),
@@ -499,12 +577,24 @@ impl EngineState {
             extension_events,
             cloud_config,
             service_config: config,
+            #[cfg(test)]
+            session_template_witness: session_template.as_ref().map(Arc::downgrade),
+            model_http_pool: None,
+            // Session opening captures one configuration for its owned runtime
+            // and immediate first thread. Raw creation retains its prior behavior.
             initial_config_available: AtomicBool::new(
-                sdk_user_input_enabled.is_some() && !added_telemetry_warning,
+                (session_initial_config || sdk_user_input_enabled.is_some())
+                    && !added_telemetry_warning,
             ),
             interception,
             restored_creation_times: Mutex::new(HashMap::new()),
-        })
+        };
+        // Publish only after construction succeeds. This cannot add a fallible
+        // step between constructing the Engine and registering its owner.
+        if let (Some(lease), Some(entry)) = (&session_template_lease, &session_template) {
+            lease.publish_session_template(entry);
+        }
+        Ok(result)
     }
 
     pub async fn start(
@@ -602,9 +692,12 @@ impl EngineState {
     // The caller holds lifecycle through validation, native import and start.
     pub(crate) async fn start_prepared(
         self: &Arc<Self>,
-        startup: StartThreadOptions,
+        mut startup: StartThreadOptions,
         instructions: Arc<options::ThreadInstructions>,
     ) -> anyhow::Result<NativeThread> {
+        if let Some(pool) = &self.model_http_pool {
+            startup.thread_extension_init.insert(pool.clone());
+        }
         let id = match &startup.initial_history {
             InitialHistory::Resumed(history) => {
                 if let Some(home) = self.native_storage_home()

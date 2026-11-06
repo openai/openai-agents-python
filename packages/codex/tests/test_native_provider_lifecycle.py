@@ -334,7 +334,7 @@ async def test_failed_open_cleanup_retains_exact_owner_and_lease(monkeypatch):
             self.close_calls = 0
 
         def __getattr__(self, name):
-            if name == "start_replaceable_thread":
+            if name == "_start_initial_replaceable_thread":
                 raise RuntimeError("controlled publication failure")
             return getattr(self.owner, name)
 
@@ -382,7 +382,7 @@ async def test_provider_retries_native_orphan_home_after_failed_core_open(monkey
         def __init__(self, engine):
             self.engine = engine
 
-        def start_replaceable_thread(self, *args):
+        def _start_initial_replaceable_thread(self, *args):
             raise RuntimeError("controlled thread publication failure")
 
     def create(config, runtime, **kwargs):

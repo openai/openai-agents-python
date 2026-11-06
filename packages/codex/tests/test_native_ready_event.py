@@ -135,12 +135,38 @@ async def test_setup_failure_releases_unstarted_owner_with_retained_traceback(mo
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows retains the original native bridge")
-async def test_native_pending_setup_failure_does_not_strand_session_close(responses, monkeypatch):
+@pytest.mark.parametrize(
+    "transport",
+    [
+        "socket",
+        pytest.param(
+            "shared",
+            marks=pytest.mark.skipif(sys.platform != "linux", reason="Linux shared completion"),
+        ),
+    ],
+)
+async def test_native_pending_setup_failure_does_not_strand_session_close(
+    responses, monkeypatch, transport
+):
     original = native_async_bridge._await_native_event
     original_startup = Session._publish_startup
     original_pair = socket.socketpair
+    original_dispatcher = _native_async._completion_dispatcher
     failed = asyncio.Event()
     errors = []
+    selected_call = None
+    attempted = []
+
+    def select_dispatcher(loop, call):
+        if call is selected_call and not failed.is_set():
+            attempted.append(transport)
+            if transport == "shared":
+                # Exercise real shared setup even when earlier opening calls
+                # already installed the loop's reusable dispatcher. Failure
+                # occurs before registration and leaves that dispatcher intact.
+                return _native_async._CompletionDispatcher(loop, call)
+            return None  # Exercise the actual retained socket fallback too.
+        return original_dispatcher(loop, call)
 
     def fail_once(*args, **kwargs):
         monkeypatch.setattr(_native_async.socket, "socketpair", original_pair)
@@ -153,7 +179,9 @@ async def test_native_pending_setup_failure_does_not_strand_session_close(respon
         class Wrapped:
             def poll(self):
                 result = read.poll()
+                nonlocal selected_call
                 if not isinstance(result, str) and not failed.is_set():
+                    selected_call = result
                     monkeypatch.setattr(_native_async.socket, "socketpair", fail_once)
                 return result
 
@@ -170,6 +198,7 @@ async def test_native_pending_setup_failure_does_not_strand_session_close(respon
         return await original_startup(session, complete_after_injection())
 
     monkeypatch.setattr(native_async_bridge, "_await_native_event", inject)
+    monkeypatch.setattr(_native_async, "_completion_dispatcher", select_dispatcher)
     monkeypatch.setattr(Session, "_publish_startup", publish_until_injected)
     owner = provider(responses)
     agent = Agent(instructions="Answer.", provider=owner)
@@ -179,6 +208,8 @@ async def test_native_pending_setup_failure_does_not_strand_session_close(respon
                 await failed.wait()
         assert caught.value is errors[0]
         assert errors[0].__traceback__ is not None
+        if sys.platform == "linux":
+            assert attempted == [transport]
         async with timeout(10), agent.session() as fresh:
             responses.respond(*text_response("after-setup-failure", "works"))
             assert (await (await fresh.submit("next")).get_result()).final_output == "works"

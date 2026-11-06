@@ -19,7 +19,11 @@ from dataclasses import (
 )
 from pathlib import Path as Path
 from threading import RLock as RLock
-from types import MappingProxyType as MappingProxyType, TracebackType as TracebackType
+from types import (
+    MappingProxyType as MappingProxyType,
+    MethodType as MethodType,
+    TracebackType as TracebackType,
+)
 from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
@@ -156,6 +160,20 @@ class NativeProvider:
 
     Explicit providers are borrowed by Sessions. Close those Sessions before
     leaving the provider's async context or awaiting ``aclose()``.
+
+    Eligible API-key HTTP Responses calls share idle connections across fresh
+    Sessions on Linux when proxy routing variables are absent. TLS configuration
+    and cached system trust material may remain in use until this explicit
+    Provider closes. OS trust changes,
+    including removed roots, may require a new Provider to refresh construction.
+    With only ``SSL_CERT_FILE`` set,
+    each request rereads and validates that file and changes retire cached
+    connections. Other CA, proxy-policy, cookie and login modes retain fresh
+    transport construction. Closing the Provider joins native owners before
+    releasing its idle clients. Sessions retain fresh auth, settings and history.
+    Synchronize process-environment changes with SDK calls. Changes between
+    calls are supported; client construction does not atomically snapshot the
+    ambient environment.
     """
 
     base_url: str | None = field(default=None, repr=False)
@@ -1012,6 +1030,29 @@ class Agent(Generic[ContextT, OutputT]):
                             "no local storage, environment, children or before_step. "
                             "Pass on_interaction or use Agent.session() for live replies."
                         )
+                # Supported delegating factories can expose a live Session/cursor.
+                # Never unwrap them or trust a callable that merely spoofs __func__.
+                from .session import _CANONICAL_SESSION_TYPE
+
+                if type(session) is _CANONICAL_SESSION_TYPE:
+                    session._plain_event_collection = (
+                        type(self) is _CANONICAL_AGENT_TYPE
+                        and isinstance(session_factory, MethodType)
+                        and session_factory.__self__ is self
+                        and session_factory.__func__ is _CANONICAL_AGENT_SESSION
+                        and type(session) is _CANONICAL_SESSION_TYPE
+                        and state is None
+                        and not return_state
+                        and tools is None
+                        and environment is None
+                        and before_step is None
+                        and prepare_request is None
+                        and budget is None
+                        and on_interaction is None
+                        and not pause_manual
+                        and parent_trace is None
+                        and trace_options is None
+                    )
                 session._fail_unhandled_questions = on_interaction is None and not pause_manual
                 if resume_manual:
                     restored = session.restored_turn
@@ -1183,5 +1224,8 @@ class Agent(Generic[ContextT, OutputT]):
             options.pop("trace_options", None)
             del trace_options
 
+
+_CANONICAL_AGENT_TYPE = Agent
+_CANONICAL_AGENT_SESSION = Agent.session
 
 _preserve_module_identity(globals(), "agents.agent")

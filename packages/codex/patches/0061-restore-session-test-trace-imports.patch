@@ -1,0 +1,13 @@
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index c605242f5843e4aec3f3f729b1c2cfc2a10e81dc..5a03ad262b0e682532bfb769e82b81e11e793ec1 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -67,6 +67,8 @@ use codex_model_provider_info::built_in_model_providers;
+ use codex_models_manager::model_info;
+ use codex_models_manager::test_support::construct_model_info_offline_for_tests;
+ use codex_models_manager::test_support::get_model_offline_for_tests;
++use codex_otel::current_span_w3c_trace_context;
++use codex_otel::set_parent_from_w3c_trace_context;
+ use codex_prompts::render_model_instructions;
+ use codex_protocol::AgentPath;
+ use codex_protocol::ResponseItemId;

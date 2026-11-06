@@ -1,0 +1,239 @@
+diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
+index dc28a724a7962dd8cbde22883efb7ac566a03593..8b31e4b0e06cb96822ecc755fbce02d1eeefc25b 100644
+--- a/codex-rs/models-manager/src/manager.rs
++++ b/codex-rs/models-manager/src/manager.rs
+@@ -479,6 +479,26 @@ impl ModelsManager for OpenAiModelsManager {
+         Ok(self.models_for_entry(&entry).to_vec())
+     }
+ 
++    fn try_list_models(&self) -> Result<Vec<ModelPreset>, TryLockError> {
++        let mut presets = {
++            let entry = self.remote_models.try_read()?;
++            let mut models = self.models_for_entry(&entry).iter().collect::<Vec<_>>();
++            // Match the owned conversion's stable priority ordering.
++            models.sort_by_key(|model| model.priority);
++            models
++                .into_iter()
++                .map(ModelPreset::from)
++                .collect::<Vec<_>>()
++        };
++        // Keep auth filtering after catalog capture and after releasing the read lock.
++        let uses_codex_backend = self
++            .auth_manager()
++            .is_some_and(AuthManager::current_auth_uses_codex_backend);
++        presets = ModelPreset::filter_by_auth(presets, uses_codex_backend);
++        ModelPreset::mark_default_by_picker_visibility(&mut presets);
++        Ok(presets)
++    }
++
+     fn auth_manager(&self) -> Option<&AuthManager> {
+         self.auth_manager.as_deref()
+     }
+diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
+index d6481bf852175457a7ddcf2c14fa132aa06fc238..d1227b26c7c8b54d7539d8c785992413a7444aa7 100644
+--- a/codex-rs/models-manager/src/manager_tests.rs
++++ b/codex-rs/models-manager/src/manager_tests.rs
+@@ -1916,3 +1916,6 @@ async fn borrowed_lookup_rechecks_api_key_discovery_policy() {
+ 
+ #[path = "model_seed_tests.rs"]
+ mod model_seed_tests;
++
++#[path = "model_list_borrow_tests.rs"]
++mod model_list_borrow_tests;
+diff --git a/codex-rs/models-manager/src/model_list_borrow_tests.rs b/codex-rs/models-manager/src/model_list_borrow_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..1de12587e99edd93e885dcf94092d314cb81b883
+--- /dev/null
++++ b/codex-rs/models-manager/src/model_list_borrow_tests.rs
+@@ -0,0 +1,143 @@
++//! Compare the fresh picker view with the existing owned-catalog conversion.
++use super::*;
++use codex_protocol::openai_models::InputModality;
++use codex_protocol::protocol::MultiAgentVersion;
++use pretty_assertions::assert_eq;
++use std::borrow::Cow;
++
++fn manager_with_catalog(catalog: Vec<ModelInfo>, chatgpt: bool) -> OpenAiModelsManager {
++    let auth = if chatgpt {
++        CodexAuth::create_dummy_chatgpt_auth_for_testing()
++    } else {
++        CodexAuth::from_api_key("synthetic-picker-view")
++    };
++    let mut manager = OpenAiModelsManager::new_without_cache(
++        TestModelsEndpoint::with_command_auth(Vec::new()),
++        Some(AuthManager::from_auth_for_testing(auth)),
++    );
++    // Construction is exclusive here; retain normal catalog/source predicates.
++    manager.remote_models.get_mut().models = Cow::Owned(catalog);
++    manager
++}
++
++fn varied_catalog() -> Vec<ModelInfo> {
++    let mut visible = remote_model("visible-api", "Visible API", 20);
++    let mut json = serde_json::to_value(&visible).expect("model JSON");
++    json["model_specialty"] = json!("coding");
++    json["additional_speed_tiers"] = json!(["fast"]);
++    json["service_tiers"] = json!([{"id":"fast","name":"Fast","description":"Lower latency"}]);
++    json["default_service_tier"] = json!("fast");
++    json["available_access_programs"] = json!(ModelAccessPrograms {
++        cyber: vec![
++            CyberAccessProgram::Standard,
++            CyberAccessProgram::DaybreakBlue
++        ]
++    });
++    json["availability_nux"] = json!({"message":"Now available"});
++    json["upgrade"] = json!({"model":"next","migration_markdown":"Upgrade notes","retirement_at":"2027-01-02T03:04:05Z"});
++    visible = serde_json::from_value(json).expect("rich model");
++    visible.input_modalities = vec![InputModality::Audio];
++    visible.multi_agent_version = Some(MultiAgentVersion::V2);
++    let hidden = remote_model_with_visibility("hidden", "Hidden", 0, "hide");
++    let mut backend_only = remote_model("backend-only", "Backend only", 2);
++    backend_only.supported_in_api = false;
++    backend_only.description = None;
++    backend_only.default_reasoning_level = None;
++    let tied = remote_model("tie-api", "Tied API", 2);
++    vec![visible, hidden, backend_only, tied]
++}
++
++#[tokio::test]
++async fn borrowed_picker_matches_owned_conversion_for_fields_order_auth_and_default() {
++    for chatgpt in [false, true] {
++        let manager = manager_with_catalog(varied_catalog(), chatgpt);
++        let expected = manager.build_available_models(manager.try_get_remote_models().unwrap());
++        let mut actual = manager.try_list_models().unwrap();
++        assert_eq!(actual, expected);
++        let names = actual
++            .iter()
++            .map(|model| model.model.as_str())
++            .collect::<Vec<_>>();
++        let expected_names = if chatgpt {
++            vec!["hidden", "backend-only", "tie-api", "visible-api"]
++        } else {
++            vec!["hidden", "tie-api", "visible-api"]
++        };
++        assert_eq!(names, expected_names);
++        assert_eq!(actual.iter().filter(|model| model.is_default).count(), 1);
++        assert!(
++            actual
++                .iter()
++                .find(|model| model.is_default)
++                .unwrap()
++                .show_in_picker
++        );
++        actual[0].display_name = "Caller mutation".into();
++        actual.clear();
++        assert_eq!(manager.try_list_models().unwrap(), expected);
++    }
++}
++
++#[tokio::test]
++async fn borrowed_picker_retains_try_lock_failure_and_reads_replacements() {
++    let manager = manager_with_catalog(varied_catalog(), true);
++    let before = manager.try_list_models().unwrap();
++    let mut writer = manager.remote_models.write().await;
++    assert!(manager.try_list_models().is_err());
++    assert!(manager.try_get_remote_models().is_err());
++    writer.models = Cow::Owned(vec![remote_model("replacement", "Replacement", 0)]);
++    drop(writer);
++    let after = manager.try_list_models().unwrap();
++    assert_ne!(after, before);
++    assert_eq!(after.len(), 1);
++    assert_eq!(after[0].model, "replacement");
++    assert_eq!(
++        after,
++        manager.build_available_models(manager.try_get_remote_models().unwrap())
++    );
++    let mut raw = manager.try_get_remote_models().unwrap();
++    raw[0].display_name = "Detached raw mutation".into();
++    assert_eq!(manager.try_list_models().unwrap(), after);
++}
++
++#[tokio::test]
++async fn borrowed_picker_keeps_source_identity_and_hidden_empty_behavior() {
++    for explicit in [false, true] {
++        let manager = manager_with_catalog(varied_catalog(), true);
++        let manager = if explicit {
++            manager.with_provider_catalog()
++        } else {
++            manager
++        };
++        {
++            let mut current = manager.remote_models.write().await;
++            current.identity = Some("different-provider".into());
++        }
++        assert_eq!(
++            manager.try_list_models().unwrap(),
++            manager.build_available_models(manager.try_get_remote_models().unwrap())
++        );
++        if explicit {
++            assert!(manager.try_list_models().unwrap().is_empty());
++        }
++    }
++    for catalog in [
++        Vec::new(),
++        vec![remote_model_with_visibility(
++            "hidden-only",
++            "Hidden only",
++            0,
++            "hide",
++        )],
++    ] {
++        let manager = manager_with_catalog(catalog, true);
++        let actual = manager.try_list_models().unwrap();
++        assert_eq!(
++            actual,
++            manager.build_available_models(manager.try_get_remote_models().unwrap())
++        );
++        if let Some(first) = actual.first() {
++            assert!(first.is_default);
++        }
++    }
++}
+diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs
+index b2dde1499eee6428ac6a281e65c85901648133f4..9c7abed18e51700effa72670647976445bec3141 100644
+--- a/codex-rs/protocol/src/openai_models.rs
++++ b/codex-rs/protocol/src/openai_models.rs
+@@ -976,6 +976,43 @@
+             availability_nux: info.availability_nux,
+             supported_in_api: info.supported_in_api,
+             input_modalities: info.input_modalities,
++        }
++    }
++}
++
++impl From<&ModelInfo> for ModelPreset {
++    fn from(info: &ModelInfo) -> Self {
++        ModelPreset {
++            id: info.slug.clone(),
++            model: info.slug.clone(),
++            display_name: info.display_name.clone(),
++            description: info.description.clone().unwrap_or_default(),
++            model_specialty: info.model_specialty.clone(),
++            default_reasoning_effort: info
++                .default_reasoning_level
++                .clone()
++                .unwrap_or(ReasoningEffort::None),
++            supported_reasoning_efforts: info.supported_reasoning_levels.clone(),
++            supports_personality: false,
++            additional_speed_tiers: info.additional_speed_tiers.clone(),
++            service_tiers: info.service_tiers.clone(),
++            default_service_tier: info.default_service_tier.clone(),
++            available_access_programs: info.available_access_programs.clone(),
++            is_default: false, // default is the highest priority available model
++            upgrade: info.upgrade.as_ref().map(|upgrade| ModelUpgrade {
++                id: upgrade.model.clone(),
++                migration_config_key: info.slug.clone(),
++                // todo(aibrahim): add the model link here.
++                model_link: None,
++                upgrade_copy: None,
++                migration_markdown: Some(upgrade.migration_markdown.clone()),
++                retirement_at: upgrade.retirement_at,
++            }),
++            show_in_picker: info.visibility == ModelVisibility::List,
++            multi_agent_version: info.multi_agent_version,
++            availability_nux: info.availability_nux.clone(),
++            supported_in_api: info.supported_in_api,
++            input_modalities: info.input_modalities.clone(),
+         }
+     }
+ }

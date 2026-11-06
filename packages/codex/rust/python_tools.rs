@@ -4111,13 +4111,30 @@ pub(crate) mod managed_tests {
         url: &str,
         memory: bool,
     ) -> Arc<crate::engine::EngineState> {
+        real_engine_store_inner(directory, url, memory, false).await
+    }
+
+    async fn real_engine_store_with_stop_hook(
+        directory: &tempfile::TempDir,
+        url: &str,
+        memory: bool,
+    ) -> Arc<crate::engine::EngineState> {
+        real_engine_store_inner(directory, url, memory, true).await
+    }
+
+    async fn real_engine_store_inner(
+        directory: &tempfile::TempDir,
+        url: &str,
+        memory: bool,
+        completion_hook: bool,
+    ) -> Arc<crate::engine::EngineState> {
         let home = directory.path().join("home");
         let work = directory.path().join("work");
         let storage = directory.path().join("storage");
         for path in [&home, &work, &storage] {
             std::fs::create_dir(path).unwrap();
         }
-        let config = json!({
+        let mut config = json!({
             "model": "receipt-fixture",
             "model_provider": "fixture",
             "model_providers.fixture": {
@@ -4130,10 +4147,19 @@ pub(crate) mod managed_tests {
             "web_search": "disabled", "agents.enabled": false,
             "features.code_mode": false, "features.instant_interrupt": false
         });
-        let runtime = json!({
+        let mut runtime = json!({
             "codex_home": home, "cwd": work, "native_thread_store": storage,
             "codex_self_exe": null, "ephemeral": false
         });
+        if completion_hook {
+            config["features.hooks"] = json!(true);
+            config["hooks"] = json!({"Stop":[{"hooks":[{
+                "type":"command", "command":"exit 0", "async":false
+            }]}]});
+            // Only this literal fixture hook is present; ambient config is isolated.
+            runtime["bypass_hook_trust"] = json!(true);
+            config["model_post_turn_compact_threshold_percent"] = json!(0);
+        }
         Arc::new(
             crate::engine::EngineState::new(
                 config.to_string(),
@@ -4150,38 +4176,34 @@ pub(crate) mod managed_tests {
     async fn steering_real_last_request_gap_continues_once_and_rejects_abort_stop_or_supersession()
     {
         use crate::engine::settlement_tests::Provider;
-        use crate::storage::{CompletionHold, MemoryThreadStore};
+        use crate::storage::{HookCompletionFlushHold, MemoryThreadStore};
         use codex_protocol::protocol::Op;
         use codex_protocol::user_input::UserInput;
         use codex_thread_store::LoadThreadHistoryParams;
-        use tokio::sync::Semaphore;
 
         tokio::time::timeout(std::time::Duration::from_secs(55), async {
             for outcome in ["continue", "abort", "stop", "superseded"] {
                 let abort = outcome == "abort";
                 let provider = Provider::start().await;
                 let directory = tempfile::tempdir().unwrap();
-                let engine = real_engine_store(&directory, &provider.url, true).await;
+                let engine = real_engine_store_with_stop_hook(&directory, &provider.url, true).await;
                 let native = engine
                     .start_with_tools(Default::default(), None, Some(vec![]), false)
                     .await.unwrap();
                 let state = native.current().unwrap();
                 let store = engine.store.as_any().downcast_ref::<MemoryThreadStore>().unwrap();
-                // With no guardian, hooks, or subagents in this fixture, the
-                // next native flush after task startup is tasks/mod.rs' flush
-                // after RegularTask::run and before on_task_finished takes the
-                // active slot. The post-terminal flush must proceed freely.
-                let hold = Arc::new(CompletionHold {
-                    parent: state.id,
-                    entered: Semaphore::new(0),
-                    release: Semaphore::new(0),
-                });
-                *store.next_flush_hold.lock().unwrap() = Some(hold.clone());
+                // Let Stop finish, then hold the task-return durability flush.
+                // No late input exists until after the outer task loop exits.
+                let hold = Arc::new(HookCompletionFlushHold::new(
+                    state.id, codex_protocol::protocol::HookEventName::Stop,
+                ));
+                *store.hook_completion_flush_hold.lock().unwrap() = Some(hold.clone());
                 let started = crate::ops::submit_replaceable(&state, json!({
                     "input": [UserInput::Text { text: "initial request".into(), text_elements: vec![] }],
                 })).await.unwrap();
                 assert_eq!(started["status"], "started");
-                hold.entered.acquire().await.unwrap().forget();
+                hold.bind(started["turn_id"].as_str().unwrap());
+                hold.flush.entered.acquire().await.unwrap().forget();
                 assert_eq!(provider.requests.lock().unwrap().len(), 1,
                     "the barrier must be after the actual completed sample");
                 let accepted = crate::ops::submit_replaceable(&state, json!({
@@ -4191,10 +4213,10 @@ pub(crate) mod managed_tests {
                 assert_eq!(accepted, json!({"status": "steered", "turn_id": started["turn_id"]}));
                 if abort {
                     state.thread.submit(Op::Interrupt).await.unwrap();
-                    // The native force path cancels a task waiting in flush;
+                    // The native force path cancels a task in the final flush;
                     // it must report its real abort rather than the tail.
                 } else {
-                    hold.release.add_permits(1);
+                    hold.flush.release.add_permits(1);
                 }
                 loop {
                     let event = state.next_session_event().await.unwrap();
@@ -4206,11 +4228,15 @@ pub(crate) mod managed_tests {
                             Value::Null
                         } else {
                             Value::Bool(true)
-                        });
+                        }, "terminal={event}; requests={}",
+                            serde_json::to_string(&*provider.requests.lock().unwrap()).unwrap());
                         break;
                     }
                 }
                 assert_eq!(provider.requests.lock().unwrap().len(), 1);
+                if !abort {
+                    hold.assert_completed();
+                }
                 let continuation = json!({
                     "mode": "continue_if_idle", "input": [],
                     "expected_previous_turn_id": started["turn_id"],
@@ -4367,11 +4393,10 @@ pub(crate) mod managed_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn recovered_manual_turn_steering_in_final_gap_continues_once() {
         use crate::engine::settlement_tests::Provider;
-        use crate::storage::{CompletionHold, MemoryThreadStore};
+        use crate::storage::{HookCompletionFlushHold, MemoryThreadStore};
         use crate::{checkpoint, manual_checkpoint};
         use codex_protocol::dynamic_tools::DynamicToolResponse;
         use codex_protocol::user_input::UserInput;
-        use tokio::sync::Semaphore;
 
         tokio::time::timeout(std::time::Duration::from_secs(35), async {
             let provider = Provider::with_first_item(Some(json!({
@@ -4379,7 +4404,7 @@ pub(crate) mod managed_tests {
                 "arguments":"{}", "call_id":"call-lookup"
             }))).await;
             let directory = tempfile::tempdir().unwrap();
-            let engine = real_engine_store(&directory, &provider.url, true).await;
+            let engine = real_engine_store_with_stop_hook(&directory, &provider.url, true).await;
             let options = json!({
                 "_application_instructions":"Run lookup when requested.", "_manual_tool_slots":[0],
                 "tool_policy":{"allowed_tools":[{"namespace":"functions","name":"lookup"}]}
@@ -4413,7 +4438,7 @@ pub(crate) mod managed_tests {
             // Use the real validated v3 restore and current catalog, exactly as
             // the native entrypoint does. No saved frame grants a direct reply.
             let restored_directory = tempfile::tempdir().unwrap();
-            let restored_engine = real_engine_store(&restored_directory, &provider.url, true).await;
+            let restored_engine = real_engine_store_with_stop_hook(&restored_directory, &provider.url, true).await;
             let restored_options: crate::options::ThreadOptions = serde_json::from_value(options).unwrap();
             let restored_specs: Vec<codex_core_api::DynamicToolSpec> =
                 serde_json::from_value(specs).unwrap();
@@ -4444,16 +4469,17 @@ pub(crate) mod managed_tests {
             assert!(!tools.check_manual(&resumed.id.to_string(), &grant));
 
             let store = restored_engine.store.as_any().downcast_ref::<MemoryThreadStore>().unwrap();
-            let hold = Arc::new(CompletionHold {
-                parent: resumed.id, entered: Semaphore::new(0), release: Semaphore::new(0)
-            });
-            *store.next_flush_hold.lock().unwrap() = Some(hold.clone());
+            let hold = Arc::new(HookCompletionFlushHold::new(
+                resumed.id, codex_protocol::protocol::HookEventName::Stop,
+            ));
+            hold.bind(original["turn_id"].as_str().unwrap());
+            *store.hook_completion_flush_hold.lock().unwrap() = Some(hold.clone());
             let recovery_state = resumed.clone();
             let manual = restored.manual.clone();
             let recovering = tokio::spawn(async move {
                 manual_checkpoint::continue_if_ready(&recovery_state, &manual, None, None).await.unwrap()
             });
-            hold.entered.acquire().await.unwrap().forget();
+            hold.flush.entered.acquire().await.unwrap().forget();
             assert_eq!(provider.requests.lock().unwrap().len(), 2,
                 "the restored native barrier must be after its completed model sample");
             let recovered = recovering.await.unwrap();
@@ -4465,17 +4491,20 @@ pub(crate) mod managed_tests {
                 }]
             })).await.unwrap();
             assert_eq!(steer, json!({"status":"steered","turn_id":recovered["turn_id"]}));
-            hold.release.add_permits(1);
+            hold.flush.release.add_permits(1);
             loop {
                 let event = resumed.next_session_event().await.unwrap();
                 let kind = event["msg"]["type"].as_str().unwrap_or("");
                 if ["turn_aborted", "task_complete", "turn_complete"].contains(&kind) {
                     assert_ne!(kind, "turn_aborted", "{event}");
                     assert_eq!(event["msg"]["turn_id"], recovered["turn_id"]);
-                    assert_eq!(event["sdk_unsampled_steering"], true);
+                    assert_eq!(event["sdk_unsampled_steering"], true,
+                        "terminal={event}; requests={}",
+                        serde_json::to_string(&*provider.requests.lock().unwrap()).unwrap());
                     break;
                 }
             }
+            hold.assert_completed();
             let continuation = json!({
                 "mode":"continue_if_idle", "input":[],
                 "expected_previous_turn_id":recovered["turn_id"],
@@ -5041,8 +5070,13 @@ pub(crate) mod managed_tests {
             ToolPolicy::default(),
             DynamicToolSpec::Function(function("lookup")),
         );
-        let first = Arc::new(PythonTools::descendant(&root, "runtime-a".into()));
-        let second = Arc::new(PythonTools::descendant(&root, "runtime-b".into()));
+        let first_thread = ExtensionData::new("first");
+        let first = first_thread.get_or_init(|| PythonTools::descendant(&root, "runtime-a".into()));
+        let second_thread = ExtensionData::new("second");
+        let second =
+            second_thread.get_or_init(|| PythonTools::descendant(&root, "runtime-b".into()));
+        let _first_turn = start_admission(&first_thread, "turn").await;
+        let _second_turn = start_admission(&second_thread, "turn").await;
         root.family.members.write().unwrap().extend([
             ("first".into(), Arc::downgrade(&first)),
             ("second".into(), Arc::downgrade(&second)),
@@ -5085,6 +5119,7 @@ pub(crate) mod managed_tests {
         );
         let thread = ExtensionData::new("child");
         let old = thread.get_or_init(|| PythonTools::descendant(&root, "old-runtime".into()));
+        let _old_turn = start_admission(&thread, "turn").await;
         root.family
             .members
             .write()
@@ -5112,7 +5147,10 @@ pub(crate) mod managed_tests {
             })
             .await;
         assert!(reply.await.is_err());
-        let replacement = Arc::new(PythonTools::descendant(&root, "new-runtime".into()));
+        let replacement_thread = ExtensionData::new("child");
+        let replacement =
+            replacement_thread.get_or_init(|| PythonTools::descendant(&root, "new-runtime".into()));
+        let _replacement_turn = start_admission(&replacement_thread, "turn").await;
         root.family
             .members
             .write()

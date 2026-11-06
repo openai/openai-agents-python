@@ -1,0 +1,232 @@
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index fba7e1c9fdc574d0c3c77dfb7ce043d2a844f3a3..a94e6714d6acb4be81ca61b30201c26c3db88e6a 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -3472,7 +3472,11 @@ impl Config {
+             .into_iter()
+             .map(|path| AbsolutePathBuf::resolve_path_against_base(path, resolved_cwd.as_path()))
+             .collect();
+-        let repo_root = resolve_root_git_project_for_trust(fs, &resolved_cwd).await;
++        let repo_root = if cfg.projects.as_ref().is_some_and(|projects| !projects.is_empty()) {
++            resolve_root_git_project_for_trust(fs, &resolved_cwd).await
++        } else {
++            None
++        };
+         let active_project = cfg
+             .get_active_project(
+                 resolved_cwd.as_path(),
+@@ -4974,3 +4978,7 @@ mod tests;
+ #[cfg(test)]
+ #[path = "config_loader_tests.rs"]
+ mod config_loader_tests;
++
++#[cfg(test)]
++#[path = "project_trust_scan_tests.rs"]
++mod project_trust_scan_tests;
+diff --git a/codex-rs/core/src/config/project_trust_scan_tests.rs b/codex-rs/core/src/config/project_trust_scan_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5a2500ba99902e7131c456d460466bf1c336d55b
+--- /dev/null
++++ b/codex-rs/core/src/config/project_trust_scan_tests.rs
+@@ -0,0 +1,201 @@
++//! An absent project table cannot consume repository trust-root discovery.
++use super::*;
++use codex_file_system::CopyOptions;
++use codex_file_system::CreateDirectoryOptions;
++use codex_file_system::ExecutorFileSystemFuture;
++use codex_file_system::FileMetadata;
++use codex_file_system::FileSystemReadStream;
++use codex_file_system::FileSystemSandboxContext;
++use codex_file_system::GetMetadataOptions;
++use codex_file_system::ReadDirectoryEntry;
++use codex_file_system::ReadFileOptions;
++use codex_file_system::RemoveOptions;
++use codex_file_system::WalkOptions;
++use codex_file_system::WalkOutcome;
++use codex_file_system::WriteFileOptions;
++use codex_protocol::config_types::TrustLevel;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++
++#[derive(Default)]
++struct RecordingTrustFileSystem {
++    git_queries: AtomicUsize,
++}
++
++impl RecordingTrustFileSystem {
++    fn record(&self, path: &PathUri) {
++        if path.to_abs_path().is_ok_and(|path| {
++            path.as_path()
++                .components()
++                .any(|part| part.as_os_str() == ".git")
++        }) {
++            self.git_queries.fetch_add(1, Ordering::Relaxed);
++        }
++    }
++}
++
++// Delegate normal configuration/filesystem behavior. Only Git-path observations
++// differ; do not replace Config's real lookup or trust-selection operations.
++impl ExecutorFileSystem for RecordingTrustFileSystem {
++    fn canonicalize<'a>(
++        &'a self,
++        path: &'a PathUri,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, PathUri> {
++        self.record(path);
++        LOCAL_FS.canonicalize(path, sandbox)
++    }
++    fn read_file<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: ReadFileOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<u8>> {
++        self.record(path);
++        LOCAL_FS.read_file(path, options, sandbox)
++    }
++    fn read_file_stream<'a>(
++        &'a self,
++        path: &'a PathUri,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, FileSystemReadStream> {
++        self.record(path);
++        LOCAL_FS.read_file_stream(path, sandbox)
++    }
++    fn write_file<'a>(
++        &'a self,
++        path: &'a PathUri,
++        contents: Vec<u8>,
++        options: WriteFileOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, ()> {
++        LOCAL_FS.write_file(path, contents, options, sandbox)
++    }
++    fn create_directory<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: CreateDirectoryOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, ()> {
++        LOCAL_FS.create_directory(path, options, sandbox)
++    }
++    fn get_metadata<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: GetMetadataOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, FileMetadata> {
++        self.record(path);
++        LOCAL_FS.get_metadata(path, options, sandbox)
++    }
++    fn read_directory<'a>(
++        &'a self,
++        path: &'a PathUri,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, Vec<ReadDirectoryEntry>> {
++        self.record(path);
++        LOCAL_FS.read_directory(path, sandbox)
++    }
++    fn walk<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: WalkOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, WalkOutcome> {
++        LOCAL_FS.walk(path, options, sandbox)
++    }
++    fn remove<'a>(
++        &'a self,
++        path: &'a PathUri,
++        options: RemoveOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, ()> {
++        LOCAL_FS.remove(path, options, sandbox)
++    }
++    fn copy<'a>(
++        &'a self,
++        source: &'a PathUri,
++        destination: &'a PathUri,
++        options: CopyOptions,
++        sandbox: Option<&'a FileSystemSandboxContext>,
++    ) -> ExecutorFileSystemFuture<'a, ()> {
++        LOCAL_FS.copy(source, destination, options, sandbox)
++    }
++}
++
++fn synthetic_repo(root: &Path) -> PathBuf {
++    std::fs::create_dir_all(root.join(".git")).unwrap();
++    std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
++    let cwd = root.join("nested/working");
++    std::fs::create_dir_all(&cwd).unwrap();
++    cwd
++}
++
++#[tokio::test]
++async fn absent_or_empty_projects_skip_git_probes_and_keep_untrusted_defaults() {
++    for projects in [None, Some(HashMap::new())] {
++        let temp = tempfile::TempDir::new().unwrap();
++        let cwd = synthetic_repo(temp.path());
++        let home = tempfile::TempDir::new().unwrap();
++        let fs = RecordingTrustFileSystem::default();
++        let config = Config::load_config_with_layer_stack(
++            &fs,
++            ConfigToml {
++                projects,
++                ..Default::default()
++            },
++            ConfigOverrides {
++                cwd: Some(cwd.clone()),
++                ..Default::default()
++            },
++            AbsolutePathBuf::from_absolute_path(home.path()).unwrap(),
++            ConfigLayerStack::default(),
++        )
++        .await
++        .unwrap();
++        assert_eq!(fs.git_queries.load(Ordering::Relaxed), 0);
++        assert_eq!(config.active_project.trust_level, None);
++        assert_eq!(config.cwd.as_path(), cwd.as_path());
++        let permissions = config.permissions.file_system_sandbox_policy();
++        assert!(permissions.can_read_local_path_with_cwd(&cwd, &cwd));
++        assert!(!permissions.can_write_local_path_with_cwd(&cwd, &cwd));
++    }
++}
++
++#[tokio::test]
++async fn nonempty_projects_resolve_nested_repository_root_with_current_trust() {
++    for trust in [TrustLevel::Trusted, TrustLevel::Untrusted] {
++        let temp = tempfile::TempDir::new().unwrap();
++        let cwd = synthetic_repo(temp.path());
++        let home = tempfile::TempDir::new().unwrap();
++        let fs = RecordingTrustFileSystem::default();
++        let config = Config::load_config_with_layer_stack(
++            &fs,
++            ConfigToml {
++                projects: Some(HashMap::from([(
++                    temp.path().to_string_lossy().into_owned(),
++                    ProjectConfig {
++                        trust_level: Some(trust.clone()),
++                    },
++                )])),
++                ..Default::default()
++            },
++            ConfigOverrides {
++                cwd: Some(cwd),
++                ..Default::default()
++            },
++            AbsolutePathBuf::from_absolute_path(home.path()).unwrap(),
++            ConfigLayerStack::default(),
++        )
++        .await
++        .unwrap();
++        assert!(fs.git_queries.load(Ordering::Relaxed) > 0);
++        assert_eq!(config.active_project.trust_level, Some(trust.clone()));
++        if trust == TrustLevel::Untrusted {
++            assert_eq!(
++                config.permissions.approval_policy.value(),
++                AskForApproval::UnlessTrusted
++            );
++        }
++    }
++}

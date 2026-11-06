@@ -1,0 +1,842 @@
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index e4edf0e7059df4f8f4789f75cd013a9466bb19ae..a9f6e914a1099a2bbca2c2ef00aac7c48ef18a77 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -272,6 +272,7 @@ pub struct ModelClient {
+     codex_responses_headers: Option<Arc<CodexResponsesHeaders>>,
+     event_sender: Option<Sender<ProtocolEvent>>,
+     http_client_factory: HttpClientFactory,
++    sdk_model_http_pool: Option<Arc<codex_http_client::SdkModelHttpPool>>,
+     restored_history: bool,
+     request_contributors: Vec<Arc<dyn codex_extension_api::ModelRequestContributor>>,
+     executed_tool_calls: Option<ExecutedToolCalls>,
+@@ -541,6 +542,7 @@ impl ModelClient {
+             codex_responses_headers: None,
+             event_sender: None,
+             http_client_factory,
++            sdk_model_http_pool: None,
+             restored_history: false,
+             request_contributors,
+             executed_tool_calls: None,
+@@ -549,6 +551,14 @@ impl ModelClient {
+         }
+     }
+ 
++    pub(crate) fn with_sdk_model_http_pool(
++        mut self,
++        pool: Option<Arc<codex_http_client::SdkModelHttpPool>>,
++    ) -> Self {
++        self.sdk_model_http_pool = pool;
++        self
++    }
++
+     pub(crate) fn with_executed_tool_calls(mut self, recorder: ExecutedToolCalls) -> Self {
+         self.executed_tool_calls = Some(recorder);
+         self
+@@ -1194,6 +1204,28 @@ impl ModelClient {
+         } else {
+             redirect_policy
+         };
++        // Session startup attaches this only for an explicit API-key SDK Provider.
++        // Resolve current auth/provider/routing before reaching this transport seam.
++        if endpoint == "/responses"
++            && !api_provider.headers.contains_key(http::header::COOKIE)
++            && !api_provider
++                .headers
++                .contains_key(codex_model_provider::ACCOUNT_ROUTING_HEADER)
++            && !self.state.provider.auth_manager().is_some_and(|manager| {
++                manager
++                    .auth_mode()
++                    .is_some_and(|mode| mode != AuthMode::ApiKey)
++            })
++            && let Some(pool) = &self.sdk_model_http_pool
++            && let Some(client) = pool.client(
++                &self.http_client_factory,
++                &api_provider.url_for_path(endpoint),
++                redirect_policy == ClientRedirectPolicy::Reject,
++                codex_login::default_client::default_headers(),
++            )?
++        {
++            return Ok(ReqwestTransport::from_http_client(client));
++        }
+         let client = create_client_for_route(
+             &self.http_client_factory,
+             &api_provider.url_for_path(endpoint),
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 6d8a9a49837f2054019683123a1199504ae16204..1bd355b6afbe4d5a5d2fcee6b1f563902fd780d5 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1702,6 +1702,7 @@ impl Session {
+                 &config.features,
+                 &initial_history,
+             );
++            let sdk_model_http_pool = thread_extension_data.get::<codex_http_client::SdkModelHttpPool>();
+             let codex_responses_headers = thread_extension_data.get::<crate::CodexResponsesHeaders>();
+             // Ephemeral title requests use request-level effort even when managed settings
+             // enable overrides. The client-supplied tag selects cache behavior, not permissions.
+@@ -1788,6 +1789,7 @@ impl Session {
+                     workspace_routing.as_ref().clone(),
+                     extensions.model_request_contributors().to_vec(),
+                 )
++                .with_sdk_model_http_pool(sdk_model_http_pool)
+                 .with_executed_tool_calls(executed_tool_calls.clone())
+                 .with_restored_history(matches!(
+                     &initial_history,
+diff --git a/codex-rs/http-client/src/client.rs b/codex-rs/http-client/src/client.rs
+index c5c2e40bba02d337cbb7602909d9492054d55ed4..49db9caa234dd96b532f2aa4af4a66e911010c0b 100644
+--- a/codex-rs/http-client/src/client.rs
++++ b/codex-rs/http-client/src/client.rs
+@@ -83,6 +83,17 @@ impl HttpClient {
+         }
+     }
+ 
++    /// Replaces wrapper defaults without changing the shared connection client.
++    /// SDK pooling uses this to keep process defaults fresh and cache no headers.
++    #[doc(hidden)]
++    pub fn with_sdk_default_headers(mut self, headers: HeaderMap) -> Self {
++        match &mut self.backend {
++            HttpClientBackend::Direct(client) => client.default_headers = Arc::new(headers),
++            HttpClientBackend::Routed(pool) => Arc::make_mut(pool).default_headers = headers,
++        }
++        self
++    }
++
+     pub fn get<U: IntoUrl>(&self, url: U) -> RequestBuilder {
+         self.request(Method::GET, url)
+     }
+diff --git a/codex-rs/http-client/src/client_builder.rs b/codex-rs/http-client/src/client_builder.rs
+index d3b8054767a89c56ac5209ba9aa87508a7b73746..30a68449d44214e4693c5d5874eb8a45a88952cc 100644
+--- a/codex-rs/http-client/src/client_builder.rs
++++ b/codex-rs/http-client/src/client_builder.rs
+@@ -239,6 +239,37 @@ impl HttpClientBuilder {
+         self.build_with_proxy_routing(ProxyRouting::TransportDefault)
+     }
+ 
++    /// Builds an admitted SDK direct client from its exact CA receipt.
++    pub(crate) fn build_sdk_model_snapshot(
++        mut self,
++        snapshot: &crate::custom_ca::SdkModelCaSnapshot,
++        max_idle_per_host: usize,
++        idle_timeout: std::time::Duration,
++        redirect_observed: impl Fn() + Send + Sync + 'static,
++    ) -> Result<HttpClient, BuildCustomCaTransportError> {
++        let request_logging = self.request_logging;
++        let default_headers = self.default_headers.take().unwrap_or_default();
++        let follow_redirects = self.follow_redirects;
++        // Admission proves that current ReqwestDefault routing is direct. Pin that
++        // captured route so later ambient proxy changes cannot poison the cache key.
++        let mut builder = self
++            .reqwest_builder(ProxyRouting::Direct)
++            .pool_max_idle_per_host(max_idle_per_host)
++            .pool_idle_timeout(idle_timeout);
++        if follow_redirects {
++            builder = builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
++                redirect_observed();
++                reqwest::redirect::Policy::default().redirect(attempt)
++            }));
++        }
++        let inner = snapshot.build(builder)?;
++        Ok(HttpClient::from_parts(
++            inner,
++            request_logging,
++            default_headers,
++        ))
++    }
++
+     /// Builds a client that connects directly without using a proxy.
+     ///
+     /// # Exceptional use only
+diff --git a/codex-rs/http-client/src/custom_ca.rs b/codex-rs/http-client/src/custom_ca.rs
+index c9a14688cc94bd22e5d8b9013e8a755bb8b993ad..66eb59be2a36c32ddcbd2661831eb3d253dcf61e 100644
+--- a/codex-rs/http-client/src/custom_ca.rs
++++ b/codex-rs/http-client/src/custom_ca.rs
+@@ -490,10 +490,19 @@ impl ConfiguredCaBundle {
+         &self,
+         cache: &Mutex<ReqwestCaCache>,
+     ) -> Result<Arc<[reqwest::Certificate]>, BuildCustomCaTransportError> {
++        self.load_reqwest_certificates_and_digest(cache)
++            .map(|(certificates, _, _)| certificates)
++    }
++
++    fn load_reqwest_certificates_and_digest(
++        &self,
++        cache: &Mutex<ReqwestCaCache>,
++    ) -> Result<(Arc<[reqwest::Certificate]>, [u8; 32], bool), BuildCustomCaTransportError> {
+         // Always read first, including after a hit. Rotation, deletion and access
+         // errors retain their current file/env context; errors are never cached.
+         let result = (|| {
+             let pem_data = self.read_pem_data()?;
++            let digest = Sha256::digest(&pem_data).into();
+             // Keep PEM normalization and its tracing events outside the lock.
+             // Cache only the expensive reqwest/native-TLS certificate wrappers.
+             let certificates = self.parse_certificate_bytes(&pem_data)?;
+@@ -531,9 +540,8 @@ impl ConfiguredCaBundle {
+                 || certificates.len() > CA_CACHE_MAX_CERTIFICATES
+                 || der_bytes > CA_CACHE_MAX_BYTES
+             {
+-                return parse().map(|(certificates, _)| certificates);
++                return parse().map(|(certificates, _)| (certificates, digest, false));
+             }
+-            let digest = Sha256::digest(&pem_data).into();
+             // Coalesce concurrent wrapper construction. No file I/O, tracing,
+             // await or client construction occurs under this lock. A poisoned cache can
+             // recover: entries change only after a successful parse completes.
+@@ -541,6 +549,7 @@ impl ConfiguredCaBundle {
+                 .lock()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+                 .load(digest, parse)
++                .map(|certificates| (certificates, digest, true))
+         })();
+         match &result {
+             Ok(_) => {}
+@@ -952,6 +961,42 @@ mod tests {
+             BuildCustomCaTransportError::InvalidCaFile { .. }
+         ));
+     }
++    #[test]
++    fn sdk_ca_receipt_revalidates_current_bytes_and_errors_after_success() {
++        let dir = TempDir::new().unwrap();
++        let path = write_cert_file(&dir, "sdk-ca.pem", TEST_CERT);
++        let env = map_env(&[(SSL_CERT_FILE_ENV, path.to_str().unwrap())]);
++        let first = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
++        let same = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
++        assert_eq!(first.digest(), same.digest());
++        let (Some((_, first_certs, _, _)), Some((_, same_certs, _, _))) =
++            (&first.bundle, &same.bundle)
++        else {
++            panic!("expected custom CA")
++        };
++        assert!(std::sync::Arc::ptr_eq(first_certs, same_certs));
++        fs::write(
++            &path,
++            include_str!("../tests/fixtures/test-intermediate.pem"),
++        )
++        .unwrap();
++        let rotated = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
++        assert_ne!(first.digest(), rotated.digest());
++        fs::write(&path, "invalid PEM").unwrap();
++        assert!(super::SdkModelCaSnapshot::load_with_env(&env).is_err());
++        fs::remove_file(&path).unwrap();
++        assert!(super::SdkModelCaSnapshot::load_with_env(&env).is_err());
++    }
++
++    #[test]
++    fn sdk_oversized_receipt_is_valid_but_not_retained() {
++        let dir = TempDir::new().unwrap();
++        let large = format!("{}{}", TEST_CERT, "\n".repeat(super::CA_CACHE_MAX_BYTES));
++        let path = write_cert_file(&dir, "sdk-large.pem", &large);
++        let env = map_env(&[(SSL_CERT_FILE_ENV, path.to_str().unwrap())]);
++        let receipt = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
++        assert!(!receipt.admissible());
++    }
+ }
+ 
+ #[cfg(test)]
+@@ -961,3 +1006,69 @@ mod tls_tests;
+ #[cfg(test)]
+ #[path = "custom_ca_cache_tests.rs"]
+ mod cache_tests;
++
++// A successful receipt validates exactly the freshly read bytes used for its hash.
++// The construction receipt holds its path only for scoped build errors. Pool entries
++// retain neither that receipt/path nor raw PEM, private material or error values.
++pub(crate) struct SdkModelCaSnapshot {
++    bundle: Option<(
++        ConfiguredCaBundle,
++        Arc<[reqwest::Certificate]>,
++        [u8; 32],
++        bool,
++    )>,
++}
++
++impl SdkModelCaSnapshot {
++    pub(crate) fn load() -> Result<Self, BuildCustomCaTransportError> {
++        Self::load_with_env(&ProcessEnv)
++    }
++
++    fn load_with_env(env: &dyn EnvSource) -> Result<Self, BuildCustomCaTransportError> {
++        let bundle = match env.configured_ca_bundle() {
++            Some(bundle) => {
++                let (certificates, digest, admissible) =
++                    bundle.load_reqwest_certificates_and_digest(&REQWEST_CA_CACHE)?;
++                Some((bundle, certificates, digest, admissible))
++            }
++            None => None,
++        };
++        Ok(Self { bundle })
++    }
++
++    pub(crate) fn digest(&self) -> Option<[u8; 32]> {
++        self.bundle.as_ref().map(|(_, _, digest, _)| *digest)
++    }
++
++    pub(crate) fn admissible(&self) -> bool {
++        self.bundle
++            .as_ref()
++            .is_none_or(|(_, _, _, admissible)| *admissible)
++    }
++
++    pub(crate) fn build(
++        &self,
++        mut builder: reqwest::ClientBuilder,
++    ) -> Result<reqwest::Client, BuildCustomCaTransportError> {
++        if let Some((bundle, certificates, _, _)) = &self.bundle {
++            ensure_rustls_crypto_provider();
++            // Only SSL_CERT_FILE with SSL_CERT_DIR absent can reach this SDK path.
++            // rustls-native-certs would otherwise reopen this same file. Its roots
++            // are already present in the validated snapshot; keep webpki roots.
++            builder = builder.use_rustls_tls().tls_built_in_native_certs(false);
++            for certificate in certificates.iter() {
++                builder = builder.add_root_certificate(certificate.clone());
++            }
++            return builder.build().map_err(|source| {
++                BuildCustomCaTransportError::BuildClientWithCustomCa {
++                    source_env: bundle.source_env,
++                    path: bundle.path.clone(),
++                    source,
++                }
++            });
++        }
++        builder
++            .build()
++            .map_err(BuildCustomCaTransportError::BuildClientWithSystemRoots)
++    }
++}
+diff --git a/codex-rs/http-client/src/lib.rs b/codex-rs/http-client/src/lib.rs
+index 5eb01f021b263fee0100435a2af5aec4a10c1d3b..f107950f089cd491532d458974c7380b6c60887a 100644
+--- a/codex-rs/http-client/src/lib.rs
++++ b/codex-rs/http-client/src/lib.rs
+@@ -14,6 +14,7 @@ mod response;
+ mod retry_after;
+ mod route_aware_client_pool;
+ mod route_aware_redirect;
++mod sdk_model_http_pool;
+ mod tls_backend_fallback;
+ mod transport;
+ 
+@@ -76,3 +77,6 @@ mod windows_tls;
+ 
+ #[cfg(windows)]
+ pub use crate::windows_tls::build_windows_platform_tls_config;
++
++#[doc(hidden)]
++pub use crate::sdk_model_http_pool::SdkModelHttpPool;
+diff --git a/codex-rs/http-client/src/route_aware_client_pool.rs b/codex-rs/http-client/src/route_aware_client_pool.rs
+index 905aaf8f0dd11598b9ff4e31e03bb3e42c8bec89..28104827934e95dd644ae8f1072dfec05b4114de 100644
+--- a/codex-rs/http-client/src/route_aware_client_pool.rs
++++ b/codex-rs/http-client/src/route_aware_client_pool.rs
+@@ -54,7 +54,7 @@ pub struct RouteAwareClientPool {
+     http_client_factory: HttpClientFactory,
+     route_class: ClientRouteClass,
+     pub(crate) client_builder: HttpClientBuilder,
+-    default_headers: HeaderMap,
++    pub(crate) default_headers: HeaderMap,
+     custom_ca_fallback: CustomCaFallback,
+     clients: Arc<Mutex<HashMap<OutboundProxyRoute, TransportClient>>>,
+     client_build: Arc<tokio::sync::Mutex<()>>,
+diff --git a/codex-rs/http-client/src/sdk_model_http_pool.rs b/codex-rs/http-client/src/sdk_model_http_pool.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4da517a2b7b82e3dab50329341db3822a5c61356
+--- /dev/null
++++ b/codex-rs/http-client/src/sdk_model_http_pool.rs
+@@ -0,0 +1,500 @@
++//! SDK Provider-owned connection reuse, deliberately restricted to legacy unmanaged HTTP.
++//! Ordinary system trust is captured for this owner's lifetime. Explicit SSL_CERT_FILE
++//! trust is revalidated on every checkout; all other transports keep their original builder.
++use std::collections::VecDeque;
++use std::io;
++use std::sync::{Arc, Mutex, Weak};
++
++use http::HeaderMap;
++
++use crate::custom_ca::SdkModelCaSnapshot;
++use crate::{HttpClient, HttpClientBuilder, HttpClientFactory, OutboundProxyPolicy};
++
++const MAX_CLIENTS: usize = 4;
++const MAX_IDLE_PER_HOST: usize = 32;
++const IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
++const ROUTING_PROXY_ENV: &[&str] = &[
++    "HTTP_PROXY",
++    "http_proxy",
++    "HTTPS_PROXY",
++    "https_proxy",
++    "ALL_PROXY",
++    "all_proxy",
++];
++
++#[derive(Clone, PartialEq, Eq)]
++struct Key {
++    factory: HttpClientFactory,
++    origin: String,
++    reject_redirects: bool,
++    ca_digest: Option<[u8; 32]>,
++}
++struct Entry {
++    key: Key,
++    token: Arc<()>,
++    client: HttpClient,
++}
++#[derive(Default)]
++struct State {
++    closed: bool,
++    clients: VecDeque<Entry>,
++    ca_digest: Option<Option<[u8; 32]>>,
++}
++
++/// An uncredentialed socket owner carried through typed SDK thread extension data.
++/// Dropping a Session does not drop its Provider's idle connections.
++#[derive(Clone, Default)]
++pub struct SdkModelHttpPool {
++    state: Arc<Mutex<State>>,
++}
++impl std::fmt::Debug for SdkModelHttpPool {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("SdkModelHttpPool").finish_non_exhaustive()
++    }
++}
++impl SdkModelHttpPool {
++    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
++        self.state
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++    }
++
++    /// Called only after the Provider has joined every native owner.
++    pub fn close(&self) {
++        let clients = {
++            let mut state = self.lock();
++            state.closed = true;
++            std::mem::take(&mut state.clients)
++        };
++        // Drop socket clients outside the state lock, before joined close completes.
++        drop(clients);
++    }
++
++    fn invalidate(&self) {
++        let clients = {
++            let mut state = self.lock();
++            state.ca_digest = None;
++            std::mem::take(&mut state.clients)
++        };
++        drop(clients);
++    }
++
++    /// None asks the caller to run its exact existing fresh construction path.
++    /// This function performs no I/O other than existing CA reads and client construction.
++    pub fn client(
++        &self,
++        factory: &HttpClientFactory,
++        request_url: &str,
++        reject_redirects: bool,
++        headers: HeaderMap,
++    ) -> io::Result<Option<HttpClient>> {
++        if self.lock().closed {
++            return Err(io::Error::other("Provider model HTTP pool is closed"));
++        }
++        let Ok(url) = reqwest::Url::parse(request_url) else {
++            return Ok(None);
++        };
++        // Admit only an explicitly captured direct route. The six routing proxy variables
++        // must be absent, including empty/non-Unicode values. NO_PROXY alone cannot route.
++        // Platform proxy services, sandbox bypass, explicit cookies and managed clients
++        // retain their original builder and permit checks.
++        if !cfg!(target_os = "linux")
++            || factory.network_policy().is_managed()
++            || factory.has_chatgpt_cookies()
++            || factory.outbound_proxy_policy() != OutboundProxyPolicy::ReqwestDefault
++            || ROUTING_PROXY_ENV
++                .iter()
++                .any(|name| std::env::var_os(name).is_some())
++            || std::env::var_os("REQUEST_METHOD").is_some()
++            || std::env::var_os("CODEX_SANDBOX").is_some()
++            || std::env::var_os("CODEX_CA_CERTIFICATE").is_some()
++            || std::env::var_os("SSL_CERT_DIR").is_some()
++            || !matches!(url.scheme(), "http" | "https")
++            || !url.username().is_empty()
++            || url.password().is_some()
++            || url.host_str().is_none_or(crate::is_allowed_chatgpt_host)
++        {
++            return Ok(None);
++        }
++        // Empty/non-Unicode file overrides are unsupported, never mistaken for OS defaults.
++        if std::env::var_os("SSL_CERT_FILE").is_some()
++            && std::env::var("SSL_CERT_FILE")
++                .ok()
++                .is_none_or(|value| value.is_empty())
++        {
++            self.invalidate();
++            return Ok(None);
++        }
++        let snapshot = match SdkModelCaSnapshot::load() {
++            Ok(snapshot) => snapshot,
++            Err(_) => {
++                self.invalidate();
++                // Preserve the legacy builder's complete logging/error/fallback behavior.
++                return Ok(None);
++            }
++        };
++        if !snapshot.admissible() {
++            self.invalidate();
++            return Ok(None);
++        }
++        let key = Key {
++            factory: factory.clone(),
++            origin: url.origin().ascii_serialization(),
++            reject_redirects,
++            ca_digest: snapshot.digest(),
++        };
++        let owner = Arc::downgrade(&self.state);
++        self.client_with_key(key, headers, |token| {
++            let mut builder = HttpClientBuilder::new().with_chatgpt_cloudflare_cookie_store();
++            if reject_redirects {
++                builder = builder.without_redirects();
++            }
++            builder
++                .build_sdk_model_snapshot(&snapshot, MAX_IDLE_PER_HOST, IDLE_TIMEOUT, move || {
++                    // A redirected client remains owned by its active request, never the Provider.
++                    // The unique token prevents an old client's callback evicting its replacement.
++                    retire_redirected(&owner, &token);
++                })
++                .ok()
++        })
++    }
++
++    fn client_with_key(
++        &self,
++        key: Key,
++        headers: HeaderMap,
++        build: impl FnOnce(Arc<()>) -> Option<HttpClient>,
++    ) -> io::Result<Option<HttpClient>> {
++        let retired = {
++            let mut state = self.lock();
++            if state.closed {
++                return Err(io::Error::other("Provider model HTTP pool is closed"));
++            }
++            let retired = if state.ca_digest != Some(key.ca_digest) {
++                state.ca_digest = Some(key.ca_digest);
++                std::mem::take(&mut state.clients)
++            } else {
++                VecDeque::new()
++            };
++            if let Some(index) = state.clients.iter().position(|entry| entry.key == key) {
++                let entry = state.clients.remove(index).expect("located SDK client");
++                let client = entry.client.clone().with_sdk_default_headers(headers);
++                state.clients.push_back(entry);
++                return Ok(Some(client));
++            }
++            retired
++        };
++        drop(retired);
++        // Synchronous construction stays owned by the initiating native operation.
++        // No lock spans a build, file read, await, or background task.
++        let token = Arc::new(());
++        let Some(client) = build(token.clone()) else {
++            self.invalidate();
++            return Ok(None);
++        };
++        let neutral = client.with_sdk_default_headers(HeaderMap::new());
++        let mut state = self.lock();
++        if state.closed {
++            return Err(io::Error::other("Provider model HTTP pool is closed"));
++        }
++        if state.ca_digest == Some(key.ca_digest)
++            && !state.clients.iter().any(|entry| entry.key == key)
++        {
++            let evicted = if state.clients.len() == MAX_CLIENTS {
++                state.clients.pop_front()
++            } else {
++                None
++            };
++            state.clients.push_back(Entry {
++                key,
++                token,
++                client: neutral.clone(),
++            });
++            drop(state);
++            drop(evicted);
++        }
++        Ok(Some(neutral.with_sdk_default_headers(headers)))
++    }
++}
++
++fn retire_redirected(owner: &Weak<Mutex<State>>, token: &Arc<()>) {
++    if let Some(owner) = owner.upgrade() {
++        let retired = {
++            let mut state = owner
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let index = state
++                .clients
++                .iter()
++                .position(|entry| Arc::ptr_eq(&entry.token, token));
++            index.and_then(|index| state.clients.remove(index))
++        };
++        drop(retired);
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::sync::atomic::{AtomicUsize, Ordering};
++
++    fn key(origin: &str) -> Key {
++        Key {
++            factory: HttpClientFactory::new(OutboundProxyPolicy::ReqwestDefault),
++            origin: origin.into(),
++            reject_redirects: false,
++            ca_digest: None,
++        }
++    }
++    fn client() -> HttpClient {
++        HttpClient::new(
++            reqwest::Client::builder()
++                .use_rustls_tls()
++                .tls_built_in_root_certs(false)
++                .no_proxy()
++                .build()
++                .unwrap(),
++        )
++    }
++
++    #[test]
++    fn reuses_success_but_never_caches_failed_construction() {
++        let pool = SdkModelHttpPool::default();
++        let builds = AtomicUsize::new(0);
++        for _ in 0..2 {
++            assert!(
++                pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++                    builds.fetch_add(1, Ordering::SeqCst);
++                    None
++                })
++                .unwrap()
++                .is_none()
++            );
++        }
++        for _ in 0..3 {
++            assert!(
++                pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++                    builds.fetch_add(1, Ordering::SeqCst);
++                    Some(client())
++                })
++                .unwrap()
++                .is_some()
++            );
++        }
++        assert_eq!(builds.load(Ordering::SeqCst), 3);
++    }
++
++    #[test]
++    fn root_rotation_and_invalidation_require_new_clients() {
++        let pool = SdkModelHttpPool::default();
++        let builds = AtomicUsize::new(0);
++        let mut a = key("https://a.test");
++        a.ca_digest = Some([1; 32]);
++        let mut b = a.clone();
++        b.ca_digest = Some([2; 32]);
++        for current in [a.clone(), a.clone(), b, a.clone()] {
++            pool.client_with_key(current, HeaderMap::new(), |_| {
++                builds.fetch_add(1, Ordering::SeqCst);
++                Some(client())
++            })
++            .unwrap()
++            .unwrap();
++        }
++        assert_eq!(builds.load(Ordering::SeqCst), 3);
++        pool.invalidate();
++        pool.client_with_key(a, HeaderMap::new(), |_| {
++            builds.fetch_add(1, Ordering::SeqCst);
++            Some(client())
++        })
++        .unwrap()
++        .unwrap();
++        assert_eq!(builds.load(Ordering::SeqCst), 4);
++    }
++
++    #[test]
++    fn bounded_cache_evicts_and_factory_redirect_changes_do_not_hit() {
++        let pool = SdkModelHttpPool::default();
++        let builds = AtomicUsize::new(0);
++        let build = |_| {
++            builds.fetch_add(1, Ordering::SeqCst);
++            Some(client())
++        };
++        for index in 0..=MAX_CLIENTS {
++            pool.client_with_key(
++                key(&format!("https://{index}.test")),
++                HeaderMap::new(),
++                build,
++            )
++            .unwrap()
++            .unwrap();
++        }
++        pool.client_with_key(key("https://0.test"), HeaderMap::new(), build)
++            .unwrap()
++            .unwrap();
++        assert_eq!(builds.load(Ordering::SeqCst), MAX_CLIENTS + 2);
++        let mut changed = key("https://0.test");
++        changed.factory = changed.factory.with_system_proxy_fallback();
++        pool.client_with_key(changed.clone(), HeaderMap::new(), build)
++            .unwrap()
++            .unwrap();
++        changed.reject_redirects = true;
++        pool.client_with_key(changed, HeaderMap::new(), build)
++            .unwrap()
++            .unwrap();
++        assert_eq!(builds.load(Ordering::SeqCst), MAX_CLIENTS + 4);
++    }
++
++    #[test]
++    fn close_fences_builds_and_does_not_publish_an_inflight_build() {
++        let pool = SdkModelHttpPool::default();
++        let result = pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++            // Calling close inside this closure also proves builds hold no pool lock.
++            pool.close();
++            Some(client())
++        });
++        assert!(result.is_err());
++        assert!(
++            pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++                panic!("closed pool must not construct a client")
++            })
++            .is_err()
++        );
++    }
++
++    #[test]
++    fn concurrent_cold_builds_join_normally_and_publish_one_entry() {
++        let pool = SdkModelHttpPool::default();
++        let barrier = Arc::new(std::sync::Barrier::new(2));
++        let threads = (0..2)
++            .map(|_| {
++                let pool = pool.clone();
++                let barrier = barrier.clone();
++                std::thread::spawn(move || {
++                    pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++                        barrier.wait();
++                        Some(client())
++                    })
++                    .unwrap()
++                    .unwrap();
++                })
++            })
++            .collect::<Vec<_>>();
++        for thread in threads {
++            thread.join().unwrap();
++        }
++        pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++            panic!("successful cold construction must be retained")
++        })
++        .unwrap()
++        .unwrap();
++    }
++
++    #[tokio::test]
++    async fn reuses_socket_with_fresh_default_and_request_headers() {
++        use std::io::{Read, Write};
++        use std::time::Duration;
++        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
++        let url = format!("http://{}", listener.local_addr().unwrap());
++        let server = std::thread::spawn(move || {
++            listener.set_nonblocking(true).unwrap();
++            let deadline = std::time::Instant::now() + Duration::from_secs(5);
++            let (mut socket, _) = loop {
++                match listener.accept() {
++                    Ok(accepted) => break accepted,
++                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
++                        assert!(
++                            std::time::Instant::now() < deadline,
++                            "timed out accepting client"
++                        );
++                        std::thread::sleep(Duration::from_millis(1));
++                    }
++                    Err(error) => panic!("accept failed: {error}"),
++                }
++            };
++            socket
++                .set_read_timeout(Some(Duration::from_secs(5)))
++                .unwrap();
++            let mut requests = Vec::new();
++            for _ in 0..2 {
++                let mut request = Vec::new();
++                let mut byte = [0];
++                while !request.ends_with(b"\r\n\r\n") {
++                    socket.read_exact(&mut byte).unwrap();
++                    request.push(byte[0]);
++                }
++                requests.push(String::from_utf8(request).unwrap().to_lowercase());
++                socket
++                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
++                    .unwrap();
++            }
++            let mut byte = [0];
++            assert_eq!(
++                socket.read(&mut byte).unwrap(),
++                0,
++                "pool close must release idle socket"
++            );
++            requests
++        });
++        let pool = SdkModelHttpPool::default();
++        let origin = key(&url);
++        for (default, auth) in [("first", "first-secret"), ("second", "second-secret")] {
++            let mut headers = HeaderMap::new();
++            headers.insert("x-test-default", http::HeaderValue::from_static(default));
++            let current = pool
++                .client_with_key(origin.clone(), headers, |_| Some(client()))
++                .unwrap()
++                .unwrap();
++            tokio::time::timeout(
++                Duration::from_secs(5),
++                current
++                    .get(&url)
++                    .header("authorization", format!("Bearer {auth}"))
++                    .send(),
++            )
++            .await
++            .unwrap()
++            .unwrap();
++        }
++        pool.close();
++        let requests = tokio::task::spawn_blocking(move || server.join())
++            .await
++            .unwrap()
++            .unwrap();
++        assert!(requests[0].contains("x-test-default: first"));
++        assert!(requests[1].contains("x-test-default: second"));
++        assert!(requests[1].contains("authorization: bearer second-secret"));
++        assert!(!requests[1].contains("first-secret"));
++    }
++    #[test]
++    fn redirect_retirement_is_immediate_and_old_token_cannot_evict_replacement() {
++        let pool = SdkModelHttpPool::default();
++        let owner = Arc::downgrade(&pool.state);
++        let mut first = None;
++        pool.client_with_key(key("https://a.test"), HeaderMap::new(), |token| {
++            first = Some(token);
++            Some(client())
++        })
++        .unwrap()
++        .unwrap();
++        let first = first.unwrap();
++        retire_redirected(&owner, &first);
++        let builds = AtomicUsize::new(0);
++        pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++            builds.fetch_add(1, Ordering::SeqCst);
++            Some(client())
++        })
++        .unwrap()
++        .unwrap();
++        assert_eq!(builds.load(Ordering::SeqCst), 1);
++        retire_redirected(&owner, &first);
++        pool.client_with_key(key("https://a.test"), HeaderMap::new(), |_| {
++            panic!("an old redirect must not evict the replacement client")
++        })
++        .unwrap()
++        .unwrap();
++        pool.close();
++        drop(pool);
++        retire_redirected(&owner, &first); // The callback owns no Provider reference.
++        assert!(owner.upgrade().is_none());
++    }
++}

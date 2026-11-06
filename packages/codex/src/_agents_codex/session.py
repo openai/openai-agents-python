@@ -2302,34 +2302,66 @@ class Session(Generic[ContextT, OutputT]):
                             "description": role.description,
                             "config_file": str(role_path),
                         }
-                create_engine = (
-                    native.create_checkpoint_engine
-                    if checkpoint is not None
-                    else native.create_engine
-                )
-                engine = await opening.acquire(
-                    create_engine(
-                        json.dumps(config),
-                        json.dumps(runtime),
-                        # Preserve the captured environment value in API-key mode.
-                        api_key=None if codex_login is not None else (opening.api_key or ""),
-                        provider_lease=provider_lease,
-                        **(
-                            {"canonical_store": storage.backend}
-                            if isinstance(storage, CustomStorage)
-                            else {}
-                        ),
-                        **(
-                            {
-                                "initial_checkpoint": checkpoint,
-                                "initial_specs_json": native_specs,
-                                "initial_options_json": json.dumps(options),
-                            }
-                            if checkpoint is not None
-                            else {}
-                        ),
+
+                async def initialize_engine(provider: NativeProvider) -> Any:
+                    create_engine = (
+                        native.create_checkpoint_engine
+                        if checkpoint is not None
+                        else native.create_engine
                     )
-                )
+                    # Environment credentials belong only to this opening. Reuse
+                    # its isolated Config without retaining auth/model services.
+                    share_session_template = (
+                        checkpoint is None
+                        and not owned_provider
+                        and opening.api_key is not None
+                        and codex_login is None
+                        and executor is None
+                        and storage is None
+                        and state is None
+                        and resume is None
+                        and native_agents is None
+                        and not programmatic_tool_calling
+                        and all(isinstance(tool, FunctionTool) for tool in agent.tools)
+                    )
+                    return await opening.acquire(
+                        create_engine(
+                            json.dumps(config),
+                            json.dumps(runtime),
+                            # Preserve the captured environment value in API-key mode.
+                            api_key=None if codex_login is not None else (opening.api_key or ""),
+                            provider_lease=provider_lease,
+                            # One opening snapshot owns the runtime and its first thread.
+                            **(
+                                {
+                                    "_capture_initial_config": True,
+                                    "_share_model_http": not owned_provider and codex_login is None,
+                                    "_share_session_template": share_session_template,
+                                    "_session_template_config_only": (
+                                        share_session_template and provider.api_key is None
+                                    ),
+                                }
+                                if checkpoint is None
+                                else {}
+                            ),
+                            **(
+                                {"canonical_store": storage.backend}
+                                if isinstance(storage, CustomStorage)
+                                else {}
+                            ),
+                            **(
+                                {
+                                    "initial_checkpoint": checkpoint,
+                                    "initial_specs_json": native_specs,
+                                    "initial_options_json": json.dumps(options),
+                                }
+                                if checkpoint is not None
+                                else {}
+                            ),
+                        )
+                    )
+
+                engine = await initialize_engine(provider)
 
                 if selected is None and provider.api_key is not None:
                     # Match Rust's whitespace after native UTF-8 validation.
@@ -2338,7 +2370,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
 
                 thread = await opening.acquire(
-                    engine.start_replaceable_thread(json.dumps(options), native_specs)
+                    engine._start_initial_replaceable_thread(json.dumps(options), native_specs)
                     if checkpoint is None
                     else engine.restore_checkpoint(checkpoint, json.dumps(options), native_specs)
                 )
@@ -2740,6 +2772,8 @@ class Session(Generic[ContextT, OutputT]):
         )
         self._observations._callback_check = weakref.WeakMethod(self._check_callback_operation)
         # The sole native reader owns questions during opening publication.
+        self._reader_default_task_factory = self._loop.get_task_factory() is None
+        self._plain_event_collection = False
         self._reader = _create_task(self._read_events())
         self._mcp_reader: asyncio.Task[None] | None = None
         if _start_readers:
@@ -6996,11 +7030,112 @@ class Session(Generic[ContextT, OutputT]):
                 ):
                     state.failure.set_result(NativeError("Step selection expired"))
 
+    def _plain_event_collection_ready(self, state: _Submission | None) -> bool:
+        from . import telemetry
+
+        return (
+            self._plain_event_collection
+            and type(self) is _CANONICAL_SESSION_TYPE
+            and sys.platform != "win32"
+            and self._reader_default_task_factory
+            and self._loop.get_task_factory() is None
+            and not telemetry._processors
+            and not telemetry._processor_starting
+            and not telemetry._processor_closing
+            and not self._closing
+            and not self._broken
+            and self._active is state
+            and state is not None
+            and state.handle is not None
+            and state.accepted.done()
+            and not state.accepted.cancelled()
+            and state.accepted.exception() is None
+            and not state.stopping
+            and not state.failure.done()
+            and not state.terminal.done()
+            and not state.restored_pending
+            and not state.repairing
+            and state.before_step is None
+            and state.prepare_request is None
+            and state.budget is None
+            and state.operation_slots is None
+            and not state.operation_mcp
+            and state.operation_refs is None
+            and state.continued_from is None
+            and not state.unsampled_steering
+            and not state.callbacks
+            and not state.questions
+            and not state.manual_inputs
+            and state.output.mode == "plain"
+            and state.output.adapter is None
+            and not state.output.max_retries
+            and not self._bound_tools
+            and not self._mcp_tools
+            and not self._bindings
+            and self._default_tools is None
+            and self._opening_agent is not None
+            and self._opening_agent.transform_context is None
+            and self._opening_agent.before_compact is None
+            and not self._child_callbacks
+            and not self._child_admissions
+            and not self._pending
+            and self._parent_trace is None
+            and state.parent_trace is None
+            and (
+                state.tracing is None
+                or (state.tracing.context is None and state.tracing.scope is None)
+            )
+            and not self._opening_agent.programmatic_tool_calling
+            and self._native_agents is None
+            and self._executor is None
+            and self._interception is None
+            and self._mcp_reader is None
+            and self._storage is None
+            and self._mutation is None
+            and self._checkpoint_task is None
+        )
+
     async def _read_events(self) -> None:
+        pending: deque[tuple[Any, bool, bool]] = deque()
+        following_error: BaseException | None = None
         try:
             while True:
-                raw_event = await self._native._next_session_event()
-                event = json.loads(raw_event)
+                if not pending:
+                    if following_error is not None:
+                        raise following_error
+                    state = self._active
+                    if self._plain_event_collection_ready(state):
+                        assert state is not None and state.handle is not None
+                        (
+                            raw,
+                            following_error,
+                            barrier,
+                        ) = await self._native._next_session_event_batch(state.handle.turn_id)
+                        batch = json.loads(raw)
+                        pending.extend(
+                            (item, not (barrier and index == len(batch) - 1), True)
+                            for index, item in enumerate(batch)
+                        )
+                        if not pending:
+                            if following_error is not None:
+                                raise following_error
+                            raise NativeError("Native event batch was empty")
+                    else:
+                        raw_event = await self._native._next_session_event()
+                        pending.append((json.loads(raw_event), False, False))
+                event, passive, batched = pending.popleft()
+                if batched and not passive:
+                    # Dispatch unexpected authority/control work on the old
+                    # route, and retain that conservative choice thereafter.
+                    self._plain_event_collection = False
+                fast_replay = passive and self._plain_event_collection_ready(self._active)
+                # The bridge already yielded once before reading the packet. Keep
+                # an immediate scheduling boundary before control/terminal work.
+                dispatch_yielded = False
+                if batched:
+                    if not fast_replay:
+                        await asyncio.sleep(0)
+                        dispatch_yielded = True
                 if event is None:
                     break
                 message = event.get("msg", {})
@@ -7206,7 +7341,12 @@ class Session(Generic[ContextT, OutputT]):
                         )
                     ):
                         continue
-                await asyncio.wait((state.accepted,))
+                if state.accepted.done():
+                    # Public readers keep their existing per-event boundary.
+                    if not fast_replay and not dispatch_yielded:
+                        await asyncio.sleep(0)
+                else:
+                    await asyncio.wait((state.accepted,))
                 state.changed.set()
                 handle = state.handle
                 if handle is None:
@@ -7407,6 +7547,8 @@ class Session(Generic[ContextT, OutputT]):
             ):
                 state.failure.set_result(error)
         finally:
+            pending.clear()
+            following_error = None
             await self._retire_url_completions()
             if not self._sealing and self._sealed_checkpoint is None:
                 self._broken = True
@@ -8855,5 +8997,7 @@ class Session(Generic[ContextT, OutputT]):
                     )
             raise first
 
+
+_CANONICAL_SESSION_TYPE = Session
 
 _preserve_module_identity(globals(), "agents.session")

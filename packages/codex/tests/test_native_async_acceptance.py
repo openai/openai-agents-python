@@ -41,6 +41,12 @@ def _on_native_start(callback):
                 call.start(writer)
                 callback()
 
+            def start_shared(self, channel, identifier):
+                started = call.start_shared(channel, identifier)
+                if started:
+                    callback()
+                return started
+
         return original(ObservedCall())
 
     with patch.object(_native_async, "_await_native_completion", observe):

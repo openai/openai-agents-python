@@ -245,6 +245,8 @@ async def test_none_signals_disable_native_exporters(monkeypatch: pytest.MonkeyP
         "metrics",
         "metrics_restore",
         "metrics_none",
+        "skill_metrics",
+        "skill_metrics_none",
         "open_failure",
         "validation_traces",
         "validation_metrics",
@@ -279,6 +281,37 @@ def test_native_process(case: str) -> None:
         timeout=50,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def _explicit_skill_body(agent: Agent, fixture: ResponsesFixture) -> None:
+    from tests.native_executor_fixtures import ExecutorPeer
+    from tests.test_environment_leases_checklist import remote, skill, trust
+
+    with tempfile.TemporaryDirectory() as directory, pytest.MonkeyPatch.context() as patch:
+        root = Path(directory)
+        async with ExecutorPeer(root / "remote").serve() as peer:
+            trust(peer, root, patch)
+            chosen = peer.root / "chosen"
+            selected_body = "SELECTED_SKILL_BODY_ORCHID"
+            unselected_body = "UNSELECTED_SKILL_BODY_RUBY"
+            for name, description, body in (
+                ("wire-selected-skill", "CHOSEN_ORCHID_CATALOG", selected_body),
+                ("wire-unselected-skill", "OTHER_RUBY_CATALOG", unselected_body),
+            ):
+                skill(chosen, name, description)
+                path = chosen / "skills" / name / "SKILL.md"
+                path.write_text(path.read_text() + body + "\n")
+            result = await agent.run("Use $wire-selected-skill", environment=remote(peer, chosen))
+            assert result.final_output == "synthetic metric answer"
+            await peer.wait_disconnected()
+            assert len(fixture.requests) == 1
+            wire = json.dumps(fixture.requests[0]["input"])
+            # Both candidates were advertised, but only the explicitly named body is injected.
+            assert "CHOSEN_ORCHID_CATALOG" in wire
+            assert "OTHER_RUBY_CATALOG" in wire
+            assert selected_body in wire
+            assert unselected_body not in wire
+            assert not fixture.replies
 
 
 async def _native_case(case: str) -> None:
@@ -466,16 +499,24 @@ async def _native_case(case: str) -> None:
         provider = NativeProvider(
             base_url=str(server.make_url("/v1")), api_key="synthetic-telemetry-key"
         )
-        if case in ("metrics", "metrics_restore", "metrics_none"):
+        if case in (
+            "metrics",
+            "metrics_restore",
+            "metrics_none",
+            "skill_metrics",
+            "skill_metrics_none",
+        ):
             metrics = telemetry.OtlpHttp(
                 endpoint=str(server.make_url("/v1/metrics")),
                 protocol="json",
                 headers={"x-synthetic-telemetry": "synthetic-metric-header"},
             )
-            await telemetry.configure(metrics=None if case == "metrics_none" else metrics)
+            await telemetry.configure(metrics=None if case.endswith("_none") else metrics)
             agent = Agent(model="gpt-5.1-codex", provider=provider, instructions="Answer.")
             fixture.respond(assistant_output("synthetic metric answer"))
-            if case == "metrics_restore":
+            if case.startswith("skill_"):
+                await _explicit_skill_body(agent, fixture)
+            elif case == "metrics_restore":
                 async with agent.session() as session:
                     turn = await session.submit("synthetic metric prompt")
                     assert (await turn.get_result()).final_output == "synthetic metric answer"
@@ -492,7 +533,7 @@ async def _native_case(case: str) -> None:
             await provider.aclose()
             await telemetry.shutdown()
             assert not collected
-            if case == "metrics_none":
+            if case.endswith("_none"):
                 assert not metric_batches
             else:
                 records = [

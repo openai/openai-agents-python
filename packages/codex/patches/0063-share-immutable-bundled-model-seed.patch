@@ -1,0 +1,320 @@
+diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
+index 85e95b7054b5d676e066a92934494be846fc1f79..dc28a724a7962dd8cbde22883efb7ac566a03593 100644
+--- a/codex-rs/models-manager/src/manager.rs
++++ b/codex-rs/models-manager/src/manager.rs
+@@ -15,6 +15,7 @@ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ModelPreset;
+ use codex_protocol::openai_models::ModelVisibility;
+ use codex_protocol::openai_models::ModelsResponse;
++use std::borrow::Cow;
+ use std::fmt;
+ use std::future::Future;
+ use std::path::PathBuf;
+@@ -282,10 +283,31 @@ impl CatalogSource {
+     }
+ }
+ 
++// Keep the public/persisted ModelsCacheEntry owned. Only the immutable bundled
++// seed needs shared storage; every remote/cache publication moves its own Vec.
++#[derive(Debug)]
++struct InMemoryModelsEntry {
++    fetched_at: DateTime<Utc>,
++    etag: Option<String>,
++    identity: Option<String>,
++    models: Cow<'static, [ModelInfo]>,
++}
++
++impl From<ModelsCacheEntry> for InMemoryModelsEntry {
++    fn from(entry: ModelsCacheEntry) -> Self {
++        Self {
++            fetched_at: entry.fetched_at,
++            etag: entry.etag,
++            identity: entry.identity,
++            models: Cow::Owned(entry.models),
++        }
++    }
++}
++
+ /// OpenAI-compatible model manager backed by bundled models, cache, and `/models`.
+ #[derive(Debug)]
+ pub struct OpenAiModelsManager {
+-    remote_models: RwLock<ModelsCacheEntry>,
++    remote_models: RwLock<InMemoryModelsEntry>,
+     cache: Option<Arc<dyn ModelsCache>>,
+     endpoint_client: SharedModelsEndpointClient,
+     catalog_source: CatalogSource,
+@@ -344,12 +366,15 @@ impl OpenAiModelsManager {
+         auth_manager: Option<Arc<AuthManager>>,
+     ) -> Self {
+         Self {
+-            remote_models: RwLock::new(ModelsCacheEntry {
++            remote_models: RwLock::new(InMemoryModelsEntry {
+                 fetched_at: Utc::now(),
+                 etag: None,
+-                client_version: Some(crate::client_version_to_whole()),
+                 identity: endpoint_client.identity(),
+-                models: load_remote_models_from_file().unwrap_or_default(),
++                models: Cow::Borrowed(
++                    crate::bundled_models_response_ref()
++                        .map(|response| response.models.as_slice())
++                        .unwrap_or_default(),
++                ),
+             }),
+             cache,
+             api_key_model_discovery_enabled: AtomicBool::new(false),
+@@ -359,12 +384,12 @@ impl OpenAiModelsManager {
+         }
+     }
+ 
+-    fn models_for_entry<'a>(&self, entry: &'a ModelsCacheEntry) -> &'a [ModelInfo] {
++    fn models_for_entry<'a>(&self, entry: &'a InMemoryModelsEntry) -> &'a [ModelInfo] {
+         if !self.api_key_discovery_disabled()
+             && entry.identity.is_some()
+             && entry.identity == self.endpoint_client.identity()
+         {
+-            entry.models.as_slice()
++            entry.models.as_ref()
+         } else {
+             match &self.catalog_source {
+                 CatalogSource::Default => crate::bundled_models_response_ref()
+@@ -379,7 +404,7 @@ impl OpenAiModelsManager {
+     /// Clear the bundled seed before sharing it; the existing auth identity must be retained.
+     pub fn with_provider_catalog(mut self) -> Self {
+         self.catalog_source = CatalogSource::ExplicitProvider(Mutex::new(()));
+-        self.remote_models.get_mut().models.clear();
++        self.remote_models.get_mut().models = Cow::Owned(Vec::new());
+         self
+     }
+ }
+@@ -607,7 +632,7 @@ impl OpenAiModelsManager {
+                         }
+                         // Keep this failure in memory even if persistent invalidation fails.
+                         current.fetched_at = DateTime::<Utc>::MIN_UTC;
+-                        current.models.clear();
++                        current.models = Cow::Owned(Vec::new());
+                         current.etag = None;
+                         current.identity.clone_from(&request_identity);
+                     }
+@@ -711,7 +736,7 @@ impl OpenAiModelsManager {
+             }
+             entry.models = models;
+         }
+-        *current = entry;
++        *current = entry.into();
+         true
+     }
+ 
+diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
+index 3c7e8a7bb0d41aac02b98f6a45261acf18932dd2..d6481bf852175457a7ddcf2c14fa132aa06fc238 100644
+--- a/codex-rs/models-manager/src/manager_tests.rs
++++ b/codex-rs/models-manager/src/manager_tests.rs
+@@ -1913,3 +1913,6 @@ async fn borrowed_lookup_rechecks_api_key_discovery_policy() {
+         );
+     }
+ }
++
++#[path = "model_seed_tests.rs"]
++mod model_seed_tests;
+diff --git a/codex-rs/models-manager/src/model_seed_tests.rs b/codex-rs/models-manager/src/model_seed_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..cf23b4cdb4bebcd0dfa11a067642a6cfc85964bc
+--- /dev/null
++++ b/codex-rs/models-manager/src/model_seed_tests.rs
+@@ -0,0 +1,197 @@
++//! The embedded seed is shared; live refresh and caller-owned results are not.
++use super::*;
++use pretty_assertions::assert_eq;
++use std::borrow::Cow;
++
++fn seeded_manager(endpoint: Arc<TestModelsEndpoint>) -> OpenAiModelsManager {
++    OpenAiModelsManager::new_without_cache(
++        endpoint,
++        Some(AuthManager::from_auth_for_testing(
++            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        )),
++    )
++}
++
++#[tokio::test]
++async fn fresh_managers_borrow_the_same_seed_with_separate_metadata() {
++    let endpoint = TestModelsEndpoint::new(Vec::new());
++    let first = seeded_manager(endpoint.clone());
++    let second = seeded_manager(endpoint.clone());
++    let bundled = crate::bundled_models_response_ref()
++        .unwrap()
++        .models
++        .as_slice();
++    assert!(!bundled.is_empty());
++    let first = first.remote_models.read().await;
++    let second = second.remote_models.read().await;
++    assert!(matches!(&first.models, Cow::Borrowed(_)));
++    assert!(matches!(&second.models, Cow::Borrowed(_)));
++    assert!(std::ptr::eq(first.models.as_ref(), bundled));
++    assert!(std::ptr::eq(second.models.as_ref(), bundled));
++    assert_eq!(first.identity, endpoint.identity());
++    assert_ne!(first.fetched_at, DateTime::<Utc>::MIN_UTC);
++    assert!(first.etag.is_none());
++}
++
++#[tokio::test]
++async fn refreshing_one_manager_does_not_replace_other_seeds_or_owned_results() {
++    let remote = remote_model("seed-refresh", "Current remote", 0);
++    let first = seeded_manager(TestModelsEndpoint::new(vec![vec![remote.clone()]]));
++    let second = seeded_manager(TestModelsEndpoint::new(Vec::new()));
++    let original = crate::bundled_models_response().unwrap();
++    let mut returned = first
++        .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
++        .await;
++    assert_eq!(returned.models, vec![remote.clone()]);
++    assert!(matches!(
++        &first.remote_models.read().await.models,
++        Cow::Owned(_)
++    ));
++    assert!(matches!(
++        &second.remote_models.read().await.models,
++        Cow::Borrowed(_)
++    ));
++    returned.models[0].display_name = "Caller mutation".into();
++    assert_eq!(first.get_remote_models().await, vec![remote]);
++    let mut second_result = second.get_remote_models().await;
++    second_result.clear();
++    assert_eq!(second.get_remote_models().await, original.models);
++    assert_eq!(crate::bundled_models_response().unwrap(), original);
++}
++
++#[tokio::test]
++async fn explicit_empty_catalog_is_owned_and_never_replaced_by_the_seed() {
++    let endpoint = TestModelsEndpoint::with_command_auth(vec![Ok(Vec::new())]);
++    let manager = OpenAiModelsManager::new_without_cache(endpoint, None).with_provider_catalog();
++    assert!(
++        matches!(&manager.remote_models.read().await.models, Cow::Owned(models) if models.is_empty())
++    );
++    assert!(manager.get_remote_models().await.is_empty());
++    assert!(
++        manager
++            .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY,)
++            .await
++            .models
++            .is_empty()
++    );
++    assert!(
++        matches!(&manager.remote_models.read().await.models, Cow::Owned(models) if models.is_empty())
++    );
++    let bundled = crate::bundled_models_response_ref()
++        .unwrap()
++        .models
++        .first()
++        .unwrap();
++    assert!(
++        manager
++            .get_model_info(&bundled.slug, &ModelsManagerConfig::default())
++            .await
++            .used_fallback_model_metadata
++    );
++}
++
++#[tokio::test]
++async fn failed_refresh_preserves_default_seed_but_invalidates_explicit_catalog() {
++    for explicit in [false, true] {
++        let endpoint = TestModelsEndpoint::with_command_auth(vec![Err(CodexErr::RequestTimeout)]);
++        let manager = OpenAiModelsManager::new_without_cache(endpoint, None);
++        let manager = if explicit {
++            manager.with_provider_catalog()
++        } else {
++            manager
++        };
++        let catalog = manager
++            .raw_model_catalog(RefreshStrategy::Online, DEFAULT_HTTP_CLIENT_FACTORY)
++            .await;
++        let current = manager.remote_models.read().await;
++        if explicit {
++            assert!(catalog.models.is_empty());
++            assert!(matches!(&current.models, Cow::Owned(models) if models.is_empty()));
++            assert_eq!(current.fetched_at, DateTime::<Utc>::MIN_UTC);
++        } else {
++            assert_eq!(catalog, crate::bundled_models_response().unwrap());
++            assert!(matches!(&current.models, Cow::Borrowed(_)));
++            assert_ne!(current.fetched_at, DateTime::<Utc>::MIN_UTC);
++        }
++    }
++}
++
++#[tokio::test]
++async fn owned_empty_publication_stays_distinct_from_a_borrowed_seed() {
++    let endpoint = TestModelsEndpoint::with_command_auth(Vec::new());
++    let manager =
++        OpenAiModelsManager::new_without_cache(endpoint.clone(), None).with_provider_catalog();
++    assert!(
++        manager
++            .apply_remote_models(ModelsCacheEntry {
++                fetched_at: Utc::now(),
++                etag: Some("empty-catalog".into()),
++                client_version: Some(crate::client_version_to_whole()),
++                identity: endpoint.identity(),
++                models: Vec::new(),
++            })
++            .await
++    );
++    assert!(manager.get_remote_models().await.is_empty());
++    assert!(
++        matches!(&manager.remote_models.read().await.models, Cow::Owned(models) if models.is_empty())
++    );
++}
++
++#[tokio::test]
++async fn authoritative_publication_moves_the_owned_vector_without_another_copy() {
++    let endpoint = TestModelsEndpoint::new(Vec::new());
++    let manager = seeded_manager(endpoint.clone());
++    let models = vec![remote_model("owned-publication", "Current remote", 0)];
++    let original_buffer = models.as_ptr();
++    assert!(
++        manager
++            .apply_remote_models(ModelsCacheEntry {
++                fetched_at: Utc::now(),
++                etag: Some("owned-catalog".into()),
++                client_version: Some(crate::client_version_to_whole()),
++                identity: endpoint.identity(),
++                models,
++            })
++            .await
++    );
++    let current = manager.remote_models.read().await;
++    assert!(matches!(&current.models, Cow::Owned(_)));
++    assert_eq!(current.models.as_ptr(), original_buffer);
++    assert_eq!(current.etag.as_deref(), Some("owned-catalog"));
++}
++
++#[tokio::test]
++async fn a_valid_cached_catalog_becomes_owned_without_affecting_another_seed() {
++    let endpoint = TestModelsEndpoint::new(Vec::new());
++    let expected = vec![remote_model("cached-publication", "Cached remote", 0)];
++    let cache = TestModelsCache::with_entry(ModelsCacheEntry {
++        fetched_at: Utc::now(),
++        etag: Some("cached-catalog".into()),
++        client_version: Some(crate::client_version_to_whole()),
++        identity: endpoint.identity(),
++        models: expected.clone(),
++    });
++    let manager = OpenAiModelsManager::new_with_cache(
++        cache,
++        endpoint,
++        Some(AuthManager::from_auth_for_testing(
++            CodexAuth::create_dummy_chatgpt_auth_for_testing(),
++        )),
++    );
++    let other = seeded_manager(TestModelsEndpoint::new(Vec::new()));
++    assert!(manager.try_load_cache().await);
++    assert_eq!(manager.get_remote_models().await, expected);
++    assert!(matches!(
++        &manager.remote_models.read().await.models,
++        Cow::Owned(_)
++    ));
++    assert!(matches!(
++        &other.remote_models.read().await.models,
++        Cow::Borrowed(_)
++    ));
++    assert_eq!(
++        other.get_remote_models().await,
++        crate::bundled_models_response().unwrap().models
++    );
++}

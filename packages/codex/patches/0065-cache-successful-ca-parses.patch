@@ -1,0 +1,367 @@
+diff --git a/codex-rs/http-client/src/custom_ca.rs b/codex-rs/http-client/src/custom_ca.rs
+index 66eb59be2a36c32ddcbd2661831eb3d253dcf61e..4dcde5537c80452600ff0f37fcfa1b0af25a5bca 100644
+--- a/codex-rs/http-client/src/custom_ca.rs
++++ b/codex-rs/http-client/src/custom_ca.rs
+@@ -418,10 +418,37 @@ const CA_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+ static REQWEST_CA_CACHE: LazyLock<Mutex<ReqwestCaCache>> =
+     LazyLock::new(|| Mutex::new(ReqwestCaCache::default()));
+ 
++// Successful parser diagnostics only; no PEM, private material or source identity.
++#[derive(Clone, Copy, Default)]
++struct CaParseDiagnostics {
++    normalized_trusted: bool,
++    ignored_crl: bool,
++}
++
++impl CaParseDiagnostics {
++    fn replay(self, bundle: &ConfiguredCaBundle) {
++        if self.normalized_trusted {
++            info!(
++                source_env = bundle.source_env,
++                ca_path = %bundle.path.display(),
++                "normalizing OpenSSL TRUSTED CERTIFICATE labels in custom CA bundle"
++            );
++        }
++        if self.ignored_crl {
++            info!(
++                source_env = bundle.source_env,
++                ca_path = %bundle.path.display(),
++                "ignoring X509 CRL entries found in custom CA bundle"
++            );
++        }
++    }
++}
++
+ struct CachedReqwestCa {
+     digest: [u8; 32],
+     certificates: Arc<[reqwest::Certificate]>,
+     der_bytes: usize,
++    diagnostics: CaParseDiagnostics,
+ }
+ 
+ #[derive(Default)]
+@@ -430,16 +457,28 @@ struct ReqwestCaCache {
+ }
+ 
+ impl ReqwestCaCache {
++    fn get(
++        &mut self,
++        digest: [u8; 32],
++    ) -> Option<(Arc<[reqwest::Certificate]>, CaParseDiagnostics)> {
++        let index = self
++            .entries
++            .iter()
++            .position(|entry| entry.digest == digest)?;
++        let entry = self.entries.remove(index).expect("located CA cache entry");
++        let result = (Arc::clone(&entry.certificates), entry.diagnostics);
++        self.entries.push_back(entry);
++        Some(result)
++    }
++
+     fn load(
+         &mut self,
+         digest: [u8; 32],
++        diagnostics: CaParseDiagnostics,
+         parse: impl FnOnce()
+             -> Result<(Arc<[reqwest::Certificate]>, usize), BuildCustomCaTransportError>,
+     ) -> Result<Arc<[reqwest::Certificate]>, BuildCustomCaTransportError> {
+-        if let Some(index) = self.entries.iter().position(|entry| entry.digest == digest) {
+-            let entry = self.entries.remove(index).expect("located CA cache entry");
+-            let certificates = entry.certificates.clone();
+-            self.entries.push_back(entry);
++        if let Some((certificates, _)) = self.get(digest) {
+             return Ok(certificates);
+         }
+         // Parse before mutating the cache. Errors and panics cannot evict valid entries.
+@@ -469,6 +508,7 @@ impl ReqwestCaCache {
+             digest,
+             certificates: certificates.clone(),
+             der_bytes,
++            diagnostics,
+         });
+         Ok(certificates)
+     }
+@@ -503,9 +543,29 @@ impl ConfiguredCaBundle {
+         let result = (|| {
+             let pem_data = self.read_pem_data()?;
+             let digest = Sha256::digest(&pem_data).into();
+-            // Keep PEM normalization and its tracing events outside the lock.
+-            // Cache only the expensive reqwest/native-TLS certificate wrappers.
+-            let certificates = self.parse_certificate_bytes(&pem_data)?;
++            // Only a bounded, previously successful exact-byte parse may bypass decoding.
++            // Keep the guard in its own scope: subscriber callbacks must run without it.
++            if pem_data.len() <= CA_CACHE_MAX_BYTES {
++                let cached = {
++                    cache
++                        .lock()
++                        .unwrap_or_else(std::sync::PoisonError::into_inner)
++                        .get(digest)
++                };
++                if let Some((certificates, diagnostics)) = cached {
++                    diagnostics.replay(self);
++                    info!(
++                        source_env = self.source_env,
++                        ca_path = %self.path.display(),
++                        certificate_count = certificates.len(),
++                        "loaded certificates from custom CA bundle"
++                    );
++                    return Ok((certificates, digest, true));
++                }
++            }
++            // Parse misses outside the lock, retaining error/tracing order and context.
++            let (certificates, diagnostics) =
++                self.parse_certificate_bytes_with_diagnostics(&pem_data)?;
+             info!(
+                 source_env = self.source_env,
+                 ca_path = %self.path.display(),
+@@ -548,7 +608,7 @@ impl ConfiguredCaBundle {
+             cache
+                 .lock()
+                 .unwrap_or_else(std::sync::PoisonError::into_inner)
+-                .load(digest, parse)
++                .load(digest, diagnostics, parse)
+                 .map(|certificates| (certificates, digest, true))
+         })();
+         match &result {
+@@ -621,6 +681,15 @@ impl ConfiguredCaBundle {
+         &self,
+         pem_data: &[u8],
+     ) -> Result<Vec<CertificateDer<'static>>, BuildCustomCaTransportError> {
++        self.parse_certificate_bytes_with_diagnostics(pem_data)
++            .map(|(certificates, _)| certificates)
++    }
++
++    fn parse_certificate_bytes_with_diagnostics(
++        &self,
++        pem_data: &[u8],
++    ) -> Result<(Vec<CertificateDer<'static>>, CaParseDiagnostics), BuildCustomCaTransportError>
++    {
+         let normalized_pem = NormalizedPem::from_pem_data(self.source_env, &self.path, &pem_data);
+ 
+         let mut certificates = Vec::new();
+@@ -662,7 +731,13 @@ impl ConfiguredCaBundle {
+             return Err(self.pem_parse_error(&pem::Error::NoItemsFound));
+         }
+ 
+-        Ok(certificates)
++        Ok((
++            certificates,
++            CaParseDiagnostics {
++                normalized_trusted: matches!(normalized_pem, NormalizedPem::TrustedCertificate(_)),
++                ignored_crl: logged_crl_presence,
++            },
++        ))
+     }
+ 
+     /// Reads the CA bundle bytes while preserving the original filesystem error kind.
+diff --git a/codex-rs/http-client/src/custom_ca_cache_tests.rs b/codex-rs/http-client/src/custom_ca_cache_tests.rs
+index 931a6a881ac77f1dadbd1193c12a40159382f111..27d1a8cdb1dda4b3c55448e006f7d83bbbb08461 100644
+--- a/codex-rs/http-client/src/custom_ca_cache_tests.rs
++++ b/codex-rs/http-client/src/custom_ca_cache_tests.rs
+@@ -173,7 +173,7 @@ fn retained_certificate_count_and_der_bytes_are_bounded() {
+     let mut cache = ReqwestCaCache::default();
+     for index in 0..8 {
+         cache
+-            .load([index; 32], || {
++            .load([index; 32], CaParseDiagnostics::default(), || {
+                 Ok((
+                     Arc::from(vec![certificate.clone(); 256]),
+                     CA_CACHE_MAX_BYTES / 4,
+@@ -200,7 +200,7 @@ fn retained_certificate_count_and_der_bytes_are_bounded() {
+     }
+     let prior = cache.entries.len();
+     cache
+-        .load([99; 32], || {
++        .load([99; 32], CaParseDiagnostics::default(), || {
+             Ok((
+                 Arc::from(vec![certificate.clone(); CA_CACHE_MAX_CERTIFICATES + 1]),
+                 1,
+@@ -208,7 +208,7 @@ fn retained_certificate_count_and_der_bytes_are_bounded() {
+         })
+         .unwrap();
+     cache
+-        .load([100; 32], || {
++        .load([100; 32], CaParseDiagnostics::default(), || {
+             Ok((Arc::from(vec![certificate]), CA_CACHE_MAX_BYTES + 1))
+         })
+         .unwrap();
+@@ -321,3 +321,179 @@ async fn request(certificates: &[reqwest::Certificate], config: Arc<rustls::Serv
+     server.join().unwrap();
+     success
+ }
++
++#[test]
++fn exact_digest_hits_replay_parser_diagnostics_with_current_source_outside_the_lock() {
++    use tracing_subscriber::Layer;
++    use tracing_subscriber::layer::SubscriberExt;
++
++    const CHILD: &str = "CODEX_HTTP_CLIENT_CA_PARSE_DIAGNOSTICS_TEST";
++    if std::env::var_os(CHILD).is_none() {
++        // Follow existing logging tests: isolate subscriber/callsite state.
++        let module = module_path!().split_once("::").unwrap().1;
++        let name = format!(
++            "{module}::exact_digest_hits_replay_parser_diagnostics_with_current_source_outside_the_lock"
++        );
++        let output = std::process::Command::new(std::env::current_exe().unwrap())
++            .args(["--exact", &name, "--nocapture"])
++            .env(CHILD, "1")
++            .output()
++            .unwrap();
++        assert!(
++            output.status.success(),
++            "{}\n{}",
++            String::from_utf8_lossy(&output.stdout),
++            String::from_utf8_lossy(&output.stderr)
++        );
++        return;
++    }
++
++    struct LogWriter {
++        logs: Arc<Mutex<Vec<u8>>>,
++        cache: Arc<Mutex<ReqwestCaCache>>,
++    }
++    impl Write for LogWriter {
++        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
++            assert!(
++                self.cache.try_lock().is_ok(),
++                "tracing must not hold the CA cache lock"
++            );
++            self.logs.lock().unwrap().extend_from_slice(bytes);
++            Ok(bytes.len())
++        }
++        fn flush(&mut self) -> io::Result<()> {
++            Ok(())
++        }
++    }
++
++    let cache = Arc::new(Mutex::new(ReqwestCaCache::default()));
++    let logs = Arc::new(Mutex::new(Vec::new()));
++    let writer_logs = Arc::clone(&logs);
++    let writer_cache = Arc::clone(&cache);
++    let subscriber = tracing_subscriber::registry().with(
++        tracing_subscriber::fmt::layer()
++            .without_time()
++            .with_target(false)
++            .with_ansi(false)
++            .with_writer(move || LogWriter {
++                logs: Arc::clone(&writer_logs),
++                cache: Arc::clone(&writer_cache),
++            })
++            .with_filter(
++                tracing_subscriber::filter::Targets::new()
++                    .with_target("codex_http_client::custom_ca", tracing::Level::INFO),
++            ),
++    );
++    let _guard = tracing::subscriber::set_default(subscriber);
++    let temp = tempfile::TempDir::new().unwrap();
++    let first_path = temp.path().join("original.pem");
++    let current_path = temp.path().join("selected.pem");
++    let trusted = include_str!("../tests/fixtures/test-ca-trusted.pem");
++    // The parser classifies this well-formed PEM CRL before ignoring its body.
++    let crl = "-----BEGIN X509 CRL-----\nMAA=\n-----END X509 CRL-----\n";
++    let ignored_key = "-----BEGIN PRIVATE KEY-----\nAQID\n-----END PRIVATE KEY-----\n";
++    let contents = format!("{trusted}\n{crl}{crl}{ignored_key}");
++    fs::write(&first_path, &contents).unwrap();
++    fs::write(&current_path, &contents).unwrap();
++    let (cold, cold_digest, cold_admissible) = bundle(&first_path)
++        .load_reqwest_certificates_and_digest(&cache)
++        .unwrap();
++    assert_eq!(cold.len(), 1);
++    let cold_logs = String::from_utf8(std::mem::take(&mut *logs.lock().unwrap())).unwrap();
++    let current = ConfiguredCaBundle {
++        source_env: CODEX_CA_CERT_ENV,
++        path: current_path.clone(),
++    };
++    let (warm, warm_digest, warm_admissible) = current
++        .load_reqwest_certificates_and_digest(&cache)
++        .unwrap();
++    let warm_logs = String::from_utf8(std::mem::take(&mut *logs.lock().unwrap())).unwrap();
++    assert!(Arc::ptr_eq(&cold, &warm));
++    assert_eq!(cold_digest, warm_digest);
++    assert!(cold_admissible && warm_admissible);
++    for (captured, path, env) in [
++        (&cold_logs, &first_path, SSL_CERT_FILE_ENV),
++        (&warm_logs, &current_path, CODEX_CA_CERT_ENV),
++    ] {
++        let lines = captured.lines().collect::<Vec<_>>();
++        assert_eq!(
++            lines.len(),
++            3,
++            "one normalization, one CRL and one count event: {captured}"
++        );
++        for (line, message) in lines.iter().zip([
++            "normalizing OpenSSL TRUSTED CERTIFICATE labels in custom CA bundle",
++            "ignoring X509 CRL entries found in custom CA bundle",
++            "loaded certificates from custom CA bundle",
++        ]) {
++            assert!(line.contains(message));
++            assert!(line.contains(env));
++            assert!(line.contains(path.to_str().unwrap()));
++        }
++        assert!(lines[2].contains("certificate_count=1"));
++        assert!(!captured.contains("PRIVATE KEY"));
++        assert!(!captured.contains("AQID"));
++    }
++    assert!(!warm_logs.contains(first_path.to_str().unwrap()));
++}
++
++#[test]
++fn warm_parse_success_does_not_hide_malformed_crls_trusted_der_or_current_read_errors() {
++    let temp = tempfile::TempDir::new().unwrap();
++    let path = temp.path().join("current.pem");
++    let cache = Mutex::new(ReqwestCaCache::default());
++    fs::write(&path, FIRST_CA).unwrap();
++    let first = bundle(&path).load_reqwest_certificates(&cache).unwrap();
++    let current = ConfiguredCaBundle {
++        source_env: CODEX_CA_CERT_ENV,
++        path: path.clone(),
++    };
++    for malformed in [
++        format!("{FIRST_CA}\n-----BEGIN X509 CRL-----\n!!!\n-----END X509 CRL-----\n"),
++        "-----BEGIN TRUSTED CERTIFICATE-----\nAA==\n-----END TRUSTED CERTIFICATE-----\n"
++            .to_string(),
++    ] {
++        fs::write(&path, malformed).unwrap();
++        for _ in 0..2 {
++            match current
++                .load_reqwest_certificates(&cache)
++                .err()
++                .expect("current CA input must fail")
++            {
++                BuildCustomCaTransportError::InvalidCaFile {
++                    source_env,
++                    path: actual,
++                    ..
++                } => {
++                    assert_eq!(source_env, CODEX_CA_CERT_ENV);
++                    assert_eq!(actual, path);
++                }
++                error => panic!("unexpected parse failure: {error}"),
++            }
++        }
++        assert_eq!(cache.lock().unwrap().entries.len(), 1);
++    }
++    fs::remove_file(&path).unwrap();
++    fs::create_dir(&path).unwrap();
++    match current
++        .load_reqwest_certificates(&cache)
++        .err()
++        .expect("current CA input must fail")
++    {
++        BuildCustomCaTransportError::ReadCaFile {
++            source_env,
++            path: actual,
++            ..
++        } => {
++            assert_eq!(source_env, CODEX_CA_CERT_ENV);
++            assert_eq!(actual, path);
++        }
++        error => panic!("current path read failure must not use cached trust: {error}"),
++    }
++    fs::remove_dir(&path).unwrap();
++    fs::write(&path, FIRST_CA).unwrap();
++    assert!(Arc::ptr_eq(
++        &first,
++        &current.load_reqwest_certificates(&cache).unwrap()
++    ));
++}

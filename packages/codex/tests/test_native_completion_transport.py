@@ -1,6 +1,8 @@
 """The Windows native completion transport must not block the event loop."""
 
 import asyncio
+import errno
+import os
 import socket
 import sys
 import weakref
@@ -246,3 +248,89 @@ async def test_windows_completion_setup_releases_unstarted_native_owner(
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
     assert all(sock.fileno() == -1 for sock in allocated)
+
+
+class _ImmediateCompletion:
+    def __init__(self):
+        self.started = False
+        self.discarded = False
+
+    def start(self, writer):
+        self.started = True
+        writer.close()
+
+    def take_result(self):
+        return "completed"
+
+    def discard_unstarted(self):
+        self.discarded = True
+
+
+@pytest.mark.serial
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux atomic socket creation")
+@pytest.mark.parametrize("default_timeout", [None, 0.0, 0.25])
+async def test_completion_atomic_flags_set_real_socket_modes(monkeypatch, default_timeout):
+    original_pair = socket.socketpair
+    original_timeout = socket.getdefaulttimeout()
+    observed = []
+
+    def pair(*args, **kwargs):
+        sockets = original_pair(*args, **kwargs)
+        observed.append(kwargs.get("type"))
+        for endpoint in sockets:
+            assert endpoint.gettimeout() == 0.0
+            assert not endpoint.getblocking()
+            assert not os.get_blocking(endpoint.fileno())
+            assert not endpoint.get_inheritable()
+        return sockets
+
+    monkeypatch.setattr(socket, "socketpair", pair)
+    try:
+        socket.setdefaulttimeout(default_timeout)
+        call = _ImmediateCompletion()
+        assert await _native_async._await_native_completion(call) == "completed"
+        assert call.started
+        assert observed == [socket.SOCK_STREAM | socket.SOCK_NONBLOCK]
+    finally:
+        socket.setdefaulttimeout(original_timeout)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux atomic socket creation")
+async def test_completion_unsupported_atomic_flag_uses_existing_socket_path(monkeypatch):
+    original_pair = socket.socketpair
+    observed = []
+    allocated = []
+
+    def pair(*args, **kwargs):
+        observed.append(kwargs.get("type"))
+        if len(observed) == 1:
+            raise OSError(errno.EINVAL, "unsupported atomic socket flag")
+        sockets = original_pair(*args, **kwargs)
+        allocated.extend(sockets)
+        return sockets
+
+    monkeypatch.setattr(socket, "socketpair", pair)
+    call = _ImmediateCompletion()
+    assert await _native_async._await_native_completion(call) == "completed"
+    assert observed == [socket.SOCK_STREAM | socket.SOCK_NONBLOCK, None]
+    assert all(endpoint.fileno() == -1 for endpoint in allocated)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux atomic socket creation")
+@pytest.mark.parametrize("error_number", [errno.EMFILE, errno.ENFILE, errno.ENOMEM, errno.EPERM])
+async def test_completion_atomic_allocation_failure_is_not_retried(monkeypatch, error_number):
+    error = OSError(error_number, "socket allocation refused")
+    attempts = []
+
+    def pair(*args, **kwargs):
+        attempts.append(kwargs)
+        raise error
+
+    monkeypatch.setattr(socket, "socketpair", pair)
+    call = _ImmediateCompletion()
+    with pytest.raises(OSError) as caught:
+        await _native_async._await_native_completion(call)
+    assert caught.value is error
+    assert len(attempts) == 1
+    assert not call.started
+    assert call.discarded

@@ -25,6 +25,8 @@ static STATE: Mutex<State> = Mutex::const_new(State {
     provider: None,
 });
 static INITIALIZED: AtomicBool = AtomicBool::new(false);
+// Successful process configuration is immutable, including after shutdown.
+static EXPORTS_ENABLED: AtomicBool = AtomicBool::new(false);
 static TRACE_INITIALIZED: AtomicBool = AtomicBool::new(false);
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 const SERVICE: &str = "codex_agents_python";
@@ -34,6 +36,10 @@ type ExportLayer = Box<dyn Layer<Registry> + Send + Sync>;
 
 pub fn is_initialized() -> bool {
     INITIALIZED.load(Ordering::Acquire)
+}
+
+pub fn collection_allowed() -> bool {
+    !EXPORTS_ENABLED.load(Ordering::Acquire)
 }
 
 pub async fn engine_starting() -> Result<()> {
@@ -100,17 +106,23 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
             http_mtls_network_policy(&config.application_network_policy);
     }
 
+    let exports_enabled = export_requested(&config);
+    let logs_enabled = !matches!(config.otel.exporter, OtelExporterKind::None);
+    let traces_enabled = config.otel.trace_processors
+        || !matches!(config.otel.trace_exporter, OtelExporterKind::None);
     codex_otel::sdk_trace::configure_pipeline(false);
     // Claim the subscriber first: losing this race must not modify native OTel globals.
     let (logger, handle) = reload::Layer::new(None::<ExportLayer>);
     let mut layers: Vec<ExportLayer> = vec![
         logger
-            .with_filter(tracing_subscriber::filter::filter_fn(
-                OtelProvider::log_export_filter,
-            ))
+            .with_filter(tracing_subscriber::filter::filter_fn(move |metadata| {
+                logs_enabled && OtelProvider::log_export_filter(metadata)
+            }))
             .boxed(),
     ];
-    layers.push(OtelProvider::reloadable_tracing_layer(SERVICE).boxed());
+    layers.push(
+        OtelProvider::reloadable_tracing_layer_with_trace_enabled(SERVICE, traces_enabled).boxed(),
+    );
     tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layers))
         .context("Could not claim the process-wide Rust tracing subscriber")?;
     state.claimed = true;
@@ -138,14 +150,11 @@ pub async fn initialize(config_json: &str, runtime_json: &str) -> Result<()> {
     }
     codex_core::otel_init::record_process_start(provider.as_ref(), SERVICE);
     codex_core::otel_init::install_sqlite_telemetry(provider.as_ref(), SERVICE);
-    TRACE_INITIALIZED.store(
-        config.otel.trace_processors
-            || !matches!(config.otel.trace_exporter, OtelExporterKind::None),
-        Ordering::Release,
-    );
+    TRACE_INITIALIZED.store(traces_enabled, Ordering::Release);
     codex_otel::sdk_trace::configure_pipeline(TRACE_INITIALIZED.load(Ordering::Acquire));
     ACTIVE.store(true, Ordering::Release);
     state.provider = provider;
+    EXPORTS_ENABLED.store(exports_enabled, Ordering::Release);
     INITIALIZED.store(true, Ordering::Release);
     Ok(())
 }
