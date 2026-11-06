@@ -1414,7 +1414,7 @@ impl PythonTools {
             replies
                 .as_ref()
                 .and_then(|pending| pending.get(&id))
-                .is_some_and(|pending| !pending.reply.is_closed()),
+                .is_some_and(|pending| !pending.is_closed()),
             "Expired step selection"
         );
         Ok(())
