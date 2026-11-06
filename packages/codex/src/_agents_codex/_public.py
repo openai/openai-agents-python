@@ -40,14 +40,18 @@ def preserve_module_identity(namespace: dict[str, Any], public_module: str) -> N
 
                 from annotationlib import Format, ForwardRef, get_annotations
 
-                value.__annotations__ = {
-                    name: evaluate_forward_ref(
-                        annotation, globals=namespace, format=Format.FORWARDREF
-                    )
-                    if isinstance(annotation, ForwardRef)
-                    else annotation
-                    for name, annotation in get_annotations(value, format=Format.FORWARDREF).items()
-                }
+                value.__annotations__.update(
+                    {
+                        name: evaluate_forward_ref(
+                            annotation, globals=namespace, format=Format.FORWARDREF
+                        )
+                        if isinstance(annotation, ForwardRef)
+                        else annotation
+                        for name, annotation in get_annotations(
+                            value, format=Format.FORWARDREF
+                        ).items()
+                    }
+                )
             value.__module__ = public_module
             if isinstance(value, type):
                 for member in vars(value).values():
