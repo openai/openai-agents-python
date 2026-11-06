@@ -997,6 +997,13 @@ class BaseSandboxSession(abc.ABC):
         :param user: Optional sandbox user to perform the write as.
         """
 
+    async def _write_sensitive_file(self, path: Path, data: io.IOBase) -> None:
+        """Write generated mount configuration using the backend's private-file hook."""
+        await self.write(path, data)
+        await self._exec_checked_nonzero(
+            "chmod", "0600", sandbox_path_str(self.normalize_path(path))
+        )
+
     async def _write_new_file(
         self,
         path: Path,
