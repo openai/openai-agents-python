@@ -89,7 +89,7 @@ def test_sdk_archive_has_current_native_api_and_licenses(sdk_wheel):
             assert (info.external_attr >> 16) & 0o111
 
 
-def test_sdk_metadata_separates_native_and_classic_dependencies(
+def test_sdk_metadata_separates_native_classic_and_a2a_dependencies(
     sdk_wheel,
 ):
     path, archive = sdk_wheel
@@ -112,6 +112,7 @@ def test_sdk_metadata_separates_native_and_classic_dependencies(
     )
     extra_dependencies = project["optional-dependencies"]
     assert "classic" in extra_dependencies
+    assert extra_dependencies["a2a"] == ["a2a-sdk==1.3.0"]
     assert sorted(metadata.get_all("Provides-Extra", [])) == sorted(extra_dependencies)
     observed = {Requirement(value) for value in metadata.get_all("Requires-Dist", [])}
     expected = {
@@ -129,12 +130,13 @@ def test_sdk_metadata_separates_native_and_classic_dependencies(
                 "python_full_version": full_version,
                 "extra": extra,
             }
-            selected_expected = expected | (classic if extra else set())
+            selected_expected = expected | (classic if extra == "classic" else set())
             # Hatch expands each integration's local classic dependency into its requirements.
             for value in extra_dependencies.get(extra, []):
                 requirement = Requirement(value)
                 if requirement.name == "openai-agents":
                     assert requirement == Requirement("openai-agents[classic]")
+                    selected_expected |= classic
                 else:
                     selected_expected.add(requirement)
             assert {

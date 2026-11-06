@@ -167,6 +167,7 @@ from _agents_codex.session import (
     _OpeningOwner as _OpeningOwner,
     _owned_span as _owned_span,
     _prepare_spec as _prepare_spec,
+    _PreparedManualResult as _PreparedManualResult,
     _PreparedOutput as _PreparedOutput,
     _PrepareRequest as _PrepareRequest,
     _private_task as _private_task,
