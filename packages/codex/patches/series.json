@@ -235,7 +235,11 @@
     {
       "path": "0054-model-context-transform.patch",
       "sha256": "6639ee84450ec3bd9f9915db2dc852e6a63c9bddb08b446cb07f4680597d05b0"
+    },
+    {
+      "path": "0055-compaction-callback.patch",
+      "sha256": "5cf5df20f97b17d042d91359a2291bee3f0b4a73f7830834d6f7624038291015"
     }
   ],
-  "result_tree": "b4646ba06693042c09248f5e2e9dcf07c78352c4"
+  "result_tree": "656d5bc53dc78b7070ce088d4bbb1754c86ad9c9"
 }

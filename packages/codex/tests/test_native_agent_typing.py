@@ -17,6 +17,7 @@ from agents import (
     ChecklistState,
     CheckpointStatus,
     ChildInvocation,
+    CompactionContext,
     Completed,
     Environment,
     EnvironmentSource,
@@ -372,6 +373,22 @@ async def project_context(request: ModelRequestContext[Application]) -> Sequence
     assert_type(request.items, tuple[dict[str, Any], ...])
     assert_type(request.purpose, Literal["turn", "compaction", "output_repair"])
     return request.items
+
+
+async def summarize_context(request: CompactionContext[Application]) -> str | None:
+    assert_type(request.context, Application)
+    assert_type(request.items, tuple[dict[str, Any], ...])
+    assert_type(request.trigger, Literal["auto", "manual"])
+    return None
+
+
+assert_type(
+    Agent(instructions="Answer.", before_compact=summarize_context), Agent[Application, str]
+)
+assert_type(
+    Agent(instructions="Answer.", output_type=Answer, before_compact=summarize_context),
+    Agent[Application, Answer],
+)
 
 
 assert_type(

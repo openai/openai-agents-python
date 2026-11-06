@@ -33,6 +33,7 @@ These programs use the current SDK and model credentials:
 | Call a Python function | [basic.py](basic.py) | One answer through `Agent` and `function_tool`. |
 | Supply application context | [typed_context.py](typed_context.py) | Context supplied to a tool and a validated Pydantic output model. |
 | Continue and restore a conversation | [conversation.py](conversation.py) | Multiple turns, streamed observations, and saved state using `Turn.get_result()`. |
+| Preserve task state during compaction | [compaction.py](compaction.py) | A `before_compact` callback supplies the summary for automatic or manual compaction. |
 | Validate an artifact before writing it | [validated_artifact.py](validated_artifact.py) | A tool callback returns validation errors through `ToolOutput` so the model can retry. |
 | Limit Python callbacks | [callback_quota.py](callback_quota.py) | A fresh application quota for each run. The quota grants no native tool permissions. |
 

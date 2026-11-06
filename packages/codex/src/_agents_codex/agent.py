@@ -39,6 +39,7 @@ from ._lifecycle import (
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
+from .compaction import _BeforeCompact
 from .model_context import _ContextTransform
 
 if TYPE_CHECKING:
@@ -331,6 +332,10 @@ class Agent(Generic[ContextT, OutputT]):
     or None to keep the original input. The callback does not edit saved history.
     Raising an exception prevents that request from reaching the provider.
 
+    ``before_compact`` runs before automatic or manual native compaction,
+    including children. Return a nonempty summary to skip native summarization,
+    or None to keep the default. Codex publishes the summary in its history.
+
     ``programmatic_tool_calling=True`` also permits native JavaScript cells to call the declared
     function and MCP tools. MCP result transforms run before those cells
     receive results. The cells use the SDK's bundled host and do not grant
@@ -347,6 +352,7 @@ class Agent(Generic[ContextT, OutputT]):
     output_type: OutputSpec[OutputT] | None
     programmatic_tool_calling: bool
     transform_context: _ContextTransform[ContextT] | None
+    before_compact: _BeforeCompact[ContextT] | None
 
     def __setattr__(self, name: str, value: object) -> None:
         # Freeze declared behavior while retaining application-owned method hooks.
@@ -369,6 +375,7 @@ class Agent(Generic[ContextT, OutputT]):
             tools: Sequence[Tool[ContextT]] | None = None,
             output_type: None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            before_compact: _BeforeCompact[ContextT] | None = None,
             **kwargs: Any,
         ) -> TextAgentT: ...
 
@@ -379,6 +386,7 @@ class Agent(Generic[ContextT, OutputT]):
             output_type: OutputSpec[OutputT],
             tools: Sequence[Tool[ContextT]] | None = None,
             transform_context: _ContextTransform[ContextT] | None = None,
+            before_compact: _BeforeCompact[ContextT] | None = None,
             **kwargs: Any,
         ) -> TypedAgentT: ...
 
@@ -404,6 +412,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        before_compact: _BeforeCompact[ContextT] | None = None,
     ) -> None: ...
 
     @overload
@@ -419,6 +428,7 @@ class Agent(Generic[ContextT, OutputT]):
         provider: NativeProvider | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        before_compact: _BeforeCompact[ContextT] | None = None,
     ) -> None: ...
 
     def __init__(
@@ -433,6 +443,7 @@ class Agent(Generic[ContextT, OutputT]):
         output_type: OutputSpec[OutputT] | None = None,
         programmatic_tool_calling: bool = False,
         transform_context: _ContextTransform[ContextT] | None = None,
+        before_compact: _BeforeCompact[ContextT] | None = None,
     ) -> None:
         if not isinstance(instructions, str):
             raise TypeError("instructions must be a string")
@@ -442,6 +453,8 @@ class Agent(Generic[ContextT, OutputT]):
             raise TypeError("programmatic_tool_calling must be a bool")
         if transform_context is not None and not callable(transform_context):
             raise TypeError("transform_context must be callable or None")
+        if before_compact is not None and not callable(before_compact):
+            raise TypeError("before_compact must be callable or None")
         if model is not None and not isinstance(model, str):
             raise TypeError("model must be a string or None")
         if provider is not None and not isinstance(provider, NativeProvider):
@@ -457,6 +470,7 @@ class Agent(Generic[ContextT, OutputT]):
         object.__setattr__(self, "output_type", output_type)
         object.__setattr__(self, "programmatic_tool_calling", programmatic_tool_calling)
         object.__setattr__(self, "transform_context", transform_context)
+        object.__setattr__(self, "before_compact", before_compact)
 
     def validate(self) -> None:
         """Check the declaration without opening a Session.

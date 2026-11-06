@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         SessionStore as SessionStore,
         SQLiteSessionStore as SQLiteSessionStore,
     )
+    from .compaction import CompactionContext as CompactionContext
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -132,6 +133,7 @@ if TYPE_CHECKING:
     )
 
 _MODULES = {
+    "CompactionContext": ".compaction",
     "ModelRequestContext": ".model_context",
     "PreparedRequest": ".prepared_request",
     "PreparedToolPresentation": ".prepared_request",
