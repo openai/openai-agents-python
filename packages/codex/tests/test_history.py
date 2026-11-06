@@ -5,7 +5,7 @@ import copy
 import pytest
 
 from agents._history import project_history
-from agents._projection import project_execution_completion
+from agents._projection import EventProjector, project_execution_completion
 
 
 def event(kind, turn="t1", **fields):
@@ -81,6 +81,119 @@ def test_recorded_items_and_usage_survive_inherited_turn_history():
     assert items[2]["phase"] == "final_answer"
     assert items[2]["content"] == [{"type": "output_text", "text": "Recorded"}]
     assert history == before
+
+
+def test_recorded_output_text_keeps_annotation_offsets_on_their_own_part():
+    annotations = [
+        {
+            "type": "url_citation",
+            "url": "https://example.com/report",
+            "title": "Report",
+            "start_index": 0,
+            "end_index": 6,
+        }
+    ]
+    history = [
+        event("task_started"),
+        event(
+            "item_completed",
+            item={
+                "type": "AgentMessage",
+                "id": "answer",
+                "content": [
+                    {"type": "Text", "text": "Source: "},
+                    {"type": "Text", "text": "Report", "annotations": annotations},
+                ],
+            },
+        ),
+        event("task_complete", last_agent_message="Source: Report"),
+    ]
+    _, items = project_history(history, "root")
+    assert [item["content"] for item in items] == [
+        [
+            {"type": "output_text", "text": "Source: "},
+            {"type": "output_text", "text": "Report", "annotations": annotations},
+        ]
+    ]
+    assert "display_text" not in items[0]
+
+
+@pytest.mark.parametrize("completion", ["completed", "open", "blank_tail"])
+def test_terminal_projection_keeps_original_citations_and_display_text(completion):
+    hidden = "<oai-mem-citation>fixture marker</oai-mem-citation>"
+    citation = {
+        "type": "url_citation",
+        "url": "https://example.com/report",
+        "title": "Report",
+        "start_index": len(hidden),
+        "end_index": len(hidden) + 6,
+    }
+    display_text = "Report published."
+    content = [
+        {"type": "Text", "text": hidden + "Report", "annotations": [citation]},
+        {"type": "Text", "text": " published."},
+    ]
+    answer = {
+        "type": "AgentMessage",
+        "id": "answer",
+        "phase": "final_answer",
+        "content": content,
+        "display_text": display_text,
+    }
+    history = [event("task_started")]
+    if completion == "open":
+        history.extend(
+            [
+                event(
+                    "item_started",
+                    item={**answer, "content": content[:1], "display_text": "Report"},
+                ),
+                event("agent_message_content_delta", item_id="answer", delta=" published."),
+            ]
+        )
+    else:
+        history.append(event("item_completed", item=answer))
+    if completion == "blank_tail":
+        history.append(
+            event(
+                "item_completed",
+                item={
+                    "type": "AgentMessage",
+                    "id": "blank-tail",
+                    "content": [{"type": "Text", "text": hidden, "annotations": []}],
+                    "display_text": "",
+                },
+            )
+        )
+    history.append(event("task_complete", last_agent_message=display_text))
+
+    projector = EventProjector("root")
+    events = [
+        projected
+        for record in history
+        for projected in projector.project({"id": "t1", "msg": record["payload"]})
+    ]
+    added = next(e["item"] for e in events if e["type"] == "agent.session.turn.item.added")
+    assert added.get("display_text") == ("Report" if completion == "open" else None)
+    messages = [e["item"] for e in events if e["type"] == "agent.session.turn.item.done"]
+    assert [message["id"] for message in messages] == (
+        ["answer", "blank-tail"] if completion == "blank_tail" else ["answer"]
+    )
+    message = messages[0]
+    assert message["status"] == "completed"
+    assert message["display_text"] == display_text
+    expected_parts = [{"type": "output_text", "text": hidden + "Report", "annotations": [citation]}]
+    if completion != "open":
+        expected_parts.append({"type": "output_text", "text": " published."})
+    assert message["content"] == expected_parts
+    original = message["content"][0]
+    annotation = original["annotations"][0]
+    assert original["text"][annotation["start_index"] : annotation["end_index"]] == "Report"
+    if completion == "blank_tail":
+        assert messages[1]["display_text"] == ""
+    if completion == "completed":
+        _, items = project_history(history, "root")
+        assert items == messages
 
 
 @pytest.mark.parametrize("terminal, expected", [(False, "in_progress"), (True, "incomplete")])

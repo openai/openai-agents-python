@@ -1653,6 +1653,7 @@ async def test_manual_restore_keeps_saved_model_settings_and_uses_current_creden
             "reasoning_effort": "low",
             "reasoning_summary": "concise",
             "service_tier": "flex",
+            "tool_choice": "required",
         }
         if explicit_settings
         else None,
@@ -1675,6 +1676,7 @@ async def test_manual_restore_keeps_saved_model_settings_and_uses_current_creden
                 "reasoning_effort": "high",
                 "reasoning_summary": "detailed",
                 "service_tier": "flex",
+                "tool_choice": "none",
             },
             tools=[lookup],
             provider=NativeProvider(base_url=responses.url, api_key="synthetic-current-restore"),
@@ -1693,6 +1695,11 @@ async def test_manual_restore_keeps_saved_model_settings_and_uses_current_creden
         assert before["model"] == after["model"] == "gpt-5.2-codex"
         assert before.get("reasoning") == after.get("reasoning")
         assert before.get("service_tier") == after.get("service_tier")
+        assert (
+            before["tool_choice"]
+            == after["tool_choice"]
+            == ("required" if explicit_settings else "auto")
+        )
         assert responses.request_headers[0]["authorization"] == "Bearer synthetic-manual-test"
         assert responses.request_headers[1]["authorization"] == "Bearer synthetic-current-restore"
         assert current.model == "gpt-5.2"

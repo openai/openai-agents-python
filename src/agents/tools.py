@@ -21,6 +21,7 @@ from _agents_codex.tools import (
     ToolRef as ToolRef,
     TypeAdapter as TypeAdapter,
     WebSearch as WebSearch,
+    WebSearchLocation as WebSearchLocation,
     _CapturedFunction as _CapturedFunction,
     _CapturedManual as _CapturedManual,
     _function_parameters as _function_parameters,

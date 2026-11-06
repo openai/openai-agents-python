@@ -13,6 +13,16 @@ from agents._web_projection import project_web_search_item
         ),
         (
             {"type": "WebSearch"},
+            {"type": "search", "sources": [{"type": "url", "url": "https://example.com"}]},
+            {
+                "type": "search",
+                "query": None,
+                "queries": None,
+                "sources": [{"type": "url", "url": "https://example.com"}],
+            },
+        ),
+        (
+            {"type": "WebSearch"},
             {"type": "open_page", "url": "https://example.com"},
             {"type": "open_page", "url": "https://example.com"},
         ),

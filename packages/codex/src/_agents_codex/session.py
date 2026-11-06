@@ -50,7 +50,7 @@ from typing import (
 from uuid import uuid4 as uuid4
 
 from ._compat import cancel_once as cancel_once
-from ._events import SessionItem as SessionItem
+from ._events import MessageItem, SessionItem as SessionItem, WebSearchCallItem
 from ._function_tools import FunctionTool as FunctionTool, Tool as Tool, ToolContext as ToolContext
 from ._history import project_history as project_history
 from ._lifecycle import (
@@ -64,6 +64,7 @@ from ._native_async import _NativeCompletionError as _NativeCompletionError
 from ._projection import (
     _error_code as _error_code,
     project_execution_completion as project_execution_completion,
+    project_model_output_item,
 )
 from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import (
@@ -133,6 +134,7 @@ from .observation import (
     ContextCompacted as ContextCompacted,
     EventStream as EventStream,
     ExecutionItemCompleted as ExecutionItemCompleted,
+    ModelOutputItemCompleted,
     OutputTextDelta as OutputTextDelta,
     SubagentLifecycle as SubagentLifecycle,
     ToolFinished as ToolFinished,
@@ -258,6 +260,7 @@ def _manual_restore_model_settings(state: SessionState) -> tuple[str, dict[str, 
         ("reasoning_effort", "effort"),
         ("reasoning_summary", "summary"),
         ("service_tier", "service_tier"),
+        ("tool_choice", "tool_choice"),
     ):
         value = captured.get(source)
         if value is not None and (not isinstance(value, str) or not value.strip()):
@@ -685,6 +688,8 @@ class Completed(Generic[OutputT]):
     prompted-output correction. Their per-turn usage is separate from usage,
     which still reports only the original thread. Missing usage remains None.
     final_output may be derived from a repair; native task history stays intact.
+    For hosted web search, read citation ranges on each text part from
+    Session.items(). final_output contains display text without those ranges.
     One-shot runners populate state when called with return_state=True.
     Existing native checkpoint restrictions still apply.
     """
@@ -1257,6 +1262,17 @@ def _split_tools(
                 raise ValueError("A Session supports exactly one NativeAgents declaration")
             native_agents = tool
         elif isinstance(tool, (Checklist, NativeGoals, WebSearch)):
+            if (
+                available is None
+                and isinstance(tool, WebSearch)
+                and tool.route == "standalone"
+                and (
+                    tool.allowed_domains is not None
+                    or tool.blocked_domains is not None
+                    or tool.location is not None
+                )
+            ):
+                raise ValueError("WebSearch domain filters and location require route='hosted'")
             if available is not None:
                 refs = _fixed_tool_refs((tool,), False, None, None)
                 if retained.intersection(refs):
@@ -1752,6 +1768,19 @@ class Session(Generic[ContextT, OutputT]):
         if goals and storage is None:
             raise ValueError("NativeGoals requires an explicit LocalStorage profile")
         web_search = next((tool for tool in available if isinstance(tool, WebSearch)), None)
+        # Capture the controls before opening can await. Later selections only select the grant.
+        web_search_config: dict[str, Any] = {}
+        if web_search is not None:
+            if web_search.allowed_domains is not None:
+                web_search_config["tools.web_search.allowed_domains"] = list(
+                    web_search.allowed_domains
+                )
+            if web_search.blocked_domains is not None:
+                web_search_config["tools.web_search.blocked_domains"] = list(
+                    web_search.blocked_domains
+                )
+            if web_search.location is not None:
+                web_search_config["tools.web_search.location"] = dict(web_search.location)
         allowed_tools, allowed_mcp = tools, mcp_tools
         deferred_schemas = any(tool.defer_loading for tool in allowed_tools) or any(
             server.defer_loading for server in allowed_mcp
@@ -2044,6 +2073,7 @@ class Session(Generic[ContextT, OutputT]):
                     "features.standalone_web_search": (
                         web_search is not None and web_search.route == "standalone"
                     ),
+                    **web_search_config,
                 }
                 from . import telemetry
 
@@ -6188,6 +6218,20 @@ class Session(Generic[ContextT, OutputT]):
                         item_id=message["item"]["id"],
                     )
                 )
+            elif kind == "item_completed":
+                item = project_model_output_item(message["item"], True, handle.turn_id)
+                if item is not None and (
+                    item["type"] == "web_search_call"
+                    or any(part.get("annotations") for part in item["content"])
+                ):
+                    self._observations.append(
+                        ModelOutputItemCompleted(
+                            session_id=self.id,
+                            turn_id=handle.turn_id,
+                            submission_id=handle.submission_id,
+                            item=cast(MessageItem | WebSearchCallItem, item),
+                        )
+                    )
 
     def _observe_execution(
         self, message: dict[str, Any], *, thread_id: str, turn_id: str, submission_id: str | None

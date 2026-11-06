@@ -2,7 +2,7 @@
 
 from typing import Any as Any
 
-from ._events import WebSearchAction as WebSearchAction
+from ._events import WebSearchAction as WebSearchAction, WebSearchActionSearch
 from ._public import preserve_module_identity as _preserve_module_identity
 
 
@@ -15,11 +15,14 @@ def _action(native: dict[str, Any]) -> WebSearchAction | None:
         )
     match action.get("type"):
         case "search":
-            return {
+            search: WebSearchActionSearch = {
                 "type": "search",
                 "query": action.get("query"),
                 "queries": action.get("queries"),
             }
+            if action.get("sources") is not None:
+                search["sources"] = action["sources"]
+            return search
         case "open_page" | "openPage":
             return {"type": "open_page", "url": action.get("url")}
         case "find_in_page" | "findInPage":

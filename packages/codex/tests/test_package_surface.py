@@ -42,7 +42,10 @@ import agents
 from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool
 from agents import ModelContextSnapshot, ModelRequestContext
 from agents.model_context import ModelContextSnapshot as SnapshotFromModule
+from agents._events import URLCitation, WebSearchSource
+from agents.observation import ModelOutputItemCompleted
 from agents.state import SessionState
+from agents.tools import WebSearch, WebSearchLocation
 
 assert ModelContextSnapshot is SnapshotFromModule
 
@@ -70,6 +73,11 @@ assert stdio.env_vars == ('MCP_PACKAGE_SURFACE_KEY',)
 agent = Agent(name='Reader', instructions='Answer.', tools=[lookup, http, stdio])
 assert agent.name == 'Reader'
 assert Agent(instructions='Answer.').name is None
+assert WebSearch is agents.WebSearch
+assert WebSearchLocation.__module__ == 'agents.tools'
+assert URLCitation.__module__ == WebSearchSource.__module__ == 'agents._events'
+assert ModelOutputItemCompleted.__module__ == 'agents.observation'
+assert 'ModelOutputItemCompleted' in agents.observation.__all__
 for unsupported in (
     {'model': object()}, {'provider': object()}, {'runtime': 'python'}, {'model_provider': object()}
 ):

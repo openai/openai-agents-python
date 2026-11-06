@@ -1,0 +1,3227 @@
+diff --git a/codex-rs/analytics/src/reducer.rs b/codex-rs/analytics/src/reducer.rs
+index edbb046c153b03546db32ccab25d11de0c24d18a..9e66e334560b0632802f475d044743cb1298e409 100644
+--- a/codex-rs/analytics/src/reducer.rs
++++ b/codex-rs/analytics/src/reducer.rs
+@@ -3569,7 +3569,7 @@ fn web_search_action_kind(action: &WebSearchAction) -> WebSearchActionKind {
+ 
+ fn web_search_query_count(query: &str, action: Option<&WebSearchAction>) -> Option<u64> {
+     match action {
+-        Some(WebSearchAction::Search { query, queries }) => queries
++        Some(WebSearchAction::Search { query, queries, .. }) => queries
+             .as_ref()
+             .map(|queries| usize_to_u64(queries.len()))
+             .or_else(|| query.as_ref().map(|_| 1)),
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history.rs b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+index 8b42fde1c5c5b874a1de766661065156447eb65f..e560c3d448916f928daf3ad8be85df29165f8ac9 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+@@ -3117,6 +3117,7 @@ mod tests {
+                 call_id: "search-1".into(),
+                 query: "codex".into(),
+                 action: CoreWebSearchAction::Search {
++                    sources: None,
+                     query: Some("codex".into()),
+                     queries: None,
+                 },
+@@ -5194,6 +5195,7 @@ mod tests {
+                 call_id: "search-1".into(),
+                 query: "codex".into(),
+                 action: CoreWebSearchAction::Search {
++                    sources: None,
+                     query: Some("codex".into()),
+                     queries: None,
+                 },
+@@ -5338,6 +5340,7 @@ mod tests {
+                 call_id: "search-1".into(),
+                 query: "codex".into(),
+                 action: CoreWebSearchAction::Search {
++                    sources: None,
+                     query: Some("codex".into()),
+                     queries: None,
+                 },
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs b/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs
+index 5c22fc30159ca240125d08532c99040fc81f727d..489404d4ee5fc1957b36b9dd6158af0915558bd7 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history_projection_tests.rs
+@@ -126,8 +126,10 @@ fn projects_completed_canonical_turn_items() {
+         }],
+     });
+     let agent_item = TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "agent-1".to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: "done".to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/item.rs b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
+index 04f68a3351c765d6c2be8d492b1a3cded43a22bb..1106021715ff6d43fc6b993eab836da04503d6f0 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/item.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
+@@ -24,7 +24,6 @@ use codex_protocol::approvals::ExecApprovalKind as CoreExecApprovalKind;
+ use codex_protocol::approvals::GuardianAssessmentAction as CoreGuardianAssessmentAction;
+ use codex_protocol::approvals::GuardianAssessmentDecisionSource as CoreGuardianAssessmentDecisionSource;
+ use codex_protocol::approvals::GuardianCommandSource as CoreGuardianCommandSource;
+-use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
+ pub use codex_protocol::items::AgentMessageDelivery;
+ pub use codex_protocol::items::AsyncUserInputQuestion;
+ use codex_protocol::items::CollabAgentTool as CoreCollabAgentTool;
+@@ -853,7 +852,7 @@ pub(crate) fn web_search_action_from_core(
+     value: codex_protocol::models::WebSearchAction,
+ ) -> WebSearchAction {
+     match value {
+-        codex_protocol::models::WebSearchAction::Search { query, queries } => {
++        codex_protocol::models::WebSearchAction::Search { query, queries, .. } => {
+             WebSearchAction::Search { query, queries }
+         }
+         codex_protocol::models::WebSearchAction::OpenPage { url } => {
+@@ -883,13 +882,7 @@ impl From<CoreTurnItem> for ThreadItem {
+                     .collect(),
+             },
+             CoreTurnItem::AgentMessage(agent) => {
+-                let text = agent
+-                    .content
+-                    .into_iter()
+-                    .map(|entry| match entry {
+-                        CoreAgentMessageContent::Text { text } => text,
+-                    })
+-                    .collect::<String>();
++                let text = agent.text().into_owned();
+                 ThreadItem::AgentMessage {
+                     id: agent.id,
+                     text,
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
+index e299c130952a8fca2095823d208cf00777a4a7f7..b6a8399a5719bfea6558af44338bd1b6a3312afc 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/tests.rs
+@@ -3193,12 +3193,15 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
+     );
+ 
+     let agent_item = TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "agent-1".to_string(),
+         content: vec![
+             AgentMessageContent::Text {
++                annotations: None,
+                 text: "Hello ".to_string(),
+             },
+             AgentMessageContent::Text {
++                annotations: None,
+                 text: "world".to_string(),
+             },
+         ],
+@@ -3221,8 +3224,10 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
+     );
+ 
+     let agent_item_with_phase = TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "agent-2".to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: "final".to_string(),
+         }],
+         phase: Some(MessagePhase::FinalAnswer),
+@@ -3260,8 +3265,10 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
+     );
+ 
+     let async_item = ThreadItem::from(TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "async-1".to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: "Which?".to_string(),
+         }],
+         phase: Some(MessagePhase::FinalAnswer),
+@@ -3468,6 +3475,7 @@ fn core_turn_item_into_thread_item_converts_supported_variants() {
+         id: "search-1".to_string(),
+         query: "docs".to_string(),
+         action: CoreWebSearchAction::Search {
++            sources: None,
+             query: Some("docs".to_string()),
+             queries: None,
+         },
+diff --git a/codex-rs/app-server/src/bespoke_event_handling.rs b/codex-rs/app-server/src/bespoke_event_handling.rs
+index cf0d580ec2aa3a8b72b0f9d586e413d0110a2997..21c37ce3ccd86692ff03d3f362bd8f4847b77b9d 100644
+--- a/codex-rs/app-server/src/bespoke_event_handling.rs
++++ b/codex-rs/app-server/src/bespoke_event_handling.rs
+@@ -3412,12 +3412,15 @@ mod tests {
+                     thread_id: conversation_id,
+                     turn_id: event_turn_id.clone(),
+                     item: CoreTurnItem::AgentMessage(CoreAgentMessageItem {
++                        display_text: None,
+                         id: "msg-1".to_string(),
+                         content: vec![
+                             CoreAgentMessageContent::Text {
++                                annotations: None,
+                                 text: "complete ".to_string(),
+                             },
+                             CoreAgentMessageContent::Text {
++                                annotations: None,
+                                 text: "response".to_string(),
+                             },
+                         ],
+@@ -3436,8 +3439,10 @@ mod tests {
+                     thread_id: conversation_id,
+                     turn_id: event_turn_id.clone(),
+                     item: CoreTurnItem::AgentMessage(CoreAgentMessageItem {
++                        display_text: None,
+                         id: "msg-2".to_string(),
+                         content: vec![CoreAgentMessageContent::Text {
++                            annotations: None,
+                             text: "  ".to_string(),
+                         }],
+                         phase: None,
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index 81bef45c8b8ab98b3aea451b9f8297a84b6d4ac2..765fcbfd8320efd4e6860badfdedc75a64b22b2a 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -30,6 +30,7 @@ fn settings_item(
+         ThreadSettingsAppliedEvent {
+             thread_id: None,
+             thread_settings: ThreadSettingsSnapshot {
++                tool_choice: None,
+                 disabled_plugin_ids: Vec::new(),
+                 model: "gpt-5".to_string(),
+                 model_provider_id: "openai".to_string(),
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index ab37525c5dd24193af24b8b5eb0277eaa41bc9f0..d5456eeca6b3fd713163e319097583c204e861f8 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -889,6 +889,7 @@ impl TurnRequestProcessor {
+                     effort: effort.clone(),
+                     summary,
+                     service_tier: service_tier.clone(),
++                    tool_choice: None,
+                     collaboration_mode: collaboration_mode.clone(),
+                     personality,
+                 })
+@@ -913,6 +914,7 @@ impl TurnRequestProcessor {
+             effort,
+             summary,
+             service_tier,
++            tool_choice: None,
+             collaboration_mode,
+             personality,
+         })
+diff --git a/codex-rs/app-server/src/thread_state.rs b/codex-rs/app-server/src/thread_state.rs
+index a19c41b19ff8aea40842771f261f195661b33ec5..7bf73631c0667cab28f0669a75dbcbd6ecd62ec9 100644
+--- a/codex-rs/app-server/src/thread_state.rs
++++ b/codex-rs/app-server/src/thread_state.rs
+@@ -15,7 +15,6 @@ use codex_file_watcher::WatchRegistration;
+ use codex_protocol::ThreadId;
+ #[cfg(test)]
+ use codex_protocol::config_types::MultiAgentMode;
+-use codex_protocol::items::AgentMessageContent as CoreAgentMessageContent;
+ use codex_protocol::items::TurnItem as CoreTurnItem;
+ use codex_protocol::models::MessagePhase;
+ use codex_protocol::protocol::EventMsg;
+@@ -202,9 +201,7 @@ impl ThreadState {
+         if let EventMsg::ItemCompleted(payload) = event
+             && let CoreTurnItem::AgentMessage(item) = &payload.item
+             && matches!(item.phase, Some(MessagePhase::FinalAnswer) | None)
+-            && item.content.iter().any(|content| {
+-                matches!(content, CoreAgentMessageContent::Text { text } if !text.trim().is_empty())
+-            })
++            && !item.text().trim().is_empty()
+         {
+             self.turn_summary.last_agent_message =
+                 Some(ThreadItem::from(CoreTurnItem::AgentMessage(item.clone())));
+diff --git a/codex-rs/app-server/tests/suite/v2/config_rpc.rs b/codex-rs/app-server/tests/suite/v2/config_rpc.rs
+index 347db91b24164b924456291a4cfea8fccb136fe7..6387237c3adba7de0b8c7fd0c740c64062dbd1d2 100644
+--- a/codex-rs/app-server/tests/suite/v2/config_rpc.rs
++++ b/codex-rs/app-server/tests/suite/v2/config_rpc.rs
+@@ -592,6 +592,7 @@ allowed_domains = ["example.com"]
+         ToolsV2 {
+             web_search: Some(WebSearchToolConfig {
+                 context_size: Some(WebSearchContextSize::Low),
++                blocked_domains: None,
+                 allowed_domains: Some(vec!["example.com".to_string()]),
+                 location: None,
+             }),
+@@ -966,6 +967,7 @@ location = { country = "US", city = "New York", timezone = "America/New_York" }
+         config.tools.expect("tools present").web_search,
+         Some(WebSearchToolConfig {
+             context_size: Some(WebSearchContextSize::High),
++            blocked_domains: None,
+             allowed_domains: Some(vec!["example.com".to_string()]),
+             location: Some(WebSearchLocation {
+                 country: Some("US".to_string()),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs b/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs
+index 972cf70347322502a1788c8f4d5c898517aef277..78ae475ea9265b87f8d72dd24b443a3bd8282fb4 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_inject_items.rs
+@@ -90,6 +90,7 @@ async fn thread_inject_items_adds_raw_response_items_to_thread_history(
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: injected_text.to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
+index f8cc0ec24dcd1268b8509cc4a312359245814643..4cb923edc529e7a8d31b0b48fb6e64e591c420e3 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
+@@ -659,8 +659,10 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
+                     thread_id,
+                     "turn-1",
+                     CoreTurnItem::AgentMessage(AgentMessageItem {
++                        display_text: None,
+                         id: "commentary-1".to_string(),
+                         content: vec![AgentMessageContent::Text {
++                            annotations: None,
+                             text: "commentary needle".to_string(),
+                         }],
+                         phase: Some(MessagePhase::Commentary),
+@@ -673,8 +675,10 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
+                     thread_id,
+                     "turn-1",
+                     CoreTurnItem::AgentMessage(AgentMessageItem {
++                        display_text: None,
+                         id: "final-1".to_string(),
+                         content: vec![AgentMessageContent::Text {
++                            annotations: None,
+                             text: "😀 **Final**  \nneedle".to_string(),
+                         }],
+                         phase: Some(MessagePhase::FinalAnswer),
+@@ -1712,8 +1716,10 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
+                     thread_id,
+                     "turn-1",
+                     CoreTurnItem::AgentMessage(AgentMessageItem {
++                        display_text: None,
+                         id: "agent-1".to_string(),
+                         content: vec![AgentMessageContent::Text {
++                            annotations: None,
+                             text: "first".to_string(),
+                         }],
+                         phase: None,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index c9048b602ee923ee84d38255218d567cd06b03bd..43d5ed1c337463ea3b308d0ff20219eeb5a444df 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -6677,6 +6677,12 @@
+           },
+           "type": "array"
+         },
++        "blocked_domains": {
++          "items": {
++            "type": "string"
++          },
++          "type": "array"
++        },
+         "context_size": {
+           "$ref": "#/definitions/WebSearchContextSize"
+         },
+diff --git a/codex-rs/core/src/agent/control/user_authorization.rs b/codex-rs/core/src/agent/control/user_authorization.rs
+index 749921aefb7c7b413c7547b8979dde321a86cdb8..4343ef47e84fb411d1080f75c84be8ea73ffed1d 100644
+--- a/codex-rs/core/src/agent/control/user_authorization.rs
++++ b/codex-rs/core/src/agent/control/user_authorization.rs
+@@ -417,7 +417,7 @@ fn root_assistant_text(
+                 .content
+                 .iter()
+                 .map(|content| match content {
+-                    AgentMessageContent::Text { text } => text.as_str(),
++                    AgentMessageContent::Text { text, .. } => text.as_str(),
+                 })
+                 .collect::<String>()
+         }
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index c351714d9aea395e0822023757cbd37f5a0b669c..3adeedc19076d1dd0873756fea157cffa5066bb5 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -197,6 +197,7 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase,
+@@ -340,7 +341,7 @@ fn has_subagent_notification<'a>(
+             return false;
+         }
+         content.iter().any(|content_item| match content_item {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                 SubagentNotification::matches_text(text)
+             }
+             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+@@ -358,7 +359,7 @@ fn history_contains_text<'a>(
+             return false;
+         };
+         content.iter().any(|content_item| match content_item {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                 text.contains(needle)
+             }
+             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+@@ -401,7 +402,7 @@ fn history_contains_assistant_inter_agent_communication<'a>(
+             return false;
+         }
+         content.iter().any(|content_item| match content_item {
+-            ContentItem::OutputText { text } => {
++            ContentItem::OutputText { text, .. } => {
+                 serde_json::from_str::<InterAgentCommunication>(text)
+                     .ok()
+                     .as_ref()
+@@ -1880,6 +1881,7 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+                 ThreadSettingsAppliedEvent {
+                     thread_id: Some(parent_thread_id),
+                     thread_settings: ThreadSettingsSnapshot {
++                        tool_choice: None,
+                         disabled_plugin_ids: Vec::new(),
+                         model: "parent-only-model".to_string(),
+                         model_provider_id: "parent-only-provider".to_string(),
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index e4edf0e7059df4f8f4789f75cd013a9466bb19ae..b3ae84d194ebd9316f091926ca830d37b2e6f031 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -959,7 +959,16 @@ impl ModelClient {
+         .then_some(StreamOptions {
+             reasoning_summary_delivery: codex_api::ReasoningSummaryDelivery::SequentialCutoff,
+         });
+-        let include = vec!["reasoning.encrypted_content".to_string()];
++        let mut include = vec!["reasoning.encrypted_content".to_string()];
++        if !model_info.use_responses_lite
++            && !self.state.provider.info().is_amazon_bedrock()
++            && prompt
++                .tools
++                .iter()
++                .any(|tool| matches!(tool, codex_tools::ToolSpec::WebSearch { .. }))
++        {
++            include.push("web_search_call.action.sources".to_string());
++        }
+         let verbosity = if model_info.support_verbosity {
+             self.state.model_verbosity.or(model_info.default_verbosity)
+         } else {
+@@ -998,7 +1007,7 @@ impl ModelClient {
+             model: model_info.slug.clone(),
+             input,
+             tools,
+-            tool_choice: "auto".to_string(),
++            tool_choice: prompt.tool_choice.to_string(),
+             parallel_tool_calls: prompt.parallel_tool_calls && !model_info.use_responses_lite,
+             reasoning: Some(reasoning),
+             store: false,
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 1ab8e118d409094511c0648459cdecd12b3991dd..92a75729d6e2a997164a8a8add2904ae56aff32b 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -40,6 +40,7 @@ pub struct Prompt {
+ 
+     /// Whether parallel tool calls are permitted for this prompt.
+     pub(crate) parallel_tool_calls: bool,
++    pub(crate) tool_choice: codex_protocol::config_types::ToolChoice,
+ 
+     pub base_instructions: BaseInstructions,
+ 
+@@ -61,6 +62,7 @@ impl Default for Prompt {
+             sampling_stop: None,
+             prepared_request_admission: None,
+             parallel_tool_calls: false,
++            tool_choice: Default::default(),
+             base_instructions: BaseInstructions::default(),
+             output_schema: None,
+             output_schema_strict: true,
+@@ -76,10 +78,55 @@ impl Prompt {
+     ) -> Vec<ResponseItem> {
+         let mut input = self.input.clone();
+         normalize_image_details(&mut input, model_info);
++        filter_response_metadata_for_input(&mut input);
+         input
+     }
+ }
+ 
++// Responses accepts the documented annotation and search source variants as input.
++// Keep future output-only metadata in history while omitting it from replay.
++pub(crate) fn filter_response_metadata_for_input(items: &mut [ResponseItem]) {
++    for item in items {
++        match item {
++            ResponseItem::Message { content, .. } => {
++                for part in content {
++                    if let ContentItem::OutputText { annotations, .. } = part {
++                        retain_supported_response_metadata(
++                            annotations,
++                            &[
++                                "url_citation",
++                                "file_citation",
++                                "container_file_citation",
++                                "file_path",
++                            ],
++                        );
++                    }
++                }
++            }
++            ResponseItem::WebSearchCall {
++                action: Some(codex_protocol::models::WebSearchAction::Search { sources, .. }),
++                ..
++            } => retain_supported_response_metadata(sources, &["url"]),
++            _ => {}
++        }
++    }
++}
++
++fn retain_supported_response_metadata(value: &mut Option<Value>, kinds: &[&str]) {
++    match value {
++        Some(Value::Array(entries)) => {
++            entries.retain(|entry| {
++                entry
++                    .get("type")
++                    .and_then(Value::as_str)
++                    .is_some_and(|kind| kinds.contains(&kind))
++            });
++        }
++        Some(_) => *value = None,
++        None => {}
++    }
++}
++
+ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+     for item in items {
+         match item {
+diff --git a/codex-rs/core/src/client_common_tests.rs b/codex-rs/core/src/client_common_tests.rs
+index 5af77bec75b38afc7c656089509d9888f933ab08..e23385b0c2c145c7a66a45b5a6bee4d137531e3d 100644
+--- a/codex-rs/core/src/client_common_tests.rs
++++ b/codex-rs/core/src/client_common_tests.rs
+@@ -19,6 +19,7 @@ fn empty_tools() -> Arc<RawValue> {
+ 
+ fn prompt_with_image_outputs(detail: Option<ImageDetail>) -> Prompt {
+     Prompt {
++        tool_choice: Default::default(),
+         input: vec![
+             ResponseItem::Message {
+                 id: None,
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index 5ade27a2f44a06c773e8b2ecdc5d2b1648bc2eb7..a9a860bed4a69aa951a0c655bb853264e78be34f 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -727,6 +727,62 @@ async fn responses_request_includes_internal_metadata_for_provider_grant_or_firs
+     Ok(())
+ }
+ 
++#[test]
++fn responses_request_uses_outer_tool_choice_and_requests_hosted_search_sources()
++-> anyhow::Result<()> {
++    use codex_protocol::config_types::ToolChoice;
++    use codex_tools::ToolSpec;
++
++    let client = test_model_client(SessionSource::Cli);
++    let metadata = test_responses_metadata_for_client(
++        &client,
++        /*turn_id*/ None,
++        format!("{}:0", client.state.thread_id),
++        /*parent_thread_id*/ None,
++        TestCodexResponsesRequestKind::Turn,
++    );
++    let mut prompt = Prompt::default();
++    let model = test_model_info();
++    let request_body = |prompt: &Prompt, model: &ModelInfo| -> anyhow::Result<serde_json::Value> {
++        Ok(serde_json::to_value(client.build_responses_request(
++            prompt,
++            model,
++            /*effort*/ None,
++            codex_protocol::config_types::ReasoningSummary::None,
++            /*service_tier*/ None,
++            &metadata,
++            /*include_internal*/ false,
++        )?)?)
++    };
++
++    let defaults = request_body(&prompt, &model)?;
++    assert_eq!(defaults["tool_choice"], "auto");
++    assert_eq!(defaults["include"], json!(["reasoning.encrypted_content"]));
++
++    prompt.tool_choice = ToolChoice::Required;
++    prompt.tools = Arc::from([ToolSpec::WebSearch {
++        external_web_access: Some(false),
++        indexed_web_access: None,
++        filters: None,
++        user_location: None,
++        search_context_size: None,
++        search_content_types: None,
++    }]);
++    let hosted = request_body(&prompt, &model)?;
++    assert_eq!(hosted["tool_choice"], "required");
++    assert_eq!(
++        hosted["include"],
++        json!([
++            "reasoning.encrypted_content",
++            "web_search_call.action.sources"
++        ])
++    );
++
++    prompt.tool_choice = ToolChoice::None;
++    assert_eq!(request_body(&prompt, &model)?["tool_choice"], "none");
++    Ok(())
++}
++
+ #[test]
+ fn responses_request_preserves_result_metadata_above_previous_aggregate_budget()
+ -> anyhow::Result<()> {
+@@ -1371,6 +1427,7 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
+         id: Some(codex_protocol::ResponseItemId::with_suffix("msg", id)),
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/codex_thread.rs b/codex-rs/core/src/codex_thread.rs
+index 4d30f7fb75dd03a9f523fa2f65089f5f97ee715a..a90ee2639a546d68ecc2de7523dfaba3c294dca0 100644
+--- a/codex-rs/core/src/codex_thread.rs
++++ b/codex-rs/core/src/codex_thread.rs
+@@ -163,6 +163,7 @@ pub struct CodexThreadSettingsOverrides {
+     pub effort: Option<Option<ReasoningEffort>>,
+     pub summary: Option<ReasoningSummary>,
+     pub service_tier: Option<Option<String>>,
++    pub tool_choice: Option<codex_protocol::config_types::ToolChoice>,
+     pub collaboration_mode: Option<CollaborationMode>,
+     pub personality: Option<Personality>,
+     pub disabled_plugin_ids: Option<Vec<String>>,
+@@ -762,6 +763,7 @@ impl CodexThread {
+             effort,
+             summary,
+             service_tier,
++            tool_choice,
+             collaboration_mode,
+             personality,
+             disabled_plugin_ids,
+@@ -774,6 +776,7 @@ impl CodexThread {
+                 collaboration_mode,
+                 reasoning_summary: summary,
+                 service_tier,
++                tool_choice,
+                 personality,
+                 approval_policy,
+                 approvals_reviewer,
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index fb7fbf05db4b618d2617449fea4f8459efa86c19..f25c9c825827a9a83d1d9973a5861cf644b33bfb 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -513,7 +513,7 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
+     let mut pieces = Vec::new();
+     for item in content {
+         match item {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                 if !text.is_empty() {
+                     pieces.push(text.as_str());
+                 }
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index 241e636ca6e1eb64693edf45824dee224692e18a..fc88f0503d0c9d742cbda9c51b8af385ef44987a 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -731,7 +731,7 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
+     content
+         .iter()
+         .map(|item| match item {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                 approx_token_count(text)
+             }
+             ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => 0,
+@@ -739,6 +739,29 @@ fn message_text_token_count(item: &ResponseItem) -> usize {
+         .sum()
+ }
+ 
++// A retained compaction excerpt no longer shares the original part's offsets.
++fn truncate_text_content(item: &mut ContentItem, remaining: &mut usize) -> bool {
++    let (text, annotations) = match item {
++        ContentItem::InputText { text } => (text, None),
++        ContentItem::OutputText { text, annotations } => (text, Some(annotations)),
++        _ => return false,
++    };
++    if *remaining == 0 {
++        return false;
++    }
++    let token_count = approx_token_count(text);
++    if token_count <= *remaining {
++        *remaining -= token_count;
++    } else {
++        *text = truncate_text(text, TruncationPolicy::Tokens(*remaining));
++        if let Some(annotations) = annotations {
++            *annotations = None;
++        }
++        *remaining = 0;
++    }
++    !text.is_empty()
++}
++
+ fn truncate_message_text_to_token_budget(
+     mut envelope: ResponseItemEnvelope,
+     max_tokens: usize,
+@@ -749,19 +772,8 @@ fn truncate_message_text_to_token_budget(
+     let mut truncated_content = Vec::with_capacity(content.len());
+     for mut content_item in content {
+         match content_item.content_mut() {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+-                if remaining == 0 {
+-                    continue;
+-                }
+-
+-                let token_count = approx_token_count(text);
+-                if token_count <= remaining {
+-                    remaining = remaining.saturating_sub(token_count);
+-                } else {
+-                    *text = truncate_text(text, TruncationPolicy::Tokens(remaining));
+-                    remaining = 0;
+-                }
+-                if !text.is_empty() {
++            ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {
++                if truncate_text_content(content_item.content_mut(), &mut remaining) {
+                     truncated_content.push(content_item);
+                 }
+             }
+@@ -1088,6 +1100,7 @@ mod tests {
+                     detail: None,
+                 },
+                 ContentItem::OutputText {
++                    annotations: None,
+                     text: "uvwxyz".to_string(),
+                 },
+                 ContentItem::InputText {
+@@ -1158,6 +1171,7 @@ mod tests {
+                         detail: None,
+                     },
+                     ContentItem::OutputText {
++                        annotations: None,
+                         text: "uv…1 tokens truncated…yz".to_string(),
+                     },
+                     ContentItem::InputImage {
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 6843656823fe6a779c6d12ad191728510d1e1e98..910ffb3661b9327b81d0ae4273a0665420441a59 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -100,6 +100,7 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         sampling_stop: crate::model_request::turn_sampling_stop(&turn_context.extension_data),
+         prepared_request_admission: None,
+         parallel_tool_calls: true,
++        tool_choice: Default::default(),
+         base_instructions,
+         output_schema: None,
+         output_schema_strict: true,
+diff --git a/codex-rs/core/src/compact_remote_v2_images.rs b/codex-rs/core/src/compact_remote_v2_images.rs
+index e1ae5be0fa8633481dd98224971af9f31059685c..74f2b2ac242b467a7e3b22db2a05f88bc578f4bf 100644
+--- a/codex-rs/core/src/compact_remote_v2_images.rs
++++ b/codex-rs/core/src/compact_remote_v2_images.rs
+@@ -1,3 +1,4 @@
++use super::truncate_text_content;
+ use crate::context_manager::estimate_image_reference_bytes;
+ use codex_context_fragments::AnnotatedContent;
+ use codex_context_fragments::set_annotated_content;
+@@ -7,14 +8,12 @@ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::is_image_close_tag_text;
+ use codex_protocol::models::is_image_open_tag_text;
+ use codex_protocol::models::is_local_image_open_tag_text;
+-use codex_protocol::protocol::TruncationPolicy;
+ use codex_utils_output_truncation::approx_token_count;
+ use codex_utils_output_truncation::approx_tokens_from_byte_count_i64;
+-use codex_utils_output_truncation::truncate_text;
+ 
+ pub(super) fn content_item_token_count(item: &ContentItem) -> usize {
+     match item {
+-        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+             approx_token_count(text)
+         }
+         ContentItem::InputImage { image, detail } => usize::try_from(
+@@ -72,18 +71,8 @@ pub(super) fn truncate_message_to_token_budget(
+         }
+         let mut item = content.pop()?;
+         match item.content_mut() {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+-                if remaining == 0 {
+-                    continue;
+-                }
+-                let token_count = approx_token_count(text);
+-                if token_count <= remaining {
+-                    remaining -= token_count;
+-                } else {
+-                    *text = truncate_text(text, TruncationPolicy::Tokens(remaining));
+-                    remaining = 0;
+-                }
+-                if !text.is_empty() {
++            ContentItem::InputText { .. } | ContentItem::OutputText { .. } => {
++                if truncate_text_content(item.content_mut(), &mut remaining) {
+                     retained.push(item);
+                 }
+             }
+diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
+index a407ffcb33d27b6ecbf814f9b2323db1e2db49ad..453e60d3f34827d08428afc137ac360afa3689c9 100644
+--- a/codex-rs/core/src/compact_tests.rs
++++ b/codex-rs/core/src/compact_tests.rs
+@@ -243,9 +243,11 @@ fn content_items_to_text_joins_non_empty_segments() {
+             text: "hello".to_string(),
+         },
+         ContentItem::OutputText {
++            annotations: None,
+             text: String::new(),
+         },
+         ContentItem::OutputText {
++            annotations: None,
+             text: "world".to_string(),
+         },
+     ];
+@@ -276,6 +278,7 @@ fn collect_user_messages_extracts_user_text_only() {
+             id: Some(ResponseItemId::with_suffix("msg", "assistant")),
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "ignored".to_string(),
+             }],
+             phase: None,
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index fba7e1c9fdc574d0c3c77dfb7ce043d2a844f3a3..29b77b8920e47b5bf445322d68e92f7d3cdfa0af 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -629,6 +629,8 @@ pub struct Config {
+     /// Effective service tier request id preference for new turns.
+     /// `default` means the user explicitly selected standard routing.
+     pub service_tier: Option<String>,
++    /// Startup policy supplied by the embedding SDK when restoring managed settings.
++    pub sdk_tool_choice: Option<codex_protocol::config_types::ToolChoice>,
+ 
+     /// Model used specifically for review sessions.
+     pub review_model: Option<String>,
+@@ -4294,6 +4296,7 @@ impl Config {
+             model,
+             daybreak_enabled: cfg.daybreak.unwrap_or(false),
+             service_tier,
++            sdk_tool_choice: None,
+             review_model,
+             model_context_window: cfg.model_context_window,
+             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index 1ecb4173f8473b8fdee3cd83e5e1bb553fe0b169..ac1578c9765ad64f12d83545a8e14283585dbd71 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -354,7 +354,9 @@ impl ContextManager {
+                                     .iter()
+                                     .filter_map(|content| match content {
+                                         ContentItem::InputText { text }
+-                                        | ContentItem::OutputText { text } => Some(text.as_str()),
++                                        | ContentItem::OutputText { text, .. } => {
++                                            Some(text.as_str())
++                                        }
+                                         _ => None,
+                                     })
+                                     .collect::<Vec<_>>()
+@@ -1087,7 +1089,7 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+         ResponseItem::Message { content, .. } => content
+             .iter()
+             .map(|part| match part {
+-                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                     text_bytes(text)
+                 }
+                 ContentItem::InputImage { image, detail } => {
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 33986a65bdeba3577c677669b9be00918ecdb690..5e74e756c390b8411303b94264ef903278825502 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -88,6 +88,7 @@ fn assistant_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+@@ -107,6 +108,7 @@ fn inter_agent_assistant_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: serde_json::to_string(&communication).unwrap(),
+         }],
+         phase: None,
+@@ -654,6 +656,7 @@ fn user_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "user".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+@@ -791,6 +794,7 @@ fn filters_non_api_messages() {
+         id: None,
+         role: "system".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "ignored".to_string(),
+         }],
+         phase: None,
+@@ -3389,6 +3393,7 @@ fn text_only_items_count_decoded_content() {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "Hello, \"world\"!\nこんにちは".to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/context_manager/history_user_authorization.rs b/codex-rs/core/src/context_manager/history_user_authorization.rs
+index 1a2fafcd93939c9464e6958dce22e96afd6c3d21..3d0f72b1f840e395c2db253273e76c098451f285 100644
+--- a/codex-rs/core/src/context_manager/history_user_authorization.rs
++++ b/codex-rs/core/src/context_manager/history_user_authorization.rs
+@@ -173,7 +173,7 @@ impl ContextManager {
+             let text = content
+                 .iter()
+                 .filter_map(|content| match content {
+-                    ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++                    ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                         Some(text.as_str())
+                     }
+                     _ => {
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 176e33da175d0edb8f74bf84b312b4ea5674f5a2..7fe7147bdaed4145ee8ba3117d4377aac8d1486f 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -137,7 +137,7 @@ fn parse_user_message(message: &[ContentItem]) -> Option<UserMessageItem> {
+                     audio_url: audio_url.clone(),
+                 });
+             }
+-            ContentItem::OutputText { text } => {
++            ContentItem::OutputText { text, .. } => {
+                 warn!("Output text in user message: {}", text);
+             }
+         }
+@@ -154,8 +154,17 @@ fn parse_agent_message(
+     let mut content: Vec<AgentMessageContent> = Vec::new();
+     for content_item in message.iter() {
+         match content_item {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+-                content.push(AgentMessageContent::Text { text: text.clone() });
++            ContentItem::InputText { text } => {
++                content.push(AgentMessageContent::Text {
++                    text: text.clone(),
++                    annotations: None,
++                });
++            }
++            ContentItem::OutputText { text, annotations } => {
++                content.push(AgentMessageContent::Text {
++                    text: text.clone(),
++                    annotations: annotations.clone(),
++                });
+             }
+             _ => {
+                 warn!(
+@@ -169,6 +178,7 @@ fn parse_agent_message(
+         .map(str::to_string)
+         .unwrap_or_else(|| Uuid::new_v4().to_string());
+     AgentMessageItem {
++        display_text: None,
+         id,
+         content,
+         phase,
+diff --git a/codex-rs/core/src/event_mapping_tests.rs b/codex-rs/core/src/event_mapping_tests.rs
+index d6d9f59f2cc4a82dc51251e9c22f47e1fdd918d6..e912c8bbb4dad2e57866906c53bfffcc18bcd7fa 100644
+--- a/codex-rs/core/src/event_mapping_tests.rs
++++ b/codex-rs/core/src/event_mapping_tests.rs
+@@ -280,7 +280,7 @@ fn parses_assistant_message_input_text_for_backward_compatibility() {
+                 .content
+                 .into_iter()
+                 .map(|content| {
+-                    let AgentMessageContent::Text { text } = content;
++                    let AgentMessageContent::Text { text, .. } = content;
+                     text
+                 })
+                 .collect::<Vec<_>>();
+@@ -496,6 +496,7 @@ fn parses_agent_message() {
+         id: Some(ResponseItemId::with_suffix("msg", "1")),
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "Hello from Codex".to_string(),
+         }],
+         phase: None,
+@@ -506,7 +507,7 @@ fn parses_agent_message() {
+ 
+     match turn_item {
+         TurnItem::AgentMessage(message) => {
+-            let Some(AgentMessageContent::Text { text }) = message.content.first() else {
++            let Some(AgentMessageContent::Text { text, .. }) = message.content.first() else {
+                 panic!("expected agent message text content");
+             };
+             assert_eq!(text, "Hello from Codex");
+@@ -587,6 +588,7 @@ fn parses_web_search_call() {
+         id: Some(ResponseItemId::with_suffix("ws", "1")),
+         status: Some("completed".to_string()),
+         action: Some(WebSearchAction::Search {
++            sources: None,
+             query: Some("weather".to_string()),
+             queries: None,
+         }),
+@@ -602,6 +604,7 @@ fn parses_web_search_call() {
+                 id: "ws_1".to_string(),
+                 query: "weather".to_string(),
+                 action: WebSearchAction::Search {
++                    sources: None,
+                     query: Some("weather".to_string()),
+                     queries: None,
+                 },
+diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
+index b56cb76705b7daf283ca90475a84ef51bfdf437b..5168987259b9bb3c6aef687ba03b6f1df179e6d5 100644
+--- a/codex-rs/core/src/guardian/tests.rs
++++ b/codex-rs/core/src/guardian/tests.rs
+@@ -285,6 +285,7 @@ async fn seed_guardian_parent_history(session: &Arc<Session>, turn: &Arc<TurnCon
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: "The repo is public; I now need approval to push the docs fix."
+                             .to_string(),
+                     }],
+@@ -301,7 +302,9 @@ fn response_item_contains_message_text(item: &ResponseItem, needle: &str) -> boo
+         return false;
+     };
+     content.iter().any(|item| match item {
+-        ContentItem::InputText { text } | ContentItem::OutputText { text } => text.contains(needle),
++        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
++            text.contains(needle)
++        }
+         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+     })
+ }
+@@ -796,6 +799,7 @@ async fn build_guardian_prompt_delta_mode_preserves_original_numbering() -> anyh
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: "I need approval for the second push.".to_string(),
+                     }],
+                     phase: None,
+@@ -937,6 +941,7 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: "Compacted summary of earlier guardian context.".to_string(),
+                     }],
+                     phase: None,
+@@ -964,6 +969,7 @@ async fn build_guardian_prompt_stale_delta_version_falls_back_to_full_prompt() -
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: "I need approval for the post-compaction push.".to_string(),
+                     }],
+                     phase: None,
+@@ -1042,6 +1048,7 @@ fn collect_guardian_transcript_entries_skips_contextual_user_messages() {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "hello".to_string(),
+             }],
+             phase: None,
+@@ -1098,6 +1105,7 @@ fn collect_guardian_transcript_entries_includes_recent_tool_calls_and_output() {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "I need to push a fix".to_string(),
+             }],
+             phase: None,
+@@ -2564,6 +2572,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: "I need approval for the second docs fix.".to_string(),
+                     }],
+                     phase: None,
+@@ -2651,6 +2660,7 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: "I need approval for the third docs fix.".to_string(),
+                     }],
+                     phase: None,
+@@ -3639,6 +3649,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
+                         id: None,
+                         role: "assistant".to_string(),
+                         content: vec![ContentItem::OutputText {
++                            annotations: None,
+                             text: "I need approval to run git diff.".to_string(),
+                         }],
+                         phase: None,
+@@ -3716,6 +3727,7 @@ async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() ->
+                         id: None,
+                         role: "assistant".to_string(),
+                         content: vec![ContentItem::OutputText {
++                            annotations: None,
+                             text: "I need approval to push after the diff check.".to_string(),
+                         }],
+                         phase: None,
+diff --git a/codex-rs/core/src/realtime_context_tests.rs b/codex-rs/core/src/realtime_context_tests.rs
+index b1519e6c1e0a664d0f15622f79c2d539cd2e6201..7144d667a009987f63788ca4eac841f098f2864a 100644
+--- a/codex-rs/core/src/realtime_context_tests.rs
++++ b/codex-rs/core/src/realtime_context_tests.rs
+@@ -94,7 +94,13 @@ fn user_message(text: impl Into<String>) -> ResponseItem {
+ }
+ 
+ fn assistant_message(text: impl Into<String>) -> ResponseItem {
+-    message("assistant", ContentItem::OutputText { text: text.into() })
++    message(
++        "assistant",
++        ContentItem::OutputText {
++            text: text.into(),
++            annotations: None,
++        },
++    )
+ }
+ 
+ fn long_turn_text(index: usize) -> String {
+diff --git a/codex-rs/core/src/realtime_history/presentation.rs b/codex-rs/core/src/realtime_history/presentation.rs
+index f21c0d02b523c5e27bd7001c52dcea42e053825f..e49bfcbb8f69acfd85ce349307bdf248e2a8b834 100644
+--- a/codex-rs/core/src/realtime_history/presentation.rs
++++ b/codex-rs/core/src/realtime_history/presentation.rs
+@@ -2,7 +2,6 @@
+ 
+ use super::RealtimeHistoryState;
+ use super::StreamingAgentMessage;
+-use codex_protocol::items::AgentMessageContent;
+ use codex_protocol::items::DynamicToolCallStatus;
+ use codex_protocol::items::McpToolCallStatus;
+ use codex_protocol::items::TurnItem;
+@@ -26,17 +25,11 @@ impl RealtimeHistoryState {
+     ) {
+         match item {
+             TurnItem::AgentMessage(message) => {
+-                let text = message
+-                    .content
+-                    .iter()
+-                    .map(|content| match content {
+-                        AgentMessageContent::Text { text } => text.as_str(),
+-                    })
+-                    .collect::<String>();
++                let text = message.text();
+                 if !completed {
+                     self.streaming_agent_message = Some(StreamingAgentMessage {
+                         item_id: message.id.clone(),
+-                        text: text.clone(),
++                        text: text.to_string(),
+                     });
+                 }
+                 self.observe_assistant_message(items, turn_id, &message.id, &text);
+diff --git a/codex-rs/core/src/realtime_history_tests.rs b/codex-rs/core/src/realtime_history_tests.rs
+index fd163ec45922ad322e9bb18d76a8be9c00930d57..4886b093486f7c12288bd7394efa7e3a97a637ff 100644
+--- a/codex-rs/core/src/realtime_history_tests.rs
++++ b/codex-rs/core/src/realtime_history_tests.rs
+@@ -220,8 +220,10 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
+     );
+ 
+     let completed = completed_item(TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "message-1".to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: "[analysis] ::codex-realtime-inline{}\nVisible explanation".to_string(),
+         }],
+         phase: None,
+@@ -297,8 +299,10 @@ fn promotes_distinct_visualizations_once_and_ignores_markdown_fences() {
+     );
+ 
+     let completed = completed_item(TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "message-1".to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index b3527fe16bdd79a25ea9b04da1529e4eb794607f..30a4ca1b53eddbaf0c996969a8c876dc19a1fffa 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -803,19 +803,22 @@ impl Session {
+         });
+         // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
+         // to avoid extracting these fields separately and constructing CollaborationMode here.
+-        let persisted_collaboration_mode = match &conversation_history {
+-            InitialHistory::Resumed(resumed) => resumed
+-                .history
+-                .iter()
+-                .rev()
+-                .find_map(|item| match item {
++        let persisted_thread_settings = match &conversation_history {
++            InitialHistory::Resumed(resumed) => {
++                resumed.history.iter().rev().find_map(|item| match item {
+                     RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                         if event.thread_id == Some(resumed.conversation_id) =>
+                     {
+-                        Some(&event.thread_settings.collaboration_mode)
++                        Some(&event.thread_settings)
+                     }
+                     _ => None,
+                 })
++            }
++            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
++        };
++        let persisted_collaboration_mode = match &conversation_history {
++            InitialHistory::Resumed(resumed) => persisted_thread_settings
++                .map(|settings| &settings.collaboration_mode)
+                 .or_else(|| {
+                     resumed
+                         .history
+@@ -865,6 +868,9 @@ impl Session {
+                 collaboration_mode,
+                 reasoning_summary: config.model_reasoning_summary,
+                 service_tier,
++                tool_choice: config.sdk_tool_choice.or_else(|| {
++                    persisted_thread_settings.and_then(|settings| settings.tool_choice)
++                }),
+                 personality: config.personality,
+                 approval_policy: config.permissions.approval_policy.clone(),
+                 approvals_reviewer: config.approvals_reviewer,
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index 9feb0790280d1baac1d5252fc9c5d0aabee573e4..b86851b8d5af003bdff94084a6938ddcbddbf7b6 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -219,6 +219,7 @@ fn assistant_message(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+@@ -242,6 +243,7 @@ fn inter_agent_assistant_message(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: serde_json::to_string(&communication).unwrap(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 6d8a9a49837f2054019683123a1199504ae16204..641e390371085f65819f721a102164d766d58e89 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -317,6 +317,7 @@ impl SessionConfiguration {
+         environment_selections: &[TurnEnvironmentSelection],
+     ) -> ThreadSettingsSnapshot {
+         ThreadSettingsSnapshot {
++            tool_choice: self.step_settings.tool_choice,
+             model: self.step_settings.collaboration_mode.model().to_string(),
+             model_provider_id: self.original_config_do_not_use.model_provider_id.clone(),
+             service_tier: self.step_settings.service_tier.clone(),
+@@ -357,6 +358,7 @@ impl SessionConfiguration {
+             windows_sandbox_level: Some(self.windows_sandbox_level),
+             summary: self.step_settings.reasoning_summary,
+             service_tier: Some(self.step_settings.service_tier.clone()),
++            tool_choice: self.step_settings.tool_choice,
+             collaboration_mode: Some(self.step_settings.collaboration_mode.clone()),
+             personality: self.step_settings.personality,
+             disabled_plugin_ids: Some(self.disabled_plugin_ids.clone()),
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index f8ad3a0229845ab3e335f92d552e7d4f0ac0464f..ae76d4b30fd1a4782a4411ed0b95e0b7096fa327 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -13,6 +13,7 @@ use codex_protocol::config_types::Personality;
+ use codex_protocol::config_types::ReasoningSummary;
+ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+ use codex_protocol::config_types::ServiceTier;
++use codex_protocol::config_types::ToolChoice;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::AskForApproval;
+@@ -28,6 +29,7 @@ pub(crate) struct StepSettings {
+     /// Normalized requested tier. Startup retains initial-model filtering;
+     /// resolution filters the effective tier against the pinned model.
+     pub(crate) service_tier: Option<String>,
++    pub(crate) tool_choice: Option<ToolChoice>,
+     pub(crate) personality: Option<Personality>,
+     pub(crate) approval_policy: Constrained<AskForApproval>,
+     pub(crate) approvals_reviewer: ApprovalsReviewer,
+@@ -127,6 +129,10 @@ impl ResolvedStepSettings {
+         &self.selected.collaboration_mode
+     }
+ 
++    pub(crate) fn tool_choice(&self) -> ToolChoice {
++        self.selected.tool_choice.unwrap_or_default()
++    }
++
+     pub(crate) fn personality(&self) -> Option<Personality> {
+         self.selected.personality
+     }
+@@ -245,6 +251,7 @@ pub(crate) struct StepSettingsUpdate {
+     pub(crate) collaboration_mode: Option<CollaborationMode>,
+     pub(crate) reasoning_summary: Option<ReasoningSummary>,
+     pub(crate) service_tier: Option<Option<String>>,
++    pub(crate) tool_choice: Option<ToolChoice>,
+     pub(crate) personality: Option<Personality>,
+     pub(crate) approval_policy: Option<AskForApproval>,
+     pub(crate) approvals_reviewer: Option<ApprovalsReviewer>,
+@@ -301,6 +308,7 @@ impl StepSettings {
+                 None => SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string(),
+             });
+         }
++        next.tool_choice = update.tool_choice.or(next.tool_choice);
+         if let Some(personality) = update.personality {
+             next.personality = Some(personality);
+         }
+diff --git a/codex-rs/core/src/session/step_settings_tests.rs b/codex-rs/core/src/session/step_settings_tests.rs
+index c5c85bedcb197b9a057a35706ab37821e1857e22..fb60f4ad0b048dbb37f5f5bf6a11e4d66cb3dc64 100644
+--- a/codex-rs/core/src/session/step_settings_tests.rs
++++ b/codex-rs/core/src/session/step_settings_tests.rs
+@@ -292,6 +292,7 @@ async fn environment_only_update_revalidates_existing_step_settings() {
+ 
+ fn configured_settings() -> StepSettings {
+     StepSettings {
++        tool_choice: None,
+         collaboration_mode: CollaborationMode {
+             mode: ModeKind::Default,
+             settings: Settings {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index c605242f5843e4aec3f3f729b1c2cfc2a10e81dc..1ec11c720d2dabdafba61f3f1b8213d23d0650d8 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -397,6 +397,7 @@ fn assistant_message(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+@@ -4432,6 +4433,7 @@ async fn set_rate_limits_retains_previous_credits() {
+         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+         environments: Vec::new(),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -4555,6 +4557,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
+         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+         environments: Vec::new(),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -5179,6 +5182,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
+         provider: create_model_provider(config.model_provider.clone(), /*auth_manager*/ None),
+         environments: Vec::new(),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -6563,6 +6567,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
+         ),
+         environments: Vec::new(),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -6791,6 +6796,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+             Some(Arc::clone(&auth_manager)),
+         ),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -7118,6 +7124,7 @@ async fn make_session_with_config_and_rx(
+             Some(Arc::clone(&auth_manager)),
+         ),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -7251,6 +7258,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
+             Some(Arc::clone(&auth_manager)),
+         ),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+@@ -9062,6 +9070,7 @@ where
+             Some(Arc::clone(&auth_manager)),
+         ),
+         step_settings: Arc::new(StepSettings {
++            tool_choice: None,
+             collaboration_mode,
+             reasoning_summary: config.model_reasoning_summary,
+             service_tier: None,
+diff --git a/codex-rs/core/src/session/thread_settings.rs b/codex-rs/core/src/session/thread_settings.rs
+index 66296ae302c58a918be98c3baa2ad87174440fd2..0ff306e7d8dcae731bf4b1bf39a31639bf70a97a 100644
+--- a/codex-rs/core/src/session/thread_settings.rs
++++ b/codex-rs/core/src/session/thread_settings.rs
+@@ -63,6 +63,7 @@ pub(super) fn prepare_update(
+         effort,
+         summary,
+         service_tier,
++        tool_choice,
+         collaboration_mode,
+         personality,
+         disabled_plugin_ids,
+@@ -75,6 +76,7 @@ pub(super) fn prepare_update(
+             collaboration_mode,
+             reasoning_summary: summary,
+             service_tier,
++            tool_choice,
+             personality,
+             approval_policy,
+             approvals_reviewer,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index fa7194daad33ca97e3776d1c492673e813807dc7..57e7a2b849610ec5972098e6963646b181561a6a 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1626,6 +1626,7 @@ pub(crate) fn build_prompt(
+             step_context.tool_router.model_visible_specs()
+         },
+         parallel_tool_calls: true,
++        tool_choice: step_context.settings.tool_choice(),
+         tool_admission: None,
+         sampling_stop: None,
+         prepared_request_admission: None,
+@@ -2147,12 +2148,7 @@ async fn maybe_emit_pending_agent_message_start(
+ 
+ /// Agent messages are text-only today; concatenate all text entries.
+ pub(super) fn agent_message_text(item: &codex_protocol::items::AgentMessageItem) -> String {
+-    item.content
+-        .iter()
+-        .map(|entry| match entry {
+-            codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+-        })
+-        .collect()
++    item.text().into_owned()
+ }
+ 
+ #[derive(Debug, PartialEq)]
+@@ -2432,7 +2428,7 @@ async fn maybe_complete_plan_item_from_message(
+     {
+         let mut text = String::new();
+         for entry in content {
+-            if let ContentItem::OutputText { text: chunk } = entry {
++            if let ContentItem::OutputText { text: chunk, .. } = entry {
+                 text.push_str(chunk);
+             }
+         }
+@@ -2458,7 +2454,7 @@ async fn emit_agent_message_in_plan_mode(
+ ) {
+     let agent_message_id = agent_message.id.clone();
+     let text = agent_message_text(&agent_message);
+-    if text.trim().is_empty() {
++    if text.trim().is_empty() && !agent_message.has_annotations() {
+         state.pending_agent_message_items.remove(&agent_message_id);
+         state.started_agent_message_items.remove(&agent_message_id);
+         return;
+@@ -2475,6 +2471,7 @@ async fn emit_agent_message_in_plan_mode(
+             .remove(&agent_message_id)
+             .unwrap_or_else(|| {
+                 TurnItem::AgentMessage(codex_protocol::items::AgentMessageItem {
++                    display_text: None,
+                     id: agent_message_id.clone(),
+                     content: Vec::new(),
+                     phase: None,
+@@ -2976,14 +2973,20 @@ async fn try_run_sampling_request(
+                         let mut seeded =
+                             assistant_message_stream_parsers.seed_item_text(&item_id, &raw_text);
+                         if let TurnItem::AgentMessage(agent_message) = &mut turn_item {
+-                            agent_message.content =
+-                                vec![codex_protocol::items::AgentMessageContent::Text {
+-                                    text: if plan_mode {
+-                                        String::new()
+-                                    } else {
+-                                        std::mem::take(&mut seeded.visible_text)
+-                                    },
+-                                }];
++                            let text = if plan_mode {
++                                String::new()
++                            } else {
++                                std::mem::take(&mut seeded.visible_text)
++                            };
++                            if agent_message.has_annotations() {
++                                agent_message.display_text = (text != raw_text).then_some(text);
++                            } else {
++                                agent_message.content =
++                                    vec![codex_protocol::items::AgentMessageContent::Text {
++                                        text,
++                                        annotations: None,
++                                    }];
++                            }
+                         }
+                         seeded_parsed = plan_mode.then_some(seeded);
+                         seeded_item_id = Some(item_id);
+diff --git a/codex-rs/core/src/session/turn_tests.rs b/codex-rs/core/src/session/turn_tests.rs
+index 7b50720fe8e44f1b2aa9a9008ff4311b0ae9f940..4a350369281ad6e2f001f0cc1f7e66fa6897ab94 100644
+--- a/codex-rs/core/src/session/turn_tests.rs
++++ b/codex-rs/core/src/session/turn_tests.rs
+@@ -19,6 +19,7 @@ impl TurnItemContributor for RewriteAgentMessageContributor {
+         Box::pin(async move {
+             if let TurnItem::AgentMessage(agent_message) = item {
+                 agent_message.content = vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: "plan contributed assistant text".to_string(),
+                 }];
+             }
+@@ -32,6 +33,7 @@ fn assistant_output_text(text: &str) -> ResponseItem {
+         id: Some(ResponseItemId::with_suffix("msg", "1")),
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 611357dbdbdb7d0a7e1a64986091895f86ea3128..19e62cd66a3176c22a3e109deecb32b2863e7cfc 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -66,7 +66,7 @@ pub(crate) fn raw_assistant_output_text_from_item(item: &ResponseItem) -> Option
+         let combined = content
+             .iter()
+             .filter_map(|ci| match ci {
+-                codex_protocol::models::ContentItem::OutputText { text } => Some(text.as_str()),
++                codex_protocol::models::ContentItem::OutputText { text, .. } => Some(text.as_str()),
+                 _ => None,
+             })
+             .collect::<String>();
+@@ -278,18 +278,8 @@ pub(crate) async fn finalize_non_tool_response_item(
+     let (memory_citation, last_agent_message, defers_mailbox_delivery_to_next_turn) =
+         match &turn_item {
+             TurnItem::AgentMessage(agent_message) => {
+-                let combined = agent_message
+-                    .content
+-                    .iter()
+-                    .map(|entry| match entry {
+-                        codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+-                    })
+-                    .collect::<String>();
+-                let last_agent_message = if combined.trim().is_empty() {
+-                    None
+-                } else {
+-                    Some(combined)
+-                };
++                let text = agent_message.text();
++                let last_agent_message = (!text.trim().is_empty()).then(|| text.into_owned());
+                 let defers_mailbox_delivery_to_next_turn =
+                     !matches!(agent_message.phase, Some(MessagePhase::Commentary))
+                         && last_agent_message.is_some();
+@@ -492,17 +482,18 @@ pub(crate) async fn finalize_turn_item(
+         apply_turn_item_contributors(sess, turn_store, turn_item).await;
+     }
+     if let TurnItem::AgentMessage(agent_message) = &mut *turn_item {
+-        let combined = agent_message
+-            .content
+-            .iter()
+-            .map(|entry| match entry {
+-                codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
+-            })
+-            .collect::<String>();
++        let combined = agent_message.raw_text();
+         let (stripped, memory_citation) =
+             strip_hidden_assistant_markup_and_parse_memory_citation(&combined, plan_mode);
+-        agent_message.content =
+-            vec![codex_protocol::items::AgentMessageContent::Text { text: stripped }];
++        if agent_message.has_annotations() {
++            // Preserve the provider's text and part-relative annotation offsets.
++            agent_message.display_text = (stripped != combined).then_some(stripped);
++        } else if stripped != combined || agent_message.content.is_empty() {
++            agent_message.content = vec![codex_protocol::items::AgentMessageContent::Text {
++                text: stripped,
++                annotations: None,
++            }];
++        }
+         if agent_message.memory_citation.is_none() {
+             agent_message.memory_citation = memory_citation;
+         }
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 16da08675bfcf69ebe8f33e200a5c6fc36a72004..fc14b1c59b41f7b704d79cee2c060c8ca7b3f2ce 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -44,6 +44,7 @@ fn assistant_output_text_with_phase(text: &str, phase: Option<MessagePhase>) ->
+         id: Some(ResponseItemId::with_suffix("msg", "1")),
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase,
+@@ -175,7 +176,7 @@ async fn handle_non_tool_response_item_strips_citations_from_assistant_message()
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
++            codex_protocol::items::AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect::<String>();
+     assert_eq!(text, "hello world");
+@@ -227,6 +228,7 @@ impl TurnItemContributor for RewriteAgentMessageContributor {
+         Box::pin(async move {
+             if let TurnItem::AgentMessage(agent_message) = item {
+                 agent_message.content = vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: "contributed assistant text".to_string(),
+                 }];
+             }
+@@ -279,7 +281,7 @@ async fn handle_non_tool_response_item_runs_turn_item_contributors_only_when_req
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            codex_protocol::items::AgentMessageContent::Text { text } => text.as_str(),
++            codex_protocol::items::AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect::<String>();
+     assert_eq!(text, "hello world");
+diff --git a/codex-rs/core/src/tasks/review.rs b/codex-rs/core/src/tasks/review.rs
+index 243592221971fdd818bec096874213644199aa1b..a522d8bffc0c7581d1fe5159b19fb7c49f37c24d 100644
+--- a/codex-rs/core/src/tasks/review.rs
++++ b/codex-rs/core/src/tasks/review.rs
+@@ -263,6 +263,7 @@ pub(crate) async fn exit_review_mode(
+                 id: Some(ResponseItemId::new("msg")),
+                 role: "assistant".to_string(),
+                 content: vec![ContentItem::OutputText {
++                    annotations: None,
+                     text: assistant_message,
+                 }],
+                 phase: None,
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index e0074648bdbf8c55a7e37a5a60021a9f8e42f858..2ec7c0e9bf9e137e7bebbfb6b626dddcf2f02f23 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -584,6 +584,7 @@ fn user_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "user".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+@@ -595,6 +596,7 @@ fn assistant_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/thread_rollout_truncation_tests.rs b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+index b92c252f018a5c755590d8de215e478391a900b3..21bc5874e52563e2eb7cdbf05a72d955fe8c7385 100644
+--- a/codex-rs/core/src/thread_rollout_truncation_tests.rs
++++ b/codex-rs/core/src/thread_rollout_truncation_tests.rs
+@@ -24,6 +24,7 @@ fn user_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "user".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+@@ -36,6 +37,7 @@ fn assistant_msg(text: &str) -> ResponseItem {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: text.to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/tools/handlers/request_user_input_async.rs b/codex-rs/core/src/tools/handlers/request_user_input_async.rs
+index da153dcd5928618a2465422d4d13af343837bc3d..f35e1d1a9aafed9f54f9b185205e89de914cace3 100644
+--- a/codex-rs/core/src/tools/handlers/request_user_input_async.rs
++++ b/codex-rs/core/src/tools/handlers/request_user_input_async.rs
+@@ -129,8 +129,10 @@ impl ToolExecutor<ToolInvocation> for RequestUserInputAsyncHandler {
+             }
+ 
+             let item = TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: call_id,
+                 content: vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: messages.join("\n\n"),
+                 }],
+                 phase: Some(MessagePhase::FinalAnswer),
+diff --git a/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs b/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
+index 4d390028f15b81e600fd1d5a04858460f46b01ca..075a7e7f65ae1ff81927d17e0a5dd4e6d4a86a0c 100644
+--- a/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
++++ b/codex-rs/core/src/tools/handlers/send_message_to_user_async.rs
+@@ -82,8 +82,10 @@ impl ToolExecutor<ToolInvocation> for SendMessageToUserAsyncHandler {
+             }
+ 
+             let item = TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: call_id,
+                 content: vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: message.to_string(),
+                 }],
+                 phase: Some(MessagePhase::FinalAnswer),
+diff --git a/codex-rs/core/src/tools/hosted_spec_tests.rs b/codex-rs/core/src/tools/hosted_spec_tests.rs
+index 05fc159abc5a6d70e6817a6a802772bc040ec803..fb401fe8847b52f6eb101297a087dd3baf8dd477 100644
+--- a/codex-rs/core/src/tools/hosted_spec_tests.rs
++++ b/codex-rs/core/src/tools/hosted_spec_tests.rs
+@@ -14,6 +14,7 @@ fn web_search_tool_preserves_configured_options() {
+             web_search_mode: Some(WebSearchMode::Live),
+             web_search_config: Some(&WebSearchConfig {
+                 filters: Some(WebSearchFilters {
++                    blocked_domains: None,
+                     allowed_domains: Some(vec!["example.com".to_string()]),
+                 }),
+                 user_location: Some(WebSearchUserLocation {
+@@ -31,6 +32,7 @@ fn web_search_tool_preserves_configured_options() {
+             external_web_access: Some(true),
+             indexed_web_access: None,
+             filters: Some(ResponsesApiWebSearchFilters {
++                blocked_domains: None,
+                 allowed_domains: Some(vec!["example.com".to_string()]),
+             }),
+             user_location: Some(ResponsesApiWebSearchUserLocation {
+diff --git a/codex-rs/core/src/turn_timing_tests.rs b/codex-rs/core/src/turn_timing_tests.rs
+index 65185ecea2e99397aae39a0f11081815afa61c1a..8ba5c2abeb60ac62dc8b3784b76a57f92b24a9ce 100644
+--- a/codex-rs/core/src/turn_timing_tests.rs
++++ b/codex-rs/core/src/turn_timing_tests.rs
+@@ -61,6 +61,7 @@ async fn turn_timing_state_records_ttfm_independently_of_ttft() {
+     assert!(
+         state
+             .record_ttfm_for_turn_item(&TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: "msg-1".to_string(),
+                 content: Vec::new(),
+                 phase: None,
+@@ -74,6 +75,7 @@ async fn turn_timing_state_records_ttfm_independently_of_ttft() {
+     assert_eq!(
+         state
+             .record_ttfm_for_turn_item(&TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: "msg-2".to_string(),
+                 content: Vec::new(),
+                 phase: None,
+@@ -173,6 +175,7 @@ fn response_item_records_turn_ttft_for_first_output_signals() {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "hello".to_string(),
+         }],
+         phase: None,
+@@ -186,6 +189,7 @@ fn response_item_records_turn_ttft_ignores_empty_non_output_items() {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: String::new(),
+         }],
+         phase: None,
+diff --git a/codex-rs/core/src/web_search.rs b/codex-rs/core/src/web_search.rs
+index 57430ed7e656c943d664c86751621ef4123d87b4..0b8bcaed458b4d9d748614ba73767af16714c11f 100644
+--- a/codex-rs/core/src/web_search.rs
++++ b/codex-rs/core/src/web_search.rs
+@@ -17,7 +17,7 @@ fn search_action_detail(query: &Option<String>, queries: &Option<Vec<String>>) -
+ 
+ pub fn web_search_action_detail(action: &WebSearchAction) -> String {
+     match action {
+-        WebSearchAction::Search { query, queries } => search_action_detail(query, queries),
++        WebSearchAction::Search { query, queries, .. } => search_action_detail(query, queries),
+         WebSearchAction::OpenPage { url } => url.clone().unwrap_or_default(),
+         WebSearchAction::FindInPage { url, pattern } => match (pattern, url) {
+             (Some(pattern), Some(url)) => format!("'{pattern}' in {url}"),
+diff --git a/codex-rs/core/tests/suite/client.rs b/codex-rs/core/tests/suite/client.rs
+index c232097e72c2e3289a294343a8184ded5382fab0..fb2bc546b5094e7bc47297abd8474ff24faf6acc 100644
+--- a/codex-rs/core/tests/suite/client.rs
++++ b/codex-rs/core/tests/suite/client.rs
+@@ -956,6 +956,7 @@ async fn resume_sends_prior_items() {
+         id: None,
+         role: "system".to_string(),
+         content: vec![codex_protocol::models::ContentItem::OutputText {
++            annotations: None,
+             text: "resumed system instruction".to_string(),
+         }],
+         phase: None,
+@@ -978,6 +979,7 @@ async fn resume_sends_prior_items() {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![codex_protocol::models::ContentItem::OutputText {
++            annotations: None,
+             text: "resumed assistant message".to_string(),
+         }],
+         phase: Some(MessagePhase::Commentary),
+@@ -3214,6 +3216,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+         id: Some(ResponseItemId::with_suffix("msg", "message-id")),
+         role: "assistant".into(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "message".into(),
+         }],
+         phase: None,
+@@ -3223,6 +3226,7 @@ async fn azure_responses_request_does_not_store_and_preserves_prefixed_item_ids(
+         id: Some(ResponseItemId::with_suffix("ws", "web-search-id")),
+         status: Some("completed".into()),
+         action: Some(WebSearchAction::Search {
++            sources: None,
+             query: Some("weather".into()),
+             queries: None,
+         }),
+diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
+index 6659bba1f40c2c797d72f80232cd651486f13ccd..58abbda80726b658abf3e8998025c6b38a419566 100755
+--- a/codex-rs/core/tests/suite/client_websockets.rs
++++ b/codex-rs/core/tests/suite/client_websockets.rs
+@@ -2613,7 +2613,10 @@ fn assistant_message_item(id: &str, text: &str) -> ResponseItem {
+     ResponseItem::Message {
+         id: Some(ResponseItemId::with_suffix("msg", id)),
+         role: "assistant".into(),
+-        content: vec![ContentItem::OutputText { text: text.into() }],
++        content: vec![ContentItem::OutputText {
++            text: text.into(),
++            annotations: None,
++        }],
+         phase: None,
+         internal_chat_message_metadata_passthrough: None,
+     }
+diff --git a/codex-rs/core/tests/suite/guardian_review.rs b/codex-rs/core/tests/suite/guardian_review.rs
+index 94b7054b873965e7e93afb07e422ba3cab67ece5..a59b8bec65f4a807c02b84b544792676de41a4ce 100644
+--- a/codex-rs/core/tests/suite/guardian_review.rs
++++ b/codex-rs/core/tests/suite/guardian_review.rs
+@@ -2239,7 +2239,7 @@ async fn guardian_denial_rejects_tool_call_with_rationale(
+     assert!(recorded_history.iter().any(|item| {
+         matches!(item, ResponseItem::Message { role, content, .. }
+         if role == "assistant" && content.iter().any(|part| {
+-            matches!(part, ContentItem::OutputText { text }
++            matches!(part, ContentItem::OutputText { text, .. }
+                 if Some(text.as_str()) == record["decision"].as_str())
+         }))
+     }));
+diff --git a/codex-rs/core/tests/suite/items.rs b/codex-rs/core/tests/suite/items.rs
+index f50baf2ad052282bb40632a29e8b30c680bae5e1..460aa4c309cf3561b700db743e12d8a937f4ed89 100644
+--- a/codex-rs/core/tests/suite/items.rs
++++ b/codex-rs/core/tests/suite/items.rs
+@@ -45,6 +45,7 @@ use core_test_support::test_codex::turn_permission_fields;
+ use core_test_support::wait_for_event;
+ use core_test_support::wait_for_event_match;
+ use pretty_assertions::assert_eq;
++use serde_json::json;
+ 
+ fn disabled_plan_turn(
+     text: &str,
+@@ -177,7 +178,8 @@ async fn assistant_message_item_is_emitted() -> anyhow::Result<()> {
+     .await;
+ 
+     assert_eq!(started.id, completed.id);
+-    let Some(codex_protocol::items::AgentMessageContent::Text { text }) = completed.content.first()
++    let Some(codex_protocol::items::AgentMessageContent::Text { text, .. }) =
++        completed.content.first()
+     else {
+         panic!("expected agent message text content");
+     };
+@@ -315,7 +317,10 @@ async fn web_search_item_is_emitted() -> anyhow::Result<()> {
+         .await?;
+ 
+     let web_search_added = ev_web_search_call_added_partial("web-search-1", "in_progress");
+-    let web_search_done = ev_web_search_call_done("web-search-1", "completed", "weather seattle");
++    let sources = json!([{"type": "url", "url": "https://weather.example/report"}]);
++    let mut web_search_done =
++        ev_web_search_call_done("web-search-1", "completed", "weather seattle");
++    web_search_done["item"]["action"]["sources"] = sources.clone();
+ 
+     let first_response = sse(vec![
+         ev_response_created("resp-1"),
+@@ -366,6 +371,7 @@ async fn web_search_item_is_emitted() -> anyhow::Result<()> {
+     assert_eq!(
+         completed.0.action,
+         WebSearchAction::Search {
++            sources: Some(sources.clone()),
+             query: Some("weather seattle".to_string()),
+             queries: None,
+         }
+@@ -389,6 +395,149 @@ async fn web_search_item_is_emitted() -> anyhow::Result<()> {
+         })
+         .expect("persisted web search completion");
+     assert_eq!(persisted_completion.started_at_ms, Some(started.1));
++    let TurnItem::WebSearch(persisted_search) = persisted_completion.item else {
++        panic!("expected persisted web search item");
++    };
++    assert_eq!(persisted_search.action, completed.0.action);
++
++    Ok(())
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn annotated_assistant_items_preserve_evidence_in_events_and_history() -> anyhow::Result<()> {
++    skip_if_no_network!(Ok(()));
++    let server = start_mock_server().await;
++    let TestCodex { codex, .. } = test_codex()
++        .with_history_mode(ThreadHistoryMode::Paginated)
++        .build(&server)
++        .await?;
++
++    let hidden = "<oai-mem-citation><citation_entries>MEMORY.md:1-2|note=[x]</citation_entries></oai-mem-citation>";
++    let citation = json!({
++        "type": "url_citation", "start_index": hidden.len(), "end_index": hidden.len() + 5,
++        "url": "https://example.com/cited", "title": "Cited"
++    });
++    let file_citation = json!({
++        "type": "file_citation", "file_id": "file-1", "filename": "report.txt", "index": 0
++    });
++    let parts = json!([
++        {"type": "output_text", "text": format!("{hidden}Hello"),
++         "annotations": [citation, {"type": "future_annotation", "custom": {"value": true}}]},
++        {"type": "output_text", "text": " world", "annotations": [file_citation]},
++        {"type": "output_text", "text": "!", "annotations": {"future_container": true}},
++    ]);
++    let sources = json!([{"type": "url", "url": "https://example.com/consulted"}]);
++    let mut search = ev_web_search_call_done("search-1", "completed", "a source");
++    search["item"]["action"]["sources"] = sources.clone();
++    let mut added = ev_message_item_added("msg-1", "");
++    added["item"]["content"] = parts.clone();
++    let mut done = ev_assistant_message("msg-1", "");
++    done["item"]["content"] = parts.clone();
++    mount_sse_once(
++        &server,
++        sse(vec![
++            ev_response_created("resp-1"),
++            search,
++            added,
++            done,
++            ev_completed("resp-1"),
++        ]),
++    )
++    .await;
++
++    codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Find a source".into(),
++            text_elements: Vec::new(),
++        }]))
++        .await?;
++
++    let started = wait_for_event_match(&codex, |event| match event {
++        EventMsg::ItemStarted(event) => match &event.item {
++            TurnItem::AgentMessage(message) => Some(message.clone()),
++            _ => None,
++        },
++        _ => None,
++    })
++    .await;
++    let completed = wait_for_event_match(&codex, |event| match event {
++        EventMsg::ItemCompleted(event) => match &event.item {
++            TurnItem::AgentMessage(message) => Some(message.clone()),
++            _ => None,
++        },
++        _ => None,
++    })
++    .await;
++    let visible = wait_for_event_match(&codex, |event| match event {
++        EventMsg::TurnComplete(event) => Some(event.last_agent_message.clone()),
++        _ => None,
++    })
++    .await;
++    let mut event_parts = parts.clone();
++    for part in event_parts.as_array_mut().unwrap() {
++        part["type"] = json!("Text");
++    }
++    for message in [started, completed] {
++        assert_eq!(serde_json::to_value(&message.content)?, event_parts);
++        assert_eq!(message.text().as_ref(), "Hello world!");
++    }
++    assert_eq!(visible.as_deref(), Some("Hello world!"));
++
++    codex.flush_rollout().await?;
++    let rollout = std::fs::read_to_string(codex.rollout_path().expect("paginated rollout path"))?;
++    let rollout_items = rollout
++        .lines()
++        .map(codex_rollout::parse_rollout_line)
++        .collect::<Result<Vec<_>, _>>()?;
++    let saved = rollout_items
++        .iter()
++        .find_map(|line| match &line.item {
++            RolloutItem::ResponseItem(item) => {
++                let item = serde_json::to_value(&item.item).unwrap();
++                (item["role"] == "assistant").then_some(item)
++            }
++            _ => None,
++        })
++        .expect("canonical response item");
++    assert_eq!(saved["content"], parts);
++
++    let replay = mount_sse_once(
++        &server,
++        sse(vec![
++            ev_response_created("resp-2"),
++            ev_assistant_message("msg-2", "Follow-up"),
++            ev_completed("resp-2"),
++        ]),
++    )
++    .await;
++    codex
++        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
++            text: "Follow up on that source".into(),
++            text_elements: Vec::new(),
++        }]))
++        .await?;
++    wait_for_event(&codex, |event| matches!(event, EventMsg::TurnComplete(_))).await;
++    let request = replay.single_request().body_json();
++    let sent = request["input"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .find(|item| item["role"] == "assistant")
++        .expect("replayed assistant message");
++    let mut replay_parts = parts.clone();
++    replay_parts[0]["annotations"] = json!([citation]);
++    replay_parts[2]
++        .as_object_mut()
++        .unwrap()
++        .remove("annotations");
++    assert_eq!(sent["content"], replay_parts);
++    let sent_search = request["input"]
++        .as_array()
++        .unwrap()
++        .iter()
++        .find(|item| item["type"] == "web_search_call")
++        .expect("replayed web search");
++    assert_eq!(sent_search["action"]["sources"], sources);
+ 
+     Ok(())
+ }
+@@ -599,7 +748,7 @@ async fn plan_mode_strips_plan_from_agent_messages() -> anyhow::Result<()> {
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            AgentMessageContent::Text { text } => text.as_str(),
++            AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect();
+     assert_eq!(agent_text_from_item, "Intro\nOutro");
+@@ -739,14 +888,14 @@ async fn plan_mode_streaming_citations_are_stripped_across_added_deltas_and_done
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            AgentMessageContent::Text { text } => text.as_str(),
++            AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect();
+     let agent_completed_text: String = agent_completed
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            AgentMessageContent::Text { text } => text.as_str(),
++            AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect();
+     let agent_delta_text = agent_deltas.concat();
+@@ -874,14 +1023,14 @@ async fn plan_mode_streaming_proposed_plan_tag_split_across_added_and_delta_is_p
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            AgentMessageContent::Text { text } => text.as_str(),
++            AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect();
+     let agent_completed_text: String = agent_completed
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            AgentMessageContent::Text { text } => text.as_str(),
++            AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect();
+ 
+@@ -967,7 +1116,7 @@ async fn plan_mode_handles_missing_plan_close_tag() -> anyhow::Result<()> {
+         .content
+         .iter()
+         .map(|entry| match entry {
+-            AgentMessageContent::Text { text } => text.as_str(),
++            AgentMessageContent::Text { text, .. } => text.as_str(),
+         })
+         .collect();
+     assert_eq!(agent_text_from_item, "Intro\n");
+diff --git a/codex-rs/core/tests/suite/prompt_debug_tests.rs b/codex-rs/core/tests/suite/prompt_debug_tests.rs
+index 6248dfa87d0d914b70bb260343e789a4860ef0c7..7a6e11705112b769e26b56311b111fcd3254deba 100644
+--- a/codex-rs/core/tests/suite/prompt_debug_tests.rs
++++ b/codex-rs/core/tests/suite/prompt_debug_tests.rs
+@@ -68,7 +68,8 @@ async fn build_prompt_input_includes_context_and_user_message() -> Result<()> {
+         };
+ 
+         content.iter().any(|content_item| {
+-            let (ContentItem::InputText { text } | ContentItem::OutputText { text }) = content_item
++            let (ContentItem::InputText { text } | ContentItem::OutputText { text, .. }) =
++                content_item
+             else {
+                 return false;
+             };
+diff --git a/codex-rs/core/tests/suite/realtime_conversation.rs b/codex-rs/core/tests/suite/realtime_conversation.rs
+index 4ad15dba2d36bc27188ea0f5ef0dea28c1d3bf8b..1ff87e8c80c19b48e9a9dafed5f28fc47565a8fb 100644
+--- a/codex-rs/core/tests/suite/realtime_conversation.rs
++++ b/codex-rs/core/tests/suite/realtime_conversation.rs
+@@ -3488,6 +3488,7 @@ async fn conversation_startup_context_current_thread_selects_many_turns_by_budge
+                     id: None,
+                     role: "assistant".to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: assistant_turn,
+                     }],
+                     phase: None,
+diff --git a/codex-rs/core/tests/suite/request_user_input_async.rs b/codex-rs/core/tests/suite/request_user_input_async.rs
+index 9dfcc6b7496ea792d542c0c7de93278e617e3809..5b9851bd20fc8197d7aace003291620a7f56dcaa 100644
+--- a/codex-rs/core/tests/suite/request_user_input_async.rs
++++ b/codex-rs/core/tests/suite/request_user_input_async.rs
+@@ -282,8 +282,10 @@ async fn freeform_async_message_emits_an_item_without_ending_the_turn(
+     })
+     .await;
+     let expected = serde_json::to_value(TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: CALL_ID.to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: MESSAGE.to_string(),
+         }],
+         phase: Some(MessagePhase::FinalAnswer),
+@@ -470,8 +472,10 @@ async fn request_user_input_async_emits_item_and_does_not_end_the_turn(
+     assert_eq!(
+         serde_json::to_value(&started)?,
+         serde_json::to_value(AgentMessageItem {
++            display_text: None,
+             id: CALL_ID.to_string(),
+             content: vec![AgentMessageContent::Text {
++                annotations: None,
+                 text: MESSAGE.to_string(),
+             }],
+             phase: Some(MessagePhase::FinalAnswer),
+diff --git a/codex-rs/core/tests/suite/review.rs b/codex-rs/core/tests/suite/review.rs
+index 19b3b4419071f9a02a442409509b43e2711e2023..c4f662b249527e72225e12be0e42fca4ed4377c4 100644
+--- a/codex-rs/core/tests/suite/review.rs
++++ b/codex-rs/core/tests/suite/review.rs
+@@ -268,7 +268,7 @@ async fn review_op_emits_lifecycle_and_review_output() {
+                 }
+             } else if role == "assistant" {
+                 for c in content {
+-                    if let ContentItem::OutputText { text } = c {
++                    if let ContentItem::OutputText { text, .. } = c {
+                         if text.contains("<user_action>") {
+                             saw_assistant_xml = true;
+                         }
+@@ -1181,6 +1181,7 @@ async fn review_input_isolated_from_parent_history() {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![codex_protocol::models::ContentItem::OutputText {
++                annotations: None,
+                 text: "parent: assistant reply".to_string(),
+             }],
+             phase: None,
+diff --git a/codex-rs/core/tests/suite/settings_constraints.rs b/codex-rs/core/tests/suite/settings_constraints.rs
+index e85d9a23519fc43c337ef9f5f4fa167c6b7e5ae1..36cb86a833ffd7b75fda37c36e5c7b7836f11b3e 100644
+--- a/codex-rs/core/tests/suite/settings_constraints.rs
++++ b/codex-rs/core/tests/suite/settings_constraints.rs
+@@ -186,6 +186,7 @@ async fn protected_model_settings_use_the_proposed_permissions(
+     assert!(response.requests().is_empty());
+ 
+     let expected = ThreadSettingsSnapshot {
++        tool_choice: None,
+         model: PROTECTED_MODEL.to_string(),
+         collaboration_mode: initial.collaboration_mode.with_updates(
+             Some(PROTECTED_MODEL.to_string()),
+diff --git a/codex-rs/ext/goal/src/accounting.rs b/codex-rs/ext/goal/src/accounting.rs
+index b2a89ce2ed3029c807cfdbed90e11be709a307c9..8b6e43c38158d7250ff11047149cb46ff9f2af1b 100644
+--- a/codex-rs/ext/goal/src/accounting.rs
++++ b/codex-rs/ext/goal/src/accounting.rs
+@@ -1,7 +1,6 @@
+ use codex_extension_api::ToolCallOutcome;
+ use codex_extension_api::ToolName;
+ use codex_protocol::config_types::ModeKind;
+-use codex_protocol::items::AgentMessageContent;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::models::MessagePhase;
+ use codex_protocol::protocol::TokenUsage;
+@@ -167,9 +166,7 @@ impl GoalAccountingState {
+         };
+         match item {
+             TurnItem::AgentMessage(message) => {
+-                let has_text = message.content.iter().any(|content| match content {
+-                    AgentMessageContent::Text { text } => !text.trim().is_empty(),
+-                });
++                let has_text = !message.text().trim().is_empty();
+                 turn.has_activity |= has_text || message.questions.is_some();
+                 turn.empty_final |=
+                     !has_text && !matches!(message.phase, Some(MessagePhase::Commentary));
+diff --git a/codex-rs/ext/goal/tests/accounting.rs b/codex-rs/ext/goal/tests/accounting.rs
+index 49f0d9251a5fe6c5670043ba38099a43b27b9867..5fc1ea6ce504b44af9428b7ac5b7b5d0cdca71c9 100644
+--- a/codex-rs/ext/goal/tests/accounting.rs
++++ b/codex-rs/ext/goal/tests/accounting.rs
+@@ -62,8 +62,12 @@ fn goal_accounting_ignores_plan_mode_turns() {
+ #[test]
+ fn empty_continuations_require_three_turns_without_activity_or_goal_changes() {
+     let empty_final = TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: "empty".into(),
+-        content: vec![AgentMessageContent::Text { text: " \n".into() }],
++        content: vec![AgentMessageContent::Text {
++            text: " \n".into(),
++            annotations: None,
++        }],
+         phase: Some(MessagePhase::FinalAnswer),
+         memory_citation: None,
+         delivery: None,
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+index 70b5f18a73d39298f0e3e16817d37a0370fc29de..c9079597ac4c1328f888d82ccc3f385b340a1721 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/extension_tests.rs
+@@ -2858,6 +2858,7 @@ async fn contributor_preserves_final_assistant_messages_after_tool_eviction() ->
+             id: None,
+             role: "assistant".to_owned(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "I found a $450 flight. Should I book it?".to_owned(),
+             }],
+             phase: Some(MessagePhase::FinalAnswer),
+@@ -2868,6 +2869,7 @@ async fn contributor_preserves_final_assistant_messages_after_tool_eviction() ->
+             id: None,
+             role: "assistant".to_owned(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "Searching airline websites.".to_owned(),
+             }],
+             phase: Some(MessagePhase::Commentary),
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
+index f3c9b710ebc3c14d8f03104b87a3e31d72518d39..f026b449505d43b19bb41d2b8d6e2580316977c7 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler/execution.rs
+@@ -402,7 +402,7 @@ impl SamplingExecution {
+                             && role == "assistant"
+                         {
+                             for item in content {
+-                                if let ContentItem::OutputText { text } = item {
++                                if let ContentItem::OutputText { text, .. } = item {
+                                     output.push_str(&text);
+                                 }
+                             }
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+index 385acc2e8a00aefd87567dd0ad5c33023c29053a..1924028222cb3e29c59d61b2bbfe35b94b8f769a 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+@@ -44,7 +44,10 @@ fn assistant_message(text: impl Into<String>, phase: MessagePhase) -> ResponseIt
+     ResponseItem::Message {
+         id: None,
+         role: "assistant".to_string(),
+-        content: vec![ContentItem::OutputText { text: text.into() }],
++        content: vec![ContentItem::OutputText {
++            text: text.into(),
++            annotations: None,
++        }],
+         phase: Some(phase),
+         internal_chat_message_metadata_passthrough: None,
+     }
+@@ -630,6 +633,7 @@ fn transcript_does_not_protect_legacy_inter_agent_instructions() {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: serde_json::to_string(&communication)
+                     .expect("legacy inter-agent communication should serialize"),
+             }],
+@@ -640,6 +644,7 @@ fn transcript_does_not_protect_legacy_inter_agent_instructions() {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "I found a $450 flight. Should I book it?".to_string(),
+             }],
+             phase: None,
+@@ -817,7 +822,10 @@ fn transcript_preserves_newest_manual_approval_when_message_budget_overflows() {
+         ResponseItem::Message {
+             id: None,
+             role: "assistant".to_string(),
+-            content: vec![ContentItem::OutputText { text: older_text }],
++            content: vec![ContentItem::OutputText {
++                text: older_text,
++                annotations: None,
++            }],
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+         },
+@@ -880,6 +888,7 @@ fn rejected_message_does_not_evict_retained_tool_entries() {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "This message has no remaining budget.".to_string(),
+         }],
+         phase: None,
+diff --git a/codex-rs/ext/web-search/src/history.rs b/codex-rs/ext/web-search/src/history.rs
+index 6d64e22124559bba621795174897d047b990673c..f2f1c15182f29a84fe013d3f7d6a7e654adfe72e 100644
+--- a/codex-rs/ext/web-search/src/history.rs
++++ b/codex-rs/ext/web-search/src/history.rs
+@@ -44,6 +44,7 @@ fn push_visible_message(messages: &mut Vec<ResponseItem>, item: &ResponseItem) {
+                     id: None,
+                     role: ASSISTANT_ROLE.to_string(),
+                     content: vec![ContentItem::OutputText {
++                        annotations: None,
+                         text: format!("Agent message from {author}:\n{text}"),
+                     }],
+                     phase: None,
+@@ -87,6 +88,7 @@ mod tests {
+     use codex_protocol::models::ImageReference;
+     use codex_protocol::models::ResponseItem;
+     use pretty_assertions::assert_eq;
++    use serde_json::json;
+ 
+     use super::ASSISTANT_ROLE;
+     use super::USER_ROLE;
+@@ -98,6 +100,7 @@ mod tests {
+             role: role.to_string(),
+             content: vec![if role == ASSISTANT_ROLE {
+                 ContentItem::OutputText {
++                    annotations: None,
+                     text: text.to_string(),
+                 }
+             } else {
+@@ -184,6 +187,45 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn recent_input_keeps_annotations_only_on_unchanged_text_parts() {
++        let citation = json!([{
++            "type": "url_citation",
++            "url": "https://example.com/source",
++            "title": "Source",
++            "start_index": 0,
++            "end_index": 6
++        }]);
++        let long_text = "Source ".repeat(1_000);
++        let mut long_citation = citation.clone();
++        long_citation[0]["start_index"] = json!(long_text.len() - 7);
++        long_citation[0]["end_index"] = json!(long_text.len() - 1);
++        let content = json!([
++            {"type": "output_text", "text": "Source", "annotations": citation},
++            {"type": "output_text", "text": long_text, "annotations": long_citation}
++        ]);
++        let items = [
++            message(USER_ROLE, "previous user"),
++            serde_json::from_value(json!({
++                "type": "message",
++                "role": ASSISTANT_ROLE,
++                "content": content
++            }))
++            .unwrap(),
++            message(USER_ROLE, "current user"),
++        ];
++
++        let SearchInput::Items(request) = recent_input(&items).expect("standalone search input")
++        else {
++            panic!("expected conversation items in standalone search input");
++        };
++        let request_message = serde_json::to_value(&request[1]).unwrap();
++        assert_eq!(request_message["content"][0], content[0]);
++        assert_ne!(request_message["content"][1]["text"], content[1]["text"]);
++        assert!(request_message["content"][1].get("annotations").is_none());
++        assert_eq!(serde_json::to_value(&items[1]).unwrap()["content"], content);
++    }
++
+     #[test]
+     fn ignores_contextual_user_messages_when_selecting_recent_turns() {
+         let items = vec![
+diff --git a/codex-rs/ext/web-search/src/tool.rs b/codex-rs/ext/web-search/src/tool.rs
+index 411b405bd8c5b6e0a9ebf4db10376ff1266da777..8de7a844ff43595b377f6313144e7e07b27da4e3 100644
+--- a/codex-rs/ext/web-search/src/tool.rs
++++ b/codex-rs/ext/web-search/src/tool.rs
+@@ -160,6 +160,7 @@ impl WebSearchTool {
+         }
+         let legacy_action = match &command_action {
+             WebSearchAction::Search { query, queries } => CoreWebSearchAction::Search {
++                sources: None,
+                 query: query.clone(),
+                 queries: queries.clone(),
+             },
+diff --git a/codex-rs/external-agent-migration/src/sessions/append_tests.rs b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+index 81f3973f799c563715f088145123a1c4a1a5267d..c561e41bfd69c57dd5419fef0d33111cc5d9ff74 100644
+--- a/codex-rs/external-agent-migration/src/sessions/append_tests.rs
++++ b/codex-rs/external-agent-migration/src/sessions/append_tests.rs
+@@ -128,7 +128,7 @@ fn model_messages(items: &[RolloutItem]) -> Vec<(MessageRole, &str)> {
+                     ("user", [ContentItem::InputText { text }]) => {
+                         Some((MessageRole::User, text.as_str()))
+                     }
+-                    ("assistant", [ContentItem::OutputText { text }]) => {
++                    ("assistant", [ContentItem::OutputText { text, .. }]) => {
+                         Some((MessageRole::Assistant, text.as_str()))
+                     }
+                     _ => None,
+diff --git a/codex-rs/external-agent-migration/src/sessions/export.rs b/codex-rs/external-agent-migration/src/sessions/export.rs
+index 6433e2198f880c107b69edca3aabeb36cfaff576..58555f75563ad1814fdf409c5142c5a7ccd37005 100644
+--- a/codex-rs/external-agent-migration/src/sessions/export.rs
++++ b/codex-rs/external-agent-migration/src/sessions/export.rs
+@@ -166,7 +166,10 @@ fn external_session_imported_marker_item() -> RolloutItem {
+ 
+ fn response_item(message: ConversationMessage) -> ResponseItem {
+     let content = match message.role {
+-        MessageRole::Assistant => ContentItem::OutputText { text: message.text },
++        MessageRole::Assistant => ContentItem::OutputText {
++            text: message.text,
++            annotations: None,
++        },
+         MessageRole::User => ContentItem::InputText { text: message.text },
+     };
+     ResponseItem::Message {
+diff --git a/codex-rs/guardian-context/src/budget.rs b/codex-rs/guardian-context/src/budget.rs
+index 56cc8a09d152e0d40ce3be30f468f79f0a0a2aef..e5181791eb53b16c4a75530af0028cec8af0603f 100644
+--- a/codex-rs/guardian-context/src/budget.rs
++++ b/codex-rs/guardian-context/src/budget.rs
+@@ -95,7 +95,7 @@ pub struct SectionCost {
+ impl SectionCost {
+     fn add_content(mut self, item: &ContentItem) -> Self {
+         match item {
+-            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++            ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                 self.text_bytes = self.text_bytes.saturating_add(text.len());
+             }
+             ContentItem::InputImage {
+diff --git a/codex-rs/guardian-context/src/enforcement.rs b/codex-rs/guardian-context/src/enforcement.rs
+index c844fee647fa38f8a5449ef235078b171e653eaf..d74b2c0568b61a7bf943cc74c088e38568b92dff 100644
+--- a/codex-rs/guardian-context/src/enforcement.rs
++++ b/codex-rs/guardian-context/src/enforcement.rs
+@@ -305,7 +305,9 @@ fn retain_content(
+         index += 1;
+         if !keep {
+             let original_bytes = match &item.content {
+-                ContentItem::InputText { text } | ContentItem::OutputText { text } => text.len(),
++                ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
++                    text.len()
++                }
+                 ContentItem::InputImage {
+                     image: ImageReference::Inline { image_url },
+                     ..
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index a0452be2042b3266e76e6037ce701043d46b9ed7..530c4bc90d18b9f60098e6b0a4e248d0f4fdd32b 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -137,7 +137,7 @@ pub fn collect_transcript(
+                 let text = content
+                     .iter()
+                     .filter_map(|item| match item {
+-                        ContentItem::InputText { text } | ContentItem::OutputText { text }
++                        ContentItem::InputText { text } | ContentItem::OutputText { text, .. }
+                             if !text.is_empty() =>
+                         {
+                             Some(text.as_str())
+diff --git a/codex-rs/guardian-context/src/transcript_tests.rs b/codex-rs/guardian-context/src/transcript_tests.rs
+index 2bf9152ba23574bad02f96a9a2659cfff4c1c0e4..1d043eecd34505bb8d4ef68d52e39ba587e81231 100644
+--- a/codex-rs/guardian-context/src/transcript_tests.rs
++++ b/codex-rs/guardian-context/src/transcript_tests.rs
+@@ -135,6 +135,7 @@ fn registered_transcript_filters_roles_and_preserves_node_repl_tool_attribution(
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "Inspection complete.".to_string(),
+             }],
+             phase: Some(MessagePhase::FinalAnswer),
+diff --git a/codex-rs/history/src/lib.rs b/codex-rs/history/src/lib.rs
+index e20801a0d8dab090730882588dbf7f009f4a25b3..f23ebf98c0f0a44e0e76b800948ad5301b0c61e9 100644
+--- a/codex-rs/history/src/lib.rs
++++ b/codex-rs/history/src/lib.rs
+@@ -351,6 +351,7 @@ impl From<CompactedItem> for ResponseItem {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: value.message,
+             }],
+             phase: None,
+diff --git a/codex-rs/history/src/rollout_payload.rs b/codex-rs/history/src/rollout_payload.rs
+index 360386664b260866a85f2224749db8a72a7a2ffb..8bea6d443d432fcc87d5adbd4141407c3bdf2875 100644
+--- a/codex-rs/history/src/rollout_payload.rs
++++ b/codex-rs/history/src/rollout_payload.rs
+@@ -129,7 +129,10 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
+                     payload: Cow::Owned(ResponseItem::Message {
+                         id: message.message_id.clone().map(ResponseItemId::from_server),
+                         role: "assistant".to_owned(),
+-                        content: vec![ContentItem::OutputText { text }],
++                        content: vec![ContentItem::OutputText {
++                            text,
++                            annotations: None,
++                        }],
+                         // Older Guardian clients exclude commentary from root-to-worker
+                         // review. Keep the phase unspecified so they can review this
+                         // confirmed delivery without claiming it ended the turn.
+@@ -180,7 +183,7 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
+                     Some(metadata),
+                 ) = (payload.as_ref(), metadata.as_deref())
+                     && role == "assistant"
+-                    && let [ContentItem::OutputText { text }] = content.as_slice()
++                    && let [ContentItem::OutputText { text, .. }] = content.as_slice()
+                     && let Some(turn_id) = passthrough.turn_id.as_ref()
+                     && let Some(acceptance_order) = metadata.user_input_order
+                     && let Some(marker) = metadata.delivered_assistant_message.as_deref()
+diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
+index 0b04ff6fd1e392d6f185a589f98c60b72b3b4578..9b07c1cee6546ad7d24f0de776a7969f1496adc6 100644
+--- a/codex-rs/history/src/tests.rs
++++ b/codex-rs/history/src/tests.rs
+@@ -151,6 +151,7 @@ fn response_item_envelope_accessors_preserve_item() {
+         id: None,
+         role: "assistant".to_string(),
+         content: vec![ContentItem::OutputText {
++            annotations: None,
+             text: "goodbye".to_string(),
+         }],
+         phase: None,
+@@ -299,7 +300,7 @@ fn delivered_assistant_rollout_survives_an_earlier_read_and_rewrite() -> Result<
+         // The preceding client's Guardian projection excludes commentary.
+         assert_eq!(phase, &None);
+         assert_eq!(metadata.user_input_order, Some(7));
+-        let [ContentItem::OutputText { text }] = content.as_slice() else {
++        let [ContentItem::OutputText { text, .. }] = content.as_slice() else {
+             panic!("older readers need plain assistant text");
+         };
+         if complete {
+diff --git a/codex-rs/memories/write/src/rollout_input.rs b/codex-rs/memories/write/src/rollout_input.rs
+index 67c94762958d64f0216642fb4f0a142fd40cce54..5fe75c61d9b3c83a8ce8ed0a9ec2049c5a4fbf7e 100644
+--- a/codex-rs/memories/write/src/rollout_input.rs
++++ b/codex-rs/memories/write/src/rollout_input.rs
+@@ -125,7 +125,7 @@ pub(crate) fn serialize_tiered_input(
+                     })
+                     || InterAgentCommunication::is_message_content(content)
+                     || content.iter().any(|part| match part {
+-                        ContentItem::InputText { text } | ContentItem::OutputText { text } => {
++                        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                             let text = text.trim_start();
+                             text.starts_with("<subagent_notification>")
+                                 || (text.starts_with("Message Type:")
+diff --git a/codex-rs/otel/src/agent_response.rs b/codex-rs/otel/src/agent_response.rs
+index dd2e04d511db456907357d7f91728420fcd55cee..efb62286684601568d5157cf601214505c03a01d 100644
+--- a/codex-rs/otel/src/agent_response.rs
++++ b/codex-rs/otel/src/agent_response.rs
+@@ -78,7 +78,7 @@ impl AgentResponseLogger {
+         let text = content
+             .iter()
+             .filter_map(|content| match content {
+-                ContentItem::OutputText { text } => Some(text.as_str()),
++                ContentItem::OutputText { text, .. } => Some(text.as_str()),
+                 ContentItem::InputText { .. }
+                 | ContentItem::InputImage { .. }
+                 | ContentItem::InputAudio { .. } => None,
+diff --git a/codex-rs/protocol/src/config_types.rs b/codex-rs/protocol/src/config_types.rs
+index 87ffe6dc8bea4d093822a8c1e868df477490e669..6b313ed221a3bcecfdea7737fd2f0c0890e301cd 100644
+--- a/codex-rs/protocol/src/config_types.rs
++++ b/codex-rs/protocol/src/config_types.rs
+@@ -415,6 +415,19 @@ pub enum WebSearchContextSize {
+     High,
+ }
+ 
++/// Outer Responses tool-selection policy.
++#[derive(
++    Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq, Display, JsonSchema, TS,
++)]
++#[serde(rename_all = "lowercase")]
++#[strum(serialize_all = "lowercase")]
++pub enum ToolChoice {
++    #[default]
++    Auto,
++    None,
++    Required,
++}
++
+ #[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+ #[schemars(deny_unknown_fields)]
+ pub struct WebSearchLocation {
+@@ -440,6 +453,9 @@ impl WebSearchLocation {
+ pub struct WebSearchToolConfig {
+     pub context_size: Option<WebSearchContextSize>,
+     pub allowed_domains: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub blocked_domains: Option<Vec<String>>,
+     pub location: Option<WebSearchLocation>,
+ }
+ 
+@@ -451,6 +467,10 @@ impl WebSearchToolConfig {
+                 .allowed_domains
+                 .clone()
+                 .or_else(|| self.allowed_domains.clone()),
++            blocked_domains: other
++                .blocked_domains
++                .clone()
++                .or_else(|| self.blocked_domains.clone()),
+             location: match (&self.location, &other.location) {
+                 (Some(location), Some(other_location)) => Some(location.merge(other_location)),
+                 (Some(location), None) => Some(location.clone()),
+@@ -465,6 +485,9 @@ impl WebSearchToolConfig {
+ #[schemars(deny_unknown_fields)]
+ pub struct WebSearchFilters {
+     pub allowed_domains: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub blocked_domains: Option<Vec<String>>,
+ }
+ 
+ #[derive(
+@@ -511,10 +534,10 @@ impl From<WebSearchLocation> for WebSearchUserLocation {
+ impl From<WebSearchToolConfig> for WebSearchConfig {
+     fn from(config: WebSearchToolConfig) -> Self {
+         Self {
+-            filters: config
+-                .allowed_domains
+-                .map(|allowed_domains| WebSearchFilters {
+-                    allowed_domains: Some(allowed_domains),
++            filters: (config.allowed_domains.is_some() || config.blocked_domains.is_some())
++                .then_some(WebSearchFilters {
++                    allowed_domains: config.allowed_domains,
++                    blocked_domains: config.blocked_domains,
+                 }),
+             user_location: config.location.map(Into::into),
+             search_context_size: config.context_size,
+@@ -945,6 +968,7 @@ mod tests {
+     fn web_search_tool_config_merge_prefers_overlay_values() {
+         let base = WebSearchToolConfig {
+             context_size: Some(WebSearchContextSize::Low),
++            blocked_domains: None,
+             allowed_domains: Some(vec!["openai.com".to_string()]),
+             location: Some(WebSearchLocation {
+                 country: Some("US".to_string()),
+@@ -955,6 +979,7 @@ mod tests {
+         };
+         let overlay = WebSearchToolConfig {
+             context_size: Some(WebSearchContextSize::High),
++            blocked_domains: None,
+             allowed_domains: None,
+             location: Some(WebSearchLocation {
+                 country: None,
+@@ -966,6 +991,7 @@ mod tests {
+ 
+         let expected = WebSearchToolConfig {
+             context_size: Some(WebSearchContextSize::High),
++            blocked_domains: None,
+             allowed_domains: Some(vec!["openai.com".to_string()]),
+             location: Some(WebSearchLocation {
+                 country: Some("US".to_string()),
+diff --git a/codex-rs/protocol/src/items.rs b/codex-rs/protocol/src/items.rs
+index 0e48870650dd2f912ca4e09b595a4f541de9d585..6bd277a3bb386207dc8ca0e5b39deda5e8511cf5 100644
+--- a/codex-rs/protocol/src/items.rs
++++ b/codex-rs/protocol/src/items.rs
+@@ -123,7 +123,12 @@ struct HookPromptXml {
+ #[serde(tag = "type")]
+ #[ts(tag = "type")]
+ pub enum AgentMessageContent {
+-    Text { text: String },
++    Text {
++        text: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        annotations: Option<serde_json::Value>,
++    },
+ }
+ 
+ #[derive(Debug, Clone, Copy, Deserialize, Serialize, TS, JsonSchema, PartialEq, Eq)]
+@@ -151,6 +156,10 @@ pub struct AsyncUserInputQuestion {
+ pub struct AgentMessageItem {
+     pub id: String,
+     pub content: Vec<AgentMessageContent>,
++    /// Visible text when Core strips markup from the original annotated parts.
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub display_text: Option<String>,
+     /// Optional phase metadata carried through from `ResponseItem::Message`.
+     ///
+     /// This is currently used by TUI rendering to distinguish mid-turn
+@@ -169,6 +178,36 @@ pub struct AgentMessageItem {
+     pub questions: Option<Vec<AsyncUserInputQuestion>>,
+ }
+ 
++impl AgentMessageItem {
++    pub fn raw_text(&self) -> String {
++        self.content
++            .iter()
++            .map(|part| match part {
++                AgentMessageContent::Text { text, .. } => text.as_str(),
++            })
++            .collect()
++    }
++
++    pub fn text(&self) -> std::borrow::Cow<'_, str> {
++        match &self.display_text {
++            Some(text) => std::borrow::Cow::Borrowed(text),
++            None => std::borrow::Cow::Owned(self.raw_text()),
++        }
++    }
++
++    pub fn has_annotations(&self) -> bool {
++        self.content.iter().any(|part| {
++            matches!(
++                part,
++                AgentMessageContent::Text {
++                    annotations: Some(_),
++                    ..
++                }
++            )
++        })
++    }
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+ pub struct EnteredReviewModeItem {
+     pub id: String,
+diff --git a/codex-rs/protocol/src/legacy_events.rs b/codex-rs/protocol/src/legacy_events.rs
+index 05a66f6cee5b298e9567a3922226d1088f0b0894..d7de9dcbf9a185d986cf2cbe8768c0e3bce3aaaa 100644
+--- a/codex-rs/protocol/src/legacy_events.rs
++++ b/codex-rs/protocol/src/legacy_events.rs
+@@ -1,6 +1,5 @@
+ use crate::ThreadId;
+ use crate::dynamic_tools::DynamicToolCallRequest;
+-use crate::items::AgentMessageContent;
+ use crate::items::AgentMessageItem;
+ use crate::items::CollabAgentTool;
+ use crate::items::CollabAgentToolCallItem;
+@@ -123,18 +122,16 @@ impl UserMessageItem {
+ 
+ impl AgentMessageItem {
+     pub fn as_legacy_events(&self) -> Vec<EventMsg> {
+-        self.content
+-            .iter()
+-            .map(|c| match c {
+-                AgentMessageContent::Text { text } => EventMsg::AgentMessage(AgentMessageEvent {
+-                    message: text.clone(),
+-                    phase: self.phase.clone(),
+-                    memory_citation: self.memory_citation.clone(),
+-                    delivery: self.delivery,
+-                    questions: self.questions.clone(),
+-                }),
+-            })
+-            .collect()
++        if self.content.is_empty() {
++            return Vec::new();
++        }
++        vec![EventMsg::AgentMessage(AgentMessageEvent {
++            message: self.text().into_owned(),
++            phase: self.phase.clone(),
++            memory_citation: self.memory_citation.clone(),
++            delivery: self.delivery,
++            questions: self.questions.clone(),
++        })]
+     }
+ }
+ 
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index 1665c31e8f645ff632002a69bdd7bb45f1be7b07..d14d79bbe52377d4189529e8e6673d8ec13c293d 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -892,6 +892,9 @@ pub enum ContentItem {
+     },
+     OutputText {
+         text: String,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        annotations: Option<serde_json::Value>,
+     },
+ }
+ 
+@@ -1960,6 +1963,9 @@ pub enum WebSearchAction {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         queries: Option<Vec<String>>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        sources: Option<serde_json::Value>,
+     },
+     OpenPage {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+@@ -2522,6 +2528,7 @@ mod tests {
+         let item = ResponseItem::from(ResponseInputItem::Message {
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "still working".to_string(),
+             }],
+             phase: Some(MessagePhase::Commentary),
+@@ -2533,6 +2540,7 @@ mod tests {
+                 id: None,
+                 role: "assistant".to_string(),
+                 content: vec![ContentItem::OutputText {
++                    annotations: None,
+                     text: "still working".to_string(),
+                 }],
+                 phase: Some(MessagePhase::Commentary),
+@@ -3827,6 +3835,7 @@ mod tests {
+                 }"#,
+                 None,
+                 Some(WebSearchAction::Search {
++                    sources: None,
+                     query: Some("weather seattle".into()),
+                     queries: Some(vec!["weather seattle".into(), "seattle weather now".into()]),
+                 }),
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 83007345f5c834bc3a330fd1fd2550793ca28901..f4f6785823bb666facd45fec1559f025ccc7fce9 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -558,6 +558,9 @@ pub struct ThreadSettingsOverrides {
+     /// preference, or `None` to leave the existing value unchanged.
+     pub service_tier: Option<Option<String>>,
+ 
++    /// Updated outer tool-selection policy for future turns.
++    pub tool_choice: Option<crate::config_types::ToolChoice>,
++
+     /// EXPERIMENTAL - set a pre-set collaboration mode.
+     /// Takes precedence over model, effort, and developer instructions if set.
+     pub collaboration_mode: Option<CollaborationMode>,
+@@ -875,6 +878,7 @@ impl InterAgentCommunication {
+         ResponseInputItem::Message {
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: serde_json::to_string(&communication).unwrap_or_default(),
+             }],
+             phase: Some(MessagePhase::Commentary),
+@@ -922,7 +926,7 @@ impl InterAgentCommunication {
+ 
+     pub fn from_message_content(content: &[ContentItem]) -> Option<Self> {
+         match content {
+-            [ContentItem::InputText { text }] | [ContentItem::OutputText { text }] => {
++            [ContentItem::InputText { text }] | [ContentItem::OutputText { text, .. }] => {
+                 serde_json::from_str(text).ok()
+             }
+             _ => None,
+@@ -2221,6 +2225,9 @@ pub struct ThreadSettingsAppliedEvent {
+ 
+ #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
+ pub struct ThreadSettingsSnapshot {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    #[ts(optional)]
++    pub tool_choice: Option<crate::config_types::ToolChoice>,
+     pub model: String,
+     pub model_provider_id: String,
+     #[serde(skip_serializing_if = "Option::is_none")]
+@@ -4818,6 +4825,7 @@ mod tests {
+             ResponseInputItem::Message {
+                 role: "assistant".to_string(),
+                 content: vec![ContentItem::OutputText {
++                    annotations: None,
+                     text: serde_json::to_string(&serialized_communication)
+                         .expect("serialize communication"),
+                 }],
+@@ -5397,6 +5405,7 @@ mod tests {
+                 id: "search-1".into(),
+                 query: "find docs".into(),
+                 action: WebSearchAction::Search {
++                    sources: None,
+                     query: Some("find docs".into()),
+                     queries: None,
+                 },
+diff --git a/codex-rs/rollout/src/search.rs b/codex-rs/rollout/src/search.rs
+index 4cba77315313625377b2c4dc4fb581efb09133b7..7dbe7cff3b9dbf2018b1f6ec1a69aec7fc0f7f41 100644
+--- a/codex-rs/rollout/src/search.rs
++++ b/codex-rs/rollout/src/search.rs
+@@ -321,7 +321,9 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
+ 
+ fn content_item_text(item: &ContentItem) -> Option<&str> {
+     match item {
+-        ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
++        ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
++            Some(text.as_str())
++        }
+         ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
+     }
+ }
+diff --git a/codex-rs/rollout/src/tests.rs b/codex-rs/rollout/src/tests.rs
+index 27fd11ba4d2fc34d2629560280d285bdee03984d..da1143855f60f87a2e300eda250f30557fb906ab 100644
+--- a/codex-rs/rollout/src/tests.rs
++++ b/codex-rs/rollout/src/tests.rs
+@@ -1609,6 +1609,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
+                 id: None,
+                 role: "assistant".into(),
+                 content: vec![ContentItem::OutputText {
++                    annotations: None,
+                     text: format!("reply-{idx}"),
+                 }],
+                 phase: None,
+diff --git a/codex-rs/state/src/extract.rs b/codex-rs/state/src/extract.rs
+index 6e48082e370d14325e8c8d639c8c55811c65ebeb..5df1131504068f79b197f2842de77b3ed68b1a34 100644
+--- a/codex-rs/state/src/extract.rs
++++ b/codex-rs/state/src/extract.rs
+@@ -754,6 +754,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    tool_choice: None,
+                     disabled_plugin_ids: Vec::new(),
+                     model: "gpt-5.2-codex".to_string(),
+                     model_provider_id: "updated-provider".to_string(),
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/legacy_event.rs b/codex-rs/thread-store/src/local/rollout_migration/legacy_event.rs
+index a1481d62cd737818d1ad865b3bab645a0308e6f8..d66105c89bc48e302375d62f77ef033a05e5de1e 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/legacy_event.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/legacy_event.rs
+@@ -141,8 +141,10 @@ pub(super) fn completed_item(
+     let result = match event {
+         EventMsg::AgentMessage(event) if !event.message.is_empty() => Some((
+             TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: next_item_id()?,
+                 content: vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: event.message.clone(),
+                 }],
+                 phase: event.phase.clone(),
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index 618dade7ff67d6bf61ce9cdf095b2c50418134ea..56fae346bba6d4ba4004c8b783bd66e6c130a50e 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -1148,6 +1148,7 @@ async fn migration_rolls_back_pre_compaction_turns_from_sqlite_history() {
+             id: None,
+             role: "assistant".to_string(),
+             content: vec![ContentItem::OutputText {
++                annotations: None,
+                 text: "old answer".to_string(),
+             }],
+             phase: None,
+@@ -1546,7 +1547,7 @@ async fn migration_keeps_downgraded_delivery_before_later_same_turn_steer() {
+         RolloutItem::ResponseItem(envelope)
+             if matches!(&envelope.item, ResponseItem::Message { role, content, .. }
+                 if role == "assistant"
+-                    && matches!(content.as_slice(), [ContentItem::OutputText { text }]
++                    && matches!(content.as_slice(), [ContentItem::OutputText { text, .. }]
+                         if text == "May I publish?"))
+     )));
+ }
+diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+index 86004a2b39d1851f11a7ddcc80068b97224fd596..3b4caf7dabe761143fbe0b4760ef50f5795c2454 100644
+--- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+@@ -234,8 +234,10 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
+                     thread_id,
+                     "turn-1",
+                     TurnItem::AgentMessage(AgentMessageItem {
++                        display_text: None,
+                         id: "agent-1".to_string(),
+                         content: vec![AgentMessageContent::Text {
++                            annotations: None,
+                             text: "done".to_string(),
+                         }],
+                         phase: None,
+@@ -328,8 +330,10 @@ async fn paginated_live_append_materializes_turn_items_and_state() {
+                     thread_id,
+                     "turn-1",
+                     TurnItem::AgentMessage(AgentMessageItem {
++                        display_text: None,
+                         id: "agent-1".to_string(),
+                         content: vec![AgentMessageContent::Text {
++                            annotations: None,
+                             text: "done".to_string(),
+                         }],
+                         phase: None,
+@@ -641,8 +645,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {
+                     thread_id,
+                     "turn-1",
+                     TurnItem::AgentMessage(AgentMessageItem {
++                        display_text: None,
+                         id: "agent-1".to_string(),
+                         content: vec![AgentMessageContent::Text {
++                            annotations: None,
+                             text: "Result".to_string(),
+                         }],
+                         phase: None,
+@@ -2885,8 +2891,10 @@ fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> Rollout
+ 
+ fn agent_message(id: &str, phase: MessagePhase) -> TurnItem {
+     TurnItem::AgentMessage(AgentMessageItem {
++        display_text: None,
+         id: id.to_string(),
+         content: vec![AgentMessageContent::Text {
++            annotations: None,
+             text: id.to_string(),
+         }],
+         phase: Some(phase),
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index 3812cec25037aa08f2ddaf8f52bf5122f43955c3..a697e6f35884ec238da9a35f637b23677a2d9273 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -740,6 +740,7 @@ mod tests {
+             ThreadSettingsAppliedEvent {
+                 thread_id: None,
+                 thread_settings: ThreadSettingsSnapshot {
++                    tool_choice: None,
+                     disabled_plugin_ids: Vec::new(),
+                     model: "gpt-5.2-codex".to_string(),
+                     model_provider_id: "updated-provider".to_string(),
+diff --git a/codex-rs/tools/src/response_history.rs b/codex-rs/tools/src/response_history.rs
+index ab16769afdb248e1e03e2090956adb548f7708e2..1677fb2532624270124f24f963d3034eb2b425f8 100644
+--- a/codex-rs/tools/src/response_history.rs
++++ b/codex-rs/tools/src/response_history.rs
+@@ -49,7 +49,7 @@ pub fn truncate_assistant_output_text_to_token_budget(
+         }
+ 
+         content.retain_mut(|content_item| {
+-            let ContentItem::OutputText { text } = content_item else {
++            let ContentItem::OutputText { text, annotations } = content_item else {
+                 return true;
+             };
+             if remaining_budget == 0 {
+@@ -62,7 +62,11 @@ pub fn truncate_assistant_output_text_to_token_budget(
+                 return true;
+             }
+ 
+-            *text = truncate_text(text, TruncationPolicy::Tokens(remaining_budget));
++            let truncated = truncate_text(text, TruncationPolicy::Tokens(remaining_budget));
++            if truncated != *text {
++                *text = truncated;
++                *annotations = None;
++            }
+             remaining_budget = 0;
+             true
+         });
+@@ -87,6 +91,7 @@ mod tests {
+             role: role.to_string(),
+             content: vec![if role == "assistant" {
+                 ContentItem::OutputText {
++                    annotations: None,
+                     text: text.to_string(),
+                 }
+             } else {
+diff --git a/codex-rs/tools/src/tool_output.rs b/codex-rs/tools/src/tool_output.rs
+index 296c31211ce54801d9faa1dc08247cd6b1de3741..31a74136d8b09e31ae5df8a3935659606c46c40c 100644
+--- a/codex-rs/tools/src/tool_output.rs
++++ b/codex-rs/tools/src/tool_output.rs
+@@ -225,7 +225,7 @@ fn response_input_to_code_mode_result(response: ResponseInputItem) -> JsonValue
+                 .into_iter()
+                 .map(|item| match item {
+                     codex_protocol::models::ContentItem::InputText { text }
+-                    | codex_protocol::models::ContentItem::OutputText { text } => {
++                    | codex_protocol::models::ContentItem::OutputText { text, .. } => {
+                         FunctionCallOutputContentItem::InputText { text }
+                     }
+                     codex_protocol::models::ContentItem::InputImage { image, detail } => {
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index 530da1be164ce3c6aa4b128ccb878bda7025e217..beda4a776276febf54b4eae7a1246ac671826ca0 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -152,12 +152,15 @@ pub fn create_tools_raw_json_for_responses_api(
+ pub struct ResponsesApiWebSearchFilters {
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub allowed_domains: Option<Vec<String>>,
++    #[serde(skip_serializing_if = "Option::is_none")]
++    pub blocked_domains: Option<Vec<String>>,
+ }
+ 
+ impl From<ConfigWebSearchFilters> for ResponsesApiWebSearchFilters {
+     fn from(filters: ConfigWebSearchFilters) -> Self {
+         Self {
+             allowed_domains: filters.allowed_domains,
++            blocked_domains: filters.blocked_domains,
+         }
+     }
+ }
+diff --git a/codex-rs/tools/src/tool_spec_tests.rs b/codex-rs/tools/src/tool_spec_tests.rs
+index d8fcee9cf85252ee53ee9f554de1a51b59ba65c1..478d2c86030059d5e2975fba5ea1a17104a9b7e0 100644
+--- a/codex-rs/tools/src/tool_spec_tests.rs
++++ b/codex-rs/tools/src/tool_spec_tests.rs
+@@ -91,9 +91,11 @@ fn tool_spec_name_covers_all_variants() {
+ fn web_search_config_converts_to_responses_api_types() {
+     assert_eq!(
+         ResponsesApiWebSearchFilters::from(ConfigWebSearchFilters {
++            blocked_domains: None,
+             allowed_domains: Some(vec!["example.com".to_string()]),
+         }),
+         ResponsesApiWebSearchFilters {
++            blocked_domains: None,
+             allowed_domains: Some(vec!["example.com".to_string()]),
+         }
+     );
+@@ -344,6 +346,7 @@ fn web_search_tool_spec_serializes_expected_wire_shape() {
+             external_web_access: Some(true),
+             indexed_web_access: Some(true),
+             filters: Some(ResponsesApiWebSearchFilters {
++                blocked_domains: Some(vec!["blocked.example".to_string()]),
+                 allowed_domains: Some(vec!["example.com".to_string()]),
+             }),
+             user_location: Some(ResponsesApiWebSearchUserLocation {
+@@ -363,6 +366,7 @@ fn web_search_tool_spec_serializes_expected_wire_shape() {
+             "indexed_web_access": true,
+             "filters": {
+                 "allowed_domains": ["example.com"],
++                "blocked_domains": ["blocked.example"],
+             },
+             "user_location": {
+                 "type": "approximate",
+diff --git a/codex-rs/tui/src/app/tests/pagination_completion_tests.rs b/codex-rs/tui/src/app/tests/pagination_completion_tests.rs
+index d3d98496c65a863628f5c7544022fece8bba97d2..12c52faec0a9640afaad863bf3a19b14da5d879a 100644
+--- a/codex-rs/tui/src/app/tests/pagination_completion_tests.rs
++++ b/codex-rs/tui/src/app/tests/pagination_completion_tests.rs
+@@ -74,8 +74,10 @@ pub(super) async fn completed_history_app(
+                 }],
+             }),
+             TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: format!("answer-{index}"),
+                 content: vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: format!("{name} answer"),
+                 }],
+                 phase: None,
+diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
+index 8214c6882e7ae5801947ef1416c245ac30aee02f..dd636da333037e79727eb20ca0a36b5482ead762 100644
+--- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
++++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
+@@ -2271,8 +2271,10 @@ async fn older_pagination_reconciles_review_prompts_across_page_boundaries() ->
+     ];
+     items.extend((0..97).map(|index| {
+         TurnItem::AgentMessage(AgentMessageItem {
++            display_text: None,
+             id: format!("review-output-{index}"),
+             content: vec![AgentMessageContent::Text {
++                annotations: None,
+                 text: format!("review output {index}"),
+             }],
+             phase: None,
+@@ -2464,8 +2466,10 @@ async fn transcript_alt_beginning_loads_every_older_history_page() -> Result<()>
+             thread_id,
+             turn_id: "multi-page-turn".to_string(),
+             item: TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: format!("history-item-{index}"),
+                 content: vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: format!("history output {index}"),
+                 }],
+                 phase: None,
+@@ -2878,8 +2882,10 @@ async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcri
+             thread_id,
+             turn_id: "scrollback-pagination-turn".to_string(),
+             item: TurnItem::AgentMessage(AgentMessageItem {
++                display_text: None,
+                 id: format!("scrollback-item-{index}"),
+                 content: vec![AgentMessageContent::Text {
++                    annotations: None,
+                     text: format!("scrollback output {index}"),
+                 }],
+                 phase: None,
+@@ -4953,8 +4959,10 @@ async fn command_center_read_only_open_requests_and_failure_preservation() -> Re
+                         thread_id,
+                         turn_id: format!("saved-turn-{index}"),
+                         item: TurnItem::AgentMessage(AgentMessageItem {
++                            display_text: None,
+                             id: format!("saved-answer-{index}"),
+                             content: vec![AgentMessageContent::Text {
++                                annotations: None,
+                                 text: "Saved final answer".to_string(),
+                             }],
+                             phase: Some(codex_protocol::models::MessagePhase::FinalAnswer),
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 4af61b2c623c9a02735f529c0b77488843658df7..f69e1ff0a632c35e773742bc3e43e62524dc27b3 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -142,7 +142,6 @@ use codex_protocol::config_types::ModeKind;
+ use codex_protocol::config_types::Settings;
+ #[cfg(target_os = "windows")]
+ use codex_protocol::config_types::WindowsSandboxLevel;
+-use codex_protocol::items::AgentMessageContent;
+ use codex_protocol::items::AgentMessageItem;
+ use codex_protocol::models::MessagePhase;
+ use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
+diff --git a/codex-rs/tui/src/chatwidget/replay.rs b/codex-rs/tui/src/chatwidget/replay.rs
+index ccb5b7751490ea13d4ee110b54e6861d003a2fe9..df7207f91acfca083efae8426781749bacb0f267 100644
+--- a/codex-rs/tui/src/chatwidget/replay.rs
++++ b/codex-rs/tui/src/chatwidget/replay.rs
+@@ -5,6 +5,7 @@
+ //! state: keep its trailing reasoning provisional until live events identify the next item.
+ 
+ use super::*;
++use codex_protocol::items::AgentMessageContent;
+ 
+ impl ChatWidget {
+     /// Restores the active typed reasoning item after a thread switch or session refresh.
+@@ -315,8 +316,12 @@ impl ChatWidget {
+                 }
+                 self.on_agent_message_item_completed(
+                     AgentMessageItem {
++                        display_text: None,
+                         id,
+-                        content: vec![AgentMessageContent::Text { text }],
++                        content: vec![AgentMessageContent::Text {
++                            text,
++                            annotations: None,
++                        }],
+                         phase,
+                         memory_citation: memory_citation.map(|citation| {
+                             codex_protocol::memory_citation::MemoryCitation {
+diff --git a/codex-rs/tui/src/chatwidget/streaming.rs b/codex-rs/tui/src/chatwidget/streaming.rs
+index 3fb130d563243b33d6784f5a8761cee6deae4baf..b48ea5c656e8903aeb8c5fe7b9d211a719a0e0bb 100644
+--- a/codex-rs/tui/src/chatwidget/streaming.rs
++++ b/codex-rs/tui/src/chatwidget/streaming.rs
+@@ -422,12 +422,7 @@ impl ChatWidget {
+             self.add_async_questions(&item.id, questions);
+         }
+         self.transcript.last_completed_agent_message = Some((turn_id.to_string(), item.id.clone()));
+-        let mut message = String::new();
+-        for content in &item.content {
+-            match content {
+-                AgentMessageContent::Text { text } => message.push_str(text),
+-            }
+-        }
++        let message = item.text().into_owned();
+         let parsed = parse_assistant_markdown(&message, self.config.cwd.as_path());
+         if from_replay && self.stream_controller.is_none() && !parsed.visible_markdown.is_empty() {
+             self.prepare_assistant_message();
+diff --git a/codex-rs/tui/src/chatwidget/tests/questions_tests.rs b/codex-rs/tui/src/chatwidget/tests/questions_tests.rs
+index ec82df314b834004efe52aae5e554e5f58204f6e..61bd22ead8ce8a25e42ab4d464d0dedab42c68fe 100644
+--- a/codex-rs/tui/src/chatwidget/tests/questions_tests.rs
++++ b/codex-rs/tui/src/chatwidget/tests/questions_tests.rs
+@@ -645,6 +645,7 @@ fn open_questions(chat: &mut ChatWidget, options: Option<Vec<String>>) {
+     chat.thread_id = Some(ThreadId::new());
+     chat.on_agent_message_item_completed(
+         AgentMessageItem {
++            display_text: None,
+             id: "review".into(),
+             content: Vec::new(),
+             phase: None,
+diff --git a/codex-rs/tui/src/history_cell/search.rs b/codex-rs/tui/src/history_cell/search.rs
+index e32ccd91841bc61e5d0d24e5a24bfe5a9382be08..f7311cc43549596bb0219a77a3116a38d908f1c5 100644
+--- a/codex-rs/tui/src/history_cell/search.rs
++++ b/codex-rs/tui/src/history_cell/search.rs
+@@ -9,7 +9,7 @@ mod tests;
+ 
+ fn web_search_action_detail(action: &WebSearchAction) -> String {
+     match action {
+-        WebSearchAction::Search { query, queries } => query
++        WebSearchAction::Search { query, queries, .. } => query
+             .clone()
+             .filter(|q| !q.is_empty())
+             .unwrap_or_else(|| queries.as_deref().unwrap_or_default().join(", ")),
+diff --git a/codex-rs/tui/src/history_cell/search_tests.rs b/codex-rs/tui/src/history_cell/search_tests.rs
+index 43dace9a9d555ad17fa06f1a94fa4adf640b4181..d51413a206e47e9089a036048942053b31fbffc5 100644
+--- a/codex-rs/tui/src/history_cell/search_tests.rs
++++ b/codex-rs/tui/src/history_cell/search_tests.rs
+@@ -85,6 +85,7 @@ fn batched_search_retains_each_query() {
+         "call".into(),
+         String::new(),
+         WebSearchAction::Search {
++            sources: None,
+             query: None,
+             queries: Some(vec!["first query".into(), "second query".into()]),
+         },
+diff --git a/codex-rs/tui/src/history_cell/tests.rs b/codex-rs/tui/src/history_cell/tests.rs
+index ea59afbbe784ceb4ecb7a8bad3d8bb1c7d2b27ba..23d034e2c4f06d0ec4ad8e4e83b5c84ce10e5132 100644
+--- a/codex-rs/tui/src/history_cell/tests.rs
++++ b/codex-rs/tui/src/history_cell/tests.rs
+@@ -1361,6 +1361,7 @@ fn web_search_history_cell_snapshot() {
+         "call-1".to_string(),
+         query.clone(),
+         WebSearchAction::Search {
++            sources: None,
+             query: Some(query),
+             queries: None,
+         },
+@@ -1412,6 +1413,7 @@ fn web_search_history_cell_truncates() {
+         "call-1".to_string(),
+         query.clone(),
+         WebSearchAction::Search {
++            sources: None,
+             query: Some(query),
+             queries: None,
+         },
+@@ -1431,6 +1433,7 @@ fn web_search_history_cell_short_query_does_not_wrap() {
+         "call-1".to_string(),
+         query.clone(),
+         WebSearchAction::Search {
++            sources: None,
+             query: Some(query),
+             queries: None,
+         },
+@@ -1450,6 +1453,7 @@ fn web_search_history_cell_transcript_snapshot() {
+         "call-1".to_string(),
+         query.clone(),
+         WebSearchAction::Search {
++            sources: None,
+             query: Some(query),
+             queries: None,
+         },
