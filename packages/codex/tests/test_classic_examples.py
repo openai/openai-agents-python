@@ -20,6 +20,7 @@ def test_classic_runner_discovers_modules_from_repository_root():
     assert all(root / example.relpath == example.path for example in examples)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Capabilities example requires a Unix sandbox")
 def test_classic_capabilities_manifest_contains_readable_image(tmp_path):
     from agents.classic.sandbox import LocalFile
     from examples.classic.sandbox.sandbox_agent_capabilities import _build_manifest

@@ -777,6 +777,7 @@ pub async fn restore(
     let mut current_files = options.sdk_instruction_files.clone();
     let manual_slots = std::mem::take(&mut options.manual_tool_slots);
     let transform_context = options.transform_context;
+    let before_compact = options.before_compact;
     let (mut startup, instructions) = engine.build_startup(options, None).await?;
     // Snapshot data is not authority to enable model-facing goal tools. The
     // validated record still requires goal storage above, but never the feature.
@@ -808,6 +809,7 @@ pub async fn restore(
             specs,
             &manual_slots,
             transform_context,
+            before_compact,
         )?;
     }
     if startup

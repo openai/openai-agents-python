@@ -1726,6 +1726,31 @@ impl NativeThread {
             .map_err(py_error)
     }
 
+    #[pyo3(signature = (id, summary, thread=None, instance=None, *, error=false))]
+    fn _reply_compaction(
+        &self,
+        id: u64,
+        summary: Option<String>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+        error: bool,
+    ) -> PyResult<()> {
+        let inner = self.current()?;
+        let tools = inner
+            .thread
+            .thread_extension_data()
+            .get::<python_tools::PythonTools>()
+            .ok_or_else(|| py_error("Compaction callbacks require Python tools"))?;
+        tools
+            .reply_compaction(
+                id,
+                if error { Err(()) } else { Ok(summary) },
+                thread,
+                instance,
+            )
+            .map_err(py_error)
+    }
+
     #[pyo3(signature = (id, thread=None, instance=None))]
     fn _check_step(&self, id: u64, thread: Option<&str>, instance: Option<&str>) -> PyResult<()> {
         let inner = self.current()?;

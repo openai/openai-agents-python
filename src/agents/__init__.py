@@ -23,6 +23,7 @@ if TYPE_CHECKING:
         SessionStore as SessionStore,
         SQLiteSessionStore as SQLiteSessionStore,
     )
+    from .compaction import CompactionContext as CompactionContext
     from .executor import (
         Environment as Environment,
         EnvironmentSource as EnvironmentSource,
@@ -136,6 +137,7 @@ if TYPE_CHECKING:
     from .usage import RunBudget as RunBudget
 
 _MODULES = {
+    "CompactionContext": ".compaction",
     "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "RunBudget": ".usage",

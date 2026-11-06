@@ -132,6 +132,7 @@ pub struct PythonTools {
     selecting_steps: AtomicBool,
     selecting_children: AtomicBool,
     context_transform_enabled: bool,
+    before_compact_enabled: bool,
     step_defaults: RwLock<Option<Vec<ToolName>>>,
     // None retires this native thread's selectors. Registration and retirement
     // share the lock so a late step cannot wait on an already closed reader.
@@ -148,6 +149,7 @@ pub(crate) enum ModelContextUpdate {
 enum PreparationReply {
     Step(StepReply),
     Context(oneshot::Sender<Option<ModelContextUpdate>>),
+    Compaction(oneshot::Sender<std::result::Result<Option<String>, ()>>),
 }
 
 impl PreparationReply {
@@ -155,6 +157,7 @@ impl PreparationReply {
         match self {
             Self::Step(reply) => reply.reply.is_closed(),
             Self::Context(reply) => reply.is_closed(),
+            Self::Compaction(reply) => reply.is_closed(),
         }
     }
 }
@@ -1069,8 +1072,9 @@ impl PythonTools {
         startup: &mut StartThreadOptions,
         specs: Vec<DynamicToolSpec>,
         transform_context: bool,
+        before_compact: bool,
     ) -> Result<()> {
-        Self::install_manual(startup, specs, &[], transform_context)
+        Self::install_manual(startup, specs, &[], transform_context, before_compact)
     }
 
     pub fn install_manual(
@@ -1078,6 +1082,7 @@ impl PythonTools {
         specs: Vec<DynamicToolSpec>,
         manual_slots: &[usize],
         transform_context: bool,
+        before_compact: bool,
     ) -> Result<()> {
         // Core resolves absent source options from resumed metadata at startup.
         let resumed_sources = startup.initial_history.get_resumed_session_sources();
@@ -1153,6 +1158,7 @@ impl PythonTools {
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: transform_context,
+            before_compact_enabled: before_compact,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
             #[cfg(test)]
@@ -1204,6 +1210,7 @@ impl PythonTools {
                     || parent.selecting_children.load(Ordering::Acquire),
             ),
             context_transform_enabled: parent.context_transform_enabled,
+            before_compact_enabled: parent.before_compact_enabled,
             step_defaults: RwLock::new(
                 parent
                     .step_defaults
@@ -1322,6 +1329,70 @@ impl PythonTools {
             *input.items = items;
         }
         Ok(())
+    }
+
+    pub(crate) fn customizes_compaction(&self) -> bool {
+        self.before_compact_enabled
+    }
+
+    pub(crate) async fn before_compact(
+        self: &Arc<Self>,
+        input: codex_extension_api::CompactionInput<'_>,
+    ) -> Result<Option<String>> {
+        let owner = self.admission_ready(input.turn_id)?;
+        let id = self.family.next_invocation.fetch_add(1, Ordering::Relaxed);
+        let (reply, receive) = oneshot::channel();
+        self.preparation_replies
+            .lock()
+            .expect("Python preparation replies poisoned")
+            .as_mut()
+            .context("Expired compaction owner")?
+            .insert(id, PreparationReply::Compaction(reply));
+        let _pending = PendingPreparation {
+            tools: self.clone(),
+            id,
+        };
+        let mut request = json!({
+            "id": input.turn_id,
+            "msg": {
+                "type": "_sdk_before_compact", "turn_id": input.turn_id,
+                "thread": input.thread_id, "instance": self.instance,
+                "step_id": id, "model": input.model,
+                "trigger": if input.automatic { "auto" } else { "manual" },
+                "items": input.items,
+            }
+        });
+        if let Some(tracing) = &owner.tracing {
+            request["msg"]["tracing_context"] = json!(tracing.token());
+        }
+        ensure!(owner.is_current(), "Expired compaction owner");
+        self.family
+            .requests
+            .send(QueuedRequest::Step(request))
+            .map_err(|_| anyhow::anyhow!("Compaction callback reader closed"))?;
+        let summary = receive
+            .await
+            .context("Compaction callback cancelled")?
+            .map_err(|_| anyhow::anyhow!("Compaction callback failed"))?;
+        ensure!(owner.is_current(), "Expired compaction owner");
+        Ok(summary)
+    }
+
+    pub(crate) fn reply_compaction(
+        self: &Arc<Self>,
+        id: u64,
+        summary: std::result::Result<Option<String>, ()>,
+        thread: Option<&str>,
+        instance: Option<&str>,
+    ) -> Result<()> {
+        let PreparationReply::Compaction(reply) =
+            self.step_owner(thread, instance)?.take_preparation(id)?
+        else {
+            anyhow::bail!("Invalid compaction reply");
+        };
+        reply
+            .send(summary)
+            .map_err(|_| anyhow::anyhow!("Expired compaction callback"))
     }
 
     pub(crate) fn retire_steps(&self) {
@@ -4837,6 +4908,7 @@ pub(crate) mod managed_tests {
             selecting_steps: AtomicBool::new(false),
             selecting_children: AtomicBool::new(false),
             context_transform_enabled: false,
+            before_compact_enabled: false,
             step_defaults: RwLock::new(None),
             preparation_replies: Mutex::new(Some(HashMap::new())),
             before_result: Mutex::new(None),
