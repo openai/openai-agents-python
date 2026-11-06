@@ -234,7 +234,10 @@ def _input_items(items: list[dict[str, Any]]) -> list[TResponseInputItem]:
             # here belong to Codex's host prompt, not to the Classic agent.
             if item.get("role") in {"system", "developer"}:
                 continue
-            result.append({key: item[key] for key in ("type", "role", "content")})
+            message = {key: item[key] for key in ("type", "role", "content")}
+            if "phase" in item:
+                message["phase"] = item["phase"]
+            result.append(message)
         elif kind == "function_call":
             result.append({key: item[key] for key in ("type", "name", "call_id", "arguments")})
         elif kind == "function_call_output":

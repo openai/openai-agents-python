@@ -286,6 +286,9 @@ async def test_existing_openai_adapter_preserves_reasoning_and_native_tool_recei
         "content": [{"type": "reasoning_text", "text": "synthetic reasoning"}],
         "encrypted_content": "synthetic-encrypted-reasoning",
     }
+    commentary = message("I will greet Ada.").model_dump(exclude_none=True)
+    commentary["id"] = "msg_commentary"
+    commentary["phase"] = "commentary"
 
     @function_tool
     def greet(value: str) -> str:
@@ -295,7 +298,7 @@ async def test_existing_openai_adapter_preserves_reasoning_and_native_tool_recei
     async def handle(request: web.Request) -> web.Response:
         requests.append(await request.json())
         output = (
-            [reasoning, call("greet").model_dump(exclude_none=True)]
+            [reasoning, commentary, call("greet").model_dump(exclude_none=True)]
             if len(requests) == 1
             else [message("Adapter finished").model_dump()]
         )
@@ -343,6 +346,10 @@ async def test_existing_openai_adapter_preserves_reasoning_and_native_tool_recei
     assert requests[0]["instructions"] == "Original adapter instructions"
     assert requests[0]["tools"][0]["parameters"] == greet.params_json_schema
     assert next(item for item in requests[1]["input"] if item["type"] == "reasoning") == reasoning
+    replayed_message = next(
+        item for item in requests[1]["input"] if item.get("role") == "assistant"
+    )
+    assert replayed_message["phase"] == "commentary"
     assert any(
         item["type"] == "function_call_output" and item["call_id"] == "call_1"
         for item in requests[1]["input"]
