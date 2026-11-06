@@ -23,4 +23,6 @@ Use guides from the same release as your installed wheel. The links below descri
 | [Usage and tracing](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/observability.md) | Read usage and diagnose work with telemetry and history. |
 | [API reference](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/docs/sdk/reference.md) | Find supported calls and defaults. |
 
+This component owns the Codex Python implementation in `src/_agents_codex`, native inputs, tests, and examples. The root project builds one `openai-agents` wheel; application code continues to import `agents`.
+
 For SDK development and source builds, see [CONTRIBUTING.md](../../CONTRIBUTING.md). See the [maintenance guide](MAINTAINING.md) for native builds and artifact checks.

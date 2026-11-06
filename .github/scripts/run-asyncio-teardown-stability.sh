@@ -4,8 +4,8 @@ set -euo pipefail
 repeat_count="${1:-5}"
 
 stability_args=(
-  tests/test_asyncio_progress.py
-  tests/test_run_step_execution.py
+  packages/codex/tests/test_asyncio_progress.py
+  packages/codex/tests/test_run_step_execution.py
   -k
   # Match the whole progress module as well as cancellation and post-invoke cases.
   "test_asyncio_progress or cancel or post_invoke"

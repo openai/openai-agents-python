@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.session import (
+from _agents_codex.session import (
     _CODEX_RESPONSES_BASE_URL as _CODEX_RESPONSES_BASE_URL,
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     _FORM_MODES as _FORM_MODES,

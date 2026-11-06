@@ -68,19 +68,19 @@ Pass `parent_trace=TraceContext(traceparent=...)` or a W3C header mapping to `ag
 
 A Python tool's `ToolContext.trace_context` supplies the issuing native span's optional W3C context. Use `to_headers()` to pass that context to another worker or an application HTTP client. Keep credentials and private content out of trace headers. This context does not create a Python span or retain local tracing policy. Use `agents.telemetry.TraceOptions` for native tracing policy and an SDK `SpanContext` as its local parent.
 
-The synthetic [trace-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/trace_context.py) connects a parent, a Python tool, and a second worker through a local collector. It requires no model key or collector account. Follow the [example-project setup](installation.md#examples-and-upgrades), then run `python -m examples.observability.trace_context` from the directory containing `examples/`.
+The synthetic [trace-context example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/observability/trace_context.py) connects a parent, a Python tool, and a second worker through a local collector. It requires no model key or collector account. Follow the [example-project setup](installation.md#examples-and-upgrades), then run `python -m examples.observability.trace_context` from the directory containing `examples/` (`packages/codex/` in a development checkout).
 
 ## Diagnose a trace with history and application receipts
 
 ### Run the local walkthrough
 
-The synthetic [trace walkthrough](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/trace_walkthrough.py) starts a local OTLP JSON receiver and prints a receipt summary and viewer URL. It needs no collector account or model key. Keep receiver output synthetic. See the [observability examples](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/README.md) for local exercises and the history reader.
+The synthetic [trace walkthrough](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/observability/trace_walkthrough.py) starts a local OTLP JSON receiver and prints a receipt summary and viewer URL. It needs no collector account or model key. Keep receiver output synthetic. See the [observability examples](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/observability/README.md) for local exercises and the history reader.
 
-First follow the [example-project setup](installation.md#examples-and-upgrades) to obtain the source files matching your installed wheel. From the directory containing `examples/`, run `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`.
+First follow the [example-project setup](installation.md#examples-and-upgrades) to obtain the source files matching your installed wheel. From the directory containing `examples/` (`packages/codex/` in a development checkout), run `python -m examples.observability.trace_walkthrough --scenario tool --view --output synthetic-trace.json`. Other scenarios are `tool-error`, `validation` and `provider`.
 
 ### Compare evidence
 
-Connect application receipts, spans and history using `example.run_id`, span `traceId`, Session identity and `conversation.id` where those identifiers are present. Compare application outcomes with telemetry and the [history reader](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/observability/history_reader.py), which joins tool calls and results by turn and call identity. Missing timestamps and usage stay missing.
+Connect application receipts, spans and history using `example.run_id`, span `traceId`, Session identity and `conversation.id` where those identifiers are present. Compare application outcomes with telemetry and the [history reader](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/observability/history_reader.py), which joins tool calls and results by turn and call identity. Missing timestamps and usage stay missing.
 
 | Evidence | What it can show | What it does not prove |
 | --- | --- | --- |

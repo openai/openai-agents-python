@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime._trace_context import (
+from _agents_codex._trace_context import (
     _KEY as _KEY,
     _PARENT as _PARENT,
     Mapping as Mapping,

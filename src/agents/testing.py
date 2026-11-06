@@ -19,7 +19,7 @@ exceptions from the test or native loop are preserved.
 
 from __future__ import annotations
 
-from ._runtime.testing import (
+from _agents_codex.testing import (
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     BaseHTTPRequestHandler as BaseHTTPRequestHandler,
     JsonValue as JsonValue,

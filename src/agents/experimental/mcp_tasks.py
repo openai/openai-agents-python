@@ -12,11 +12,7 @@ its journal, access policy, verified result projection, and wake-up schedule.
 
 from __future__ import annotations
 
-from agents.experimental import (
-    _mcp_tasks_wire as wire,  # noqa: F401 - Preserve the existing module binding.
-)
-
-from .._runtime.experimental.mcp_tasks import (
+from _agents_codex.experimental.mcp_tasks import (
     _FORM_TYPES as _FORM_TYPES,
     Any as Any,
     AsyncIterator as AsyncIterator,
@@ -65,6 +61,9 @@ from .._runtime.experimental.mcp_tasks import (
     time as time,
     urlsplit as urlsplit,
     version as version,
+)
+from agents.experimental import (
+    _mcp_tasks_wire as wire,  # noqa: F401 - Preserve the existing module binding.
 )
 
 __all__ = ["MCPInputReply", "MCPTasksProvider"]

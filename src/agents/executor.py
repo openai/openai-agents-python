@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.executor import (
+from _agents_codex.executor import (
     TYPE_CHECKING as TYPE_CHECKING,
     AbstractAsyncContextManager as AbstractAsyncContextManager,
     Any as Any,

@@ -190,6 +190,7 @@ exclude = [
 skip-excluded-dirs = true
 only-include = [
     "src/agents",
+    "packages/codex/src/_agents_codex",
     "CLASSIC.md",
     "packages/codex/README.md",
     "packages/codex/Cargo.toml",
@@ -203,8 +204,8 @@ only-include = [
 exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/agents"]
-dev-mode-dirs = ["src"]
+packages = ["src/agents", "packages/codex/src/_agents_codex"]
+dev-mode-dirs = ["src", "packages/codex/src"]
 # The qualified native overlay owns these files, including in an extracted sdist.
 exclude = ["*.so", "*.dylib", "*.pyd", "/src/agents/bin", "/src/agents/licenses"]
 
@@ -225,7 +226,12 @@ include = [
 [tool.ruff]
 line-length = 100
 target-version = "py310"
-extend-exclude = ["packages/codex"]
+extend-exclude = [
+    "packages/codex/scripts",
+    "packages/codex/rust",
+    "packages/codex/.upstream",
+    "packages/codex/target",
+]
 
 [tool.ruff.lint]
 select = [
@@ -244,19 +250,20 @@ select = [
   "TRY201", # needless exception name in raise statements
   "UP", # pyupgrade
 ]
-isort = { combine-as-imports = true, known-first-party = ["agents"] }
+isort = { combine-as-imports = true, known-first-party = ["agents", "_agents_codex"] }
 logger-objects = ["agents.logger.logger"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
 
 [tool.ruff.lint.per-file-ignores]
-"examples/**/*.py" = ["ASYNC", "DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
-"examples/**/*.ipynb" = ["RUF100"]
-"tests/**/*.py" = ["ASYNC", "RUF006", "RUF012", "RUF100"]
+"packages/codex/examples/**/*.py" = ["ASYNC", "DTZ005", "E501", "G004", "RUF006", "RUF012", "RUF100"]
+"packages/codex/examples/**/*.ipynb" = ["RUF100"]
+"packages/codex/tests/**/*.py" = ["ASYNC", "RUF006", "RUF012", "RUF100"]
 "packages/codex/scripts/*.py" = ["E402"]
 
 [tool.mypy]
+mypy_path = ["src", "packages/codex/src"]
 strict = true
 disallow_incomplete_defs = false
 disallow_untyped_defs = false
@@ -287,8 +294,8 @@ module = ["vercel", "vercel.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
-source = ["src/agents"]
-omit = ["tests/*"]
+source = ["src/agents", "packages/codex/src/_agents_codex"]
+omit = ["packages/codex/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
@@ -304,7 +311,8 @@ exclude_also = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
-testpaths = ["tests", "packages/codex/tests"]
+testpaths = ["packages/codex/tests"]
+pythonpath = ["packages/codex"]
 
 markers = [
   "allow_call_model_methods: mark test as allowing calls to real model implementations",

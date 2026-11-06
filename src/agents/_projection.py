@@ -1,6 +1,6 @@
 """Project native observations into Managed Agents event envelopes."""
 
-from ._runtime._projection import (
+from _agents_codex._projection import (
     _EXECUTION_KINDS as _EXECUTION_KINDS,
     Any as Any,
     CommandOutputDeltaEvent as CommandOutputDeltaEvent,

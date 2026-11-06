@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.subagents import (
+from _agents_codex.subagents import (
     TYPE_CHECKING as TYPE_CHECKING,
     AfterValidator as AfterValidator,
     Annotated as Annotated,

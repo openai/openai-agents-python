@@ -162,9 +162,9 @@ jobs:
         if: runner.os == 'Linux' || runner.os == 'macOS'
         run: |
           stage=$(mktemp -d "$RUNNER_TEMP/canonical-storage.XXXXXX")
-          mkdir -p "$stage/examples/canonical_storage"
-          cp -R tests "$stage/tests"
-          cp examples/canonical_storage/main.py "$stage/examples/canonical_storage"
+          mkdir -p "$stage/packages/codex/examples/canonical_storage"
+          cp -R packages/codex/tests "$stage/packages/codex/tests"
+          cp packages/codex/examples/canonical_storage/main.py "$stage/packages/codex/examples/canonical_storage"
           uv venv --seed --python 3.10 "$stage/venv"
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
@@ -184,18 +184,18 @@ jobs:
           PYTHON
           chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
           CODEX_EXEC_SERVER_TEST_BINARY="$GITHUB_WORKSPACE/dist/exec-server-fixture" \
-            "$python" -I -B -m pytest -q -o "pythonpath=$stage" -o asyncio_mode=auto \
-            tests/test_canonical_storage.py tests/test_canonical_storage_example.py \
-            tests/test_custom_storage_durability.py \
-            tests/test_native_local_descendant_receipts.py::test_local_descendant_admission_checks_receipts_without_resuming_work \
-            tests/test_native_local_descendant_receipts.py::test_local_reopen_refuses_cold_active_child_without_tool_receipt
+            "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
+            packages/codex/tests/test_canonical_storage.py packages/codex/tests/test_canonical_storage_example.py \
+            packages/codex/tests/test_custom_storage_durability.py \
+            packages/codex/tests/test_native_local_descendant_receipts.py::test_local_descendant_admission_checks_receipts_without_resuming_work \
+            packages/codex/tests/test_native_local_descendant_receipts.py::test_local_reopen_refuses_cold_active_child_without_tool_receipt
       - name: Qualify offline Unix sockets with the installed Linux wheel
         if: runner.os == 'Linux'
         run: |
           stage=$(mktemp -d "$RUNNER_TEMP/offline-ipc.XXXXXX")
-          mkdir -p "$stage/tests/qualification" "$stage/home"
-          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
-          cp tests/qualification/{offline_ipc.py,unix_socket_command.py,unix_peer_approval.py,offline_executor.sh} "$stage/tests/qualification"
+          mkdir -p "$stage/packages/codex/tests/qualification" "$stage/home"
+          cp packages/codex/tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/packages/codex/tests"
+          cp packages/codex/tests/qualification/{offline_ipc.py,unix_socket_command.py,unix_peer_approval.py,offline_executor.sh} "$stage/packages/codex/tests/qualification"
           python="$RUNNER_TEMP/sdk-3.12/bin/python"
           uv export --frozen --only-group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/test-constraints.txt"
@@ -203,19 +203,19 @@ jobs:
           (
             cd "$stage"
             env -i HOME="$stage/home" PATH=/usr/bin:/bin timeout 90 \
-              "$python" -I -B -m pytest -q -o "pythonpath=$stage" tests/qualification/unix_peer_approval.py
+              "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" packages/codex/tests/qualification/unix_peer_approval.py
           )
           chmod +x "$GITHUB_WORKSPACE/dist/exec-server-fixture"
-          sudo unshare --mount --net --propagation private -- /bin/bash tests/qualification/run_offline_ipc.sh \
+          sudo unshare --mount --net --propagation private -- /bin/bash packages/codex/tests/qualification/run_offline_ipc.sh \
             "$(readlink /proc/self/ns/net)" "$(readlink /proc/self/ns/mnt)" "$(id -u)" "$(id -g)" \
             "$stage" "$python" "$GITHUB_WORKSPACE/dist/exec-server-fixture"
       - name: Test native macOS Unix socket policy with the installed wheel
         if: runner.os == 'macOS'
         run: |
           stage=$(mktemp -d "$RUNNER_TEMP/macos-ipc.XXXXXX")
-          mkdir -p "$stage/tests/qualification" "$stage/home"
-          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
-          cp tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/tests/qualification"
+          mkdir -p "$stage/packages/codex/tests/qualification" "$stage/home"
+          cp packages/codex/tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/packages/codex/tests"
+          cp packages/codex/tests/qualification/{macos_ipc,offline_ipc,unix_socket_command}.py "$stage/packages/codex/tests/qualification"
           uv venv --seed --python "$(command -v python)" "$stage/venv"
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
@@ -225,14 +225,14 @@ jobs:
           chmod +x "$fixture"
           cd "$stage"
           env -i PATH=/usr/bin:/bin HOME="$stage/home" SHELL=/bin/sh \
-            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.getcwd()); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
+            "$python" -I -B -u -c 'import os,runpy,sys; sys.path.insert(0,os.path.join(os.getcwd(),"packages/codex")); runpy.run_module("tests.qualification.macos_ipc",run_name="__main__")' "$fixture"
       - name: Test Windows named pipes and Unix peer approval with the installed wheel
         if: runner.os == 'Windows'
         run: |
           stage=$(mktemp -d "$(cygpath -u "$RUNNER_TEMP")/windows-ipc.XXXXXX")
-          mkdir -p "$stage/tests/qualification"
-          cp tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/tests"
-          cp tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/tests/qualification"
+          mkdir -p "$stage/packages/codex/tests/qualification"
+          cp packages/codex/tests/{__init__,_asyncio,native_executor_fixtures,native_fixtures}.py "$stage/packages/codex/tests"
+          cp packages/codex/tests/qualification/{windows_ipc,offline_ipc,unix_peer_approval}.py "$stage/packages/codex/tests/qualification"
           uv venv --seed --python 3.12 "$stage/venv"
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
@@ -255,13 +255,13 @@ jobs:
           env = {key: value for key, value in os.environ.items() if key.upper() in keep}
           subprocess.run(
               [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
-               "import os, sys, pytest; sys.path.insert(0, os.getcwd()); "
-               "sys.exit(pytest.main(['-q', 'tests/qualification/unix_peer_approval.py']))"],
+               "import os, sys, pytest; sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
+               "sys.exit(pytest.main(['-q', 'packages/codex/tests/qualification/unix_peer_approval.py']))"],
               cwd=stage, env=env, check=True, timeout=90,
           )
           subprocess.run(
               [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
-               "import os, runpy, sys; sys.path.insert(0, os.getcwd()); "
+               "import os, runpy, sys; sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
                "runpy.run_module('tests.qualification.windows_ipc', run_name='__main__')", fixture],
               cwd=stage, env=env, check=True,
           )

@@ -81,7 +81,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: generated-contract-${{ github.run_attempt }}
-          path: tests/fixtures/released_api_contract.json
+          path: packages/codex/tests/fixtures/released_api_contract.json
           retention-days: 1
 
   update:

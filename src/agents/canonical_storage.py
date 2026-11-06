@@ -6,7 +6,7 @@ reenter the SDK. Payloads are trusted opaque native records, not portable state.
 
 from __future__ import annotations
 
-from ._runtime.canonical_storage import (
+from _agents_codex.canonical_storage import (
     CustomStorage as CustomStorage,
     Iterator as Iterator,
     Path as Path,

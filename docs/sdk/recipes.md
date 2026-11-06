@@ -12,12 +12,12 @@ These examples use scripted responses and need no API key. Tools still execute, 
 
 | Module | What it checks |
 | --- | --- |
-| [`typed_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/typed_tools.py) | Validates nested Python input and returns typed results as JSON. Python enforces bounds the native schema can omit. Invalid input prevents a write; invalid output cannot undo one. |
-| [`inspect_requests`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/inspect_requests.py) | Prints native declarations, original arguments, arguments after preparation, and the model-visible result. Scripted selection does not measure prompt quality. |
-| [`concurrent_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/concurrent_tools.py) | Two Sessions share one quota unit through an event-loop lock. The quota does not work across threads or processes. |
-| [`safe_effects`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/safe_effects.py) | A fake writer records one write for duplicate calls. Deduplication lasts only in memory. |
-| [`specialist_agents`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/specialist_agents.py) | A function tool calls a separate Agent with explicit catalog context and tools, then returns a typed summary. This nested Session is not a native child for tracking or checkpoints. Python closures can still share permissions and resources. |
-| [`application_memory`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/application_memory.py) | Saves, recalls, and deletes a user's SQLite fact across new Sessions. The example removes its temporary database on exit. Your application owns retention and expiry. |
+| [`typed_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/typed_tools.py) | Validates nested Python input and returns typed results as JSON. Python enforces bounds the native schema can omit. Invalid input prevents a write; invalid output cannot undo one. |
+| [`inspect_requests`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/inspect_requests.py) | Prints native declarations, original arguments, arguments after preparation, and the model-visible result. Scripted selection does not measure prompt quality. |
+| [`concurrent_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/concurrent_tools.py) | Two Sessions share one quota unit through an event-loop lock. The quota does not work across threads or processes. |
+| [`safe_effects`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/safe_effects.py) | A fake writer records one write for duplicate calls. Deduplication lasts only in memory. |
+| [`specialist_agents`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/specialist_agents.py) | A function tool calls a separate Agent with explicit catalog context and tools, then returns a typed summary. This nested Session is not a native child for tracking or checkpoints. Python closures can still share permissions and resources. |
+| [`application_memory`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/application_memory.py) | Saves, recalls, and deletes a user's SQLite fact across new Sessions. The example removes its temporary database on exit. Your application owns retention and expiry. |
 
 For example, `python -m examples.recipes.concurrent_tools` prints `Two Sessions shared one unit without overspending.` Its assertions check the remaining quota and tool results, not just the scripted answer.
 
@@ -27,16 +27,16 @@ These examples require `OPENAI_API_KEY`, make model requests, and can incur char
 
 | Module | What it shows |
 | --- | --- |
-| [`local_mcp`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/local_mcp.py) | A trusted standard-library stdio server returns the PAPER catalog price. Select the raw tool name `lookup`. The native client cleans up the connection and process. Read-only metadata does not restrict the server's host permissions. |
-| [`image_input`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/image_input.py) | Sends a synthetic PNG as inline data and prints a typed answer. Local paths, PDFs, and remote URLs are unsupported. Model confidence is not a calibrated probability. |
-| [`retrieval`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/retrieval.py) | Searches tenant-scoped text and checks returned source IDs against retrieved IDs. A matching ID does not prove that the source supports the answer. |
-| [`programmatic_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/recipes/programmatic_tools.py) | Generated JavaScript aggregates regional sales and prints tool calls and history. Pending code cells and their runtime state need an open Session. |
+| [`local_mcp`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/local_mcp.py) | A trusted standard-library stdio server returns the PAPER catalog price. Select the raw tool name `lookup`. The native client cleans up the connection and process. Read-only metadata does not restrict the server's host permissions. |
+| [`image_input`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/image_input.py) | Sends a synthetic PNG as inline data and prints a typed answer. Local paths, PDFs, and remote URLs are unsupported. Model confidence is not a calibrated probability. |
+| [`retrieval`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/retrieval.py) | Searches tenant-scoped text and checks returned source IDs against retrieved IDs. A matching ID does not prove that the source supports the answer. |
+| [`programmatic_tools`](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/recipes/programmatic_tools.py) | Generated JavaScript aggregates regional sales and prints tool calls and history. Pending code cells and their runtime state need an open Session. |
 
 ## Run supervised workers
 
 This example uses APIs added after `0.24.0-alpha.6`. Follow the [setup for examples from the development branch](installation.md#examples-and-upgrades) before running it.
 
-The [supervised worker example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/supervised_worker/README.md) runs two local processes with separate workspaces and native histories. Each worker owns its Session. A status client can disconnect, then read the same job and its accepted result from application storage.
+The [supervised worker example](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/supervised_worker/README.md) runs two local processes with separate workspaces and native histories. Each worker owns its Session. A status client can disconnect, then read the same job and its accepted result from application storage.
 
 For an API-key worker that needs different write grants on different turns, use a supported local executor or Linux WSS executor. With macOS WSS, set the worker's write roots in its Environment before opening the Session. See [executor write roots](execution.md#replace-write-roots-between-turns).
 
@@ -44,7 +44,7 @@ The worker checks the actual artifact and the retained command result before acc
 
 ## Start a local browser application
 
-The [browser starter](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/web_starter/README.md) combines tools, human approval, a typed result, and an authorized artifact download. It uses pinned aiohttp and a browser client. A FastAPI adaptation must preserve its identity, request, streaming, and cleanup rules.
+The [browser starter](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/web_starter/README.md) combines tools, human approval, a typed result, and an authorized artifact download. It uses pinned aiohttp and a browser client. A FastAPI adaptation must preserve its identity, request, streaming, and cleanup rules.
 
 Run this example only on a private local POSIX host. Anyone with local access can choose either synthetic identity. Shared deployment requires real authentication.
 
@@ -114,4 +114,4 @@ Choose retention, access, and deletion rules for each store:
 | Workspace artifacts | Application or executor storage controls files. Checkpoints do not copy or delete them. |
 | Collector data | The chosen telemetry service controls retention and deletion. Closing a Session or deleting a memory fact does not delete exported data. |
 
-The [example index](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/examples/README.md) has more protocol and deployment examples. Keep their exact client pins and stated deployment limits.
+The [example index](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/packages/codex/examples/README.md) has more protocol and deployment examples. Keep their exact client pins and stated deployment limits.

@@ -23,7 +23,7 @@ from urllib.parse import quote
 REPO = "openai/openai-agents-python"
 RELEASE_SOURCE_BRANCHES = ("main", "feat/codex-harness")
 BRANCH = "release-please--branches--main"
-CONTRACT = "tests/fixtures/released_api_contract.json"
+CONTRACT = "packages/codex/tests/fixtures/released_api_contract.json"
 FILES = {
     CONTRACT,
     "pyproject.toml",

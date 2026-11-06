@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.usage import (
+from _agents_codex.usage import (
     Any as Any,
     TokenUsage as TokenUsage,
     TokenUsageInfo as TokenUsageInfo,

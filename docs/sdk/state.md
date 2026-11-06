@@ -25,7 +25,7 @@ The storage choices have these limits:
 - Do not combine `storage` or `resume` with portable `state`.
 - Each restore method requires current application tools, context, and provider configuration. Saved history grants no credentials or permissions.
 
-`CustomStorage` currently supports root Sessions with automatic Python tools. It cannot be combined with portable checkpoints and rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/examples/canonical_storage) explains the synchronous `SessionStore` contract, the persistent SQLite reference adapter, and recovery of tool calls with unknown outcomes. Storage does not guarantee exactly-once external actions.
+`CustomStorage` currently supports root Sessions with automatic Python tools. It cannot be combined with portable checkpoints and rejects native tools, environments, child agents, goals, checklists, code mode, and manual tools. The [canonical storage example](https://github.com/openai/openai-agents-python/tree/feat/codex-harness/packages/codex/examples/canonical_storage) explains the synchronous `SessionStore` contract, the persistent SQLite reference adapter, and recovery of tool calls with unknown outcomes. Storage does not guarantee exactly-once external actions.
 
 Use the local profile recipe below to reopen from a directory. For portable `SessionState` snapshots, continue to [save and restore a portable checkpoint](#save-and-restore-a-portable-checkpoint).
 

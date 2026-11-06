@@ -86,6 +86,8 @@ The wheel does not include example files. To run an example included in `0.24.0-
 
 You do not need to build the SDK to run examples from that release.
 
+In a development-branch source checkout, examples live under `packages/codex/examples/`. Run their module commands from `packages/codex/`, which contains the `examples` package. The alpha.6 archive keeps its original root `examples/` directory.
+
 Development-branch examples can require APIs absent from alpha.6, including `Environment.local()` for local execution and `Turn.wait_for_attention()` for supervised workers. To run those examples, use a newer release whose notes include the APIs, or follow the [contributor setup](https://github.com/openai/openai-agents-python/blob/feat/codex-harness/CONTRIBUTING.md) to build this branch. Keep the example files and installed build on the same version.
 
 To upgrade, download a newer compatible preview wheel and install it in the same environment with `python -m pip install --upgrade` followed by the wheel's path. Read that release's notes for changes before upgrading.

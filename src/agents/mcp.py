@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.mcp import (
+from _agents_codex.mcp import (
     _MCP as _MCP,
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,

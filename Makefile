@@ -27,17 +27,17 @@ format-check:
 .PHONY: lint
 lint: 
 	uv run ruff check
-	uv run python .github/scripts/check_optional_truthiness.py src/agents
+	uv run python .github/scripts/check_optional_truthiness.py src/agents packages/codex/src/_agents_codex
 
 .PHONY: mypy
 mypy: 
-	uv run mypy src
-	uv run mypy --strict --follow-imports=silent tests/test_native_agent_typing.py tests/test_native_agent_checkpoint_typing.py tests/test_native_mcp_mypy.py tests/test_native_manual_tools_typing.py
+	uv run mypy src packages/codex/src
+	uv run mypy --strict --follow-imports=silent packages/codex/tests/test_native_agent_typing.py packages/codex/tests/test_native_agent_checkpoint_typing.py packages/codex/tests/test_native_mcp_mypy.py packages/codex/tests/test_native_manual_tools_typing.py
 
 .PHONY: pyright
 pyright:
 	uv run pyright --project pyrightconfig.json --threads "$${PYRIGHT_THREADS:-4}"
-	uv run pyright --project tests/pyright-negative.json
+	uv run pyright --project packages/codex/tests/pyright-negative.json
 
 .PHONY: typecheck
 typecheck:

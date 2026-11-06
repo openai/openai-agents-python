@@ -1,6 +1,6 @@
 """Versioned native conversation checkpoints for application-owned storage."""
 
-from ._runtime.state import (
+from _agents_codex.state import (
     Any as Any,
     BaseModel as BaseModel,
     ChecklistState as ChecklistState,

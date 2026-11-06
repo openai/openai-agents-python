@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ._runtime.native_interception import (
+from _agents_codex.native_interception import (
     TYPE_CHECKING as TYPE_CHECKING,
     Allow as Allow,
     Any as Any,

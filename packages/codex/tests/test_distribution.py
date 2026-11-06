@@ -25,8 +25,14 @@ if sys.version_info >= (3, 11):
 else:
     import tomli as tomllib
 
-SOURCE = Path(__file__).resolve().parents[3] / "src/agents"
-PYTHON_FILES = {str(path.relative_to(SOURCE)) for path in SOURCE.rglob("*.py")}
+ROOT = Path(__file__).resolve().parents[3]
+SOURCE = ROOT / "src/agents"
+SOURCES = {"agents": SOURCE, "_agents_codex": ROOT / "packages/codex/src/_agents_codex"}
+PYTHON_FILES = {
+    f"{package}/{path.relative_to(source).as_posix()}": path
+    for package, source in SOURCES.items()
+    for path in source.rglob("*.py")
+}
 
 
 @pytest.fixture
@@ -49,11 +55,12 @@ def test_sdk_archive_has_current_native_api_and_licenses(sdk_wheel):
         )
         for name in names
     )
-    source = SOURCE
     python = {name for name in names if name.endswith(".py")}
-    assert python == {f"agents/{name}" for name in PYTHON_FILES}
-    for name in PYTHON_FILES | {"py.typed"}:
-        assert archive.read(f"agents/{name}") == (source / name).read_bytes()
+    assert python == set(PYTHON_FILES)
+    for name, source in PYTHON_FILES.items():
+        assert archive.read(name) == source.read_bytes()
+    for package, source in SOURCES.items():
+        assert archive.read(f"{package}/py.typed") == (source / "py.typed").read_bytes()
     assert (
         archive.read("agents/licenses/SDK_LICENSE")
         == (Path(__file__).resolve().parents[3] / "LICENSE").read_bytes()

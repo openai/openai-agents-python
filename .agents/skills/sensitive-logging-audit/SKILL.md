@@ -26,6 +26,7 @@ Run the collector tests, then collect candidates:
 ```bash
 uv run python .agents/skills/sensitive-logging-audit/scripts/test_inventory.py
 uv run python .agents/skills/sensitive-logging-audit/scripts/inventory_logging.py \
+  src/agents packages/codex/src/_agents_codex \
   --format json --output /tmp/sensitive-logging-candidates.json
 ```
 
@@ -36,9 +37,9 @@ The report intentionally contains no `policy`, `safe`, or guard classification.
 The collector does not follow assignments such as `emit = logger.error`. Search the source directly and inspect aliases, callbacks, wrappers, and reflective dispatch:
 
 ```bash
-rg -n '\.(debug|info|warning|warn|error|exception|critical|fatal|log)\b' src/agents
-rg -n '\b(print|pprint|pp|warn|warn_explicit|write|writelines|print_exc|print_exception)\b' src/agents
-rg -n -i 'redact|sensitive|diagnostic|logging|trace' src/agents packages/codex/rust
+rg -n '\.(debug|info|warning|warn|error|exception|critical|fatal|log)\b' src/agents packages/codex/src/_agents_codex
+rg -n '\b(print|pprint|pp|warn|warn_explicit|write|writelines|print_exc|print_exception)\b' src/agents packages/codex/src/_agents_codex
+rg -n -i 'redact|sensitive|diagnostic|logging|trace' src/agents packages/codex/src/_agents_codex packages/codex/rust
 ```
 
 Do not turn collector coverage or a textual guard into a security conclusion. Trace producers and callers.
