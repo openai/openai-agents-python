@@ -5,6 +5,7 @@ live SDK session, not durable API resources or replay cursors. Required-action
 variants extend Managed Agents where it has no matching native interaction.
 """
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, Literal as Literal
 
 from typing_extensions import (
@@ -449,9 +450,26 @@ class ModelResponseDecisionEvent(EventHeader):
     reason: Literal["declined"]
 
 
+class URLCitation(TypedDict):
+    """A provider citation with offsets into its original output text part."""
+
+    type: Literal["url_citation"]
+    url: str
+    title: str
+    start_index: int
+    end_index: int
+
+
 class OutputText(TypedDict):
+    """An original text part and any provider-supplied annotations.
+
+    The provider may supply additional JSON annotations. Text with annotations
+    can contain markup that Core strips from Completed.final_output.
+    """
+
     type: Literal["output_text"]
     text: str
+    annotations: NotRequired[Sequence[URLCitation | JsonValue] | JsonValue]
 
 
 class InputText(TypedDict):
@@ -478,6 +496,12 @@ FunctionCallStatus = _PublicTypeAliasType(
 
 
 class MessageItem(TypedDict):
+    """An assistant message with original content parts and optional display text.
+
+    When Core strips markup, display_text holds the visible text. Annotation
+    offsets still refer to the original text in each content part.
+    """
+
     type: Literal["message"]
     id: str
     turn_id: str
@@ -485,6 +509,7 @@ class MessageItem(TypedDict):
     status: OutputItemStatus
     content: list[OutputText]
     phase: Literal["commentary", "final_answer"] | None
+    display_text: NotRequired[str]
 
 
 class ReasoningItem(TypedDict):
@@ -495,10 +520,18 @@ class ReasoningItem(TypedDict):
     status: OutputItemStatus | None
 
 
+class WebSearchSource(TypedDict):
+    """A URL the provider reports consulting for a search."""
+
+    type: Literal["url"]
+    url: str
+
+
 class WebSearchActionSearch(TypedDict):
     type: Literal["search"]
     query: str | None
     queries: list[str] | None
+    sources: NotRequired[list[WebSearchSource]]
 
 
 class WebSearchActionOpenPage(TypedDict):

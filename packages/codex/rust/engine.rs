@@ -997,6 +997,7 @@ impl EngineState {
                 startup.config.model_reasoning_effort = settings.reasoning_effort.clone();
                 startup.config.model_reasoning_summary = settings.reasoning_summary;
                 startup.config.service_tier = settings.service_tier.clone();
+                startup.config.sdk_tool_choice = settings.tool_choice;
                 // Session still holds its checkpoint fence and this engine's
                 // lifecycle lock. Inspect the existing source subtree before
                 // allocating a new owner, without consuming or retiring cells.

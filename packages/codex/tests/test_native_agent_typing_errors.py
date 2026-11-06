@@ -117,6 +117,7 @@ if TYPE_CHECKING:
     )
 
     settings: ModelSettings = {"reasoning_efort": "low"}  # pyright: ignore[reportAssignmentType]
+    tool_choice: ModelSettings = {"tool_choice": {"type": "web_search"}}  # pyright: ignore[reportAssignmentType]
     typed: Agent[Application, Answer] = Agent(instructions="Answer.")  # pyright: ignore[reportCallIssue]
     typed_explicit: Agent[Application, Answer] = Agent[Application, Answer](  # pyright: ignore[reportCallIssue]
         instructions="Answer."

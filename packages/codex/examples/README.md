@@ -31,6 +31,7 @@ These programs use the current SDK and model credentials:
 | Task | Example | What to inspect |
 | --- | --- | --- |
 | Call a Python function | [basic.py](basic.py) | One answer through `Agent` and `function_tool`. |
+| Search the web | [hosted_web_search.py](hosted_web_search.py) | Domain filters, approximate location, and source URLs on a compatible Responses model. |
 | Supply application context | [typed_context.py](typed_context.py) | Context supplied to a tool and a validated Pydantic output model. |
 | Continue and restore a conversation | [conversation.py](conversation.py) | Multiple turns, streamed observations, and saved state using `Turn.get_result()`. |
 | Preserve task state during compaction | [compaction.py](compaction.py) | A `before_compact` callback supplies the summary for automatic or manual compaction. |

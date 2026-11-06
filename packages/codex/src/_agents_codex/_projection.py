@@ -204,6 +204,32 @@ def project_execution_completion(
     return cast(ExecutionItem | None, _execution_item(native, thread_id, turn_id))
 
 
+def project_model_output_item(
+    native: dict[str, Any], done: bool, turn_id: str | None
+) -> dict[str, Any] | None:
+    if native["type"] != "AgentMessage":
+        return project_web_search_item(native, done, turn_id)
+    content = []
+    for part in native.get("content", []):
+        if part.get("type") == "Text":
+            text = {"type": "output_text", "text": part["text"]}
+            if part.get("annotations") is not None:
+                text["annotations"] = part["annotations"]
+            content.append(text)
+    item = {
+        "id": native["id"],
+        "turn_id": turn_id,
+        "type": "message",
+        "role": "assistant",
+        "status": "completed" if done else "in_progress",
+        "content": content,
+        "phase": native.get("phase"),
+    }
+    if native.get("display_text") is not None:
+        item["display_text"] = native["display_text"]
+    return item
+
+
 class EventProjector:
     """Translate native records for canonical-history reconstruction."""
 
@@ -398,24 +424,6 @@ class EventProjector:
     ) -> dict[str, Any] | None:
         kind, item_id = native["type"], native["id"]
         common = {"id": item_id, "turn_id": turn_id}
-        if kind == "AgentMessage":
-            return {
-                **common,
-                "type": "message",
-                "role": "assistant",
-                "status": "completed" if done else "in_progress",
-                "content": [
-                    {
-                        "type": "output_text",
-                        "text": "".join(
-                            part["text"]
-                            for part in native.get("content", [])
-                            if part.get("type") == "Text"
-                        ),
-                    }
-                ],
-                "phase": native.get("phase"),
-            }
         if kind == "Reasoning":
             return {
                 **common,
@@ -441,7 +449,7 @@ class EventProjector:
             return _execution_item(native, None, turn_id)
         return project_subagent_item(
             native, done, turn_id, self.source_id
-        ) or project_web_search_item(native, done, turn_id)
+        ) or project_model_output_item(native, done, turn_id)
 
     def _function_output(
         self,
@@ -544,6 +552,7 @@ class EventProjector:
             initial["status"] = "in_progress"
             if initial["type"] == "message":
                 initial["content"] = []
+                initial.pop("display_text", None)
             elif initial["type"] == "reasoning":
                 initial["summary"] = []
             elif initial["type"] == "command_execution":
@@ -601,7 +610,13 @@ class EventProjector:
                     )
                 )
             if not reasoning:
-                self._last_message[turn_id] = "".join(part["text"] for part in parts)
+                display_text = item.get("display_text")
+                if display_text is None:
+                    display_text = "".join(part["text"] for part in parts)
+                # Core keeps the previous visible message when this one is blank.
+                # Python's strip also removes U+001C through U+001F.
+                if display_text.strip() or any(c in display_text for c in "\x1c\x1d\x1e\x1f"):
+                    self._last_message[turn_id] = display_text
         flushed = self._flush_command(turn_id, item_id)
         result.extend(flushed)
         if item["type"] == "command_execution" and item["status"] == "incomplete":
@@ -672,7 +687,10 @@ class EventProjector:
                         and open_messages
                         and item["id"] == open_messages[-1]
                     ):
-                        unfinished["content"] = [{"type": "output_text", "text": final_text}]
+                        if any("annotations" in part for part in unfinished["content"]):
+                            unfinished["display_text"] = final_text
+                        else:
+                            unfinished["content"] = [{"type": "output_text", "text": final_text}]
                         unfinished["status"] = "completed"
                     result.extend(self._finish_item(turn_id, unfinished))
             if (
@@ -802,7 +820,9 @@ class EventProjector:
             parts = self._items[(turn_id, item_id)]["summary" if reasoning else "content"]
             while len(parts) <= index:
                 parts.append({"type": "summary_text" if reasoning else "output_text", "text": ""})
-            parts[index]["text"] += msg["delta"]
+            # Deltas carry visible text. Annotated parts retain the original text.
+            if reasoning or not any("annotations" in part for part in parts):
+                parts[index]["text"] += msg["delta"]
             result.extend(self._part_added(turn_id, item_id, index, reasoning))
             result.append(
                 self._event(

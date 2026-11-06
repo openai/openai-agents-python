@@ -18,6 +18,8 @@ from agents import (
     WebSearch,
     function_tool,
 )
+from agents.observation import ModelOutputItemCompleted
+from agents.tools import WebSearchLocation
 from tests._asyncio import timeout
 from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import ResponsesFixture, assistant_output, function_call
@@ -61,6 +63,257 @@ def search_call(code: bool, call_id: str):
     item = function_call("run", {"search_query": [{"q": "selected-search"}]}, call_id)
     item["item"]["namespace"] = "web"
     return item
+
+
+async def test_hosted_controls_are_captured_and_outer_choice_survives_idle_restore():
+    async with timeout(30), search_peer() as (model, searches):
+        allowed = ["weather.example"]
+        blocked = ["ads.weather.example"]
+        location: WebSearchLocation = {
+            "country": "US",
+            "region": "Illinois",
+            "city": "Chicago",
+            "timezone": "America/Chicago",
+        }
+        web_search = WebSearch(
+            route="hosted", allowed_domains=allowed, blocked_domains=blocked, location=location
+        )
+        provider = NativeProvider(base_url=model.url, api_key="hosted-controls-fixture")
+        agent = Agent(
+            instructions="Answer the user's question.",
+            model="gpt-5.5",
+            provider=provider,
+            tools=[web_search],
+        )
+        async with provider:
+            async with agent.session() as session:
+                allowed[:] = ["changed.example"]
+                blocked.clear()
+                location["timezone"] = "America/New_York"
+                replacement = WebSearch(route="hosted", allowed_domains=["replacement.example"])
+                with pytest.raises(CapabilityError, match="captured"):
+                    await session.submit("invalid", tools=[replacement])
+                with pytest.raises(CapabilityError, match="captured"):
+                    await session.update(tools=[replacement])
+                assert not model.requests
+
+                model.respond(assistant_output("No lookup needed."))
+                turn = await session.submit(
+                    {"role": "user", "content": [{"type": "input_text", "text": "Remember Ada."}]},
+                    tools=[web_search],
+                )
+                assert (await turn.get_result()).final_output == "No lookup needed."
+                assert not [
+                    item async for item in session.items() if item["type"] == "web_search_call"
+                ]
+
+                await session.update(model_settings={"tool_choice": "none"})
+                model.respond(assistant_output("Ada is remembered."))
+                turn = await session.submit("Whom did I ask you to remember?", tools=[web_search])
+                assert (await turn.get_result()).final_output == "Ada is remembered."
+                state = await session.save_state()
+
+            model.respond(assistant_output("Still remembered."))
+            async with agent.session(state=state) as restored:
+                turn = await restored.submit(
+                    "Confirm the name.", before_step=lambda turn, step_index: []
+                )
+                assert (await turn.get_result()).final_output == "Still remembered."
+
+        assert not searches
+        first, second, third = model.requests
+        assert [request["tool_choice"] for request in model.requests] == ["auto", "none", "none"]
+        tool = next(tool for tool in first["tools"] if tool["type"] == "web_search")
+        assert tool == next(tool for tool in second["tools"] if tool["type"] == "web_search")
+        assert tool["filters"] == {
+            "allowed_domains": ["weather.example"],
+            "blocked_domains": ["ads.weather.example"],
+        }
+        assert tool["user_location"] == {
+            "type": "approximate",
+            "country": "US",
+            "region": "Illinois",
+            "city": "Chicago",
+            "timezone": "America/Chicago",
+        }
+        assert "web_search_call.action.sources" in first["include"]
+        assert all(tool["type"] != "web_search" for tool in third["tools"])
+        assert "web_search_call.action.sources" not in third["include"]
+        assert any(
+            item.get("role") == "user"
+            and {"type": "input_text", "text": "Remember Ada."} in item["content"]
+            for item in third["input"]
+        )
+
+
+@pytest.mark.parametrize("with_evidence", [True, False], ids=["with-evidence", "without-evidence"])
+async def test_hosted_search_evidence_reaches_history_events_and_next_request(with_evidence):
+    async with timeout(30), search_peer() as (model, searches):
+
+        async def omit_usage(event):
+            if event["type"] == "response.completed":
+                event["response"].pop("usage")
+                event["response"].pop("usage_metadata")
+
+        if not with_evidence:
+            model.before_event = omit_usage
+        action = {"type": "search", "query": "Chicago weather"}
+        parts = [
+            {"type": "output_text", "text": "Chicago forecast. "},
+            {"type": "output_text", "text": "Clear skies."},
+        ]
+        if with_evidence:
+            action["sources"] = [
+                {"type": "url", "url": "https://weather.example/chicago"},
+                {"type": "url", "url": "https://weather.example/forecast"},
+            ]
+            hidden = "<oai-mem-citation>fixture marker</oai-mem-citation>"
+            parts[1]["text"] = hidden + parts[1]["text"]
+            parts[1]["annotations"] = [
+                {
+                    "type": "url_citation",
+                    "url": "https://weather.example/chicago",
+                    "title": "Chicago forecast",
+                    "start_index": len(hidden),
+                    "end_index": len(hidden) + 11,
+                },
+                {
+                    "type": "file_citation",
+                    "file_id": "file_fixture",
+                    "filename": "fixture.txt",
+                    "index": 0,
+                },
+            ]
+        model.respond(
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "web_search_call",
+                    "id": "ws_chicago",
+                    "status": "completed",
+                    "action": action,
+                },
+            },
+            {
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "message",
+                    "id": "msg_chicago",
+                    "role": "assistant",
+                    "content": parts,
+                },
+            },
+        )
+        provider = NativeProvider(base_url=model.url, api_key="hosted-evidence-fixture")
+        agent = Agent(
+            instructions="Research the weather.",
+            model="gpt-5.5",
+            provider=provider,
+            model_settings={"tool_choice": "required"},
+            tools=[WebSearch(route="hosted")],
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Find the Chicago forecast.")
+            events = [event async for event in turn.events()]
+            settled = await turn.get_result()
+            assert settled.final_output == "Chicago forecast. Clear skies."
+            items = [item async for item in session.items()]
+            message = next(
+                item for item in items if item["type"] == "message" and item["role"] == "assistant"
+            )
+            search = next(item for item in items if item["type"] == "web_search_call")
+            assert message["content"] == parts
+            assert search["action"] == {**action, "queries": None}
+
+            observed = {
+                event.item["type"]: event.item
+                for event in events
+                if isinstance(event, ModelOutputItemCompleted)
+            }
+            assert observed["web_search_call"] == search
+            if with_evidence:
+                cited_part = message["content"][1]
+                citation = cited_part["annotations"][0]
+                start, end = citation["start_index"], citation["end_index"]
+                assert 0 <= start < end <= len(cited_part["text"])
+                assert cited_part["text"][start:end] == "Clear skies"
+                assert observed["message"]["content"] == parts
+                assert observed["message"]["display_text"] == settled.final_output
+                assert settled.usage is not None
+                assert settled.usage.last_token_usage.total_tokens == 14
+            else:
+                assert "message" not in observed
+                assert settled.usage is None
+            recorded = [turn async for turn in session.turns()]
+            received = recorded[0]["responses"][0]
+            assert received["usage_source"] == "received"
+            assert (
+                received["usage"]["total_tokens"] if received["usage"] is not None else None
+            ) == (14 if with_evidence else None)
+
+            state = await session.save_state()
+
+        model.respond(assistant_output("Reused the prior evidence."))
+        async with agent.session(state=state) as restored:
+            assert [
+                item async for item in restored.items() if item["type"] == "web_search_call"
+            ] == [search]
+            await restored.update(model_settings={"tool_choice": "auto"})
+            followup = await restored.submit("Repeat what the source said.")
+            assert (await followup.get_result()).final_output == "Reused the prior evidence."
+
+        assert not searches
+        original, followup_request = model.requests
+        assert original["tool_choice"] == "required"
+        assert followup_request["tool_choice"] == "auto"
+        replayed = {item["type"]: item for item in followup_request["input"]}
+        message = next(
+            item for item in followup_request["input"] if item.get("role") == "assistant"
+        )
+        assert message["content"] == parts
+        assert replayed["web_search_call"]["action"].get("sources") == action.get("sources")
+
+
+async def test_unknown_annotation_format_does_not_discard_assistant_message():
+    async with timeout(20), search_peer() as (model, searches):
+        reply = assistant_output("Answer with unfamiliar metadata.")
+        part = reply["item"]["content"][0]
+        part["annotations"] = {"unknown_provider_format": ["kept"]}
+        model.respond(reply)
+        provider = NativeProvider(base_url=model.url, api_key="unknown-annotation-fixture")
+        async with (
+            provider,
+            Agent(instructions="Answer.", model="gpt-5.5", provider=provider).session() as session,
+        ):
+            turn = await session.submit("Answer the question.")
+            assert (await turn.get_result()).final_output == part["text"]
+            assert [
+                item["content"]
+                async for item in session.items()
+                if item["type"] == "message" and item["role"] == "assistant"
+            ] == [[part]]
+        assert len(model.requests) == 1
+        assert not searches
+
+
+@pytest.mark.parametrize(
+    "search",
+    [
+        WebSearch(allowed_domains=["weather.example"]),
+        WebSearch(blocked_domains=["weather.example"]),
+        WebSearch(location={"timezone": "America/Chicago"}),
+    ],
+)
+async def test_standalone_controls_rejected_before_provider_io(search):
+    async with timeout(10), search_peer() as (model, searches):
+        provider = NativeProvider(base_url=model.url, api_key="standalone-controls-fixture")
+        agent = Agent(instructions="Answer.", provider=provider, tools=[search])
+        with pytest.raises(ValueError, match="require route='hosted'"):
+            agent.validate()
+        with pytest.raises(ValueError, match="require route='hosted'"):
+            async with agent.session():
+                pytest.fail("Standalone search accepted hosted controls")
+        assert not model.requests and not searches
 
 
 @pytest.mark.parametrize("code", [False, True], ids=["direct", "code"])

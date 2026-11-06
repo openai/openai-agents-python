@@ -7,7 +7,8 @@ use codex_core::context::{
 use codex_core_api::{AbsolutePathBuf, CodexThread, WithTurnExtensionData};
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::config_types::{
-    ApprovalsReviewer, CollaborationMode, Personality, ReasoningSummary, WindowsSandboxLevel,
+    ApprovalsReviewer, CollaborationMode, Personality, ReasoningSummary, ToolChoice,
+    WindowsSandboxLevel,
 };
 use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::mcp::RequestId;
@@ -327,6 +328,7 @@ pub struct ThreadSettings {
     summary: Option<ReasoningSummary>,
     #[serde(deserialize_with = "optional")]
     service_tier: Option<Option<String>>,
+    tool_choice: Option<ToolChoice>,
     collaboration_mode: Option<CollaborationMode>,
     personality: Option<Personality>,
     disabled_plugin_ids: Option<Vec<String>>,
@@ -339,7 +341,7 @@ pub fn model_settings(params: Value) -> Result<ThreadSettingsOverrides> {
         .context("model settings must be an object")?;
     for (key, value) in fields {
         match key.as_str() {
-            "model" | "effort" | "summary" | "service_tier" => {
+            "model" | "effort" | "summary" | "service_tier" | "tool_choice" => {
                 if key == "service_tier" && value.is_null() {
                     continue;
                 }

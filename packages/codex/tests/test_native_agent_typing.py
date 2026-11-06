@@ -26,6 +26,7 @@ from agents import (
     InputText,
     LocalStorage,
     ModelRequestContext,
+    ModelSettings,
     NativeAgents,
     NativeError,
     NativeGoal,
@@ -45,11 +46,46 @@ from agents import (
     TraceContext,
     Turn,
     UserInput,
+    WebSearch,
     function_tool,
 )
+from agents._events import OutputText, URLCitation, WebSearchSource
 from agents.history import RecordedTurn
-from agents.observation import EventStream, ToolFinished, ToolStarted
+from agents.observation import EventStream, ModelOutputItemCompleted, ToolFinished, ToolStarted
 from agents.subagents import Subagent
+from agents.tools import WebSearchLocation
+
+search_location: WebSearchLocation = {"timezone": "America/Chicago"}
+search = WebSearch(route="hosted", allowed_domains=["weather.example"], location=search_location)
+search_settings: ModelSettings = {"tool_choice": "required"}
+search_agent = Agent(instructions="Research.", tools=[search], model_settings=search_settings)
+assert_type(search_agent, Agent[None, str])
+
+web_citation: URLCitation = {
+    "type": "url_citation",
+    "url": "https://weather.example/",
+    "title": "Weather",
+    "start_index": 0,
+    "end_index": 7,
+}
+annotated_text: OutputText = {
+    "type": "output_text",
+    "text": "Weather",
+    "annotations": [web_citation],
+}
+
+
+async def hosted_search_types(turn: Turn[str]) -> None:
+    async for event in turn.events():
+        if not isinstance(event, ModelOutputItemCompleted):
+            continue
+        if event.item["type"] == "message":
+            assert_type(event.item.get("display_text"), str | None)
+        else:
+            action = event.item["action"]
+            if action is not None and action["type"] == "search":
+                assert_type(action.get("sources"), list[WebSearchSource] | None)
+
 
 provider_error = NativeError(
     "provider rejected the request",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect as inspect
 import json as json
-from collections.abc import Awaitable as Awaitable, Callable as Callable
+from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence
 from dataclasses import dataclass as dataclass, field as field
 from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Literal as Literal
 
@@ -14,6 +14,7 @@ from pydantic import (
     TypeAdapter as TypeAdapter,
     create_model as create_model,
 )
+from typing_extensions import TypedDict
 
 from ._events import FunctionCallResponse as FunctionCallResponse
 from ._public import preserve_module_identity as _preserve_module_identity
@@ -37,6 +38,15 @@ class Checklist:
     """
 
 
+class WebSearchLocation(TypedDict, total=False, closed=True):
+    """Approximate user location for hosted web search."""
+
+    country: str
+    region: str
+    city: str
+    timezone: str
+
+
 @dataclass(frozen=True, kw_only=True)
 class WebSearch:
     """Allow the native web search tool for this Session.
@@ -47,10 +57,22 @@ class WebSearch:
     corresponding native provider protocol, which the current provider must
     support. It grants no other tools. An operation/step cannot add or change
     its binding. A selection may omit it to disable search for that step.
+
+    Domain filters and approximate location require ``route="hosted"``,
+    a Responses provider with the ``web_search`` tool, and a model that
+    supports that route, such as ``gpt-5.5``. Supply domains without a URL
+    scheme. Use a two-letter country code and an IANA timezone such as
+    ``America/Chicago`` when setting those location fields. The Session
+    captures the controls when it opens. The provider applies them.
+    Search results can include cited URLs and consulted sources. Source
+    passages are unavailable through this interface.
     """
 
     mode: Literal["cached", "live"] = "cached"
     route: Literal["standalone", "hosted"] = "standalone"
+    allowed_domains: Sequence[str] | None = None
+    blocked_domains: Sequence[str] | None = None
+    location: WebSearchLocation | None = None
 
 
 @dataclass(frozen=True)
