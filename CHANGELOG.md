@@ -1,5 +1,73 @@
 # Changelog
 
+## [0.25.0](https://github.com/openai/openai-agents-python/compare/v0.24.0...v0.25.0) (2026-11-06)
+
+
+### Features
+
+* expose utilities for third-party session adapters ([#5428](https://github.com/openai/openai-agents-python/issues/5428)) ([16fdb20](https://github.com/openai/openai-agents-python/commit/16fdb2091d0b18cc1200d26ba6a20ee6f1962455))
+* **sandbox:** remove Runloop provider ([#5369](https://github.com/openai/openai-agents-python/issues/5369)) ([12ce34d](https://github.com/openai/openai-agents-python/commit/12ce34d8438d6f1f7c964a261b89e069e8a0b3d3))
+
+
+### Bug Fixes
+
+* add opt-in handoff error recovery ([#5418](https://github.com/openai/openai-agents-python/issues/5418)) ([a6ed84f](https://github.com/openai/openai-agents-python/commit/a6ed84f38ed374585fb3969a8177a76755d58d94))
+* align implicit settings with provider-selected models ([#5425](https://github.com/openai/openai-agents-python/issues/5425)) ([a88d291](https://github.com/openai/openai-agents-python/commit/a88d2919631dbd93801a79eb0f97011ef9b451b7))
+* default GPT-6 Chat Completions tool requests to non-reasoning ([#5420](https://github.com/openai/openai-agents-python/issues/5420)) ([3396dca](https://github.com/openai/openai-agents-python/commit/3396dca75663d3e72f27aed3e3a79c5d018b8332))
+* **deps-dev:** bump aiohttp from 3.14.3 to 3.14.5 ([#5403](https://github.com/openai/openai-agents-python/issues/5403)) ([442d0ea](https://github.com/openai/openai-agents-python/commit/442d0ea112e62e3423d3e93478532424f71b3f8a))
+* **deps-dev:** bump playwright from 1.50.0 to 1.63.0 ([#5402](https://github.com/openai/openai-agents-python/issues/5402)) ([0dc4cf1](https://github.com/openai/openai-agents-python/commit/0dc4cf152bff1f50bdc0e41f28808563406545b2))
+* **deps-dev:** bump ruff from 0.16.8 to 0.17.1 ([#5439](https://github.com/openai/openai-agents-python/issues/5439)) ([5bb6fb7](https://github.com/openai/openai-agents-python/commit/5bb6fb727a67bb4da21f8d04d0b8d3e7a65f463a))
+* **deps-dev:** bump twilio from 9.11.1 to 9.12.0 ([#5486](https://github.com/openai/openai-agents-python/issues/5486)) ([465583d](https://github.com/openai/openai-agents-python/commit/465583dc88f9e91a8a8ec3e076f6bc2362119023))
+* **deps-dev:** bump websockets from 15.0.1 to 16.1.1 ([#5484](https://github.com/openai/openai-agents-python/issues/5484)) ([86bd298](https://github.com/openai/openai-agents-python/commit/86bd29878b30062757fdb4f32fb95eb8eccc7e36))
+* **deps:** bump actions/create-github-app-token from 3.2.0 to 3.3.0 ([#5464](https://github.com/openai/openai-agents-python/issues/5464)) ([b8df4ff](https://github.com/openai/openai-agents-python/commit/b8df4ffa7dc626e1f872566241af06b2bdbc9d0e))
+* **deps:** bump actions/download-artifact from 8.0.1 to 8.0.2 ([#5466](https://github.com/openai/openai-agents-python/issues/5466)) ([eccd8c8](https://github.com/openai/openai-agents-python/commit/eccd8c85eec85714ec798b1acf4ae2109d603dc0))
+* **deps:** bump actions/setup-python from 7.0.0 to 7.1.0 ([#5465](https://github.com/openai/openai-agents-python/issues/5465)) ([18d233b](https://github.com/openai/openai-agents-python/commit/18d233b35fa7b5b86ed7920f7482e8d9c5cc7ce6))
+* **deps:** bump astral-sh/setup-uv from 10.2.0 to 10.3.2 ([#5463](https://github.com/openai/openai-agents-python/issues/5463)) ([1ed8268](https://github.com/openai/openai-agents-python/commit/1ed8268eb3a71065d81ec444189dcb7396334d54))
+* **deps:** bump daytona from 0.155.0 to 0.226.1 ([#5487](https://github.com/openai/openai-agents-python/issues/5487)) ([d4f07df](https://github.com/openai/openai-agents-python/commit/d4f07df2915ddb029d7076595bb7d4ce89322308))
+* **deps:** bump httpx2 from 2.12.0 to 2.14.0 ([#5438](https://github.com/openai/openai-agents-python/issues/5438)) ([0c55458](https://github.com/openai/openai-agents-python/commit/0c55458f03127b2506119544bfebe18b8a867a55))
+* **deps:** bump mcp from 2.0.0 to 2.2.0 ([#5393](https://github.com/openai/openai-agents-python/issues/5393)) ([97c8288](https://github.com/openai/openai-agents-python/commit/97c8288bc6e97d69f45fc3732f1cf236b321d125))
+* **deps:** bump mcp from 2.0.0 to 2.3.0 ([#5404](https://github.com/openai/openai-agents-python/issues/5404)) ([e2de6a8](https://github.com/openai/openai-agents-python/commit/e2de6a8f2c61ea3818f582fc74c8f8a8da9830b2))
+* **deps:** bump opentelemetry-api from 1.40.0 to 1.45.1 ([#5410](https://github.com/openai/openai-agents-python/issues/5410)) ([2964f77](https://github.com/openai/openai-agents-python/commit/2964f772a72f2c14186bbd4203cd10723f81aeb2))
+* **deps:** bump the codeql group with 2 updates ([#5462](https://github.com/openai/openai-agents-python/issues/5462)) ([775707e](https://github.com/openai/openai-agents-python/commit/775707e2c39f7c91213716ceaea60a3d8230cf7b))
+* **deps:** require certifi 2026.10.19 or later ([#5429](https://github.com/openai/openai-agents-python/issues/5429)) ([6295010](https://github.com/openai/openai-agents-python/commit/6295010c7568d3f95e0f6e0e19b625bae65d9f01))
+* **deps:** require pymongo 4.18.3 or later ([#5445](https://github.com/openai/openai-agents-python/issues/5445)) ([57027de](https://github.com/openai/openai-agents-python/commit/57027de5f00409443011a3b12c1a54533f8931ee))
+* **deps:** update fastapi requirement from &gt;=0.142.2 to &gt;=0.143.0 in /examples/realtime/twilio_sip ([#5399](https://github.com/openai/openai-agents-python/issues/5399)) ([6bfa5ff](https://github.com/openai/openai-agents-python/commit/6bfa5ff5be83d80bb3de4be4a61bd589289c99f2))
+* **deps:** update fastapi requirement from &gt;=0.143.0 to &gt;=0.150.0 in /examples/realtime/twilio_sip ([#5435](https://github.com/openai/openai-agents-python/issues/5435)) ([56df6b4](https://github.com/openai/openai-agents-python/commit/56df6b418c7b089ecdbc4cf9afe98fabd409795a))
+* **deps:** update fastapi requirement from &gt;=0.150.0 to &gt;=0.162.0 in /examples/realtime/twilio_sip ([#5482](https://github.com/openai/openai-agents-python/issues/5482)) ([803fbf2](https://github.com/openai/openai-agents-python/commit/803fbf22c035d570b1f269cc6cdabb2bcece4314))
+* **deps:** update fastapi requirement in /examples/realtime/twilio_sip ([803fbf2](https://github.com/openai/openai-agents-python/commit/803fbf22c035d570b1f269cc6cdabb2bcece4314))
+* **deps:** update fastapi requirement in /examples/realtime/twilio_sip ([56df6b4](https://github.com/openai/openai-agents-python/commit/56df6b418c7b089ecdbc4cf9afe98fabd409795a))
+* **deps:** update fastapi requirement in /examples/realtime/twilio_sip ([6bfa5ff](https://github.com/openai/openai-agents-python/commit/6bfa5ff5be83d80bb3de4be4a61bd589289c99f2))
+* **deps:** update httpx2 requirement from &gt;=2.13.1 to &gt;=2.15.1 in /examples/realtime/twilio ([#5432](https://github.com/openai/openai-agents-python/issues/5432)) ([4134643](https://github.com/openai/openai-agents-python/commit/41346438f42276f78fc186fb76ecddb6d03ca5a0))
+* **deps:** update httpx2 requirement from &gt;=2.13.1 to &gt;=2.15.1 in /examples/realtime/twilio_sip ([#5436](https://github.com/openai/openai-agents-python/issues/5436)) ([a91f0bf](https://github.com/openai/openai-agents-python/commit/a91f0bfe013a63ce0ad8935c8c2d25047d249002))
+* **deps:** update httpx2 requirement from &gt;=2.15.1 to &gt;=2.16.0 in /examples/realtime/twilio ([#5478](https://github.com/openai/openai-agents-python/issues/5478)) ([16c3a3f](https://github.com/openai/openai-agents-python/commit/16c3a3f5b5c1048816718d427bb644d6900a4689))
+* **deps:** update httpx2 requirement from &gt;=2.15.1 to &gt;=2.16.0 in /examples/realtime/twilio_sip ([#5483](https://github.com/openai/openai-agents-python/issues/5483)) ([39a123b](https://github.com/openai/openai-agents-python/commit/39a123bc7abe529d8315cc8765670be3b1400ec8))
+* **deps:** update httpx2 requirement in /examples/realtime/twilio ([16c3a3f](https://github.com/openai/openai-agents-python/commit/16c3a3f5b5c1048816718d427bb644d6900a4689))
+* **deps:** update httpx2 requirement in /examples/realtime/twilio_sip ([39a123b](https://github.com/openai/openai-agents-python/commit/39a123bc7abe529d8315cc8765670be3b1400ec8))
+* **deps:** update openai requirement from &lt;4,&gt;=3.26.0 to &gt;=3.29.0,&lt;4 in /examples/realtime/twilio_sip ([#5398](https://github.com/openai/openai-agents-python/issues/5398)) ([0e54e4b](https://github.com/openai/openai-agents-python/commit/0e54e4b6ce2aaa96ff917a978ec8774eb7ab85f1))
+* **deps:** update openai requirement from &lt;4,&gt;=3.29.0 to &gt;=3.35.1,&lt;4 in /examples/realtime/twilio_sip ([#5434](https://github.com/openai/openai-agents-python/issues/5434)) ([2350082](https://github.com/openai/openai-agents-python/commit/2350082ccc13d411ccdd1c8fef3f2f0cd3df8141))
+* **deps:** update openai requirement from &lt;4,&gt;=3.35.1 to &gt;=3.39.0,&lt;4 in /examples/realtime/twilio_sip ([#5480](https://github.com/openai/openai-agents-python/issues/5480)) ([13dbaa3](https://github.com/openai/openai-agents-python/commit/13dbaa304757aba1718087ff31f9f0ba764fbd28))
+* **deps:** update openai requirement in /examples/realtime/twilio_sip ([13dbaa3](https://github.com/openai/openai-agents-python/commit/13dbaa304757aba1718087ff31f9f0ba764fbd28))
+* **deps:** update openai requirement in /examples/realtime/twilio_sip ([2350082](https://github.com/openai/openai-agents-python/commit/2350082ccc13d411ccdd1c8fef3f2f0cd3df8141))
+* **deps:** update openai requirement in /examples/realtime/twilio_sip ([0e54e4b](https://github.com/openai/openai-agents-python/commit/0e54e4b6ce2aaa96ff917a978ec8774eb7ab85f1))
+* **deps:** update starlette requirement from &gt;=1.7.0 to &gt;=1.9.0 in /examples/realtime/twilio ([#5433](https://github.com/openai/openai-agents-python/issues/5433)) ([26c762a](https://github.com/openai/openai-agents-python/commit/26c762a5baf49bcd1b23d28c99979422553e96c7))
+* **deps:** update starlette requirement from &gt;=1.7.0 to &gt;=1.9.0 in /examples/realtime/twilio_sip ([#5437](https://github.com/openai/openai-agents-python/issues/5437)) ([b6966fa](https://github.com/openai/openai-agents-python/commit/b6966fa4b8741fe13c3659f0fb16c1a6afcce4da))
+* **deps:** update starlette requirement from &gt;=1.9.0 to &gt;=1.10.0 in /examples/realtime/twilio ([#5479](https://github.com/openai/openai-agents-python/issues/5479)) ([f137418](https://github.com/openai/openai-agents-python/commit/f13741822f9451bb0b7ae97c3f96783f6ee7a5bc))
+* **deps:** update starlette requirement from &gt;=1.9.0 to &gt;=1.10.0 in /examples/realtime/twilio_sip ([#5481](https://github.com/openai/openai-agents-python/issues/5481)) ([814de8b](https://github.com/openai/openai-agents-python/commit/814de8b1cfdaf6c70212dca9ca23563dd0b789ac))
+* **deps:** update starlette requirement in /examples/realtime/twilio ([f137418](https://github.com/openai/openai-agents-python/commit/f13741822f9451bb0b7ae97c3f96783f6ee7a5bc))
+* **deps:** update starlette requirement in /examples/realtime/twilio_sip ([814de8b](https://github.com/openai/openai-agents-python/commit/814de8b1cfdaf6c70212dca9ca23563dd0b789ac))
+* **deps:** update twilio requirement from &lt;10,&gt;=9.11.2 to &gt;=9.12.0,&lt;10 in /examples/realtime/twilio ([#5397](https://github.com/openai/openai-agents-python/issues/5397)) ([452c5bd](https://github.com/openai/openai-agents-python/commit/452c5bda2e481fe21120ec69232e87c83a7d66f5))
+* **deps:** update twilio requirement in /examples/realtime/twilio ([452c5bd](https://github.com/openai/openai-agents-python/commit/452c5bda2e481fe21120ec69232e87c83a7d66f5))
+* improve missing stream completion diagnostics ([#5457](https://github.com/openai/openai-agents-python/issues/5457)) ([e355d69](https://github.com/openai/openai-agents-python/commit/e355d69152d4f4730dfb03b63dbce53e8d9f5d8c))
+* preserve empty structured shell results ([#5423](https://github.com/openai/openai-agents-python/issues/5423)) ([963d032](https://github.com/openai/openai-agents-python/commit/963d032fe611571bd01a91ba9d4eb42ab92ec2e8))
+* Preserve nested handoff record boundaries ([b040da5](https://github.com/openai/openai-agents-python/commit/b040da59037b1a34fee3a0dd4da95a571460eb98))
+* preserve nested handoff record boundaries ([#5430](https://github.com/openai/openai-agents-python/issues/5430)) ([b040da5](https://github.com/openai/openai-agents-python/commit/b040da59037b1a34fee3a0dd4da95a571460eb98))
+* preserve Pydantic run context snapshots ([#5444](https://github.com/openai/openai-agents-python/issues/5444)) ([bc4c6e1](https://github.com/openai/openai-agents-python/commit/bc4c6e124d39626f9ad77c58cb136c67e66c4cf7))
+* raise MCP minimum to 1.21.2 for Pydantic and OAuth compatibility ([#5384](https://github.com/openai/openai-agents-python/issues/5384)) ([970db99](https://github.com/openai/openai-agents-python/commit/970db99b1f97594b30496b9b75031f0c7f4f36ba))
+* **realtime:** honor explicit interruption with automatic VAD ([#5427](https://github.com/openai/openai-agents-python/issues/5427)) ([addc737](https://github.com/openai/openai-agents-python/commit/addc737f48b260785cecc13d0edec192e7ade54a))
+* replay ID-less assistant output in Chat Completions sessions ([#5419](https://github.com/openai/openai-agents-python/issues/5419)) ([28c29bc](https://github.com/openai/openai-agents-python/commit/28c29bc952bf0cce573a95683503132f4233608c))
+* require patched MCP dependency versions ([#5431](https://github.com/openai/openai-agents-python/issues/5431)) ([b235388](https://github.com/openai/openai-agents-python/commit/b235388f7c04b4573c2a789785eccc4aae265370))
+* stop native tool queues during function failure cleanup ([#5446](https://github.com/openai/openai-agents-python/issues/5446)) ([cd26bbb](https://github.com/openai/openai-agents-python/commit/cd26bbbc52847845fde73b9952b51e62e2bcbdc0))
+
 ## [0.24.0](https://github.com/openai/openai-agents-python/compare/v0.23.1...v0.24.0) (2026-10-15)
 
 
