@@ -17,7 +17,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Generic, TypeVar, cast
 from uuid import uuid4
 
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import ResponseFunctionToolCall, ResponseFunctionToolCallParam
 from pydantic import RootModel, TypeAdapter
 
 from _agents_codex._function_tools import FunctionTool, ToolContext
@@ -440,7 +440,9 @@ class SDKRunner:
             # The projected request may also contain calls from the current
             # turn. Reserve those IDs in addition to the full root history.
             seen_calls.update(
-                item["call_id"] for item in translated if item["type"] == "function_call"
+                cast(ResponseFunctionToolCallParam, item)["call_id"]
+                for item in translated
+                if item.get("type") == "function_call"
             )
             input_snapshot = deepcopy(translated)
             response = await model.get_response(
