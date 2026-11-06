@@ -389,14 +389,24 @@ jobs:
               return selected
 
           # Discover exact matching artifacts, including producers older than recent docs runs.
+          # Bound lookup work even when many matching artifacts are retained.
           # API failures remain visible; an absent ready artifact never waits for a producer.
           def candidates():
-              query = urllib.parse.urlencode({'name': 'native-snapshot-Linux-X64-' + native_identity})
+              query = urllib.parse.urlencode({'name': 'native-snapshot-Linux-X64-' + native_identity, 'per_page': 100})
+              branches = {os.environ['SOURCE_BRANCH']}
+              if os.environ.get('CURRENT_PR'):
+                  branches.add(os.environ['CURRENT_HEAD_REF'])
               seen = set()
-              for artifact in records(api + '/artifacts?' + query, 'artifacts'):
-                  run_id = artifact['workflow_run']['id']
-                  if artifact['expired'] or run_id in seen:
+              for artifact in get(api + '/artifacts?' + query)['artifacts'][:100]:
+                  run = artifact['workflow_run']
+                  run_id = run['id']
+                  if (artifact['expired'] or run_id in seen
+                          or str(run['repository_id']) != os.environ['GITHUB_REPOSITORY_ID']
+                          or str(run['head_repository_id']) != os.environ['GITHUB_REPOSITORY_ID']
+                          or run['head_branch'] not in branches):
                       continue
+                  if len(seen) >= 20:
+                      return
                   seen.add(run_id)
                   yield get(api + '/runs/' + str(run_id))
 

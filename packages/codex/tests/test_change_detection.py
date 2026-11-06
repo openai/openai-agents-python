@@ -938,8 +938,11 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "uv_build_controls_changed",
         "native_setup_changed",
         "old_snapshot_after_docs",
-        "snapshot_index_paginated",
-        "incomplete_snapshot_index",
+        "snapshot_index_filtered",
+        "snapshot_index_page_bound",
+        "snapshot_index_run_bound",
+        "snapshot_index_duplicate_runs",
+        "snapshot_index_empty",
         "branch_same",
         "branch_merge_python",
         "branch_merge_native_changed",
@@ -1993,8 +1996,11 @@ def test_native_build_selection(
 
     monkeypatch.setattr(subprocess, "run", tool)
 
+    requests = []
+
     def urlopen(request: urllib.request.Request, **kwargs: object) -> io.StringIO:
         url = request.full_url
+        requests.append(url)
         if scenario == "api_error":
             raise urllib.error.URLError("API unavailable")
         if "/workflows/" in url:
@@ -2033,24 +2039,65 @@ def test_native_build_selection(
         elif "/actions/artifacts?" in url:
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
             assert query["name"] == ["native-snapshot-Linux-X64-" + native_identity]
+            assert query["per_page"] == ["100"]
             matches = [
-                dict(artifact, workflow_run={"id": 123})
+                dict(
+                    artifact,
+                    workflow_run={
+                        "id": 123,
+                        "repository_id": 10,
+                        "head_repository_id": 10,
+                        "head_branch": source["head_branch"],
+                    },
+                )
                 for artifact in artifacts
                 if artifact["name"] == query["name"][0]
             ]
             if scenario == "no_history" or dependency_cache and not prefer_wheel:
                 matches = []
-            if scenario == "snapshot_index_paginated":
-                matches = [dict(matches[0], expired=True) for _ in range(100)] + matches
-            if scenario == "incomplete_snapshot_index":
+            if scenario in {"snapshot_index_filtered", "snapshot_index_page_bound"}:
+                rejected = (
+                    {"repository_id": 20},
+                    {"head_repository_id": 20},
+                    {"head_branch": "unrelated"},
+                )
+                matches = [
+                    dict(
+                        matches[0],
+                        workflow_run={
+                            **matches[0]["workflow_run"],
+                            "id": 1000 + index,
+                            **rejected[index % len(rejected)],
+                        },
+                    )
+                    for index in range(100 if scenario == "snapshot_index_page_bound" else 99)
+                ] + matches
+            if scenario in {"snapshot_index_run_bound", "snapshot_index_duplicate_runs"}:
+                matches = [
+                    dict(
+                        matches[0],
+                        workflow_run={
+                            **matches[0]["workflow_run"],
+                            "id": 1000 + index if scenario == "snapshot_index_run_bound" else 1000,
+                        },
+                    )
+                    for index in range(20 if scenario == "snapshot_index_run_bound" else 80)
+                ] + matches
+            if scenario == "snapshot_index_empty":
                 matches = []
-            page = int(query["page"][0])
             response = {
-                "total_count": 1 if scenario == "incomplete_snapshot_index" else len(matches),
-                "artifacts": matches[(page - 1) * 100 : page * 100],
+                "total_count": 1 if scenario == "snapshot_index_empty" else len(matches),
+                "artifacts": matches[:100],
             }
         elif url.endswith("/runs/123"):
             response = source
+        elif "/runs/" in url and url.rsplit("/", 1)[1].isdigit():
+            assert scenario in {"snapshot_index_run_bound", "snapshot_index_duplicate_runs"}
+            response = {
+                **source,
+                "id": int(url.rsplit("/", 1)[1]),
+                "path": ".github/workflows/other.yml",
+            }
         elif "/pulls/" in url:
             response = {
                 "merged": True,
@@ -2147,6 +2194,21 @@ def test_native_build_selection(
             exec(compile(script, workflow_path, "exec"), {})
     else:
         exec(compile(script, workflow_path, "exec"), {})
+    if scenario.startswith("snapshot_index_"):
+        assert sum("/actions/artifacts?" in url for url in requests) == 1
+        run_details = [
+            url for url in requests if "/runs/" in url and url.rsplit("/", 1)[1].isdigit()
+        ]
+        assert (
+            len(run_details)
+            == {
+                "snapshot_index_filtered": 1,
+                "snapshot_index_page_bound": 0,
+                "snapshot_index_run_bound": 20,
+                "snapshot_index_duplicate_runs": 2,
+                "snapshot_index_empty": 0,
+            }[scenario]
+        )
     assert (output.read_text() if output.exists() else "") == (
         (
             "dependency_run=123\ndependencies="
@@ -2180,7 +2242,8 @@ def test_native_build_selection(
             "build_bytecode_noise",
             "python_fixture_changed",
             "old_snapshot_after_docs",
-            "snapshot_index_paginated",
+            "snapshot_index_filtered",
+            "snapshot_index_duplicate_runs",
             "dependency_lock_changed",
             "retired_realtime_extra",
             "retired_realtime_extra_dependency_changed",
