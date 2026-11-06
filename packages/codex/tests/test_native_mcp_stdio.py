@@ -30,6 +30,7 @@ from tests.native_fixtures import (
     assistant_output,
     function_call,
     responses as responses,
+    tool_output,
 )
 from tests.test_native_agent import provider
 from tests.test_native_manual_tools import LookupArgs, next_request
@@ -229,6 +230,50 @@ async def test_stdio_launch_resources_are_pinned_until_current_authority_restore
     assert sorted(
         item["selected_env"] for item in records(current_log) if item["event"] == "start"
     ) == ["at-restore"]
+
+
+async def test_native_stdio_reconnect_does_not_replay_uncertain_call(
+    responses: ResponsesFixture, tmp_path: Path
+) -> None:
+    log = tmp_path / "reconnect"
+    uncertain, later = "exit-before-reply", "after-reconnect"
+    receipt = "recovered-stdio-result"
+    descriptor = stdio(
+        log,
+        "--exit-after-key",
+        uncertain,
+        "--label",
+        receipt,
+        "--writable",
+        approval_mode="approve",
+    )
+    for key in (uncertain, later):
+        event = function_call("search", {"key": key}, key)
+        event["item"]["namespace"] = "mcp__local"
+        responses.respond(event)
+    responses.respond(assistant_output("done"))
+
+    async with timeout(30):
+        async with Agent(
+            instructions="Use the selected tool.", tools=[descriptor], provider=provider(responses)
+        ).session() as session:
+            # Both calls run in one turn, with no new Session or tool selection between them.
+            turn = await session.submit("Run the two marked calls in sequence.")
+            assert (await turn.get_result()).final_output == "done"
+            assert len(responses.requests) == 3
+            error = tool_output(responses.requests[1], uncertain)
+            assert "Transport closed" in error, error
+            output = tool_output(responses.requests[2], later)
+
+            peer_records = records(log)
+            effects = [(row["key"], row["pid"]) for row in peer_records if row["event"] == "effect"]
+            assert sorted(key for key, _ in effects) == sorted((uncertain, later)), output
+            assert receipt in output, output
+            effect_pids = {pid for _, pid in effects}
+            assert len(effect_pids) == 2
+            starts = [row["pid"] for row in peer_records if row["event"] == "start"]
+            assert sorted(starts) == sorted(effect_pids)
+        await assert_stopped(log)
 
 
 @pytest.mark.parametrize("ending", ["cancel", "close"])

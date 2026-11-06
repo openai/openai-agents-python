@@ -34,6 +34,7 @@ These programs use the current SDK and model credentials:
 | Supply application context | [typed_context.py](typed_context.py) | Context supplied to a tool and a validated Pydantic output model. |
 | Continue and restore a conversation | [conversation.py](conversation.py) | Multiple turns, streamed observations, and saved state using `Turn.get_result()`. |
 | Preserve task state during compaction | [compaction.py](compaction.py) | A `before_compact` callback supplies the summary for automatic or manual compaction. |
+| Compact and retain original context | [retained_compaction.py](retained_compaction.py) | An application-written summary and a selected original message survive save and restore. |
 | Validate an artifact before writing it | [validated_artifact.py](validated_artifact.py) | A tool callback returns validation errors through `ToolOutput` so the model can retry. |
 | Limit Python callbacks | [callback_quota.py](callback_quota.py) | A fresh application quota for each run. The quota grants no native tool permissions. |
 
@@ -43,6 +44,7 @@ These programs use the current SDK and model credentials:
 | --- | --- | --- |
 | Own native Session storage | [Application-owned storage](canonical_storage/README.md) | A persistent POSIX reference adapter, writer ownership, and verified tool-result recovery. |
 | Test application behavior | [Task recipe chooser](../../../docs/sdk/recipes.md) | Typed tools, request inspection, concurrency, safe effects, specialists, local MCP, images, retrieval, and application memory. Each entry identifies scripted or live execution. |
+| Edit a sampling request after a tool result | [prepared_request.py](recipes/prepared_request.py) | Synthetic Responses HTTP; requires a development build newer than alpha.6. Follow [matching-source setup](../../../docs/sdk/installation.md#examples-and-upgrades) and [request-editing limits](../../../docs/sdk/configuration.md#edit-the-next-sampling-request). |
 | Build a browser application | [Service and browser starter](web_starter/README.md) | Request ownership, approvals, bounded admission, typed results, and authorized artifact downloads. Install its pinned browser dependencies. |
 | Stream Vercel UI frames | [vercel_stream.py](vercel_stream.py) | The application supplies its HTTP response and owns the Session. |
 | Stream AG-UI events | [AG-UI guide](ag_ui/README.md) | Install the pinned dependency in its README. |

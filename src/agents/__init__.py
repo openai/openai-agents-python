@@ -53,7 +53,10 @@ if TYPE_CHECKING:
         MCPResultContext as MCPResultContext,
         StdioMCP as StdioMCP,
     )
-    from .model_context import ModelRequestContext as ModelRequestContext
+    from .model_context import (
+        ModelContextSnapshot as ModelContextSnapshot,
+        ModelRequestContext as ModelRequestContext,
+    )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
         NativeAgents as NativeAgents,
@@ -131,10 +134,13 @@ if TYPE_CHECKING:
         InstructionFileReceipt as InstructionFileReceipt,
         TurnReceipt as TurnReceipt,
     )
+    from .usage import RunBudget as RunBudget
 
 _MODULES = {
     "CompactionContext": ".compaction",
+    "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
+    "RunBudget": ".usage",
     "PreparedRequest": ".prepared_request",
     "PreparedToolPresentation": ".prepared_request",
     "TraceContext": "._trace_context",

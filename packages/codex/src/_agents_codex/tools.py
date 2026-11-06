@@ -186,6 +186,10 @@ class _CapturedFunction:
     context: Any = field(repr=False)
     namespace: None = field(default=None, init=False)
 
+    @property
+    def _ref(self) -> ToolRef:
+        return ToolRef(self.name)
+
     def _parse_arguments(self, arguments: Any) -> BaseModel:
         if isinstance(arguments, str):
             arguments = json.loads(arguments)

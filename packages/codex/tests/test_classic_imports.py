@@ -43,7 +43,8 @@ def test_migration_missing_extra_has_actionable_error() -> None:
     result = run_isolated(
         "try:\n import agents.migration\n"
         "except ModuleNotFoundError as exc:\n"
-        " assert 'openai-agents[classic]' in str(exc)\n"
+        " assert \"python -m pip install '.[classic]'\" in str(exc)\n"
+        " assert 'matching source checkout' in str(exc)\n"
         "else:\n raise AssertionError('migration imported without Classic dependencies')",
         no_site=True,
     )
@@ -57,7 +58,9 @@ import agents
 try:
     import agents.classic
 except ModuleNotFoundError as exc:
-    assert 'openai-agents[classic]' in str(exc)
+    assert "python -m pip install '.[classic]'" in str(exc)
+    assert 'matching source checkout' in str(exc)
+    assert 'CLASSIC.md#install-from-the-matching-source' in str(exc)
     print(str(exc))
 else:
     raise AssertionError('classic imported without dependencies')
@@ -65,6 +68,48 @@ else:
         no_site=True,
     )
     assert "Missing modules:" in result.stdout
+
+
+def test_optional_dependency_error_points_to_matching_source() -> None:
+    run_isolated(
+        """
+import runpy
+helper = runpy.run_path('src/agents/classic/extensions/memory/_optional_imports.py')
+cause = ModuleNotFoundError("No module named 'redis'", name='redis')
+try:
+    helper['raise_optional_dependency_error'](
+        'RedisSession', dependency_name='redis', extra_name='redis', cause=cause
+    )
+except ImportError as exc:
+    assert type(exc) is ImportError
+    assert exc.__cause__ is cause
+    assert "python -m pip install '.[classic-redis]'" in str(exc)
+    assert 'matching source checkout' in str(exc)
+    assert 'CLASSIC.md#install-from-the-matching-source' in str(exc)
+else:
+    raise AssertionError('optional dependency error was not raised')
+""",
+        no_site=True,
+    )
+
+
+def test_voice_dependency_error_points_to_matching_source() -> None:
+    run_isolated(
+        """
+import runpy
+try:
+    runpy.run_path('src/agents/classic/voice/imports.py')
+except ImportError as exc:
+    assert type(exc) is ImportError
+    assert isinstance(exc.__cause__, ModuleNotFoundError)
+    assert "python -m pip install '.[classic-voice]'" in str(exc)
+    assert 'matching source checkout' in str(exc)
+    assert 'CLASSIC.md' in str(exc)
+else:
+    raise AssertionError('voice imported without dependencies')
+""",
+        no_site=True,
+    )
 
 
 def test_unrelated_dependency_import_error_is_preserved() -> None:

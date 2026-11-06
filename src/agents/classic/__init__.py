@@ -1,6 +1,7 @@
 """The established Python Agents runtime, isolated from native Codex.
 
-Install ``openai-agents[classic]`` and use explicit ``agents.classic`` imports.
+From the matching source checkout, run ``python -m pip install '.[classic]'``
+and use explicit ``agents.classic`` imports. See CLASSIC.md for source setup.
 """
 
 from . import _dependencies as _dependencies

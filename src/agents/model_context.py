@@ -7,6 +7,7 @@ from _agents_codex.model_context import (
     ContextT as ContextT,
     Generic as Generic,
     Literal as Literal,
+    ModelContextSnapshot as ModelContextSnapshot,
     ModelRequestContext as ModelRequestContext,
     Sequence as Sequence,
     TypeAlias as TypeAlias,

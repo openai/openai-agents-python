@@ -113,6 +113,46 @@ Set `cwd` to an absolute executor path or `file:` URI. The selected native model
 
 There is no separate Python process or file client.
 
+### Supply native skills
+
+To make a trusted skill available to the model, place its files on the selected executor. Each discovery root contains a `skills` directory. For example:
+
+```text
+/workspace/capabilities/
+└── skills/
+    └── report-style/
+        └── SKILL.md
+```
+
+Save this content in `SKILL.md`. The frontmatter supplies the name and description used for discovery; the body contains the skill's instructions.
+
+```markdown
+---
+name: report-style
+description: Write reports with an evidence section.
+---
+
+Include an Evidence section that names the files you inspected.
+```
+
+Select the parent of `skills`, rather than the skill directory itself. This async fragment uses `environment` and `agent` from [remote execution](#remote-execution). Provision the directory above before opening the new Session:
+
+```python
+from dataclasses import replace
+
+environment = replace(
+    environment,
+    capability_directories=["/workspace/capabilities"],
+)
+async with agent.session(environment=environment) as session:
+    turn = await session.submit("Use report-style to summarize the workspace.")
+    result = await turn.get_result()
+```
+
+Use the same `capability_directories` option with `Environment.local()` for files on a local executor. The SDK disables host and bundled skill discovery. Selecting a discovery root does not widen command permissions. Keep any files or scripts that commands need within the executor's existing readable roots.
+
+An empty sequence selects no discovery roots. `None` omits the override and keeps the native defaults. When restoring a checkpoint, supply the current executor's roots again. Restore does not recover discovery roots from the saved Environment or fall back to the Python controller's files.
+
 ### Argument validation
 
 Before dispatch, the SDK checks `exec_command` and `write_stdin` arguments against their pinned object schemas. It rejects malformed JSON, missing fields, unknown keys, wrong types, and invalid enum values. Omitting an optional field differs from passing `null`.
@@ -325,6 +365,10 @@ Callbacks cannot replace these identities.
 An executor approval or transform callback cannot observe its own Session, submit work to it, update it, interrupt it, checkpoint it, or close it. Start any event observer in an application task outside the callback. Use application context for data needed to make a decision.
 
 Arguments for `exec_command` and `write_stdin` are JSON objects; `apply_patch` receives a patch string. Native validation still applies after transformation. A result transform runs after the executor effect and cannot undo it.
+
+Setting `Environment.transform_result` also changes observations for selected `exec_command`, `write_stdin`, and `apply_patch` calls, including direct calls, generated-code calls, and native child calls. The runtime drops raw command-output deltas for those calls. Command and patch completion records retain their identity and status, but their output fields contain a withheld-output placeholder. This control also covers later output from the same background process, including output collected by a controlled `write_stdin` call.
+
+The accepted whole result still reaches the model or generated code. The callback does not transform individual output chunks. Argument transforms and approvals alone do not enable this result control. Other observations and Python or MCP tool output keep their own rules; this setting does not sanitize all telemetry.
 
 `policy_timeout` bounds transform decisions in seconds and defaults to 30. The SDK rejects invalid, late, or failed decisions. These callbacks cover root and native child calls.
 

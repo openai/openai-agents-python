@@ -41,6 +41,7 @@ from ._public import preserve_module_identity as _preserve_module_identity
 from ._trace_context import TraceContext as TraceContext, _trace_context as _trace_context
 from .compaction import _BeforeCompact
 from .model_context import _ContextTransform
+from .usage import RunBudget
 
 if TYPE_CHECKING:
 
@@ -483,10 +484,18 @@ class Agent(Generic[ContextT, OutputT]):
         """
         from .mcp import _tool_names
         from .schema import _prepare_spec
-        from .session import _split_tools
+        from .session import _check_namespaced_tool_collisions, _split_tools
 
-        python_tools, mcp_tools, _ = _split_tools(self.tools, self.programmatic_tool_calling)
-        _tool_names(mcp_tools)
+        python_tools, mcp_tools, native_agents = _split_tools(
+            self.tools, self.programmatic_tool_calling
+        )
+        _check_namespaced_tool_collisions(
+            python_tools,
+            _tool_names(mcp_tools),
+            self.tools,
+            self.programmatic_tool_calling,
+            native_agents=native_agents,
+        )
         native = importlib.import_module("agents._native")
         native._validate_python_tool_declarations(
             json.dumps([json.loads(tool._spec_json()) for tool in python_tools])
@@ -721,6 +730,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -741,6 +751,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -762,6 +773,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]: ...
 
     async def run(
@@ -784,6 +796,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]:
         """Run one submission through a Session and close it on completion.
 
@@ -815,6 +828,11 @@ class Agent(Generic[ContextT, OutputT]):
         raise InteractionRequired with a checkpoint at a settled manual call.
         Other interactive combinations require a handler or Agent.session().
 
+        budget limits this logical run's next root sampling admission, including
+        output repair. Pass on_interaction if the budgeted run uses manual tools.
+        The SDK cannot capture a budgeted active run or add a budget to a
+        restored active turn. return_state=True can still save an idle result.
+
         Pass state to restore with current bindings. For a supported pending
         manual checkpoint, input=None resumes the existing turn. Idle state
         needs input for a new turn. return_state=True captures a successful
@@ -824,10 +842,12 @@ class Agent(Generic[ContextT, OutputT]):
         try:
             from .prepared_request import _check_output, _check_profile, _check_tools
             from .schema import PromptedOutput, _prepare_spec
-            from .session import InteractionRequired, NativeError, _split_tools
+            from .session import CapabilityError, InteractionRequired, NativeError, _split_tools
             from .state import SessionState
             from .tools import WebSearch
 
+            if budget is not None and not isinstance(budget, RunBudget):
+                raise TypeError("budget must be a RunBudget or None")
             if prepare_request is not None:
                 if not callable(prepare_request):
                     raise TypeError("prepare_request must be callable")
@@ -855,6 +875,8 @@ class Agent(Generic[ContextT, OutputT]):
                 raise TypeError("state must be a SessionState")
             resume_manual = state is not None and state.native_continuation is not None
             if resume_manual:
+                if budget is not None:
+                    raise CapabilityError("Cannot set a budget when restoring an active checkpoint")
                 if input is not None:
                     raise ValueError("Use input=None to resume a pending manual checkpoint")
                 if on_interaction is None:
@@ -884,6 +906,14 @@ class Agent(Generic[ContextT, OutputT]):
                 and tool._bind is None
                 and (tools is None or tool in tools or tool.ref in tools)
             )
+            budget_capture_error = None
+            if budget is not None and pause_manual:
+                budget_capture_error = CapabilityError(
+                    "An active run with a budget cannot be captured for manual replies. "
+                    "Pass on_interaction or use Agent.session() for live replies."
+                )
+                if state is None or tools is not None:
+                    raise budget_capture_error
             # Restore persisted defaults before judging an omitted selection.
             if (
                 pause_manual
@@ -894,6 +924,7 @@ class Agent(Generic[ContextT, OutputT]):
                     or environment is not None
                     or native_agents is not None
                     or before_step is not None
+                    or any(tool.ref.namespace is not None for tool in declared)
                     or (
                         mcp_tools
                         and (
@@ -904,8 +935,8 @@ class Agent(Generic[ContextT, OutputT]):
                 )
             ):
                 raise InteractionRequired(
-                    "Pausing for manual replies requires Python/manual tools, plain output or "
-                    "native strict output, "
+                    "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                    "plain output or native strict output, "
                     "no environment, children or before_step. "
                     "Pass on_interaction or use Agent.session() for live replies."
                 )
@@ -945,6 +976,10 @@ class Agent(Generic[ContextT, OutputT]):
                         environment=session._executor,
                         native_agents=None if effective is None else session._native_agents,
                     )
+                    if budget_capture_error is not None:
+                        if any(tool._bind is None for tool in selected):
+                            raise budget_capture_error
+                        pause_manual = ()
                     if (
                         prepare_request is not None
                         and before_step is None
@@ -954,6 +989,7 @@ class Agent(Generic[ContextT, OutputT]):
                             "Running manual tools with prepare_request requires on_interaction. "
                             "Use Agent.session() to reply to requests directly."
                         )
+                    # Submit can republish bound tools beyond the restored idle catalog.
                     if any(tool is eligible for tool in selected for eligible in pause_manual) and (
                         opening.programmatic_tool_calling
                         or session._default_output.mode == "prompted"
@@ -961,12 +997,12 @@ class Agent(Generic[ContextT, OutputT]):
                         or session._native_agents is not None
                         or session._storage is not None
                         or selected_mcp
+                        or any(tool._ref.namespace is not None for tool in session._bound_tools)
                         or any(isinstance(tool, WebSearch) for tool in opening.tools)
                     ):
                         raise InteractionRequired(
-                            "Pausing for manual replies requires Python/manual tools, "
-                            "plain output or "
-                            "native strict output, "
+                            "Pausing for manual replies requires unnamespaced Python/manual tools, "
+                            "plain output or native strict output, "
                             "no local storage, environment, children or before_step. "
                             "Pass on_interaction or use Agent.session() for live replies."
                         )
@@ -981,6 +1017,8 @@ class Agent(Generic[ContextT, OutputT]):
                     submit_options: dict[str, Any] = {}
                     if prepare_request is not None:
                         submit_options["prepare_request"] = prepare_request
+                    if budget is not None:
+                        submit_options["budget"] = budget
                     submission = await session.submit(
                         input, tools=tools, before_step=before_step, **submit_options
                     )
@@ -1017,6 +1055,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1037,6 +1076,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]: ...
 
     @overload
@@ -1058,6 +1098,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]: ...
 
     def run_sync(
@@ -1080,6 +1121,7 @@ class Agent(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Completed[OutputT]:
         """Run through session() outside an event loop.
 
@@ -1092,6 +1134,8 @@ class Agent(Generic[ContextT, OutputT]):
         retry cleanup. Explicit providers remain the caller's responsibility and
         are not attached to the error.
         """
+        if budget is not None and not isinstance(budget, RunBudget):
+            raise TypeError("budget must be a RunBudget or None")
         options: dict[str, Any] = {}
         try:
             try:
@@ -1117,6 +1161,8 @@ class Agent(Generic[ContextT, OutputT]):
                     options["environment"] = environment
                 if prepare_request is not None:
                     options["prepare_request"] = prepare_request
+                if budget is not None:
+                    options["budget"] = budget
                 return _SyncRun().run(
                     self.run(
                         input,

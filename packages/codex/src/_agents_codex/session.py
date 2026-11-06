@@ -114,7 +114,7 @@ from .mcp import (
     _result_policies as _result_policies,
     _tool_names as _tool_names,
 )
-from .model_context import ModelRequestContext
+from .model_context import ModelContextSnapshot, ModelRequestContext
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -204,7 +204,13 @@ from .turn_receipt import (
     _load_instruction_files as _load_instruction_files,
     _redact_checkpoint_executor_receipts as _redact_checkpoint_executor_receipts,
 )
-from .usage import TokenUsageInfo as TokenUsageInfo, _token_usage_info as _token_usage_info
+from .usage import (
+    _MAX_SAFE_INTEGER,
+    RunBudget,
+    TokenUsage,
+    TokenUsageInfo as TokenUsageInfo,
+    _token_usage_info as _token_usage_info,
+)
 
 _MutationResultT = TypeVar("_MutationResultT")
 _ResultT = TypeVar("_ResultT")
@@ -499,7 +505,7 @@ class NativeError(RuntimeError):
     """The native conversation could not complete the submitted operation.
 
     ``status_code``, ``code`` and ``request_id`` contain available provider
-    metadata. ``code`` is the upstream error code; ``category`` is the normalized
+    metadata. Budget failures use an SDK-defined ``code``. ``category`` is the normalized
     native failure category. Missing or discarded values remain ``None``.
     Messages and metadata may contain provider-supplied information.
     effects describes only the failed operation, never earlier actions.
@@ -537,6 +543,91 @@ class NativeError(RuntimeError):
     def effects(self) -> Literal["not_started", "unknown", "recorded"]:
         """Effect outcome proved for this exact failure, otherwise unknown."""
         return self._effects
+
+
+@dataclass
+class _RunBudget:
+    """Accounting shared by all native turns in one logical run."""
+
+    limits: RunBudget
+    requests: int = 0
+    tokens: int = 0
+    cost_micros: int = 0
+    usage_missing: bool = False
+    pending_estimates: list[TokenUsage] = field(default_factory=list)
+
+    def observe(self, usage: dict[str, Any] | None) -> None:
+        if self.limits.max_tokens is None and self.limits.max_estimated_cost_micros is None:
+            return
+        total = usage.get("total_tokens") if usage is not None else None
+        if usage is None or type(total) is not int or total < 0:
+            self.usage_missing = True
+            return
+        self.tokens += total
+        if self.limits.max_estimated_cost_micros is not None:
+            if self.limits.estimate_cost_micros is None:
+                self.usage_missing = True
+            else:
+                self.pending_estimates.append(TokenUsage(**usage))
+
+    def check(self) -> None:
+        limits = self.limits
+        for limit, observed, metric in (
+            (limits.max_requests, self.requests, "request"),
+            (limits.max_tokens, self.tokens, "token"),
+            (limits.max_estimated_cost_micros, self.cost_micros, "estimated cost"),
+        ):
+            if limit is not None and observed >= limit:
+                raise NativeError(
+                    f"Run budget reached its {metric} limit", code="run_budget_exceeded"
+                )
+        stop_on_missing = limits.missing_usage == "stop"
+        cost_limit = limits.max_estimated_cost_micros
+        estimator = limits.estimate_cost_micros
+        if (
+            cost_limit is not None
+            and estimator is not None
+            and not (self.usage_missing and stop_on_missing)
+        ):
+            for usage in self.pending_estimates:
+                invalid = False
+                try:
+                    estimate = estimator(usage)
+                except (Exception, asyncio.CancelledError):
+                    # Do not attach the estimator's exception or its traceback.
+                    invalid = True
+                    estimate = None
+                if invalid or (
+                    estimate is not None
+                    and (type(estimate) is not int or not 0 <= estimate <= _MAX_SAFE_INTEGER)
+                ):
+                    if (
+                        inspect.iscoroutine(estimate)
+                        and inspect.getcoroutinestate(estimate) == inspect.CORO_CREATED
+                    ):
+                        estimate.close()
+                    estimate = None  # Keep the rejected value out of traceback locals.
+                    raise NativeError(
+                        "Run budget cost estimator failed or returned an invalid estimate",
+                        code="run_budget_invalid_estimate",
+                    )
+                if estimate is None:
+                    self.usage_missing = True
+                    if stop_on_missing:
+                        break
+                    continue
+                self.cost_micros += estimate
+                if self.cost_micros >= cost_limit:
+                    raise NativeError(
+                        "Run budget reached its estimated cost limit",
+                        code="run_budget_exceeded",
+                    )
+            self.pending_estimates.clear()
+        if self.usage_missing and stop_on_missing:
+            raise NativeError(
+                "Run budget requires reported usage and estimates for configured limits",
+                code="run_budget_usage_unavailable",
+            )
 
 
 def _model_failure_error(message: dict[str, Any]) -> NativeError:
@@ -595,7 +686,7 @@ class Completed(Generic[OutputT]):
     prompted-output correction. Their per-turn usage is separate from usage,
     which still reports only the original thread. Missing usage remains None.
     final_output may be derived from a repair; native task history stays intact.
-    state is populated only on Agent.run/run_sync with return_state=True.
+    One-shot runners populate state when called with return_state=True.
     Existing native checkpoint restrictions still apply.
     """
 
@@ -643,6 +734,7 @@ class _Submission:
     prepare_request: _PrepareRequest | None = None
     preparation_index: int = 0
     step_index: int = 0
+    budget: _RunBudget | None = None
     operation_slots: tuple[int, ...] | None = None
     operation_mcp: tuple[_MCP[Any], ...] | None = None
     operation_refs: tuple[ToolRef, ...] | None = None
@@ -1047,7 +1139,7 @@ def _split_tools(
                 current = next(
                     item
                     for item in available
-                    if isinstance(item, FunctionTool) and item.name == declaration.name
+                    if isinstance(item, FunctionTool) and item.ref == declaration.ref
                 )
                 admitted[declaration.ref] = current
             elif isinstance(declaration, (StdioMCP, HttpMCP)):
@@ -1135,15 +1227,21 @@ def _split_tools(
                     assert isinstance(resolved, (HttpMCP, StdioMCP))
                     tool = replace(resolved, tools=tool.tools)
         if isinstance(tool, FunctionTool):
-            if has_checklist and tool.name == "update_plan":
+            if has_checklist and tool.ref == ToolRef("update_plan"):
                 raise ValueError("Checklist reserves the tool name update_plan")
-            if has_goals and tool.name in ("create_goal", "get_goal", "update_goal"):
-                raise ValueError("NativeGoals reserves create_goal, get_goal and update_goal")
-            if programmatic_tool_calling and tool.name in ("exec", "wait"):
-                raise ValueError("programmatic_tool_calling reserves the tool names exec and wait")
-            if available is not None and any(
-                previous.name == tool.name for previous in python_tools
+            if (
+                has_goals
+                and tool.ref.namespace is None
+                and tool.name in ("create_goal", "get_goal", "update_goal")
             ):
+                raise ValueError("NativeGoals reserves create_goal, get_goal and update_goal")
+            if (
+                programmatic_tool_calling
+                and tool.ref.namespace is None
+                and tool.name in ("exec", "wait")
+            ):
+                raise ValueError("programmatic_tool_calling reserves the tool names exec and wait")
+            if available is not None and any(previous.ref == tool.ref for previous in python_tools):
                 raise CapabilityError("Operation tools must select distinct captured slots")
             python_tools.append(tool)
         elif isinstance(tool, (StdioMCP, HttpMCP)):
@@ -1228,6 +1326,101 @@ def _capture_tools(
         generation,
         tuple(tool._capture(context) for tool in tools),
     )
+
+
+def _saved_python_ref(spec: Mapping[str, Any]) -> ToolRef | None:
+    if spec.get("type") == "namespace":
+        tools = spec.get("tools")
+        if not isinstance(tools, list) or len(tools) != 1 or not isinstance(tools[0], dict):
+            return None
+        namespace = spec.get("name")
+        name = tools[0].get("name")
+        if isinstance(namespace, str) and isinstance(name, str):
+            return ToolRef(name, namespace)
+    else:
+        name = spec.get("name")
+        if isinstance(name, str):
+            return ToolRef(name)
+    return None
+
+
+def _restore_python_catalog(
+    catalog: _ToolCatalog, specs: Sequence[Mapping[str, Any]]
+) -> _ToolCatalog:
+    # Use saved order with current bindings. Native rejects unknown or duplicate
+    # specs when comparing the complete catalogs.
+    by_ref = {tool._ref: tool for tool in catalog.tools}
+    refs = dict.fromkeys(map(_saved_python_ref, specs))
+    return _ToolCatalog(
+        catalog.generation, tuple(by_ref[ref] for ref in refs if ref is not None and ref in by_ref)
+    )
+
+
+def _restore_operation_slots(
+    catalog: _ToolCatalog,
+    selected: Sequence[FunctionTool[Any, Any, Any]],
+    pending_names: Sequence[str],
+) -> tuple[int, ...]:
+    available = {tool._ref: slot for slot, tool in enumerate(catalog.tools)}
+    if any(tool.ref not in available for tool in selected):
+        raise ValueError("Saved operation names tools outside its native generation")
+    manual_names = {tool.name for tool in selected if tool._bind is None}
+    if any(name not in manual_names for name in pending_names):
+        raise ValueError("Saved operation does not admit its pending manual tools")
+    return tuple(available[tool.ref] for tool in selected)
+
+
+def _direct_tool_namespaces(
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    mcp: tuple[_MCP[Any], ...],
+    collaboration: bool,
+) -> list[str]:
+    namespaces = {
+        name["namespace"] for name in _tool_names(tuple(s for s in mcp if not s.defer_loading))
+    }
+    namespaces.update(ref.namespace for tool in tools if (ref := tool.ref).namespace is not None)
+    if collaboration:
+        namespaces.add("collaboration")
+    return ["functions", *sorted(namespaces - {"functions"})]
+
+
+def _check_namespaced_tool_collisions(
+    tools: Sequence[FunctionTool[Any, Any, Any]],
+    mcp_names: Sequence[dict[str, str]],
+    available: Sequence[Tool[Any]],
+    programmatic_tool_calling: bool,
+    *,
+    environment: Environment[Any] | None = None,
+    native_agents: NativeAgents | None = None,
+) -> None:
+    python_refs = {tool.ref for tool in tools}
+    namespaced = {ref for ref in python_refs if ref.namespace is not None}
+    if not namespaced:
+        return
+    other_refs = {ToolRef(**item) for item in mcp_names} | _fixed_tool_refs(
+        available, False, environment, native_agents
+    )
+    if namespaced & other_refs:
+        raise ValueError("A selected MCP tool shares a ToolRef with another Session capability")
+    if not programmatic_tool_calling:
+        return
+
+    # Core exposes generated-code tools as JavaScript identifiers and keeps the
+    # first tool if two identities project to the same identifier.
+    by_name: dict[str, ToolRef] = {}
+    for ref in python_refs | other_refs:
+        if ref.namespace == "collaboration":
+            continue  # Core keeps this namespace direct-only.
+        name = ref.name
+        if ref.namespace not in (None, "functions"):
+            separator = "" if ref.namespace.endswith("_") or name.startswith("_") else "__"
+            name = ref.namespace + separator + name
+        name = re.sub(r"^[^A-Za-z_$]|[^A-Za-z0-9_$]", "_", name) or "_"
+        if name in {"exec", "wait"}:
+            continue
+        previous = by_name.setdefault(name, ref)
+        if ref != previous and (ref in namespaced or previous in namespaced):
+            raise ValueError("A selected MCP tool collides with another code-mode tool name")
 
 
 def _same_opening_tools(left: Sequence[Tool[Any]], right: Sequence[Tool[Any]]) -> bool:
@@ -1579,6 +1772,13 @@ class Session(Generic[ContextT, OutputT]):
                 )
         output = _prepare_spec(agent.output_type)
         mcp_names = _tool_names(allowed_mcp)
+        _check_namespaced_tool_collisions(
+            allowed_tools,
+            mcp_names,
+            available,
+            programmatic_tool_calling,
+            native_agents=native_agents,
+        )
         model = agent.model
         catalog = _capture_tools(0, tools, context)
         bound_tools = catalog.tools
@@ -1589,20 +1789,7 @@ class Session(Generic[ContextT, OutputT]):
             and saved.managed_tool_specs is not None
             and (native_agents is not None or not manual_restore)
         ):
-            # The saved idle or native child generation may be a subset.
-            # Rebuild its import specs from current bindings in saved order. Native still
-            # compares full schemas, modes and manual slots, so unknown or
-            # duplicate saved declarations cannot become trusted grants.
-            names = [spec.get("name") for spec in saved.managed_tool_specs]
-            catalog = _ToolCatalog(
-                0,
-                tuple(
-                    sorted(
-                        (tool for tool in bound_tools if tool.name in names),
-                        key=lambda tool: names.index(tool.name),
-                    )
-                ),
-            )
+            catalog = _restore_python_catalog(catalog, saved.managed_tool_specs)
         # Carry the owned root's exact contract through this checked restore.
         # The opening default still applies to the next explicit request.
         restored_output = selected.output if selected is not None and manual_restore else output
@@ -1670,6 +1857,15 @@ class Session(Generic[ContextT, OutputT]):
                 executor, Environment
             ):
                 raise TypeError("environment must be an Environment")
+            if executor is not None and programmatic_tool_calling:
+                _check_namespaced_tool_collisions(
+                    allowed_tools,
+                    mcp_names,
+                    available,
+                    programmatic_tool_calling,
+                    environment=executor,
+                    native_agents=native_agents,
+                )
             if state is not None:
                 current_policy = executor._network_policy_digest() if executor is not None else None
                 if saved.network_policy_digest != current_policy:
@@ -1721,16 +1917,12 @@ class Session(Generic[ContextT, OutputT]):
                 )
                 if set(restored_operation_refs) != set(saved.operation_tools):
                     raise ValueError("Saved operation does not describe a canonical tool subset")
-                available_slots = {tool.name: slot for slot, tool in enumerate(catalog.tools)}
-                if any(tool.name not in available_slots for tool in selected_python):
-                    raise ValueError("Saved operation names tools outside its native generation")
-                operation_slots = tuple(available_slots[tool.name] for tool in selected_python)
                 assert continuation is not None
-                selected_names = {tool.name for tool in selected_python}
-                if any(
-                    pending.tool not in selected_names for pending in continuation.pending_manual
-                ):
-                    raise ValueError("Saved operation does not admit its pending manual tools")
+                operation_slots = _restore_operation_slots(
+                    catalog,
+                    selected_python,
+                    [pending.tool for pending in continuation.pending_manual],
+                )
             # Capture bindings at opening; acquire only a promoted operation's
             # selected servers. A manual restore already owns admitted work.
             if not manual_restore:
@@ -1842,22 +2034,11 @@ class Session(Generic[ContextT, OutputT]):
                         "direct_only_tool_namespaces": (
                             ["collaboration"]
                             if programmatic_tool_calling
-                            else [
-                                "functions",
-                                *sorted(
-                                    {
-                                        name["namespace"]
-                                        for server in allowed_mcp
-                                        if not server.defer_loading
-                                        for name in _tool_names((server,))
-                                    }
-                                ),
-                                *(
-                                    ["collaboration"]
-                                    if native_agents is not None or deferred_schemas
-                                    else []
-                                ),
-                            ]
+                            else _direct_tool_namespaces(
+                                allowed_tools,
+                                allowed_mcp,
+                                native_agents is not None or deferred_schemas,
+                            )
                         ),
                     },
                     "features.code_mode_interrupt": programmatic_tool_calling,
@@ -2002,7 +2183,7 @@ class Session(Generic[ContextT, OutputT]):
                         "allowed_tools": [
                             {
                                 "name": entry.name,
-                                "namespace": "functions",
+                                "namespace": entry.ref.namespace or "functions",
                             }
                             for entry in allowed_tools
                         ]
@@ -2217,7 +2398,7 @@ class Session(Generic[ContextT, OutputT]):
                     if restored_defaults is None:
                         # Older checkpoints lack exact persistent fixed selectors.
                         session._default_tools = (
-                            *(ToolRef(tool.name, tool.namespace) for tool in catalog.tools),
+                            *(tool._ref for tool in catalog.tools),
                             *restored_mcp_refs,
                             *restored_fixed_refs,
                         )
@@ -2460,6 +2641,10 @@ class Session(Generic[ContextT, OutputT]):
         self._websockets_enabled = False
         self._engine = engine
         self._native = thread
+        # Issued snapshots belong to this Session's current native thread.
+        self._model_context_snapshots: weakref.WeakKeyDictionary[ModelContextSnapshot, str] = (
+            weakref.WeakKeyDictionary()
+        )
         self._home = home
         self._catalog = catalog
         # MCP publication keeps this exact captured tuple; rebinding an idle
@@ -2918,6 +3103,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Turn[OutputT]: ...
 
     @overload
@@ -2934,6 +3120,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Turn[_TurnT]: ...
 
     @overload
@@ -2949,6 +3136,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: None = None,
         trace_options: None = None,
         prepare_request: None = None,
+        budget: None = None,
     ) -> Turn[Any]: ...
 
     async def submit(
@@ -2964,6 +3152,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: RunBudget | None = None,
     ) -> Turn[Any]:
         """Acknowledge a new root locally, or steer the captured active root.
 
@@ -2998,6 +3187,11 @@ class Session(Generic[ContextT, OutputT]):
         can be cancelled before any model request. This hook does not count
         transport retries, compaction or separate output-repair requests.
         Keep this Turn to wait with the chosen type, steer or cancel exactly it.
+
+        budget limits this logical run's next root sampling admission. A
+        queued submission has its own budget. Steering and live replies
+        keep the active run's budget. A budgeted active turn cannot suspend.
+        See RunBudget for the counted usage, errors, and overshoot behavior.
 
         trace_options overrides linkage and adds native tracing restrictions.
         Explicit parent takes precedence over ambient context, then Session
@@ -3034,6 +3228,7 @@ class Session(Generic[ContextT, OutputT]):
                 or before_step is not None
                 or writable_roots is not None
                 or prepare_request is not None
+                or budget is not None
                 or trace_options is not None
                 or parent_trace is not None
             ):
@@ -3046,6 +3241,8 @@ class Session(Generic[ContextT, OutputT]):
                     raise SessionBusyError("Cannot steer private Session work")
                 await self._steer(captured, input)
                 return captured
+            if budget is not None and not isinstance(budget, RunBudget):
+                raise TypeError("budget must be a RunBudget or None")
             output = self._default_output if output_type is None else _prepare_spec(output_type)
             parts = _native_input(input)
             roots = None
@@ -3074,6 +3271,7 @@ class Session(Generic[ContextT, OutputT]):
                 enqueue=if_busy != "reject",
                 writable_roots=roots,
                 prepare_request=prepare_request,
+                budget=_RunBudget(budget) if budget is not None else None,
                 parent_trace=parent_trace,
                 trace_options=trace_options,
             )
@@ -3327,7 +3525,7 @@ class Session(Generic[ContextT, OutputT]):
                 if (
                     not isinstance(entry, _CapturedManual)
                     or entry.name != message["tool"]
-                    or entry.namespace != message.get("namespace")
+                    or entry._ref.namespace != message.get("namespace")
                 ):
                     raise NativeError("Manual tool request does not match its declaration")
                 if not self._native._check_manual_tool(grant):
@@ -3650,7 +3848,31 @@ class Session(Generic[ContextT, OutputT]):
             state.add_callback(delivery)
             return cast(Turn[Any], await _join(delivery, outcome=delivered))
 
-    async def compact(self, *, summary: str | None = None) -> None:
+    async def model_context(self) -> ModelContextSnapshot:
+        """Read the current native model context of an idle Session.
+
+        Use the positions in ``snapshot.items`` to select originals for supplied
+        compaction. This snapshot is separate from the Session's canonical history
+        and from any per-request transformation.
+        """
+        self._check_callback_operation("read the model context of its own Session")
+        self._check_idle_update()
+
+        async def capture() -> ModelContextSnapshot:
+            captured = await self._native._read_model_context()
+            snapshot = ModelContextSnapshot(tuple(json.loads(captured)["items"]))
+            self._model_context_snapshots[snapshot] = captured
+            return snapshot
+
+        return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def compact(
+        self,
+        *,
+        summary: str | None = None,
+        snapshot: ModelContextSnapshot | None = None,
+        retain: Sequence[int] | None = None,
+    ) -> None:
         """Compact native conversation context and wait for owned settlement.
 
         This idle-only operation uses Core's compaction task. It does not submit
@@ -3660,17 +3882,31 @@ class Session(Generic[ContextT, OutputT]):
 
         With summary, replace model context with the supplied nonempty text,
         preserving current instructions and the original canonical history.
-        This does not call the model or create a Turn. It requires an exclusively
-        idle root without child or background work. Local profiles cannot be
-        copied into this private context. Programmatic tool calling is supported
+        This does not call the model or create a Turn. Pass both ``snapshot`` and
+        ``retain`` to also keep original items. Use a snapshot that this Session
+        issued for its current model context. Pass zero-based item indices.
+        The selection may be empty. Duplicate indices count once, and items
+        keep their native order.
+        System and developer items are always kept. Select both items of a
+        tool call and result pair, or omit both. Portable SessionState saves the
+        resulting context and canonical history. Snapshots themselves are tied
+        to the live Session.
+
+        Supplied compaction requires an exclusively idle root without child
+        or background work. Open the Session without a storage profile.
+        Programmatic tool calling is supported
         only while full native history proves that no code VM was used. Used or
         previously compacted programmatic sessions must use compact() instead.
         Used code state remains subject to this restriction while dormant.
-        Unresolved tool effects are not discarded. Current bindings and the Session's workspace stay
-        owned by this Session. Cancellation joins this publication before new
-        work may start; a published summary is not rolled back.
+        Unresolved tool effects block compaction. The Session keeps its current
+        bindings and workspace. A setup failure before retirement leaves the
+        original context active. Cancellation waits for publication to settle
+        before new work can start. If publication succeeds, the summary and
+        retained items remain in effect.
         """
         self._check_callback_operation("compact its own Session")
+        if (snapshot is None) != (retain is None) or (snapshot is not None and summary is None):
+            raise ValueError("Pass snapshot and retain together with a supplied summary")
         if summary is not None:
             self._check_idle_update()
             if not isinstance(summary, str):
@@ -3682,7 +3918,27 @@ class Session(Generic[ContextT, OutputT]):
                 child.busy for child in self._child_callbacks.values()
             ):
                 raise RuntimeError("Cannot compact while native child callbacks remain active")
-            await self._join_mutation(asyncio.create_task(self._compact_context(summary)))
+            captured = None
+            indices: set[int] = set()
+            if snapshot is not None:
+                if type(snapshot) is not ModelContextSnapshot:
+                    raise TypeError("snapshot must be a ModelContextSnapshot")
+                captured = self._model_context_snapshots.get(snapshot)
+                if captured is None:
+                    raise ValueError(
+                        "snapshot must come from this Session's current native context"
+                    )
+                assert retain is not None
+                for index in retain:
+                    if not isinstance(index, int) or isinstance(index, bool):
+                        raise TypeError("retain indices must be integers")
+                    index = int(index)
+                    if not 0 <= index < len(snapshot.items):
+                        raise ValueError("retain index is outside the snapshot")
+                    indices.add(index)
+            await self._join_mutation(
+                asyncio.create_task(self._compact_context(summary, captured, indices))
+            )
             return
         handle = await self._start(None, self._default_output)
         try:
@@ -3693,7 +3949,7 @@ class Session(Generic[ContextT, OutputT]):
                 await _close_after_error(error, lambda: self._cancel(handle))
             raise
 
-    async def _compact_context(self, summary: str) -> None:
+    async def _compact_context(self, summary: str, captured: str | None, indices: set[int]) -> None:
         assert self._native_options is not None
         assert self._opening_agent is not None
         native = importlib.import_module("agents._native")
@@ -3702,15 +3958,19 @@ class Session(Generic[ContextT, OutputT]):
         thread = None
         retiring = False
         try:
-            current = json.loads(change.context())
-            retained = [
+            encoded = change.context()
+            # Both native reads serialize the same full snapshot, including revisions.
+            if captured is not None and captured != encoded:
+                raise ValueError("snapshot is stale. Call Session.model_context() again.")
+            current = json.loads(encoded)
+            indices.update(
                 index
                 for index, item in enumerate(current["items"])
                 if item.get("role") in ("system", "developer")
-            ]
+            )
             # Core constructs the checkpoint from original native envelopes,
             # rejects unknown/unpaired effects, and retains review provenance.
-            checkpoint = change.prepare(summary, retained)
+            checkpoint = change.prepare(summary, sorted(indices))
             saved = json.loads(checkpoint)
             code = saved.get("root_code_mode")
             if code is not None and (
@@ -3800,6 +4060,7 @@ class Session(Generic[ContextT, OutputT]):
             await self._engine.close()
             self._engine = engine
             self._native = thread
+            self._model_context_snapshots.clear()
             engine = thread = None
             self._reader = _create_task(self._read_events())
             self._sealing = False
@@ -4090,6 +4351,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | None = None,
         trace_options: TraceOptions | Mapping[str, Any] | None = None,
         prepare_request: _PrepareRequest | None = None,
+        budget: _RunBudget | None = None,
     ) -> Turn[Any]:
         """Own one native task; None selects Core's compaction operation."""
         try:
@@ -4166,7 +4428,7 @@ class Session(Generic[ContextT, OutputT]):
                             (
                                 i
                                 for i, captured in enumerate(self._bound_tools)
-                                if captured.name == tool.name
+                                if captured._ref == tool.ref
                             ),
                             None,
                         )
@@ -4180,6 +4442,7 @@ class Session(Generic[ContextT, OutputT]):
                 output,
                 before_step=before_step,
                 prepare_request=prepare_request,
+                budget=budget,
                 tracing=_capture(trace_options, self._trace_context),
                 operation_slots=slots,
                 operation_mcp=mcp,
@@ -4392,7 +4655,7 @@ class Session(Generic[ContextT, OutputT]):
             # Explicit idle declarations replace bindings; refs only select.
             # Preserve every omitted opening slot and alias for later operations.
             supplied_python = {
-                tool.name: tool for tool in selection if isinstance(tool, FunctionTool)
+                tool.ref: tool for tool in selection if isinstance(tool, FunctionTool)
             }
             supplied_mcp = tuple(
                 tool for tool in selection if isinstance(tool, (HttpMCP, StdioMCP))
@@ -4400,7 +4663,7 @@ class Session(Generic[ContextT, OutputT]):
             bindings: list[Tool[ContextT]] = []
             for bound in self._bindings:
                 if isinstance(bound, FunctionTool):
-                    bindings.append(supplied_python.get(bound.name, bound))
+                    bindings.append(supplied_python.get(bound.ref, bound))
                 elif isinstance(bound, (HttpMCP, StdioMCP)):
                     if not any(server.name == bound.name for server in supplied_mcp):
                         bindings.append(bound)
@@ -4410,15 +4673,15 @@ class Session(Generic[ContextT, OutputT]):
             # Replace its old identities once; keep all current ones selectable.
             bindings.extend(supplied_mcp)
             selected = tuple(
-                supplied_python[bound.name]._capture(self._context)
-                if bound.name in supplied_python
+                supplied_python[bound._ref]._capture(self._context)
+                if bound._ref in supplied_python
                 else bound
                 for bound in self._bound_tools
             )
             bound_tools = selected
             if self._native_agents is not None:
-                names = {tool.name for tool in python}
-                selected = tuple(tool for tool in selected if tool.name in names)
+                refs = {tool.ref for tool in python}
+                selected = tuple(tool for tool in selected if tool._ref in refs)
             candidate = _ToolCatalog(self._catalog.generation + 1, selected)
 
             async def publish() -> None:
@@ -5303,7 +5566,11 @@ class Session(Generic[ContextT, OutputT]):
                     self._native._prepare_requests(True)
                 self._native._select_steps(
                     input is not None
-                    and (state.before_step is not None or state.operation_slots is not None),
+                    and (
+                        state.budget is not None
+                        or state.before_step is not None
+                        or state.operation_slots is not None
+                    ),
                     _native_tool_refs(state.operation_refs)
                     if state.operation_refs is not None
                     else None,
@@ -5606,6 +5873,7 @@ class Session(Generic[ContextT, OutputT]):
                     prepare_request=state.prepare_request,
                     preparation_index=state.preparation_index,
                     step_index=state.step_index,
+                    budget=state.budget,
                     operation_slots=state.operation_slots,
                     operation_mcp=state.operation_mcp,
                     operation_refs=state.operation_refs,
@@ -5774,6 +6042,7 @@ class Session(Generic[ContextT, OutputT]):
                                 json.dumps({"schema": state.output.schema, "invalid_output": text})
                             ),
                             _prepare_spec(str),
+                            budget=state.budget,
                         )
                     except NativeError as error:
                         rejected = error._effects == "not_started"
@@ -6540,6 +6809,7 @@ class Session(Generic[ContextT, OutputT]):
             return
         selected_json = None
         replied = False
+        budget = state.budget if isinstance(state, _Submission) else None
         guard = _Invocation(self)
         token = _invocation.set(guard)
         try:
@@ -6580,6 +6850,8 @@ class Session(Generic[ContextT, OutputT]):
             selection = None
             if not active():
                 return
+            if budget is not None:
+                budget.check()
             if callback is not None:
                 selection = await _call_callback(
                     callback,
@@ -6673,6 +6945,8 @@ class Session(Generic[ContextT, OutputT]):
                     self._native._reply_step(
                         message["step_id"], selected_json, message["thread"], message["instance"]
                     )
+                    if budget is not None and selected_json is not None:
+                        budget.requests += 1
             except RuntimeError:
                 # Cancellation can retire this exact native nonce first.
                 # A child's native nonce can retire before its terminal receipt.
@@ -6906,6 +7180,12 @@ class Session(Generic[ContextT, OutputT]):
                     turn_id = turn_id or event["id"]
                 if turn_id and turn_id != handle.turn_id:
                     continue
+                if (
+                    kind == "raw_response_completed"
+                    and event["id"] == handle.turn_id
+                    and state.budget is not None
+                ):
+                    state.budget.observe(message["token_usage"])
                 # Observe delivered MCP ends before settled-policy failure bookkeeping.
                 self._observe_mcp(event, state)
                 if kind in {"task_complete", "turn_complete", "turn_aborted"}:
@@ -7546,7 +7826,8 @@ class Session(Generic[ContextT, OutputT]):
             entry = self._catalog.tools[marker["slot"]]
             if not isinstance(entry, _CapturedFunction):
                 raise NativeError("Native callback does not match a function declaration")
-            if message["tool"] != entry.name or message.get("namespace") != entry.namespace:
+            ref = entry._ref
+            if message["tool"] != ref.name or message.get("namespace") != ref.namespace:
                 raise NativeError("Native tool request does not match its captured declaration")
             # Pydantic validators are application code too. Admit the original
             # native request before argument validation can execute that code.
@@ -7559,8 +7840,8 @@ class Session(Generic[ContextT, OutputT]):
                 turn_id=state.handle.turn_id,
                 submission_id=state.handle.submission_id,
                 call_id=message["callId"],
-                name=entry.name,
-                namespace=entry.namespace,
+                name=ref.name,
+                namespace=ref.namespace,
             )
             self._observations.append(started)
             parsed = entry._parse_arguments(message["arguments"])
@@ -7576,7 +7857,7 @@ class Session(Generic[ContextT, OutputT]):
                 MappingProxyType(deepcopy(kwargs)),
                 trace_context=_native_trace_context(message.get("_sdk_trace")),
                 call=ToolCallInfo(
-                    tool=ToolRef(entry.name, entry.namespace),
+                    tool=ref,
                     session_id=self.id,
                     turn_id=state.handle.turn_id,
                     call_id=message["callId"] if code_origin is None else None,
@@ -7938,6 +8219,10 @@ class Session(Generic[ContextT, OutputT]):
         return await self._checkpoint(active, before_seal=before_seal)
 
     def _check_portable_capture(self) -> None:
+        if self._active is not None and self._active.budget is not None:
+            raise CapabilityError(
+                "Cannot checkpoint an active run with a budget. Reply in the live Session."
+            )
         if self._active is not None and self._active.prepare_request is not None:
             raise CapabilityError(
                 "Cannot checkpoint an operation with prepare_request: "
@@ -7963,6 +8248,11 @@ class Session(Generic[ContextT, OutputT]):
             raise CapabilityError(
                 "Cannot suspend an operation with before_step: "
                 "portable restore cannot recover its callback"
+            )
+        if any(tool._ref.namespace is not None for tool in self._catalog.tools):
+            raise CapabilityError(
+                "Cannot suspend with selected MCP tools in the current catalog; "
+                "reply in the live Session"
             )
 
     def _check_checkpoint_admission(self, active: _Submission | None) -> None:
@@ -8074,8 +8364,8 @@ class Session(Generic[ContextT, OutputT]):
                             environment=self._executor,
                             native_agents=self._native_agents,
                         )
-                        bound = {tool.name: tool for tool in self._bound_tools}
-                        selected = tuple(bound[tool.name] for tool in python)
+                        bound = {tool._ref: tool for tool in self._bound_tools}
+                        selected = tuple(bound[tool.ref] for tool in python)
                     idle_mcp = mcp
                     if selected != self._catalog.tools:
                         _, allowed_mcp, _ = _split_tools(opening)
@@ -8323,6 +8613,7 @@ class Session(Generic[ContextT, OutputT]):
             self._owned_provider = None
         self._model_api_key = None
         self._native_options = None
+        self._model_context_snapshots.clear()
         self._parent_trace = None
         self._closed = True
 

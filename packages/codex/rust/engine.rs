@@ -736,6 +736,7 @@ impl EngineState {
                 graph: self.agent_graph.subscribe(new.thread_id).await,
                 native: Some(next_native_event(new.thread)),
                 session_terminal: None,
+                root_step_prefix: None,
                 children: VecDeque::new(),
                 pending: VecDeque::new(),
                 next_instance: 0,
@@ -1510,12 +1511,14 @@ struct ThreadEvents {
     extensions: broadcast::Receiver<(String, Event)>,
     created: broadcast::Receiver<ThreadId>,
     graph: mpsc::UnboundedReceiver<crate::storage::GraphEvent>,
-    // Like a child read, keep an already received native Error across other
-    // select branches while its typed reporting receipt is being finalized.
+    // The receive future does not suspend after dequeuing a Core event.
     native: Option<NextEvent>,
     // Retain a dequeued terminal while its admission-ready receipt is pending,
     // including when a Python reader is cancelled before that receipt arrives.
     session_terminal: Option<NextSessionTerminal>,
+    // Hold a root selector behind the finite native prefix visible when it
+    // arrived. Retain both across Python reads and reader cancellation.
+    root_step_prefix: Option<(serde_json::Value, usize)>,
     children: VecDeque<(ThreadId, ChildReader)>,
     pending: VecDeque<(ChildEventSource, Event)>,
     next_instance: u64,
@@ -1864,72 +1867,110 @@ impl ThreadState {
             if let Some((source, event)) = events.pending.pop_front() {
                 return self.child_event(source, event, admission_ready).await;
             }
-            let ThreadEvents {
-                extensions,
-                created,
-                graph,
-                children,
-                native,
-                ..
-            } = &mut *events;
-            tokio::select! {
-                _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
-                metadata = self.request_metadata.next() => return Ok(metadata),
-                request = async {
-                    python_tools.as_ref().expect("guarded Python channel").next_request().await
-                }, if python_tools.is_some() => return Ok(request),
-                event = async { native.as_mut().expect("guarded native reader").await }, if native.is_some() => {
-                    events.native = Some(next_native_event(self.thread.clone()));
-                    let event = event?;
-                    if admission_ready && let EventMsg::TurnComplete(done) = &event.msg {
-                        ensure!(done.turn_id == event.id, "Native completion turn identity differs");
-                        let receipt = python_tools.as_ref()
-                            .context("Session event reads require replaceable tools")?
-                            .admission_ready(&done.turn_id)?;
-                        events.session_terminal = Some(Box::pin(async move {
-                            receipt.wait().await?;
-                            let steering_tail = receipt.has_steering_tail();
-                            Ok((event, steering_tail, receipt))
-                        }));
+            let event = if let Some((_, remaining)) = &mut events.root_step_prefix {
+                if *remaining == 0 {
+                    return Ok(events.root_step_prefix.take().expect("pending root step").0);
+                }
+                let ThreadEvents {
+                    native,
+                    root_step_prefix,
+                    ..
+                } = &mut *events;
+                let event = tokio::select! {
+                    _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
+                    event = native.as_mut().context("Root event reader closed")? => event,
+                };
+                root_step_prefix.as_mut().expect("pending root step").1 -= 1;
+                event
+            } else {
+                let ThreadEvents {
+                    extensions,
+                    created,
+                    graph,
+                    children,
+                    native,
+                    ..
+                } = &mut *events;
+                tokio::select! {
+                    _ = closing.changed() => anyhow::bail!("Codex thread is closed"),
+                    metadata = self.request_metadata.next() => return Ok(metadata),
+                    request = async {
+                        python_tools.as_ref().expect("guarded Python channel").next_request().await
+                    }, if python_tools.is_some() => {
+                        if request["msg"]["type"] == "_sdk_select_step"
+                            && request["msg"]["thread"].as_str() == Some(self.id.to_string().as_str())
+                        {
+                            let queued = self.thread.queued_event_count();
+                            if queued != 0 {
+                                events.root_step_prefix = Some((request, queued));
+                                continue;
+                            }
+                        }
+                        return Ok(request);
+                    },
+                    event = async { native.as_mut().expect("guarded native reader").await }, if native.is_some() => event,
+                    (source, event) = read_child(children) => return self.child_event(source, event, admission_ready).await,
+                    Some(event) = graph.recv() => {
+                        self.discover_children(&mut events).await?;
+                        return graph_event(event);
+                    },
+                    notification = created.recv() => {
+                        match notification {
+                            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                                self.discover_children(&mut events).await?;
+                            }
+                            Err(broadcast::error::RecvError::Closed) => anyhow::bail!("Thread discovery closed"),
+                        }
                         continue;
                     }
-                    if let Some(settlement) = self.thread.thread_extension_data()
-                        .get::<crate::turn_settlement::Settlement>() {
-                        settlement.delivered(&event.msg);
-                    }
-                    let project_reason = python_tools.as_ref()
-                        .and_then(|tools| tools.observed_admission(&event.id)).is_some();
-                    return native_event(None, event, admission_ready, project_reason);
-                },
-                (source, event) = read_child(children) => return self.child_event(source, event, admission_ready).await,
-                Some(event) = graph.recv() => {
-                    self.discover_children(&mut events).await?;
-                    return graph_event(event);
-                },
-                notification = created.recv() => {
-                    match notification {
-                        Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
-                            self.discover_children(&mut events).await?;
+                    event = extensions.recv() => {
+                        let (target, event) = event?;
+                        if target.is_empty() || target == self.id.to_string() {
+                            return native_event(None, event, admission_ready, false);
                         }
-                        Err(broadcast::error::RecvError::Closed) => anyhow::bail!("Thread discovery closed"),
+                        if let Ok(id) = ThreadId::from_string(&target) {
+                            if !events.children.iter().any(|(child_id, _)| *child_id == id) {
+                                self.discover_children(&mut events).await?;
+                            }
+                            if let Some((_, reader)) = events.children.iter().find(|(child_id, _)| *child_id == id) {
+                                let source = (id, reader.instance, reader.incarnation.clone());
+                                events.pending.push_back((source, event));
+                            }
+                        }
+                        continue;
                     }
                 }
-                event = extensions.recv() => {
-                    let (target, event) = event?;
-                    if target.is_empty() || target == self.id.to_string() {
-                        return native_event(None, event, admission_ready, false);
-                    }
-                    if let Ok(id) = ThreadId::from_string(&target) {
-                        if !events.children.iter().any(|(child_id, _)| *child_id == id) {
-                            self.discover_children(&mut events).await?;
-                        }
-                        if let Some((_, reader)) = events.children.iter().find(|(child_id, _)| *child_id == id) {
-                            let source = (id, reader.instance, reader.incarnation.clone());
-                            events.pending.push_back((source, event));
-                        }
-                    }
-                }
+            };
+            events.native = Some(next_native_event(self.thread.clone()));
+            let event = event?;
+            if admission_ready && let EventMsg::TurnComplete(done) = &event.msg {
+                ensure!(
+                    done.turn_id == event.id,
+                    "Native completion turn identity differs"
+                );
+                let receipt = python_tools
+                    .as_ref()
+                    .context("Session event reads require replaceable tools")?
+                    .admission_ready(&done.turn_id)?;
+                events.session_terminal = Some(Box::pin(async move {
+                    receipt.wait().await?;
+                    let steering_tail = receipt.has_steering_tail();
+                    Ok((event, steering_tail, receipt))
+                }));
+                continue;
             }
+            if let Some(settlement) = self
+                .thread
+                .thread_extension_data()
+                .get::<crate::turn_settlement::Settlement>()
+            {
+                settlement.delivered(&event.msg);
+            }
+            let project_reason = python_tools
+                .as_ref()
+                .and_then(|tools| tools.observed_admission(&event.id))
+                .is_some();
+            return native_event(None, event, admission_ready, project_reason);
         }
     }
 

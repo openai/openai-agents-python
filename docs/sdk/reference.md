@@ -20,11 +20,11 @@ agent.with_output_type(output_type) -> Agent
 await agent.run(input, *, context=None, on_interaction=None,
                 provider=None, model=None, model_settings=None, environment=None,
                 tools=None, before_step=None, state=None, return_state=False,
-                parent_trace=None, trace_options=None) -> Completed
+                parent_trace=None, trace_options=None, prepare_request=None) -> Completed
 agent.run_sync(input, *, context=None, on_interaction=None,
                provider=None, model=None, model_settings=None, environment=None,
                tools=None, before_step=None, state=None, return_state=False,
-               parent_trace=None, trace_options=None) -> Completed
+               parent_trace=None, trace_options=None, prepare_request=None) -> Completed
 agent.session(*, context=None, state=None, storage=None, resume=None, provider=None, model=None,
               model_settings=None, environment=None, tools=None,
               instruction_files=(), reconciled_calls=(),
@@ -55,7 +55,7 @@ A Session owns a native conversation, opened with `agent.session()` in an async 
 
 | Call | Result |
 | --- | --- |
-| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None)` | Return a root Turn before completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
+| `await session.submit(input, *, output_type=None, tools=None, before_step=None, if_busy="reject", writable_roots=None, parent_trace=None, trace_options=None, prepare_request=None)` | Return a root Turn after local registration, before native admission or completion. Busy handling defaults to rejection. `"queue"` adds first-in, first-out work. `"steer"` targets the captured busy root or starts a new root when idle, without overrides. On a supported local or Linux WSS executor, use [additional write roots](execution.md#replace-write-roots-between-turns) to replace grants for new work. |
 | `session.rate_limits()` | Latest available `ApiRateLimits` snapshot. See [API-key limits](configuration.md#read-api-key-rate-limits). |
 | `session.events(*, after=0, include_execution_details=False)` | Observe the Session until it ends, using the retained global observation sequence. Execution arguments and results require `include_execution_details=True` for a trusted reader. See [streaming](sessions.md#stream-observations). |
 | `session.interactions()` | Receive live requests, separate from passive observations. |
@@ -91,6 +91,12 @@ History and descendant iterators have no pagination arguments.
 
 `session.capabilities.websockets_allowed` reports provider permission, not negotiated transport. Capability reports describe configuration support. They grant no permissions and do not establish checkpoint readiness. See [conversations and state](sessions.md).
 
+### PreparedRequest and prepare_request
+
+Request editing requires a development build newer than alpha.6; use the [matching-source setup](installation.md#examples-and-upgrades). Import `PreparedRequest` and `PreparedToolPresentation` from `agents`.
+
+`prepare_request(turn, request, *, preparation_index, recovery_attempt)` may return a complete `PreparedRequest`, `None`, or an awaitable of either. The value contains `instructions: str`, `input: list[dict]`, and `tools: list[PreparedToolPresentation]`. Input uses native ResponseItem JSON. A tool presentation contains `namespace`, `name`, `kind`, `strict`, `defer_loading`, `description`, and `parameters`; only the last two can change. Edits affect sampling, leaving canonical history and execution authority unchanged. See [request-editing profiles and lifecycle limits](configuration.md#edit-the-next-sampling-request).
+
 ### before_step
 
 The synchronous or asynchronous callback receives root `Turn` positionally and `step_index` by keyword. It returns `None` to keep the turn's tool selection, or a sequence of selectors for that preparation.
@@ -98,6 +104,8 @@ The synchronous or asynchronous callback receives root `Turn` positionally and `
 `step_index` counts preparations from zero. Cancellation can end a preparation before a model request. Selectors obey [tool-selection limits](tools.md#replace-tools-between-turns). Programmatic entry points are `ToolRef("exec", "functions")` and `ToolRef("wait", "functions")`. See the [per-step example](sessions.md#update-tools-instructions-and-model-settings).
 
 ### Turn
+
+A root Turn has a stable `submission_id` after local registration. Its `turn_id` can be `None` until native admission produces `TurnStarted`. A withdrawal before admission can leave no native history or events. See [submission acknowledgment](sessions.md#queue-or-steer-active-work).
 
 A root Turn's `get_result()` follows accepted continuations. A captured child Turn represents one exact native turn and does not follow later child turns. Child events or a new Subagent snapshot can identify a successor.
 
@@ -110,6 +118,8 @@ A root Turn's `get_result()` follows accepted continuations. A captured child Tu
 | `await turn.steer(input)` | Steer the captured active root or child turn. It cannot target another turn or revive a closed child. |
 | `await turn.steer_exact(input, *, expected_turn_id)` | Steer the exact native root turn and return a `SteeringReceipt` upon acceptance. See [strict steering](sessions.md#steer-one-exact-root-turn). |
 | `await turn.cancel(*, mode="force")` | Stop the root or withdraw it from the queue. Return `None` after cleanup. Children use `Subagent.try_cancel`, which returns a boolean; see [interruption](sessions.md#interrupt-work) for its confirmation and cleanup limits. |
+
+Observation `after` cursors apply only to the same live Session and reset on restore or reopen. A Turn iterator ends at owned settlement; use the Session stream for later background completions. See [observation cursor lifetime](sessions.md#reconnect-an-observer).
 
 Turn calls use the Session's opening event loop. After `run_sync()`, that loop has closed, so use `Completed` directly. IDs alone grant no control. See [Turn lifetime](sessions.md).
 
@@ -128,6 +138,12 @@ A `Completed` result contains `turn`, `final_output`, `usage`, optional `state` 
 Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage excludes children.
 
 `repair_attempts` is a tuple of `RecordedTurn` receipts for opted-in prompted-output corrections; it is empty when no repair ran. Their per-turn usage is separate from `Completed.usage`, which still describes the original thread. Missing usage remains `None`. The final output may come from a repair without rewriting the original native history. See [structured output configuration](configuration.md).
+
+### RecordedTurn and RecordedResponse
+
+Import these history value types from `agents.history`. In a development build newer than alpha.6, a `RecordedTurn` can include `responses`, a list of retained `RecordedResponse` occurrences. Each occurrence has origin `thread_id`/`turn_id`, optional observation `id` and provider `response_id`, `usage_source`, and available usage or terminal facts. `usage_source` is `"received"` or `"native_normalized"`; missing counters are unknown and differ from zero. Optional `status` and `incomplete_reason` retain reported terminal facts. Occurrence `id` differs from a provider `response_id`, which can repeat. Missing response coverage is unknown, and retained responses do not prove SDK acceptance or billing. See [response-attempt inspection](sessions.md#inspect-response-attempts) and the [matching-source setup](installation.md#examples-and-upgrades).
+
+Live `ModelRequestDispatching` and `ModelResponseLinked` observations come from `agents.observation`. They describe resolved sampling fields and best-effort links to retained occurrences. Dispatch can precede encoding failure or zero socket writes; links can be lost. Neither event proves provider receipt or success. Follow the same response-attempt guide for correlation and coverage limits.
 
 ### TokenUsageInfo and TokenUsage
 
@@ -153,6 +169,7 @@ The run needs an application decision. A supported one-shot run using Python or 
 | `code` | Available upstream provider error code, or `None`. |
 | `request_id` | Available provider request ID, or `None`. |
 | `category` | Normalized native failure category, or `None`. |
+| `response_integrity_reason` | Read-only `ResponseIntegrityReason` or `None` for the captured originating model-output integrity failure. Added after alpha.6; see [integrity diagnostics](sessions.md#diagnose-response-integrity-failures) and use the [matching development build](installation.md#examples-and-upgrades). |
 | `effects` | `"not_started"`, `"unknown"`, or `"recorded"` for the exact failed operation. The default is `"unknown"`. |
 
 Missing or discarded metadata is `None`. Messages and metadata may contain provider-supplied information. `effects="unknown"` does not establish that replay is safe. Even `"not_started"` describes only this failed operation, not earlier actions.
@@ -180,6 +197,8 @@ Import `LocalStorage` from `agents` and construct it with a `pathlib.Path`, for 
 After closing the Session, reopen the conversation with `agent.session(storage=profile, resume=saved_id)` using the original profile directory and current tools, context and provider. Only one native writer can own the conversation at a time.
 
 `resume` requires `storage`. Neither option can be used with portable `state`. A Session using local storage cannot export portable state through `save_state()`, `suspend()` or `fork()`.
+
+In builds newer than alpha.6, `LocalStorage` rejects `Agent(programmatic_tool_calling=True)` before opening because nested tool calls lack durable intent/result receipts. Use the [matching development build](installation.md#examples-and-upgrades) and [storage support limits](state.md#choose-how-to-store-a-conversation).
 
 An unknown call outcome raises `LocalRecoveryRequired`. Verify the effects of unresolved root calls, then supply `reconciled_calls` to reopen the original conversation. An active child whose runtime cannot be restored still blocks reopening. See [local recovery](state.md#recover-after-interruption).
 
@@ -245,11 +264,19 @@ Both types carry a native request's `description`. For `ApprovalRequest`, return
 
 For an `ElicitationRequest` form, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
 
+Standard forms can use primitive or general schemas, including nested objects and arrays on the general route; see [form schema support](approvals.md#handle-native-approvals-and-forms) for validation limits.
+
 A URL request has an empty schema, plus `url` and `elicitation_id`. Return `request.reply_url_accept()` from a one-shot handler or use `await request.accept_url()` in an explicit Session to consent. Decline with `request.reply(None)` or `await request.decline()`.
 
 In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server's completion notification. Keep the Session open while waiting. Consent does not establish completion, and a server notification does not independently verify the result.
 
 A timeout expires the interaction and raises `TimeoutError`. Cancelling the waiter stops only that wait. A Session-scoped URL request has no turn or submission ID. The SDK never visits its URL. See [native interactions and their limits](approvals.md#answer-interactions-during-a-one-shot-run).
+
+### VerificationProof and VerificationRequest
+
+These types serve a separately provisioned trusted verification service; SDK support does not establish service eligibility. `VerificationProof(credential_id, signature)` carries the signer's result. Submission requires a nonempty credential ID of at most 1024 UTF-8 bytes and canonical unpadded base64url encoding of 1 through 128 signature bytes.
+
+`VerificationRequest.challenge` contains the exact immutable bytes to sign. `title` is service display text, and `server_name` is the application's registered service alias. A one-shot handler returns `request.reply(proof)` or `request.reply(None)` to decline. An explicit Session uses `await request.respond(proof)` or `await request.decline()`. Enqueue acknowledgment does not establish service acceptance. See [verification challenges](approvals.md#answer-a-verification-challenge).
 
 ## MCP connections
 
@@ -280,9 +307,15 @@ StdioMCP(*, name: str, tools: Sequence[str], command: str,
 
 For both descriptors, `transform_result_timeout=None` uses a 30-second deadline; it does not disable the deadline. An explicit value must be in `(0, 3600]` seconds and requires `transform_result`. This deadline is separate from tool execution and approval. Where supported, `defer_loading=True` controls when the model sees selected schemas. It does not delay connection startup.
 
+### HostedVerificationMCP and ChatGPTAppsMCP
+
+These integrations require separately provisioned service access and credentials; they are not a general service-availability promise. Both use the fixed server name `codex_apps`. `HostedVerificationMCP` accepts the other `HttpMCP` options, including selected tools, trusted service `url`, and optional `bearer_token`. The application supplies its trusted signer and enrollment. Use a new Session to replace the fixed registration.
+
+`ChatGPTAppsMCP` requires selected `tools`, an explicit first-party ChatGPT `access_token`, and its exact `account_id`. Its URL is fixed, and it accepts no `bearer_token` override. Credentials are separate from model-provider authentication. It does not read a saved login or refresh tokens; open a fresh Session to replace credentials. See [service-specific MCP integrations](mcp.md#service-specific-integrations).
+
 ### MCPCallContext
 
-Supplies context to MCP `before` and `approval`. `context.call.call_id` is `None` when native supplies no provider call ID.
+Supplies context to MCP `before` and `approval`. `context.call.call_id` is `None` when native supplies no provider call ID. The synchronous or asynchronous `approval(context, call)` returns exactly `bool` or `StopTurn`, without a transform deadline. See [MCP policies](mcp.md#mcp-result-policies).
 
 ### MCPResultContext
 
@@ -309,8 +342,8 @@ Environment options have these limits:
 
 - `tools` selects any combination of `exec_command`, `write_stdin` and `apply_patch`, defaulting to none. `write_stdin` requires `exec_command`.
 - `approval` returns bool or `StopTurn`, without a transform deadline. It sees original arguments. Denial skips `transform_arguments`. `policy_timeout` bounds only transforms.
-- Result transforms support default-mode direct calls and generated calls with `Agent(programmatic_tool_calling=True)`. See [executor policies](execution.md#executor-policies).
-- `capability_directories` contains absolute paths or `file:` URIs on the selected executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots.
+- Result transforms support default-mode direct calls and generated calls with `Agent(programmatic_tool_calling=True)`. Result control also withholds raw command-output deltas and output fields in controlled execution records. See [executor policies](execution.md#transform-executor-arguments-and-results).
+- `capability_directories` contains absolute paths or `file:` URIs on the selected executor. `None` keeps native discovery defaults. An empty sequence selects no discovery roots. See [native skill setup](execution.md#supply-native-skills) for the `skills/NAME/SKILL.md` layout and restore rules.
 - `network` accepts immutable `NetworkPolicy` or a same-field dictionary. Explicit policies require `"exec_command"` and a compatible Linux or macOS managed-proxy executor. Windows rejects them in this revision. The Python controller may run on another OS. See [network and local socket access](execution.md#network-and-local-socket-access).
 
 Use [`Environment.local()`](execution.md#local-execution) on supported Linux and macOS hosts. `writable_roots` lists existing writable directories in addition to `cwd`. For WSS, pass a non-`None` sequence to enable the strict write policy. Use `writable_roots=[]` to grant writes only in `cwd`. A macOS WSS Environment keeps the roots you choose when opening the Session. See [per-turn write roots](execution.md#replace-write-roots-between-turns) for policy changes and restore.
@@ -372,6 +405,38 @@ Supports `reasoning_effort`, `reasoning_summary` and `service_tier`. Omitted set
 `TraceContext(*, traceparent, tracestate=None)` holds validated W3C trace headers. `to_headers()` returns a new header mapping. Import `TraceContext` from `agents`. Pass it or a mapping containing `traceparent` and optional `tracestate` as `parent_trace` when opening a Session, running an Agent, or submitting a new root Turn. See [trace correlation](observability.md#continue-a-trace-across-workers) for inheritance and restore rules.
 
 Import `TraceOptions` from `agents.telemetry` for the `trace_options` argument. These options control native tracing linkage and policy. A local `TraceOptions.parent` uses an SDK `SpanContext`; a `TraceContext` carries only W3C headers between workers. Neither type grants tool or workspace access.
+
+### Native workflow scopes and TraceOptions
+
+These APIs require a development build newer than alpha.6; follow the [matching-source setup](installation.md#examples-and-upgrades). Import them from `agents.telemetry`.
+
+```text
+trace(name, *, options=None) -> TraceScope
+span(name, *, options=None) -> TraceScope
+current_context() -> SpanContext | None
+TraceOptions(*, parent=None, detached=False, trace_id=None, group_id=None,
+             metadata={}, disabled=None, include_sensitive_data=None,
+             export_credentials=None)
+TraceExportCredentials(*, headers)
+```
+
+Use a `TraceScope` as a synchronous context manager, or call `start()` and `end()` in the same task. `context` supplies the local `SpanContext` after entry. `set_outcome(status=..., category=None)` accepts `"ok"`, `"error"`, or `"cancelled"`; category is an optional short ASCII identifier. New workflows default to metadata-only. Disabled and content restrictions are inherited even when linkage is detached. See [local trace scopes](observability.md#group-work-in-a-local-trace) for lifetime and parent selection.
+
+### Native processors and delivery
+
+Processor registration, `force_flush`, and shutdown budgets were added after alpha.6. Use the same [development-build setup](installation.md#examples-and-upgrades) and `agents.telemetry` namespace.
+
+```text
+await configure(*, traces=None, logs=None, metrics=None, environment="dev",
+                span_attributes=None, log_user_prompt=False,
+                log_agent_responses=False, tool_result_max_bytes=0, processors=())
+add_trace_processor(processor) -> None
+set_trace_processors(processors) -> None
+await force_flush(*, timeout_ms=10000) -> FlushResult
+await shutdown(*, timeout_ms=None) -> None
+```
+
+A processor implements `on_trace_event(event: TraceLifecycleEvent)` synchronously or asynchronously. Add preserves the native exporter; set replaces future routes, including that exporter. `FlushResult` has `status`, `dropped_records`, `failed_deliveries`, and `barrier`. Flush success does not prove storage or viewer visibility. See [custom sinks and delivery limits](observability.md#send-native-traces-to-an-application-sink).
 
 ## Native tools and delegation
 

@@ -96,7 +96,7 @@ The **Tests** workflow checks each pull request's merge commit and runs on pushe
 
 #### Identify the artifact
 
-Every selected platform publishes a `native-snapshot-<OS>-<ARCH>` artifact before any SDK or installed-package qualification starts in that run. Qualification repacks the current Python SDK around the verified native payload, then publishes the existing `native-<OS>-<ARCH>` output. Installed-package, IPC, executable-symbol and receipt checks remain required.
+Every selected platform publishes a `native-snapshot-<OS>-<ARCH>-<input-hash>` artifact before any SDK or installed-package qualification starts in that run. Qualification repacks the current Python SDK around the verified native payload, then publishes the existing `native-<OS>-<ARCH>` output. Installed-package, IPC, executable-symbol and receipt checks remain required.
 
 #### Check donor eligibility
 
@@ -109,11 +109,15 @@ A donor is a push run that supplies a reusable native artifact. For each donor, 
 
 A branch producer also records its unique open PR, repository IDs and branch refs before publication. Consumers compare that captured identity with their current PR. Pre-PR or ambiguous associations do not qualify, and PR-scoped products never supply canonical pushes or another PR.
 
-PR Tests checks the latest 20 successful push runs for each eligible source. It reuses a compatible, qualified snapshot if one exists. Otherwise it starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
+Tests searches artifacts by the exact native input hash, so later docs-only runs do not hide a retained snapshot. The hash covers native sources, pins, patches, build scripts and settings, copied licenses, the test executor and executable CI controls. Python sources and dependencies can change without a native rebuild; qualification repacks and tests the current SDK. Snapshots and their captured producer identity are retained for 90 days. If no eligible snapshot exists, Tests checks the latest 20 successful push runs per source for reusable Rust dependencies, then starts a fresh build immediately. Incomplete source-history reads and corrupted downloads fail visibly. A copied snapshot must pass the same source, publication and qualification checks.
+
+In this repository's CI, macOS snapshot reuse, SDK qualification and SDK tests use the ARM64 `macos-15` runner. Cold native builds and dependency-only reuse use `macos-15-xlarge`.
+
+Artifact-control Python commands isolate startup from unbound checkout imports. Native CI rejects tracked Python bytecode/cache paths and root `.python-version`, `uv.toml` or `.venv` overrides before setting up uv; keep build settings in `pyproject.toml`.
 
 #### Keep native and SDK caches separate
 
-Native producers do not restore or save Actions caches. They prefer verified native snapshots. If only local Rust source and permitted SDK files changed, they can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. They use the same donor, digest, publication and qualification checks as snapshots. They preserve dependency sources and timestamps, remove compiled `codex-agents-python` outputs, and require matching build environments. Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
+Native producers do not restore or save Actions caches. They prefer verified native snapshots. If only local Rust source and Python SDK files changed, they can restore a separate verified dependency artifact and rebuild the current native package. Only push runs publish dependency artifacts. They use the same donor, digest, publication and qualification checks as snapshots. They preserve dependency sources and timestamps, remove compiled `codex-agents-python` outputs, and require matching build environments. Pin, patch, lockfile, build-script or workflow changes require a cold build. Missing artifacts also fall back immediately to a cold build; CI never waits for another build. SDK-phase caches remain separate, and every new native package still passes full platform qualification.
 
 ## Keep the pin and source verifiable
 

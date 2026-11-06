@@ -221,6 +221,33 @@ async def test_restore_rebinds_callback_and_explicit_summary_bypasses_it(respons
     assert len(responses.requests) == 1
 
 
+async def test_retained_summary_bypasses_hook_and_preserves_it_for_later_compaction(responses):
+    calls = []
+
+    def compact(request):
+        calls.append(request.trigger)
+        return "Callback summary."
+
+    responses.respond(assistant_output("Original reference: atlas-17."))
+    responses.respond(assistant_output("Continued."))
+    agent = Agent(instructions="Answer.", provider=provider(responses), before_compact=compact)
+    async with timeout(20), agent.session() as session:
+        await (await session.submit("Read the reference.")).get_result()
+        snapshot = await session.model_context()
+        retain = [i for i, item in enumerate(snapshot.items) if item.get("role") == "assistant"]
+        assert len(retain) == 1
+        await session.compact(summary="Application summary.", snapshot=snapshot, retain=retain)
+        assert calls == []
+        await (await session.submit("Continue.")).get_result()
+        await session.compact()
+        saved = await session.save_state()
+    assert calls == ["manual"]
+    assert len(responses.requests) == 2
+    assert "Original reference: atlas-17." in json.dumps(responses.requests[-1]["input"])
+    assert "Application summary." in json.dumps(responses.requests[-1]["input"])
+    assert "Callback summary." in saved.to_json()
+
+
 @pytest.mark.parametrize("summary", ["", " \n\t"])
 async def test_empty_summary_cannot_replace_history(responses, summary):
     agent = Agent(

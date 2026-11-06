@@ -10,7 +10,7 @@ from collections.abc import AsyncIterator
 from copy import deepcopy
 from pathlib import Path
 from threading import Event as ThreadEvent
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 from openai.types.responses import (
@@ -20,7 +20,15 @@ from openai.types.responses import (
 )
 from pydantic import BaseModel
 
-from agents import NativeError
+from agents import (
+    Allow,
+    CustomStorage,
+    Deny,
+    LocalStorage,
+    NativeError,
+    SessionState,
+    SQLiteSessionStore,
+)
 from agents.classic import Agent, Model, ModelProvider, RunContextWrapper, function_tool
 from agents.classic.exceptions import MaxTurnsExceeded, ModelBehaviorError, UserError
 from agents.classic.items import ModelResponse
@@ -30,6 +38,8 @@ from agents.classic.tool_context import ToolContext as ClassicToolContext
 from agents.classic.usage import Usage
 from agents.migration import SDKRunner, SDKRunResult
 from agents.migration._transport import _ResponseCarrier
+from tests.native_fixtures import responses as responses
+from tests.test_custom_storage_durability import FaultStore
 
 
 @pytest.fixture(autouse=True)
@@ -268,6 +278,315 @@ async def test_named_model_uses_only_explicit_provider() -> None:
     assert result.final_output == "named"
     assert names == ["custom/model"]
     assert model.requests[0]["system_instructions"] is None
+
+
+@pytest.mark.parametrize("mode", ["portable", "local", "custom"])
+async def test_restart_preserves_history_and_uses_current_model_and_callback(
+    mode: Literal["portable", "local", "custom"], tmp_path: Path
+) -> None:
+    if mode == "custom" and os.name != "posix":
+        pytest.skip("SQLiteSessionStore requires POSIX locking")
+    effects: list[str] = []
+    approved: list[str] = []
+
+    @function_tool(name_override="record")
+    async def original(value: str) -> str:
+        effects.append(f"old:{value}")
+        return effects[-1]
+
+    @function_tool(name_override="record", needs_approval=True)
+    async def current(ctx: RunContextWrapper[str], value: str) -> str:
+        effects.append(f"{ctx.context}:{value}")
+        return effects[-1]
+
+    async def approve(ctx: ClassicToolContext[str]) -> Allow:
+        approved.append(ctx.tool_call_id)
+        return Allow()
+
+    storage = (
+        LocalStorage(tmp_path / "profile")
+        if mode == "local"
+        else CustomStorage(SQLiteSessionStore(tmp_path / "canonical.sqlite"))
+        if mode == "custom"
+        else None
+    )
+    original_model = ScriptedModel([call("record", call_id="first-id")], [message("first answer")])
+    first = await SDKRunner.run(
+        Agent("Record", model=original_model, tools=[original]),
+        "first input",
+        storage=storage,
+        return_state=mode == "portable",
+    )
+    first_turn = first.native_result.turn
+    saved = first.native_result.state
+    if mode == "portable":
+        assert saved is not None
+        assert saved.source_session_id == first_turn.session_id
+        state = SessionState.from_json(saved.to_json())
+        resume = None
+    else:
+        assert saved is None
+        state = None
+        resume = first_turn.session_id
+
+    new_call = call("record", call_id="second-id", arguments='{"value":"Grace"}')
+    current_model = ScriptedModel([new_call], [message("second answer")])
+
+    class CurrentProvider(ModelProvider):
+        def get_model(self, model_name: str | None) -> Model:
+            assert model_name == "current/model"
+            return current_model
+
+    current_agent = Agent("Record", model="current/model", tools=[current])
+    second = await SDKRunner.run(
+        current_agent,
+        "second input",
+        context="new",
+        model_provider=CurrentProvider(),
+        state=state,
+        storage=storage,
+        resume=resume,
+        return_state=mode == "portable",
+        on_approval=approve,
+    )
+    assert second.final_output == "second answer"
+    assert second.native_result.turn.session_id == first_turn.session_id
+    assert second.native_result.turn.turn_id != first_turn.turn_id
+    assert effects == ["old:Ada", "new:Grace"]
+    assert len(original_model.requests) == len(current_model.requests) == 2
+    request = current_model.requests[0]["input"]
+    assert "first answer" in json.dumps(request)
+    assert [item["call_id"] for item in request if item["type"] == "function_call"] == ["first-id"]
+    assert [
+        (item["call_id"], item["output"])
+        for item in request
+        if item["type"] == "function_call_output"
+    ] == [("first-id", "old:Ada")]
+    if saved is not None:
+        newer = second.native_result.state
+        assert newer is not None
+        historical = next(
+            record
+            for record in saved.history
+            if record["type"] == "response_item" and record["payload"].get("call_id") == "first-id"
+        )
+        assert historical["payload"]["id"] == "item_first-id"
+        assert historical in newer.history
+        state = newer
+
+    repeated = ScriptedModel([call("record", call_id="first-id")])
+    current_agent.model = repeated
+    with pytest.raises(ModelBehaviorError, match="invalid function call identity"):
+        await SDKRunner.run(
+            current_agent,
+            "reject replay",
+            context="new",
+            state=state,
+            storage=storage,
+            resume=resume,
+            on_approval=approve,
+        )
+    assert len(repeated.requests) == 1
+    assert effects == ["old:Ada", "new:Grace"]
+    assert approved == ["second-id"]
+
+
+async def test_replay_guard_includes_calls_removed_from_model_context(responses) -> None:
+    from agents import Agent as NativeAgent, NativeProvider
+    from agents.migration._runner import _native_tool
+
+    effects: list[str] = []
+
+    @function_tool
+    async def record(value: str) -> str:
+        effects.append(value)
+        return value
+
+    model = ScriptedModel([call("record", call_id="historical")], [message("recorded")])
+    agent = Agent("Record", model=model, tools=[record])
+    first = await SDKRunner.run(agent, "record Ada", return_state=True)
+    state = first.native_result.state
+    assert state is not None
+
+    # Use the same tool declaration for native portable restore. Only Core's
+    # public compaction operation changes the context for the next sample.
+    provider = NativeProvider(
+        base_url=responses.url, api_key="synthetic-compaction", supports_websockets=False
+    )
+    native_tool = _native_tool(record, agent, RunContextWrapper(context=None), {}, None)
+    native_agent = NativeAgent(
+        instructions="", model="gpt-5.5", provider=provider, tools=[native_tool]
+    )
+    async with provider, native_agent.session(state=state) as session:
+        await session.compact(summary="The old effect is complete.")
+        state = await session.save_state()
+    assert responses.requests == []
+
+    replay = ScriptedModel([call("record", call_id="historical")])
+    agent.model = replay
+    with pytest.raises(ModelBehaviorError, match="invalid function call identity"):
+        await SDKRunner.run(agent, "continue", state=state)
+    [request] = replay.requests
+    assert "The old effect is complete." in json.dumps(request["input"])
+    assert not any(item.get("call_id") == "historical" for item in request["input"])
+    assert effects == ["Ada"]
+
+
+@pytest.mark.parametrize("cancel", [False, True], ids=["allow", "cancel"])
+async def test_held_approval_keeps_original_model_and_admission(cancel: bool) -> None:
+    entered, release, cancelled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    effects: list[str] = []
+    approvals: list[ClassicToolContext[str]] = []
+
+    @function_tool(needs_approval=True)
+    async def record(ctx: RunContextWrapper[str], value: str) -> str:
+        effects.append(f"{ctx.context}:{value}")
+        return effects[-1]
+
+    async def approval(ctx: ClassicToolContext[str]) -> Allow:
+        approvals.append(ctx)
+        entered.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            # Deliberately return a late allow after the run lost admission.
+        return Allow()
+
+    original_call = call("record", arguments=' { "value": "Ada" } ')
+    model = ScriptedModel([original_call], [message("original model finished")])
+    replacement = ScriptedModel([message("must not run")])
+    agent = Agent("Approval", model=model, tools=[record])
+    task = asyncio.create_task(
+        SDKRunner.run(agent, "record Ada", context="app", on_approval=approval, return_state=True)
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 15)
+        assert not task.done()
+        assert effects == []
+        assert len(model.requests) == 1
+        [approval_context] = approvals
+        assert approval_context.agent is agent
+        assert approval_context.context == "app"
+        assert approval_context.usage.requests == 1
+        assert approval_context.tool_call == original_call
+        assert approval_context.tool_arguments == original_call.arguments
+        assert approval_context.turn_input == model.requests[0]["input"]
+        agent.model = replacement
+        if cancel:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 15)
+            assert cancelled.is_set()
+            assert effects == []
+            assert len(model.requests) == 1
+        else:
+            release.set()
+            result = await asyncio.wait_for(task, 15)
+            assert result.final_output == "original model finished"
+            assert result.native_result.state is not None
+            assert result.native_result.state.native_continuation is None
+            assert effects == ["app:Ada"]
+            assert len(model.requests) == 2
+        assert replacement.requests == []
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_static_approval_denial_is_recorded_without_dispatch(tmp_path: Path) -> None:
+    @function_tool(needs_approval=True)
+    async def record(value: str) -> str:
+        pytest.fail("denied tool ran")
+
+    async def deny(_ctx: ClassicToolContext[None]) -> Deny:
+        return Deny("application denied")
+
+    model = ScriptedModel([call("record")], [message("finished without effect")])
+    storage = LocalStorage(tmp_path / "profile")
+    agent = Agent("Approval", model=model, tools=[record])
+    result = await SDKRunner.run(agent, "record Ada", storage=storage, on_approval=deny)
+    assert result.final_output == "finished without effect"
+    agent.model = ScriptedModel([message("resumed after denial")])
+    resumed = await SDKRunner.run(
+        agent,
+        "continue",
+        storage=storage,
+        resume=result.native_result.turn.session_id,
+        on_approval=deny,
+    )
+    assert resumed.final_output == "resumed after denial"
+    receipt = next(
+        item for item in agent.model.requests[0]["input"] if item["type"] == "function_call_output"
+    )
+    assert receipt["call_id"] == "call_1"
+    assert "application denied" in receipt["output"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SQLiteSessionStore requires POSIX locking")
+async def test_custom_store_result_failure_stops_work_and_requires_native_reconciliation(
+    tmp_path: Path,
+) -> None:
+    store = FaultStore(tmp_path / "canonical.sqlite", "result-fail")
+    storage = CustomStorage(store)
+    effects: list[str] = []
+
+    @function_tool
+    async def record(value: str) -> str:
+        effects.append(value)
+        return value
+
+    agent = Agent("Record", model=ScriptedModel([message("ready")]), tools=[record])
+    first = await SDKRunner.run(agent, "start", storage=storage)
+    resume = first.native_result.turn.session_id
+    failing = ScriptedModel([call("record")], [message("must not run")])
+    agent.model = failing
+    with pytest.raises(RuntimeError, match="Canonical storage failed") as error:
+        await SDKRunner.run(agent, "record Ada", storage=storage, resume=resume)
+    assert "secret-do-not-expose" not in str(error.value)
+    assert store.fired
+    assert effects == ["Ada"]
+    assert len(failing.requests) == 1
+
+    retry = ScriptedModel([message("must not run")])
+    agent.model = retry
+    with pytest.raises(RuntimeError, match="unknown tool outcome"):
+        await SDKRunner.run(agent, "continue", storage=storage, resume=resume)
+    assert retry.requests == []
+    assert effects == ["Ada"]
+
+
+@pytest.mark.parametrize("invalid", ["resume", "return_state", "reconciled_calls"])
+async def test_incompatible_storage_options_fail_before_open(
+    invalid: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agents import ReconciledCall
+
+    options: dict[str, Any] = {
+        "resume": {"resume": "thread"},
+        "return_state": {"storage": LocalStorage(tmp_path / "profile"), "return_state": True},
+        "reconciled_calls": {
+            "reconciled_calls": [
+                ReconciledCall(
+                    thread_id="thread",
+                    turn_id="turn",
+                    call_id="call",
+                    outcome="applied",
+                    result="confirmed",
+                )
+            ],
+        },
+    }[invalid]
+
+    async def forbidden(*_args: Any, **_kwargs: Any) -> None:
+        pytest.fail("invalid persistence options opened the carrier")
+
+    monkeypatch.setattr(_ResponseCarrier, "start", forbidden)
+    model = ScriptedModel([message("must not run")])
+    with pytest.raises(ValueError, match=invalid):
+        await SDKRunner.run(Agent("Invalid", model=model), "hello", **options)
+    assert model.requests == []
 
 
 async def test_existing_openai_adapter_preserves_reasoning_and_native_tool_receipts() -> None:

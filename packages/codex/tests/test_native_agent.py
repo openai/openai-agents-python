@@ -46,6 +46,7 @@ def test_session_exposes_only_the_core_workflow_methods() -> None:
         "cancel_all",
         "suspend",
         "subagents",
+        "model_context",
         "compact",
         "update",
         "events",

@@ -973,13 +973,14 @@ async fn load_rules(
     root: &PathUri,
     paths: &HashSet<PathUri>,
 ) -> Result<String> {
-    let directory = root.join(".claude/rules")?;
+    // SDK-private project metadata, separate from Core's AGENTS.md discovery.
+    let directory = root.join(".agents/rules")?;
     let no_follow = GetMetadataOptions {
         follow_symlinks: false,
     };
     match fs.get_metadata(&directory, no_follow, None).await {
         Ok(m) if m.is_symlink => return Ok(String::new()),
-        Ok(m) => ensure!(m.is_directory, ".claude/rules is not a directory"),
+        Ok(m) => ensure!(m.is_directory, ".agents/rules is not a directory"),
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(String::new()),
         Err(e) => return Err(e.into()),
     }
@@ -1097,4 +1098,36 @@ fn applicable<'a>(source: &'a str, paths: &[String], windows: bool) -> Result<(&
         end += line.len();
     }
     bail!("unclosed YAML frontmatter")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_exec_server::LocalFileSystem;
+
+    #[tokio::test]
+    async fn loads_project_rules_for_matching_paths() -> Result<()> {
+        let project = tempfile::tempdir()?;
+        let rules = project.path().join(".agents/rules");
+        std::fs::create_dir_all(&rules)?;
+        std::fs::write(
+            rules.join("python.md"),
+            "---\npaths:\n  - src/**/*.py\n---\nPreserve callback ordering.\n",
+        )?;
+        let root = PathUri::from_host_native_path(project.path())?;
+        let filesystem = LocalFileSystem::unsandboxed();
+        let access = ReadAccess::NativeFullRead(&filesystem);
+
+        let matching = HashSet::from([root.join("src/agents/session.py")?]);
+        let expected = if cfg!(windows) {
+            "\n.agents\\rules\\python.md:\nPreserve callback ordering.\n\n"
+        } else {
+            "\n.agents/rules/python.md:\nPreserve callback ordering.\n\n"
+        };
+        assert_eq!(load_rules(&access, &root, &matching).await?, expected);
+
+        let nonmatching = HashSet::from([root.join("docs/session.md")?]);
+        assert!(load_rules(&access, &root, &nonmatching).await?.is_empty());
+        Ok(())
+    }
 }

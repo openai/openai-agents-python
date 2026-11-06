@@ -8,6 +8,7 @@ Use a manual `FunctionTool` when your application must obtain or supply a tool r
 | Wait for requests during an explicit Session | [Wait for a request or result](#wait-for-a-request-or-result) |
 | Answer requests during `run()` | [A one-shot handler](#answer-interactions-during-a-one-shot-run) |
 | Answer a native approval, form, or URL request | [Native interaction requests](#handle-native-approvals-and-forms) |
+| Answer a trusted service's verification challenge | [Verification proofs](#answer-a-verification-challenge) |
 | Expire a live request | [Force cancellation](#expire-pending-requests) |
 | Recover an external job after a host restart | [Experimental job recovery](#experimental-job-recovery) |
 
@@ -196,9 +197,39 @@ URL consent does not establish completion or verification. In an explicit Sessio
 
 Handlers may run concurrently. Synchronous handlers run in worker threads and must support concurrent calls. When root work finishes, fails, or is cancelled, the run closes its Session and waits for handlers to finish. Python cannot forcibly stop synchronous worker threads. Use an explicit Session if children must continue after the root finishes or if you need to retry an invalid manual result.
 
-Standard MCP forms support primitive fields and enum-backed multi-select arrays, including titled choices; nested objects and general arrays remain unsupported on that route. OpenAI extension forms support Draft 2020-12 object schemas with nested objects, arrays and single-hop references to local `$defs`. Extension `format` values are annotations; regex keywords, resource identifiers and dynamic references are unsupported. The SDK does not fetch schema resources.
+Standard MCP forms and OpenAI extension forms support these schema modes:
+
+| Schema mode | Supported values and validation |
+| --- | --- |
+| Strict primitive schemas in standard forms | Primitive fields and enum-backed string multi-select arrays, including titled choices. The SDK checks types, bounds, choices and supported formats. |
+| General schemas in standard or OpenAI extension forms | Draft 2020-12 object schemas with nested objects, arrays, root constraints and single-hop references to local `$defs`. The SDK validates JSON values; `format` is an annotation. |
+
+A standard form that does not fit the strict primitive subset uses general validation. For example, its schema can require a nested `profile.active` boolean and a `scores` array of integers. General schemas do not support regex keywords, resource identifiers, dynamic references or references beyond single-hop local `$defs`. The SDK does not fetch schema resources.
 
 Native child interactions require the [explicit opt-in](delegation.md#shared-tools-and-permissions). Use manual tools for application-owned questions, including supported child manual requests. Live replies do not make code cells, processes or child turns portable.
+
+### Answer a verification challenge
+
+`VerificationRequest` is separate from a form or URL consent request. It is available only with an explicit [trusted verification or personal Apps registration](mcp.md#service-specific-integrations). These integrations require separately provisioned service access and credentials. SDK installation does not provide enrollment, signing keys or access to the service.
+
+For a verification request, `challenge` contains the exact bytes to sign. `server_name` identifies the host registration; the service-provided `title` and `description` grant no authority. Use only the signer enrolled for that registration. Never persist the live request, challenge or proof.
+
+The following handler fragment requires your application's asynchronous `sign_challenge(challenge: bytes) -> VerificationProof` function. That function must sign the exact bytes with its enrolled key and return `VerificationProof(credential_id=..., signature=...)`. Encode the signature as canonical URL-safe base64 without `=` padding. It must decode to 1–128 bytes. The nonempty credential ID must be at most 1,024 UTF-8 bytes.
+
+This fragment reuses `answer_native` above for other native requests. Pass `answer_verification` as `on_interaction` for the Agent configured with your registration:
+
+```python
+from agents import VerificationProof, VerificationRequest
+
+
+async def answer_verification(request):
+    if isinstance(request, VerificationRequest):
+        proof: VerificationProof = await sign_challenge(request.challenge)
+        return request.reply(proof)
+    return await answer_native(request)
+```
+
+Return `request.reply(None)` to decline instead of signing. In an explicit Session, use `await request.respond(proof)` or `await request.decline()`. A reply acknowledges enqueueing, not acceptance by the authoritative verification service. The service must verify and consume the challenge before reporting success. URL consent or completed connector OAuth does not automatically sign a later challenge.
 
 ### Ask for application approval
 

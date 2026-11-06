@@ -16,7 +16,7 @@ AG-UI is the only extra direct dependency. It supplies the schema and SSE encode
 
 ## Stream from the worker's Session
 
-Place the following excerpt inside your worker's existing Session scope. The application supplies `agent`, the open `session`, and an asynchronous `send_to_ui` function that writes an HTTP response. Passing the owning Session lets the example verify native item identities.
+Place the following excerpt inside your worker's existing Session scope. The application supplies `agent`, the open `session`, and an asynchronous `send_to_ui` function that writes an HTTP response. For a worker launched from a development checkout's repository root, set `PYTHONPATH=packages/codex` so the `examples.ag_ui` import resolves. Passing the owning Session lets the example verify native item identities.
 
 Capture the output declaration that the worker uses for this Turn. The excerpt submits without an override, so it passes `agent.output_type`. If you pass an `output_type` override to `session.submit`, pass that override to `stream_turn` instead. `Turn` does not expose an output-mode getter, so the application must retain the declaration.
 
