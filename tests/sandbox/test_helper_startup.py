@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import shlex
+import shutil
 import sys
 import tarfile
 from pathlib import Path
@@ -12,11 +13,12 @@ import pytest
 from openai.types.responses import ResponseCustomToolCall
 
 from agents import RunConfig, Runner
-from agents.sandbox import Manifest, SandboxAgent, SandboxRunConfig
+from agents.sandbox import Manifest, SandboxAgent, SandboxPathGrant, SandboxRunConfig
 from agents.sandbox.capabilities import Filesystem, Shell
 from agents.sandbox.capabilities.shell import ShellToolSet
 from agents.sandbox.session import SandboxSession
 from agents.sandbox.session.base_sandbox_session import BaseSandboxSession
+from agents.sandbox.session.runtime_helpers import WORKSPACE_FINGERPRINT_HELPER
 from agents.sandbox.snapshot import NoopSnapshotSpec
 from agents.testing import ModelStep, ScriptedModel
 from tests.test_responses import get_final_output_message, get_function_tool_call
@@ -28,16 +30,35 @@ if TYPE_CHECKING or sys.platform != "win32":
     from agents.sandbox.sandboxes.unix_local import UnixLocalSandboxClient
 
     class _RecordingClient(UnixLocalSandboxClient):
-        def __init__(self) -> None:
+        def __init__(self, outside: Path) -> None:
             super().__init__(inherit_host_environment=False)
+            self.outside = outside
             self.sessions: list[SandboxSession] = []
+            self.cache_dirs: list[Path] = []
 
         async def create(self, **kwargs: Any) -> SandboxSession:
             session = await super().create(**kwargs)
             self.sessions.append(session)
+            helper_dir = Path(WORKSPACE_FINGERPRINT_HELPER.install_path).parent
+            cache_dir = Path(session._snapshot_fingerprint_cache_path()).parent
+            helper_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir.mkdir(parents=True)
+            self.cache_dirs.append(cache_dir)
+            # Approval does not grant host filesystem access. This trusted fixture
+            # permits only its sentinel and helper/cache paths, keeping confinement on.
+            session.state.manifest = session.state.manifest.model_copy(
+                update={
+                    "extra_path_grants": session.state.manifest.extra_path_grants
+                    + tuple(
+                        SandboxPathGrant(path=str(path))
+                        for path in (self.outside, helper_dir, cache_dir)
+                    )
+                }
+            )
             return session
 
 
+@pytest.mark.requires_native_macos_sandbox
 @pytest.mark.asyncio
 @pytest.mark.parametrize("approval", [None, False, True], ids=["file-only", "rejected", "approved"])
 async def test_runner_snapshot_does_not_execute_workspace_startup_files(
@@ -89,7 +110,7 @@ async def test_runner_snapshot_does_not_execute_workspace_startup_files(
         else [Filesystem(), Shell(configure_tools=require_approval)],
         model=ScriptedModel(steps=steps),
     )
-    client = _RecordingClient()
+    client = _RecordingClient(outside)
     config = RunConfig(tracing_disabled=True, sandbox=SandboxRunConfig(client=client))
     try:
         result = await Runner.run(agent, "Write the files.", run_config=config)
@@ -117,8 +138,11 @@ async def test_runner_snapshot_does_not_execute_workspace_startup_files(
         for session in client.sessions:
             await session.shutdown()
             await client.delete(session)
+        for cache_dir in client.cache_dirs:
+            shutil.rmtree(cache_dir, ignore_errors=True)
 
 
+@pytest.mark.requires_native_macos_sandbox
 @pytest.mark.asyncio
 @pytest.mark.parametrize("operation", ["read", "write", "mkdir", "rm", "same-file"])
 async def test_fixed_file_checks_do_not_load_workspace_profile(

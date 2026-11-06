@@ -4,14 +4,14 @@ import asyncio
 import json
 import socket
 import traceback
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import mcp
 import pytest
 import uvicorn
 from mcp.server import Server
-from mcp.types import ListToolsResult, TextContent, Tool
+from mcp.types import ListToolsResult, TextContent
 
 from agents.exceptions import UserError
 from agents.mcp import MCPServerStreamableHttp
@@ -22,6 +22,8 @@ from agents.mcp.server import (
     _validated_v2_http_client_factory,
 )
 
+from .model_compat import Tool
+
 pytestmark = pytest.mark.skipif(not MCP_V2, reason="MCP v2 HTTP behavior")
 httpx2 = pytest.importorskip("httpx2")
 
@@ -30,10 +32,10 @@ httpx2 = pytest.importorskip("httpx2")
 async def test_v2_streamable_http_negotiates_modern_protocol():
     async def list_tools(_context, _params) -> ListToolsResult:
         return ListToolsResult(
-            tools=[Tool(name="probe", input_schema={"type": "object", "properties": {}})]
+            tools=[Tool(name="probe", inputSchema={"type": "object", "properties": {}})]
         )
 
-    app = Server("probe-server", on_list_tools=list_tools).streamable_http_app()
+    app = cast(Any, Server)("probe-server", on_list_tools=list_tools).streamable_http_app()
     socket_ = socket.socket()
     socket_.bind(("127.0.0.1", 0))
     socket_.listen()
