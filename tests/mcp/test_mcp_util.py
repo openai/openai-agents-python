@@ -854,7 +854,7 @@ async def test_to_function_tool_does_not_reuse_nested_static_mcp_meta():
 
 @pytest.mark.asyncio
 async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="openai.agents")
 
     """Test that bad JSON input errors are logged and re-raised."""
     server = FakeMCPServer()
@@ -873,7 +873,7 @@ async def test_mcp_invoke_bad_json_errors(caplog: pytest.LogCaptureFixture):
 async def test_mcp_invoke_bad_json_redacts_payload_when_dont_log_tool_data(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="openai.agents")
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", True)
 
     server = FakeMCPServer()
@@ -897,7 +897,7 @@ async def test_mcp_invoke_bad_json_redacts_payload_when_dont_log_tool_data(
 async def test_mcp_invoke_bad_json_includes_payload_when_tool_logging_enabled(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ):
-    caplog.set_level(logging.DEBUG)
+    caplog.set_level(logging.DEBUG, logger="openai.agents")
     monkeypatch.setattr(_debug, "DONT_LOG_TOOL_DATA", False)
 
     server = FakeMCPServer()
