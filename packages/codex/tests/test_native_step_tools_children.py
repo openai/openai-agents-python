@@ -107,6 +107,8 @@ async def test_child_step_stop_preserves_sibling_and_allows_successor(tmp_path, 
             try:
                 await entered.wait()
                 assert (await root.get_result()).final_output == "root complete"
+                # Selector entry can precede native child-turn publication.
+                await handles(session, 2)
                 children = [child async for child in session.subagents()]
                 stopped, surviving = sorted(
                     children, key=lambda child: child.id != next(iter(owners))
