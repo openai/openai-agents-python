@@ -2404,11 +2404,22 @@ async def test_initial_authorization_cleanup_keeps_bearer_out_of_traceback(inter
 
 
 def _sdk_traceback_frames(error):
-    return (
-        (frame, line)
-        for frame, line in traceback.walk_tb(error.__traceback__)
-        if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex."))
-    )
+    # Asyncio can retain the SDK cancellation in a chained exception.
+    pending = [error]
+    seen = set()
+    while pending:
+        error = pending.pop()
+        if id(error) in seen:
+            continue
+        seen.add(id(error))
+        pending.extend(
+            chained for chained in (error.__cause__, error.__context__) if chained is not None
+        )
+        yield from (
+            (frame, line)
+            for frame, line in traceback.walk_tb(error.__traceback__)
+            if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex."))
+        )
 
 
 def _sdk_traceback_locals(error):
@@ -2499,11 +2510,7 @@ async def test_start_releases_issued_credentials(tmp_path, finish):
                 await sending
         # Keep the provider and finished task alive, including its exception traceback.
         if finish != "success":
-            frames = [
-                (frame, line)
-                for frame, line in traceback.walk_tb(failure.value.__traceback__)
-                if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex."))
-            ]
+            frames = list(_sdk_traceback_frames(failure.value))
             assert frames, "No SDK traceback frames were inspected."
             summary = traceback.StackSummary.extract(frames, capture_locals=True)
             assert TOKEN not in "".join(summary.format())
