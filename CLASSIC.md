@@ -64,7 +64,9 @@ from agents import Agent as NativeAgent
 from agents.classic import Agent as ClassicAgent, Runner
 ```
 
-Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions or RunState objects into native APIs. Keep existing conversations in classic; start a fresh native conversation when porting a workflow. This package provides no automatic conversion to native checkpoints and no Codex-backed compatibility Runner.
+Classic preserves the Python loop, model providers, handoffs, guardrails, streamed results, and supported v0 session and RunState behavior. Native Agent and Session objects have their own execution and storage contracts. Do not pass classic tools, agents, sessions or RunState objects into native APIs. Keep existing conversations in classic; start a fresh native conversation when porting a workflow. This package provides no automatic conversion to native checkpoints.
+
+For a supported single-agent workflow, the experimental [SDKRunner migration adapter](MIGRATION.md) can run an existing Classic Agent and function tools through the native loop. It has a narrower contract than the Classic Runner and rejects unsupported features before execution. Keep workflows that require those features on Classic until you port them to the native API.
 
 Test application behavior after changing imports, including tool effects, guardrail ordering, streamed events, provider settings and saved-state restoration. Application-defined callback and class locations may also participate in saved identity checks; keep those locations stable while testing the namespace change.
 

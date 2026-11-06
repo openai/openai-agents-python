@@ -32,6 +32,24 @@ def test_native_package_without_classic_dependencies() -> None:
     )
 
 
+def test_native_imports_do_not_load_migration() -> None:
+    run_isolated(
+        "import agents, agents.agent, agents.session, sys; "
+        "assert not any(x.startswith(('agents.migration', 'agents.classic')) for x in sys.modules)"
+    )
+
+
+def test_migration_missing_extra_has_actionable_error() -> None:
+    result = run_isolated(
+        "try:\n import agents.migration\n"
+        "except ModuleNotFoundError as exc:\n"
+        " assert 'openai-agents[classic]' in str(exc)\n"
+        "else:\n raise AssertionError('migration imported without Classic dependencies')",
+        no_site=True,
+    )
+    assert result.returncode == 0
+
+
 def test_missing_extra_has_actionable_error() -> None:
     result = run_isolated(
         """

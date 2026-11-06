@@ -20,6 +20,10 @@ The example asks the agent to greet Ada with the Python `greeting` tool and prin
 
 To start without model credentials, choose a [scripted recipe](../docs/sdk/recipes.md#test-application-logic-without-a-model).
 
+## Migrate a v0 workflow
+
+The source-only [migration example](migration.py) runs Classic function tools through the experimental `agents.migration.SDKRunner`. It uses a scripted Model and needs no model credentials. Follow the [migration guide](../MIGRATION.md) for matching-source installation and supported features, then run `python examples/migration.py` from the repository root.
+
 ## Choose an agent task
 
 These programs use the current SDK and model credentials:

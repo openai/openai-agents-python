@@ -1445,6 +1445,7 @@ class Session(Generic[ContextT, OutputT]):
         parent_trace: TraceContext | Mapping[str, str | None] | None = None,
         _tracing_context: str | None = None,
         _expected_codex_login_binding: str | None = None,
+        _migration_transport: bool = False,
     ) -> Session[ContextT, OutputT]:
         parent_trace = _trace_context(parent_trace)
         reconciliation = _validate_storage_opening(storage, state, resume, reconciled_calls)
@@ -1865,6 +1866,16 @@ class Session(Generic[ContextT, OutputT]):
 
                 if telemetry._engine_options is not None:
                     config.update(json.loads(telemetry._engine_options))
+                if _migration_transport:
+                    # Migration stages one response per admitted sampling callback.
+                    # Replaying its private byte carrier cannot repeat inference.
+                    migration_provider = cast(
+                        dict[str, object], config[f"model_providers.{provider_id}"]
+                    )
+                    migration_provider["request_max_retries"] = 0
+                    migration_provider["stream_max_retries"] = 0
+                    config["features.respect_system_proxy"] = False
+                    config["features.system_proxy_fallback"] = False
                 if programmatic_tool_calling:
                     config["features.code_mode_host"] = {
                         "enabled": True,

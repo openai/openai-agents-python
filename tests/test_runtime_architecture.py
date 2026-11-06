@@ -21,7 +21,7 @@ _LEAVES = {"config", "version"}
 _PUBLIC_MODULES = sorted(
     ".".join(path.relative_to(_PACKAGE).with_suffix("").parts)
     for path in _PACKAGE.rglob("*.py")
-    if path.relative_to(_PACKAGE).parts[0] != "classic"
+    if path.relative_to(_PACKAGE).parts[0] not in {"classic", "migration"}
     and "_runtime" not in path.relative_to(_PACKAGE).parts
     and path.name != "__init__.py"
     and path.stem not in _LEAVES
