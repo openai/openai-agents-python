@@ -91,7 +91,7 @@ ToolSearchOutputRawItem: TypeAlias = ResponseToolSearchOutputItem | dict[str, An
 
 # Distinguish a missing dict entry from an explicit None value.
 _MISSING_ATTR_SENTINEL = object()
-_JSON_OUTPUT_ADAPTER = pydantic.TypeAdapter(Any)
+_JSON_OUTPUT_ADAPTER: pydantic.TypeAdapter[Any] = pydantic.TypeAdapter(Any)
 
 
 @dataclass

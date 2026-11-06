@@ -1615,6 +1615,98 @@ class TestDaytonaSandbox:
         assert list(entry.output_chunks) == [b"tail"]
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("kill_fails", [False, True])
+    async def test_terminate_pty_entry_disconnects_shielded_reader(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        kill_fails: bool,
+    ) -> None:
+        pty_module = pytest.importorskip("daytona.handle.async_pty_handle")
+        daytona_module = _load_daytona_module(monkeypatch)
+        sandbox = _FakeDaytonaSandbox()
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+        receiving = asyncio.Event()
+
+        class WebSocket:
+            closed = False
+
+            async def receive(self) -> Any:
+                receiving.set()
+                await asyncio.Event().wait()
+
+            async def close(self) -> bool:
+                self.closed = True
+                return True
+
+        async def fail_kill(_session_id: str) -> None:
+            raise RuntimeError("remote termination failed")
+
+        if kill_fails:
+            monkeypatch.setattr(sandbox.process, "kill_pty_session", fail_kill)
+        websocket = WebSocket()
+        handle = pty_module.AsyncPtyHandle(websocket)
+        entry = daytona_module._DaytonaPtySessionEntry(  # noqa: SLF001
+            daytona_session_id="session-123", pty_handle=handle
+        )
+        worker = asyncio.create_task(session._run_pty_waiter(entry))  # noqa: SLF001
+        entry.worker_task = worker
+        try:
+            await receiving.wait()
+            await asyncio.sleep(0)
+            await session._terminate_pty_entry(entry)  # noqa: SLF001
+            assert websocket.closed
+            assert handle._wait.done()  # noqa: SLF001
+            assert worker.done()
+            assert entry.worker_task is None
+        finally:
+            await handle.disconnect()
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("cancel_disconnect", [False, True])
+    async def test_terminate_pty_entry_cleans_worker_when_disconnect_is_interrupted(
+        self, monkeypatch: pytest.MonkeyPatch, cancel_disconnect: bool
+    ) -> None:
+        daytona_module = _load_daytona_module(monkeypatch)
+        sandbox = _FakeDaytonaSandbox()
+        state = daytona_module.DaytonaSandboxSessionState(
+            manifest=Manifest(root=daytona_module.DEFAULT_DAYTONA_WORKSPACE_ROOT),
+            snapshot=NoopSnapshot(id="snapshot"),
+            sandbox_id=sandbox.id,
+        )
+        state.timeouts.cleanup_s = 0.01
+        session = daytona_module.DaytonaSandboxSession.from_state(state, sandbox=sandbox)
+        disconnected = asyncio.Event()
+
+        class Handle:
+            async def disconnect(self) -> None:
+                try:
+                    if cancel_disconnect:
+                        raise asyncio.CancelledError
+                    await asyncio.Event().wait()
+                finally:
+                    disconnected.set()
+
+        worker = asyncio.create_task(asyncio.Event().wait())
+        entry = daytona_module._DaytonaPtySessionEntry(  # noqa: SLF001
+            daytona_session_id="session-123", pty_handle=Handle(), worker_task=worker
+        )
+        if cancel_disconnect:
+            with pytest.raises(asyncio.CancelledError):
+                await session._terminate_pty_entry(entry)  # noqa: SLF001
+        else:
+            await asyncio.wait_for(session._terminate_pty_entry(entry), timeout=1)  # noqa: SLF001
+        assert disconnected.is_set()
+        assert worker.done()
+        assert entry.worker_task is None
+
+    @pytest.mark.asyncio
     async def test_terminate_pty_entry_awaits_worker_finalizer(
         self,
         monkeypatch: pytest.MonkeyPatch,
