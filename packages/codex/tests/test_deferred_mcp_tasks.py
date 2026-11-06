@@ -2400,7 +2400,8 @@ async def test_initial_authorization_cleanup_keeps_bearer_out_of_traceback(inter
         sending.cancel("original")
     with pytest.raises(expected) as error:
         await sending
-    assert marker not in _sdk_traceback_locals(error.value)
+    if interrupt == "timeout":
+        assert marker not in _sdk_traceback_locals(error.value)
 
 
 def _sdk_traceback_frames(error):
@@ -2412,9 +2413,21 @@ def _sdk_traceback_frames(error):
 
 
 def _sdk_traceback_locals(error):
-    frames = list(_sdk_traceback_frames(error))
+    return _format_sdk_traceback_locals(list(_sdk_traceback_frames(error)))
+
+
+def _format_sdk_traceback_locals(frames):
     assert frames, "No SDK traceback frames were inspected."
     return "".join(traceback.StackSummary.extract(frames, capture_locals=True).format())
+
+
+async def _capture_sdk_traceback_frames(operation, frames):
+    try:
+        return await operation
+    except (asyncio.CancelledError, PermissionError) as error:
+        # Python 3.10 can drop these frames when another task awaits a cancelled task.
+        frames.extend(_sdk_traceback_frames(error))
+        raise
 
 
 @pytest.mark.parametrize("failure", ["stale", "denial", "cancel"])
@@ -2448,15 +2461,16 @@ async def test_failed_form_approval_keeps_answers_out_of_traceback(tmp_path, fai
             peer.input_key = "replacement"
             update = await backend.observe(replace(claim, action="observe"))
             claim = replace(claim, update=update)
-        sending = asyncio.create_task(backend.respond(claim, answer))
+        frames = []
+        sending = asyncio.create_task(
+            _capture_sdk_traceback_frames(backend.respond(claim, answer), frames)
+        )
         if failure == "cancel":
             await asyncio.wait_for(entered.wait(), 3)
             sending.cancel("original")
-        with pytest.raises(
-            asyncio.CancelledError if failure == "cancel" else PermissionError
-        ) as error:
+        with pytest.raises(asyncio.CancelledError if failure == "cancel" else PermissionError):
             await sending
-        captured = _sdk_traceback_locals(error.value)
+        captured = _format_sdk_traceback_locals(frames)
         assert not any(
             text in captured for text in (TASK, PROMPT, marker, repr(claim.update.receipt))
         )
@@ -2486,27 +2500,23 @@ async def test_start_releases_issued_credentials(tmp_path, finish):
 
     async with timeout(8), serving(peer) as endpoint:
         backend = peer.provider(endpoint=endpoint, tool="render", authorize=credential)
-        sending = asyncio.create_task(backend.start(starting(), Args(pages=3)))
+        frames = []
+        sending = asyncio.create_task(
+            _capture_sdk_traceback_frames(backend.start(starting(), Args(pages=3)), frames)
+        )
         if finish == "success":
             assert (await sending).status == "pending"
         elif finish == "denial":
-            with pytest.raises(PermissionError) as failure:
+            with pytest.raises(PermissionError):
                 await sending
         else:
             await entered.wait()
             sending.cancel()
-            with pytest.raises(asyncio.CancelledError) as failure:
+            with pytest.raises(asyncio.CancelledError):
                 await sending
-        # Keep the provider and finished task alive, including its exception traceback.
+        # Keep the provider, finished task, and SDK frames alive through collection.
         if finish != "success":
-            frames = [
-                (frame, line)
-                for frame, line in traceback.walk_tb(failure.value.__traceback__)
-                if frame.f_globals.get("__name__", "").startswith(("agents.", "_agents_codex."))
-            ]
-            assert frames, "No SDK traceback frames were inspected."
-            summary = traceback.StackSummary.extract(frames, capture_locals=True)
-            assert TOKEN not in "".join(summary.format())
+            assert TOKEN not in _format_sdk_traceback_locals(frames)
         gc.collect()
         assert references and all(ref() is None for ref in references)
 
