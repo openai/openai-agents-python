@@ -52,7 +52,10 @@ if TYPE_CHECKING:
         MCPResultContext as MCPResultContext,
         StdioMCP as StdioMCP,
     )
-    from .model_context import ModelRequestContext as ModelRequestContext
+    from .model_context import (
+        ModelContextSnapshot as ModelContextSnapshot,
+        ModelRequestContext as ModelRequestContext,
+    )
     from .native_agents import (
         ChildInvocation as ChildInvocation,
         NativeAgents as NativeAgents,
@@ -133,6 +136,7 @@ if TYPE_CHECKING:
     from .usage import RunBudget as RunBudget
 
 _MODULES = {
+    "ModelContextSnapshot": ".model_context",
     "ModelRequestContext": ".model_context",
     "RunBudget": ".usage",
     "PreparedRequest": ".prepared_request",

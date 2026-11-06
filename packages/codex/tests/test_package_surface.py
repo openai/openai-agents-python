@@ -40,8 +40,11 @@ class ForbiddenRuntime(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, ForbiddenRuntime())
 import agents
 from agents import Agent, HttpMCP, NativeProvider, StdioMCP, ToolContext, function_tool
-from agents import ModelRequestContext
+from agents import ModelContextSnapshot, ModelRequestContext
+from agents.model_context import ModelContextSnapshot as SnapshotFromModule
 from agents.state import SessionState
+
+assert ModelContextSnapshot is SnapshotFromModule
 
 def reject_socket(*args, **kwargs):
     raise AssertionError('Declaration opened a socket')

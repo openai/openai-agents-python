@@ -15,6 +15,19 @@ from ._public import preserve_module_identity as _preserve_module_identity
 ContextT = TypeVar("ContextT")
 
 
+@dataclass(frozen=True, eq=False)
+class ModelContextSnapshot:
+    """Current model context captured by an idle Session.
+
+    ``items`` contains detached Responses-shaped JSON in native context order.
+    Editing the JSON does not change the originals used by ``Session.compact``.
+    Pass the issued object back to the same Session while its context is current.
+    Capture a new snapshot after restoring a Session or replacing its context.
+    """
+
+    items: tuple[dict[str, Any], ...] = field(repr=False)
+
+
 @dataclass(frozen=True)
 class ModelRequestContext(Generic[ContextT]):
     """Detached input and identity for one awaited context transformation.

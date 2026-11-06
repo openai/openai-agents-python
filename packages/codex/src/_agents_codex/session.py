@@ -113,7 +113,7 @@ from .mcp import (
     _result_policies as _result_policies,
     _tool_names as _tool_names,
 )
-from .model_context import ModelRequestContext
+from .model_context import ModelContextSnapshot, ModelRequestContext
 from .native_agents import (
     _COLLABORATION_TOOLS as _COLLABORATION_TOOLS,
     ChildInvocation as ChildInvocation,
@@ -2638,6 +2638,10 @@ class Session(Generic[ContextT, OutputT]):
         self._websockets_enabled = False
         self._engine = engine
         self._native = thread
+        # Issued snapshots belong to this Session's current native thread.
+        self._model_context_snapshots: weakref.WeakKeyDictionary[ModelContextSnapshot, str] = (
+            weakref.WeakKeyDictionary()
+        )
         self._home = home
         self._catalog = catalog
         # MCP publication keeps this exact captured tuple; rebinding an idle
@@ -3841,7 +3845,31 @@ class Session(Generic[ContextT, OutputT]):
             state.add_callback(delivery)
             return cast(Turn[Any], await _join(delivery, outcome=delivered))
 
-    async def compact(self, *, summary: str | None = None) -> None:
+    async def model_context(self) -> ModelContextSnapshot:
+        """Read the current native model context of an idle Session.
+
+        Use the positions in ``snapshot.items`` to select originals for supplied
+        compaction. This snapshot is separate from the Session's canonical history
+        and from any per-request transformation.
+        """
+        self._check_callback_operation("read the model context of its own Session")
+        self._check_idle_update()
+
+        async def capture() -> ModelContextSnapshot:
+            captured = await self._native._read_model_context()
+            snapshot = ModelContextSnapshot(tuple(json.loads(captured)["items"]))
+            self._model_context_snapshots[snapshot] = captured
+            return snapshot
+
+        return await self._join_mutation(asyncio.create_task(capture()))
+
+    async def compact(
+        self,
+        *,
+        summary: str | None = None,
+        snapshot: ModelContextSnapshot | None = None,
+        retain: Sequence[int] | None = None,
+    ) -> None:
         """Compact native conversation context and wait for owned settlement.
 
         This idle-only operation uses Core's compaction task. It does not submit
@@ -3851,17 +3879,31 @@ class Session(Generic[ContextT, OutputT]):
 
         With summary, replace model context with the supplied nonempty text,
         preserving current instructions and the original canonical history.
-        This does not call the model or create a Turn. It requires an exclusively
-        idle root without child or background work. Local profiles cannot be
-        copied into this private context. Programmatic tool calling is supported
+        This does not call the model or create a Turn. Pass both ``snapshot`` and
+        ``retain`` to also keep original items. Use a snapshot that this Session
+        issued for its current model context. Pass zero-based item indices.
+        The selection may be empty. Duplicate indices count once, and items
+        keep their native order.
+        System and developer items are always kept. Select both items of a
+        tool call and result pair, or omit both. Portable SessionState saves the
+        resulting context and canonical history. Snapshots themselves are tied
+        to the live Session.
+
+        Supplied compaction requires an exclusively idle root without child
+        or background work. Open the Session without a storage profile.
+        Programmatic tool calling is supported
         only while full native history proves that no code VM was used. Used or
         previously compacted programmatic sessions must use compact() instead.
         Used code state remains subject to this restriction while dormant.
-        Unresolved tool effects are not discarded. Current bindings and the Session's workspace stay
-        owned by this Session. Cancellation joins this publication before new
-        work may start; a published summary is not rolled back.
+        Unresolved tool effects block compaction. The Session keeps its current
+        bindings and workspace. A setup failure before retirement leaves the
+        original context active. Cancellation waits for publication to settle
+        before new work can start. If publication succeeds, the summary and
+        retained items remain in effect.
         """
         self._check_callback_operation("compact its own Session")
+        if (snapshot is None) != (retain is None) or (snapshot is not None and summary is None):
+            raise ValueError("Pass snapshot and retain together with a supplied summary")
         if summary is not None:
             self._check_idle_update()
             if not isinstance(summary, str):
@@ -3873,7 +3915,27 @@ class Session(Generic[ContextT, OutputT]):
                 child.busy for child in self._child_callbacks.values()
             ):
                 raise RuntimeError("Cannot compact while native child callbacks remain active")
-            await self._join_mutation(asyncio.create_task(self._compact_context(summary)))
+            captured = None
+            indices: set[int] = set()
+            if snapshot is not None:
+                if type(snapshot) is not ModelContextSnapshot:
+                    raise TypeError("snapshot must be a ModelContextSnapshot")
+                captured = self._model_context_snapshots.get(snapshot)
+                if captured is None:
+                    raise ValueError(
+                        "snapshot must come from this Session's current native context"
+                    )
+                assert retain is not None
+                for index in retain:
+                    if not isinstance(index, int) or isinstance(index, bool):
+                        raise TypeError("retain indices must be integers")
+                    index = int(index)
+                    if not 0 <= index < len(snapshot.items):
+                        raise ValueError("retain index is outside the snapshot")
+                    indices.add(index)
+            await self._join_mutation(
+                asyncio.create_task(self._compact_context(summary, captured, indices))
+            )
             return
         handle = await self._start(None, self._default_output)
         try:
@@ -3884,7 +3946,7 @@ class Session(Generic[ContextT, OutputT]):
                 await _close_after_error(error, lambda: self._cancel(handle))
             raise
 
-    async def _compact_context(self, summary: str) -> None:
+    async def _compact_context(self, summary: str, captured: str | None, indices: set[int]) -> None:
         assert self._native_options is not None
         assert self._opening_agent is not None
         native = importlib.import_module("agents._native")
@@ -3893,15 +3955,19 @@ class Session(Generic[ContextT, OutputT]):
         thread = None
         retiring = False
         try:
-            current = json.loads(change.context())
-            retained = [
+            encoded = change.context()
+            # Both native reads serialize the same full snapshot, including revisions.
+            if captured is not None and captured != encoded:
+                raise ValueError("snapshot is stale. Call Session.model_context() again.")
+            current = json.loads(encoded)
+            indices.update(
                 index
                 for index, item in enumerate(current["items"])
                 if item.get("role") in ("system", "developer")
-            ]
+            )
             # Core constructs the checkpoint from original native envelopes,
             # rejects unknown/unpaired effects, and retains review provenance.
-            checkpoint = change.prepare(summary, retained)
+            checkpoint = change.prepare(summary, sorted(indices))
             saved = json.loads(checkpoint)
             code = saved.get("root_code_mode")
             if code is not None and (
@@ -3991,6 +4057,7 @@ class Session(Generic[ContextT, OutputT]):
             await self._engine.close()
             self._engine = engine
             self._native = thread
+            self._model_context_snapshots.clear()
             engine = thread = None
             self._reader = _create_task(self._read_events())
             self._sealing = False
@@ -8467,6 +8534,7 @@ class Session(Generic[ContextT, OutputT]):
             self._owned_provider = None
         self._model_api_key = None
         self._native_options = None
+        self._model_context_snapshots.clear()
         self._parent_trace = None
         self._closed = True
 
