@@ -97,6 +97,15 @@ The statistics/qualification tests use only the standard library and do not impo
 "$PEER_PY" -m unittest discover -s "$BENCH/tests" -v
 ```
 
+The optional native-SDK cursor check uses the loopback peer to verify a retained
+conversation beyond the observation buffer's retention and rejection of a genuine
+SDK gap. It reports correctness only:
+
+```sh
+uv pip install --python "$NATIVE_PY" 'aiohttp==3.14.3'
+"$NATIVE_PY" "$BENCH/tests/native_stream_cursor.py" -v
+```
+
 Direct cProfile collection remains available after clearing the same inherited controls:
 
 ```sh

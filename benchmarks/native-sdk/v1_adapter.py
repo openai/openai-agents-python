@@ -77,15 +77,17 @@ class Conversation:
     def __init__(self, session, stream):
         self.session = session
         self.stream = stream
+        self.after = 0
 
     async def run(self, prompt: str) -> dict:
         turn = await self.session.submit(prompt)
         deltas = []
         first_delta_ns = None
         if self.stream:
-            async for event in turn.events():
-                if event.type == "event_gap":
+            async for event in turn.events(after=self.after):
+                if event.type == "gap":
                     raise AssertionError("Native stream dropped observations")
+                self.after = event.sequence
                 if event.type == "output_text_delta":
                     if first_delta_ns is None:
                         first_delta_ns = perf_counter_ns()
