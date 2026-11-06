@@ -43,7 +43,8 @@ def test_migration_missing_extra_has_actionable_error() -> None:
     result = run_isolated(
         "try:\n import agents.migration\n"
         "except ModuleNotFoundError as exc:\n"
-        " assert 'openai-agents[classic]' in str(exc)\n"
+        " assert \"python -m pip install '.[classic]'\" in str(exc)\n"
+        " assert 'matching source checkout' in str(exc)\n"
         "else:\n raise AssertionError('migration imported without Classic dependencies')",
         no_site=True,
     )
