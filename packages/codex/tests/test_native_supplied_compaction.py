@@ -4,12 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import json
+from copy import copy, deepcopy
 from dataclasses import replace
 
 import pytest
 from pydantic import BaseModel
 
-from agents import Agent, FunctionTool, ToolContext, function_tool
+from agents import (
+    Agent,
+    FunctionTool,
+    ModelContextSnapshot,
+    NativeError,
+    RunBudget,
+    ToolContext,
+    function_tool,
+)
 from agents.observation import SessionEnded
 from agents.state import SessionState
 from tests._asyncio import timeout
@@ -18,7 +27,11 @@ from tests.test_native_agent_checkpoints import call, message, peer
 from tests.test_native_instruction_updates import application_texts
 
 
-async def test_supplied_summary_keeps_native_history_tools_and_round_trips():
+def has_text(item, text):
+    return any(part.get("text") == text for part in item.get("content", []))
+
+
+async def test_supplied_selection_keeps_originals_in_order_and_round_trips():
     effects: list[str] = []
 
     @function_tool
@@ -27,43 +40,97 @@ async def test_supplied_summary_keeps_native_history_tools_and_round_trips():
         return "receipt:" + ctx.context
 
     async with timeout(30), peer() as wire:
+        wire.usage = {
+            "input_tokens": 17,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 7,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 24,
+        }
         agent = Agent[str, str](instructions="Original.", tools=[record], provider=wire.provider())
-        wire.replies.extend((call("record", "settled-call"), message("settled", "settled-answer")))
+        wire.replies.extend(
+            (
+                message("Omit this answer.", "omitted-answer"),
+                call("record", "settled-call"),
+                message("Keep this answer.", "settled-answer"),
+            )
+        )
         async with agent.session(context="live") as session:
             stream = session.events()
             owner_id = session.id
+            await (await session.submit("Omit this input.")).get_result()
             await session.update(instructions="Current.")
-            original = await session.submit("Remember this long original input.")
+            budget = RunBudget(max_requests=2)
+            original = await session.submit("Keep this input.", budget=budget)
             completed = await original.get_result()
+            assert completed.usage is not None
+            assert completed.usage.last_token_usage.total_tokens == 24
             before = await session.save_state()
             items = [item async for item in session.items()]
+            turns = [turn async for turn in session.turns()]
+            snapshot = await session.model_context()
+            retained = [
+                i
+                for i, item in enumerate(snapshot.items)
+                if item.get("call_id") == "settled-call"
+                or has_text(item, "Keep this input.")
+                or has_text(item, "Keep this answer.")
+            ]
+            assert [snapshot.items[i]["type"] for i in retained] == [
+                "message",
+                "function_call",
+                "function_call_output",
+                "message",
+            ]
+            protected = [
+                i
+                for i, item in enumerate(snapshot.items)
+                if item.get("role") in {"system", "developer"}
+            ]
+            assert protected
+            expected = [deepcopy(snapshot.items[i]) for i in sorted(protected + retained)]
             sent = len(wire.requests)
-            assert await session.compact(summary="Supplied short version: atlas-17.") is None
+            with pytest.raises(RuntimeError, match="retain both original tool call and result"):
+                await session.compact(
+                    summary="Do not publish.", snapshot=snapshot, retain=[retained[1]]
+                )
+            rejected = await session.save_state()
+            assert rejected.history[: len(before.history)] == before.history
+            assert not any(row["type"] == "compacted" for row in rejected.history)
+
+            snapshot.items[retained[0]]["content"][0]["text"] = "Caller edit."
+            snapshot.items[retained[1]]["call_id"] = "edited-call"
+            snapshot.items[protected[0]].clear()
+            assert (
+                await session.compact(
+                    summary="Application summary.",
+                    snapshot=snapshot,
+                    retain=[*reversed(retained), retained[0]],
+                )
+                is None
+            )
             assert len(wire.requests) == sent
             assert session.id == owner_id and await original.get_result() is completed
             assert [item async for item in session.items()] == items
+            assert [turn async for turn in session.turns()] == turns
             saved = await session.save_state()
             assert saved.history[: len(before.history)] == before.history
             assert saved.instructions == "Current."
-            compact = next(
-                r["payload"] for r in reversed(saved.history) if r["type"] == "compacted"
-            )
-            assert compact["message"] == "Supplied short version: atlas-17."
-            assert any(
-                row.get("metadata") is not None
-                for row in saved.history
-                if row["type"] == "response_item"
-            )
+            (row,) = (row for row in saved.history if row["type"] == "compacted")
+            compact = row["payload"]
+            assert compact["message"] == "Application summary."
+            assert compact["replacement_history"][:-1] == expected
+            state = SessionState.from_json(saved.to_json())
             wire.replies.extend(
                 (call("record", "following-call"), message("following", "following-answer"))
             )
-            outcome = await (await session.submit("Work now.")).get_result()
+            outcome = await (await session.submit("Work now.", budget=budget)).get_result()
             assert outcome.final_output == "following"
-            consumed = wire.requests[sent]
-            assert "Supplied short version: atlas-17." in json.dumps(consumed["input"])
-            assert "Remember this long original input." not in json.dumps(consumed["input"])
-            assert application_texts(consumed)[-1] == "Current."
-            state = SessionState.from_json((await session.save_state()).to_json())
+            assert outcome.usage is not None
+            assert (
+                outcome.usage.total_token_usage.total_tokens
+                == completed.usage.total_token_usage.total_tokens + 48
+            )
         events = [event async for event in stream]
         assert isinstance(events[-1], SessionEnded)
         assert effects == ["live", "live"]
@@ -72,10 +139,91 @@ async def test_supplied_summary_keeps_native_history_tools_and_round_trips():
             (call("record", "restored-call"), message("restored", "restored-answer"))
         )
         async with agent.session(context="fresh", state=state) as restored:
-            assert (
-                await (await restored.submit("Use current context")).get_result()
-            ).final_output == "restored"
+            assert restored.id == owner_id
+            assert (await restored.save_state()).history[: len(saved.history)] == saved.history
+            assert [item async for item in restored.items()] == items
+            assert [turn async for turn in restored.turns()] == turns
+            assert (await restored.model_context()).items == tuple(compact["replacement_history"])
+            resumed = await (
+                await restored.submit("Use current context", budget=budget)
+            ).get_result()
+            assert resumed.final_output == "restored"
+            assert resumed.usage == outcome.usage
+            sent_before_block = len(wire.requests)
+            blocked = await restored.submit("No sampling.", budget=RunBudget(max_requests=0))
+            with pytest.raises(NativeError) as stopped:
+                await blocked.get_result()
+            assert stopped.value.code == "run_budget_exceeded"
+            assert len(wire.requests) == sent_before_block
         assert effects == ["live", "live", "fresh"]
+        for consumed in (wire.requests[sent], wire.requests[sent + 2]):
+            input_items = consumed["input"]
+            assert application_texts(consumed)[-1] == "Current."
+            encoded = json.dumps(input_items)
+            assert "Omit this" not in encoded
+            assert "Caller edit." not in encoded
+            assert "edited-call" not in encoded
+            assert [
+                item["type"] for item in input_items if item.get("call_id") == "settled-call"
+            ] == ["function_call", "function_call_output"]
+            ordered_text = ["Keep this input.", "Keep this answer.", "Application summary."]
+            assert [
+                text for item in input_items for text in ordered_text if has_text(item, text)
+            ] == ordered_text
+
+
+async def test_supplied_selection_requires_current_issued_snapshot(monkeypatch):
+    from agents import _native
+
+    def forbid_candidate(*args, **kwargs):
+        pytest.fail("Invalid selection reached candidate acquisition")
+
+    async with timeout(30), peer() as wire:
+        agent = Agent(instructions="Answer.", provider=wire.provider())
+        async with agent.session() as session:
+            stale = await session.model_context()
+            wire.replies.append(message("Original reply."))
+            await (await session.submit("Original input.")).get_result()
+            snapshot = await session.model_context()
+            before = await session.save_state()
+            async with agent.session() as other:
+                foreign = await other.model_context()
+            with monkeypatch.context() as patch:
+                patch.setattr(_native, "create_checkpoint_engine", forbid_candidate)
+                for unissued in (foreign, copy(snapshot), ModelContextSnapshot(snapshot.items)):
+                    with pytest.raises(ValueError, match="this Session"):
+                        await session.compact(summary="No.", snapshot=unissued, retain=[])
+                with pytest.raises(ValueError, match="stale"):
+                    await session.compact(summary="No.", snapshot=stale, retain=[])
+                for kwargs in (
+                    {"snapshot": snapshot, "retain": []},
+                    {"summary": "No.", "snapshot": snapshot},
+                    {"summary": "No.", "retain": []},
+                ):
+                    with pytest.raises(ValueError, match="together.*summary"):
+                        await session.compact(**kwargs)
+                for invalid in (True, 0.0, "0"):
+                    with pytest.raises(TypeError, match="indices must be integers"):
+                        await session.compact(summary="No.", snapshot=snapshot, retain=[invalid])
+                for invalid in (-1, len(snapshot.items)):
+                    with pytest.raises(ValueError, match="outside the snapshot"):
+                        await session.compact(summary="No.", snapshot=snapshot, retain=[invalid])
+                rejected = await session.save_state()
+                assert rejected.history[: len(before.history)] == before.history
+                assert not any(row["type"] == "compacted" for row in rejected.history)
+            await session.compact(summary="Empty selection.", snapshot=snapshot, retain=[])
+            current = await session.model_context()
+            state = SessionState.from_json((await session.save_state()).to_json())
+            with pytest.raises(ValueError, match="current native context"):
+                await session.compact(summary="No.", snapshot=snapshot, retain=[])
+            assert has_text(current.items[-1], "Empty selection.")
+            assert not any(has_text(item, "Original input.") for item in current.items)
+        async with agent.session(state=state) as restored:
+            assert restored.id == state.source_session_id
+            assert (await restored.model_context()).items == current.items
+            with pytest.raises(ValueError, match="this Session"):
+                await restored.compact(summary="No.", snapshot=current, retain=[])
+        assert len(wire.requests) == 1
 
 
 async def test_supplied_repeated_and_ordinary_compaction_use_their_own_paths():
@@ -124,12 +272,17 @@ async def test_manual_boundary_refuses_without_consuming_or_sealing():
         async with Agent(
             instructions="Record.", tools=[manual], provider=wire.provider()
         ).session() as session:
+            snapshot = await session.model_context()
             turn = await session.submit("record now")
             async for event in session.interactions():
                 action = manual.match(event)
                 assert action is not None
                 with pytest.raises(RuntimeError, match="busy|active|idle"):
-                    await session.compact(summary="Never omit this call.")
+                    await session.model_context()
+                with pytest.raises(RuntimeError, match="busy|active|idle"):
+                    await session.compact(
+                        summary="Never omit this call.", snapshot=snapshot, retain=[]
+                    )
                 await action.respond("accepted")
                 break
             assert (await turn.get_result()).final_output == "completed"
@@ -160,6 +313,35 @@ async def test_callback_cannot_compact_its_own_session():
             )
 
 
+async def test_model_context_capture_owns_idle_admission(monkeypatch):
+    from agents import _native
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    read = _native.NativeThread._read_model_context
+
+    async def hold(thread):
+        captured = await read(thread)
+        entered.set()
+        await release.wait()
+        return captured
+
+    monkeypatch.setattr(_native.NativeThread, "_read_model_context", hold)
+    async with timeout(20), peer() as wire:
+        async with Agent(instructions="Answer.", provider=wire.provider()).session() as session:
+            pending = asyncio.create_task(session.model_context())
+            try:
+                await entered.wait()
+                with pytest.raises(RuntimeError, match="busy|mutation|changing"):
+                    await session.submit("Wait for capture.")
+                with pytest.raises(RuntimeError, match="busy"):
+                    await session.update(instructions="Wait for capture.")
+            finally:
+                release.set()
+                snapshot = await pending
+            await session.compact(summary="Captured while idle.", snapshot=snapshot, retain=[])
+            assert wire.requests == []
+
+
 async def test_cancellation_joins_source_fence_and_cannot_compact_a_successor(monkeypatch):
     from agents import _native
 
@@ -175,23 +357,37 @@ async def test_cancellation_joins_source_fence_and_cannot_compact_a_successor(mo
     monkeypatch.setattr(_native.NativeThread, "_begin_context_change", hold)
     async with timeout(20), peer() as wire:
         async with Agent(instructions="Answer.", provider=wire.provider()).session() as session:
-            pending = asyncio.create_task(session.compact(summary="Before cancellation."))
-            await entered.wait()
-            pending.cancel("caller")
-            await asyncio.sleep(0)
-            assert not pending.done()
-            for conflicting in (
-                lambda: session.submit("too early"),
-                session.save_state,
-                lambda: session.submit("too early", tools=[]),
-                lambda: session.compact(summary="too early"),
-            ):
-                with pytest.raises(
-                    RuntimeError, match="busy|mutation|changing|checkpoint|active|idle"
+            wire.replies.append(message("Keep this answer."))
+            await (await session.submit("Initial request.")).get_result()
+            snapshot = await session.model_context()
+            selected = next(
+                i for i, item in enumerate(snapshot.items) if has_text(item, "Keep this answer.")
+            )
+            pending = asyncio.create_task(
+                session.compact(
+                    summary="Before cancellation.", snapshot=snapshot, retain=[selected]
+                )
+            )
+            try:
+                await entered.wait()
+                pending.cancel("caller")
+                await asyncio.sleep(0)
+                assert not pending.done()
+                for conflicting in (
+                    lambda: session.submit("too early"),
+                    session.save_state,
+                    session.model_context,
+                    lambda: session.update(instructions="too early"),
+                    lambda: session.submit("too early", tools=[]),
+                    lambda: session.compact(summary="too early"),
                 ):
-                    await conflicting()
-            pending.cancel("again")
-            release.set()
+                    with pytest.raises(
+                        RuntimeError, match="busy|mutation|changing|checkpoint|active|idle"
+                    ):
+                        await conflicting()
+                pending.cancel("again")
+            finally:
+                release.set()
             with pytest.raises(asyncio.CancelledError):
                 await pending
             monkeypatch.setattr(_native.NativeThread, "_begin_context_change", original)
@@ -199,6 +395,7 @@ async def test_cancellation_joins_source_fence_and_cannot_compact_a_successor(mo
             next_turn = await session.submit("next input")
             assert (await next_turn.get_result()).final_output == "successor"
             assert "Before cancellation." in json.dumps(wire.requests[-1]["input"])
+            assert "Keep this answer." in json.dumps(wire.requests[-1]["input"])
             assert (
                 sum(row["type"] == "compacted" for row in (await session.save_state()).history) == 1
             )
@@ -539,6 +736,10 @@ async def test_supplied_mcp_preflight_failure_leaves_source_usable(responses, fa
                 "original result"
             )
             before = await session.save_state()
+            snapshot = await session.model_context()
+            selected = next(
+                i for i, item in enumerate(snapshot.items) if has_text(item, "Original input.")
+            )
             if failure == "connection":
                 remote.denied = True
             elif failure == "listing":
@@ -550,7 +751,9 @@ async def test_supplied_mcp_preflight_failure_leaves_source_usable(responses, fa
                 "startup" if failure == "interaction" else "MCP.*(connection|listing|unavailable)"
             )
             with pytest.raises(exception, match=match):
-                await session.compact(summary="Unpublished replacement.")
+                await session.compact(
+                    summary="Unpublished replacement.", snapshot=snapshot, retain=[selected]
+                )
             if failure == "interaction":
                 await remote.answered.wait()
                 assert remote.prompted.is_set()
@@ -558,6 +761,7 @@ async def test_supplied_mcp_preflight_failure_leaves_source_usable(responses, fa
                     {"id": 873, "jsonrpc": "2.0", "result": {"action": "cancel"}}
                 ]
             assert not remote.calls and len(responses.requests) == 1
+            assert (await session.model_context()).items == snapshot.items
             retained = await session.save_state()
             assert retained.history[: len(before.history)] == before.history
             assert not any(row["type"] == "compacted" for row in retained.history)
