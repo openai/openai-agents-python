@@ -830,6 +830,15 @@ def _question(
     return result
 
 
+@dataclass(frozen=True, slots=True)
+class _PreparedManualResult:
+    """Serialized result for the declared call in a waiting checkpoint."""
+
+    declaration: FunctionTool[Any, Any, Any] = field(repr=False)
+    call_id: str
+    output: str = field(repr=False)
+
+
 @dataclass(frozen=True)
 class _CapturedManual:
     name: str
@@ -838,6 +847,24 @@ class _CapturedManual:
     input_adapter: TypeAdapter[Any] = field(repr=False)
     output_adapter: TypeAdapter[Any] = field(repr=False)
     namespace: None = field(default=None, init=False)
+
+    def _encode_result(
+        self, value: Any, *, expected_json: str | None = None, strict: bool = False
+    ) -> str:
+        from .tools import ToolOutput
+
+        text = (
+            value
+            if isinstance(value, str)
+            else self.output_adapter.dump_json(
+                value, warnings="error" if strict or expected_json is not None else True
+            ).decode()
+        )
+        if expected_json is not None and text != expected_json:
+            raise ValueError("Manual tool result differs from its verified projection")
+        response = value if isinstance(value, ToolOutput) else ToolOutput.text(text)
+        response._validate()
+        return json.dumps(response.to_native())
 
     def request(
         self,

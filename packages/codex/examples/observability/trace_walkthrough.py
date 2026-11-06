@@ -10,8 +10,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from socketserver import TCPServer
 from threading import Lock, Thread
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -29,6 +30,13 @@ from agents.testing import ScriptedResponses, text, tool_call
 from agents.tools import ToolOutput
 
 from .history_reader import read_history
+
+
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # Numeric loopback needs no reverse DNS lookup during local startup.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = cast(tuple[str, int], self.server_address)
 
 
 class Collector:
@@ -86,7 +94,7 @@ class Collector:
                 self.end_headers()
                 self.wfile.write(body)
 
-        server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        server = _LoopbackHTTPServer(("127.0.0.1", port), Handler)
         server.daemon_threads = False
         thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
         thread.start()

@@ -224,9 +224,9 @@ def test_public_typed_dict_annotations_preserve_inheritance_and_qualifiers(
 ) -> None:
     from typing_extensions import NotRequired, Required
 
-    from agents._runtime._public import preserve_module_identity
+    from _agents_codex._public import preserve_module_identity
 
-    implementation = ModuleType("agents._runtime._annotation_test")
+    implementation = ModuleType("_agents_codex._annotation_test")
     public = ModuleType("agents._annotation_test")
     monkeypatch.setitem(sys.modules, implementation.__name__, implementation)
     monkeypatch.setitem(sys.modules, public.__name__, public)
@@ -417,6 +417,82 @@ for adapter, invalid in (
     else:
         raise AssertionError('Invalid alias value was accepted: ' + repr(invalid))
 assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
+def test_fresh_public_checkpoint_preserves_required_annotations() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import json
+import sys
+from pydantic import ValidationError
+from agents.state import SessionState
+assert SessionState.__pydantic_complete__
+payload = {
+    'format_version': 2, 'codex_revision': 'synthetic',
+    'source_session_id': 'synthetic', 'history': [], 'root_metadata': {},
+    'subagents': {'worker': {'description': 'Synthetic role'}},
+}
+state = SessionState.from_json(json.dumps(payload))
+assert SessionState.from_json(state.to_json()) == state
+try:
+    SessionState.from_json(json.dumps({**payload, 'subagents': {'worker': {}}}))
+except ValidationError:
+    pass
+else:
+    raise AssertionError('Required role description was lost')
+
+assert 'agents._native' not in sys.modules
+""",
+        ],
+        check=True,
+        timeout=30,
+    )
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 14), reason="Deferred TypedDict annotations require 3.14"
+)
+def test_public_metadata_keeps_unresolved_annotation_bindings() -> None:
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import annotationlib
+import pickle
+import sys
+import types
+from typing import get_args, get_type_hints
+from typing_extensions import ReadOnly, Required
+from _agents_codex._public import preserve_module_identity
+
+private = types.ModuleType('_agents_codex._annotation_probe')
+public = types.ModuleType('agents._annotation_probe')
+sys.modules[private.__name__] = private
+sys.modules[public.__name__] = public
+exec(chr(10).join([
+    'from __future__ import annotations',
+    'from typing_extensions import TypedDict, Required, ReadOnly',
+    'class Deferred(TypedDict):',
+    '    value: Required[ReadOnly[Later]]',
+]), private.__dict__)
+preserve_module_identity(private.__dict__, public.__name__)
+public.Deferred = private.Deferred
+assert private.Deferred.__module__ == public.__name__
+annotation = private.Deferred.__annotations__['value']
+assert isinstance(get_args(get_args(annotation)[0])[0], annotationlib.ForwardRef)
+private.Later = int
+hints = get_type_hints(private.Deferred, globalns=private.__dict__, include_extras=True)
+assert hints['value'] == Required[ReadOnly[int]]
+assert pickle.loads(pickle.dumps(private.Deferred)) is private.Deferred
 """,
         ],
         check=True,

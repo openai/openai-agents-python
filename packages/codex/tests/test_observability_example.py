@@ -2,9 +2,13 @@
 
 import json
 import os
+import socket
 import subprocess
 import sys
+from contextlib import closing
+from http.client import HTTPConnection
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -136,3 +140,19 @@ def test_viewer_escapes_received_content():
         page = response.read().decode()
     assert "&lt;script&gt;" in page
     assert "<script>" not in page
+
+
+def test_numeric_loopback_collector_serves_without_reverse_dns(monkeypatch):
+    from examples.observability.trace_walkthrough import Collector
+
+    def forbidden_lookup(*args, **kwargs):
+        raise AssertionError("Numeric loopback must not require reverse DNS")
+
+    monkeypatch.setattr(socket, "getfqdn", forbidden_lookup)
+    with Collector().serve() as collector:
+        url = urlsplit(collector.url)
+        with closing(HTTPConnection(url.hostname, url.port, timeout=2)) as connection:
+            connection.request("GET", "/")
+            response = connection.getresponse()
+            assert response.status == 200
+            assert b"html" in response.read()
