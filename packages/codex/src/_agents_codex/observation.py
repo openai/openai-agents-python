@@ -24,7 +24,12 @@ from typing import (
 
 from typing_extensions import TypedDict as TypedDict
 
-from ._events import ExecutionItem as ExecutionItem, FunctionCallStatus as FunctionCallStatus
+from ._events import (
+    ExecutionItem as ExecutionItem,
+    FunctionCallStatus as FunctionCallStatus,
+    MessageItem,
+    WebSearchCallItem,
+)
 from ._public import preserve_module_identity as _preserve_module_identity
 from .rate_limits import ApiRateLimits as ApiRateLimits
 from .usage import TokenUsageInfo as TokenUsageInfo
@@ -112,6 +117,20 @@ class OutputTextDelta(_SubmissionEvent):
     item_id: str
     delta: str
     type: Literal["output_text_delta"] = field(default="output_text_delta", init=False)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ModelOutputItemCompleted(_SubmissionEvent):
+    """A completed web search call or an assistant message with annotations.
+
+    Citation offsets refer to the individual text part. Use Session.items()
+    to recover recorded items if the event buffer drops an observation.
+    """
+
+    item: MessageItem | WebSearchCallItem
+    type: Literal["model_output_item_completed"] = field(
+        default="model_output_item_completed", init=False
+    )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -241,6 +260,7 @@ Observation: TypeAlias = (
     | TurnFinished
     | SubagentLifecycle
     | OutputTextDelta
+    | ModelOutputItemCompleted
     | UsageUpdated
     | ApiRateLimitsUpdated
     | ContextCompacted
@@ -303,7 +323,7 @@ class _ObservationBuffer:
             for definition in fields(event)
             if isinstance(value := getattr(event, definition.name), str)
         )
-        if isinstance(event, ExecutionItemCompleted):
+        if isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
             size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
         if size > 65_536:
             self._mark_gap()
@@ -381,7 +401,9 @@ class EventStream(AsyncIterator[Observation]):
                 for event, _ in records:
                     if event.sequence > self._after:
                         self._after = event.sequence
-                        if isinstance(event, ExecutionItemCompleted):
+                        if isinstance(event, ModelOutputItemCompleted):
+                            event = replace(event, item=deepcopy(event.item))
+                        elif isinstance(event, ExecutionItemCompleted):
                             item = event.item
                             if self._include_execution_details:
                                 item = deepcopy(item)

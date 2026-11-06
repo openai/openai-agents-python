@@ -24,6 +24,7 @@ from typing import (
     TYPE_CHECKING as TYPE_CHECKING,
     Any as Any,
     Generic as Generic,
+    Literal,
     SupportsIndex as SupportsIndex,
     cast as cast,
     overload as overload,
@@ -81,11 +82,16 @@ class ModelSettings(TypedDict, total=False, closed=True):
 
     ``service_tier=None`` clears the override. These settings select model
     behavior; they do not grant tools, filesystem access, or network access.
+    ``tool_choice`` controls whether the model may call tools in the request.
+    Use ``"auto"`` to let the model decide, ``"none"`` to disable tool calls,
+    or ``"required"`` to require a call to an offered tool. The default is
+    ``"auto"``.
     """
 
     reasoning_effort: str
     reasoning_summary: str
     service_tier: str | None
+    tool_choice: Literal["auto", "none", "required"]
 
 
 def _copy_model_settings(settings: ModelSettings | None) -> ModelSettings:

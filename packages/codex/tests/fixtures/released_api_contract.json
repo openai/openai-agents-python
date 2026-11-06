@@ -12,7 +12,7 @@
           "NewOutputT = TypeVar('NewOutputT')",
           "TextAgentT = TypeVar('TextAgentT', bound='Agent[Any, str]')",
           "TypedAgentT = TypeVar('TypedAgentT', bound='Agent[Any, Any]')",
-          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None",
+          "class ModelSettings(TypedDict, total=False, closed=True):\n    reasoning_effort: str\n    reasoning_summary: str\n    service_tier: str | None\n    tool_choice: Literal['auto', 'none', 'required']",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexLogin:\n    codex_home: str | Path | None = field(default=None, repr=False)\n    account_id: str | None = field(default=None, repr=False)",
           "@dataclass(frozen=True, kw_only=True)\nclass CodexAccount:\n    account_id: str | None\n    plan_type: str",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeProvider:\n    base_url: str | None = field(default=None, repr=False)\n    api_key: str | None = field(default=None, repr=False)\n    supports_websockets: bool | None = None\n    auth: CodexLogin | None = field(default=None, repr=False)\n\n    async def aclose(self) -> None:\n        pass\n\n    async def __aenter__(self) -> NativeProvider:\n        pass\n\n    async def __aexit__(self, exc_type: type[BaseException] | None, exc: BaseException | None, traceback: TracebackType | None) -> None:\n        pass",
@@ -37,7 +37,7 @@
           "from dataclasses import dataclass as dataclass, field as field",
           "from pathlib import Path as Path",
           "from types import TracebackType as TracebackType",
-          "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, overload as overload",
+          "from typing import TYPE_CHECKING as TYPE_CHECKING, Any as Any, Generic as Generic, Literal, overload as overload",
           "from typing_extensions import TypedDict as TypedDict, TypeVar as TypeVar",
           "from ._trace_context import TraceContext as TraceContext",
           "from .model_context import _ContextTransform",
@@ -386,6 +386,7 @@
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnStarted(_SubmissionEvent):\n    type: Literal['turn_started'] = field(default='turn_started', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass TurnFinished(_SubmissionEvent):\n    status: Literal['completed', 'failed', 'cancelled']\n    error_type: str | None = None\n    type: Literal['turn_finished'] = field(default='turn_finished', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass OutputTextDelta(_SubmissionEvent):\n    item_id: str\n    delta: str\n    type: Literal['output_text_delta'] = field(default='output_text_delta', init=False)",
+          "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ModelOutputItemCompleted(_SubmissionEvent):\n    item: MessageItem | WebSearchCallItem\n    type: Literal['model_output_item_completed'] = field(default='model_output_item_completed', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass UsageUpdated(_SubmissionEvent):\n    usage: TokenUsageInfo | None\n    type: Literal['usage_updated'] = field(default='usage_updated', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ApiRateLimitsUpdated(_SubmissionEvent):\n    snapshot: ApiRateLimits\n    type: Literal['api_rate_limits_updated'] = field(default='api_rate_limits_updated', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass ContextCompacted(_SubmissionEvent):\n    item_id: str\n    type: Literal['context_compacted'] = field(default='context_compacted', init=False)",
@@ -396,7 +397,7 @@
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SubagentLifecycle(_Event):\n    subagent_id: str\n    parent_agent_id: str\n    status: str\n    kind: Literal['created', 'active', 'closed', 'snapshot'] = 'snapshot'\n    type: Literal['subagent_lifecycle'] = field(default='subagent_lifecycle', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass SessionEnded(_Event):\n    reason: Literal['closed', 'failed']\n    type: Literal['session_ended'] = field(default='session_ended', init=False)",
           "@dataclass(frozen=True, slots=True, kw_only=True)\nclass EventGap(_Event):\n    first_sequence: int\n    type: Literal['gap'] = field(default='gap', init=False)",
-          "Observation: TypeAlias = TurnStarted | ModelRequestDispatching | ModelResponseLinked | TurnFinished | SubagentLifecycle | OutputTextDelta | UsageUpdated | ApiRateLimitsUpdated | ContextCompacted | ToolStarted | ToolFinished | ExecutionItemCompleted | SessionEnded | EventGap",
+          "Observation: TypeAlias = TurnStarted | ModelRequestDispatching | ModelResponseLinked | TurnFinished | SubagentLifecycle | OutputTextDelta | ModelOutputItemCompleted | UsageUpdated | ApiRateLimitsUpdated | ContextCompacted | ToolStarted | ToolFinished | ExecutionItemCompleted | SessionEnded | EventGap",
           "_ObservationT = TypeVar('_ObservationT', bound=Observation)",
           "class _ObservationBuffer:\n\n    def __init__(self, session_id: str) -> None:\n        pass\n\n    def notify(self) -> None:\n        pass\n\n    def turn_started(self, turn_id: str) -> TurnStarted | None:\n        pass\n\n    def append(self, event: _ObservationT) -> _ObservationT | None:\n        pass\n\n    def finish(self, reason: Literal['closed', 'failed']) -> None:\n        pass",
           "class EventStream(AsyncIterator[Observation]):\n\n    def __init__(self, buffer: _ObservationBuffer, *, after: int, _turn: Turn[Any] | None=None, _include_execution_details: bool=False) -> None:\n        pass\n\n    def __aiter__(self) -> EventStream:\n        pass\n\n    async def __anext__(self) -> Observation:\n        pass\n\n    async def aclose(self) -> None:\n        pass"
@@ -407,6 +408,7 @@
           "EventGap": "agents.observation.EventGap",
           "EventStream": "agents.observation.EventStream",
           "ExecutionItemCompleted": "agents.observation.ExecutionItemCompleted",
+          "ModelOutputItemCompleted": "agents.observation.ModelOutputItemCompleted",
           "ModelRequestDispatching": "agents.observation.ModelRequestDispatching",
           "ModelResponseLinked": "agents.observation.ModelResponseLinked",
           "Observation": "Observation",
@@ -424,7 +426,7 @@
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Literal as Literal, TypeAlias as TypeAlias, TypeVar as TypeVar",
           "from typing_extensions import TypedDict as TypedDict",
-          "from ._events import ExecutionItem as ExecutionItem, FunctionCallStatus as FunctionCallStatus",
+          "from ._events import ExecutionItem as ExecutionItem, FunctionCallStatus as FunctionCallStatus, MessageItem, WebSearchCallItem",
           "from .rate_limits import ApiRateLimits as ApiRateLimits",
           "from .usage import TokenUsageInfo as TokenUsageInfo",
           "from .turn import Turn"
@@ -433,8 +435,10 @@
           "ApiRateLimits": "agents.rate_limits.ApiRateLimits",
           "ExecutionItem": "agents._events.ExecutionItem",
           "FunctionCallStatus": "agents._events.FunctionCallStatus",
+          "MessageItem": "agents._events.MessageItem",
           "TokenUsageInfo": "agents.usage.TokenUsageInfo",
-          "Turn": "agents.turn.Turn"
+          "Turn": "agents.turn.Turn",
+          "WebSearchCallItem": "agents._events.WebSearchCallItem"
         }
       },
       "agents.prepared_request": {
@@ -785,7 +789,8 @@
       "agents.tools": {
         "declarations": [
           "@dataclass(frozen=True)\nclass Checklist:\n    pass",
-          "@dataclass(frozen=True, kw_only=True)\nclass WebSearch:\n    mode: Literal['cached', 'live'] = 'cached'\n    route: Literal['standalone', 'hosted'] = 'standalone'",
+          "class WebSearchLocation(TypedDict, total=False, closed=True):\n    country: str\n    region: str\n    city: str\n    timezone: str",
+          "@dataclass(frozen=True, kw_only=True)\nclass WebSearch:\n    mode: Literal['cached', 'live'] = 'cached'\n    route: Literal['standalone', 'hosted'] = 'standalone'\n    allowed_domains: Sequence[str] | None = None\n    blocked_domains: Sequence[str] | None = None\n    location: WebSearchLocation | None = None",
           "@dataclass(frozen=True)\nclass NativeGoals:\n    pass",
           "@dataclass(frozen=True)\nclass ToolRef:\n    name: str\n    namespace: str | None = None",
           "@dataclass(frozen=True)\nclass ToolCallInfo:\n    tool: ToolRef\n    session_id: str\n    turn_id: str\n    call_id: str | None\n    child_id: str | None\n    child_incarnation: str | None\n    role: str | None\n    model: str | None\n    route: Literal['direct', 'code']\n    outer_call_id: str | None = None\n    cell_id: str | None = None\n    nested_call_id: str | None = None",
@@ -803,14 +808,16 @@
           "ToolOutputImage": "agents.tools.ToolOutputImage",
           "ToolOutputText": "agents.tools.ToolOutputText",
           "ToolRef": "agents.tools.ToolRef",
-          "WebSearch": "agents.tools.WebSearch"
+          "WebSearch": "agents.tools.WebSearch",
+          "WebSearchLocation": "agents.tools.WebSearchLocation"
         },
         "imports": [
           "import inspect as inspect",
-          "from collections.abc import Awaitable as Awaitable, Callable as Callable",
+          "from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence",
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Literal as Literal",
           "from pydantic import BaseModel as BaseModel, TypeAdapter as TypeAdapter",
+          "from typing_extensions import TypedDict",
           "from .manual import _CapturedManual as _CapturedManual",
           "from ._function_tools import ToolContext",
           "from .native_interception import Allow, Deny, ReplaceArguments"
@@ -1023,15 +1030,17 @@
           "class PermissionsRequiredAction(_ActionSource):\n    type: Literal['permissions']\n    request_id: str\n    turn_id: str | None\n    permissions: dict[str, JsonValue]\n    reason: str | None",
           "class EnvironmentConnectionRequiredAction(_ActionSource):\n    type: Literal['environment_connection']\n    environment_id: str",
           "RequiredAction = TypeAliasType('RequiredAction', FunctionCallRequiredAction | ToolApprovalRequiredAction | McpElicitationRequiredAction | UserInputRequiredAction | PermissionsRequiredAction | EnvironmentConnectionRequiredAction)",
-          "class OutputText(TypedDict):\n    type: Literal['output_text']\n    text: str",
+          "class URLCitation(TypedDict):\n    type: Literal['url_citation']\n    url: str\n    title: str\n    start_index: int\n    end_index: int",
+          "class OutputText(TypedDict):\n    type: Literal['output_text']\n    text: str\n    annotations: NotRequired[Sequence[URLCitation | JsonValue] | JsonValue]",
           "class InputText(TypedDict):\n    type: Literal['input_text']\n    text: str",
           "class InputImage(TypedDict):\n    type: Literal['input_image']\n    image_url: str",
           "class SummaryText(TypedDict):\n    type: Literal['summary_text']\n    text: str",
           "OutputItemStatus = TypeAliasType('OutputItemStatus', Literal['in_progress', 'completed', 'incomplete'])",
           "FunctionCallStatus = TypeAliasType('FunctionCallStatus', Literal['in_progress', 'completed', 'failed', 'incomplete'])",
-          "class MessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['assistant']\n    status: OutputItemStatus\n    content: list[OutputText]\n    phase: Literal['commentary', 'final_answer'] | None",
+          "class MessageItem(TypedDict):\n    type: Literal['message']\n    id: str\n    turn_id: str\n    role: Literal['assistant']\n    status: OutputItemStatus\n    content: list[OutputText]\n    phase: Literal['commentary', 'final_answer'] | None\n    display_text: NotRequired[str]",
           "class ReasoningItem(TypedDict):\n    type: Literal['reasoning']\n    id: str\n    turn_id: str\n    summary: list[SummaryText]\n    status: OutputItemStatus | None",
-          "class WebSearchActionSearch(TypedDict):\n    type: Literal['search']\n    query: str | None\n    queries: list[str] | None",
+          "class WebSearchSource(TypedDict):\n    type: Literal['url']\n    url: str",
+          "class WebSearchActionSearch(TypedDict):\n    type: Literal['search']\n    query: str | None\n    queries: list[str] | None\n    sources: NotRequired[list[WebSearchSource]]",
           "class WebSearchActionOpenPage(TypedDict):\n    type: Literal['open_page']\n    url: str | None",
           "class WebSearchActionFindInPage(TypedDict):\n    type: Literal['find_in_page']\n    url: str | None\n    pattern: str | None",
           "class WebSearchActionOther(TypedDict):\n    type: Literal['other']",
@@ -1057,6 +1066,7 @@
         ],
         "exports": {},
         "imports": [
+          "from collections.abc import Sequence",
           "from typing import Literal as Literal",
           "from typing_extensions import NotRequired as NotRequired, TypeAliasType as TypeAliasType, TypedDict as TypedDict",
           "from .config import JsonValue as JsonValue"
