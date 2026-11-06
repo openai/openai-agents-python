@@ -30,10 +30,12 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class StopTurn:
-    """Stop the exact owning turn from an admitted native before policy.
+    """Stop the exact owning turn from an admitted before policy or step hook.
 
     Return this from an Environment approval or arguments transform, or from
-    an MCP approval. The SDK never includes the reason in native history,
+    an MCP approval, or a root or child before_step callback. A step decision
+    prevents its pending model request and joins owned cleanup; earlier effects
+    are not rolled back. The SDK never includes the reason in native history,
     observations, or the public failure. False is a local denial for direct
     Environment calls and for MCP calls. Generated-code Environment approval
     False also stops and joins its owning turn.

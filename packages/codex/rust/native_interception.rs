@@ -440,6 +440,17 @@ pub(crate) struct CapturedTurnStop {
     control: Arc<Control>,
     owner: Arc<DirectTurn>,
 }
+
+pub(crate) fn capture_step_stop(
+    thread_store: &ExtensionData,
+    turn_store: &ExtensionData,
+) -> Option<CapturedTurnStop> {
+    Some(CapturedTurnStop {
+        control: thread_store.get::<Control>()?,
+        owner: turn_store.get::<DirectTurn>()?,
+    })
+}
+
 impl CapturedTurnStop {
     pub(crate) fn stop(&self) {
         let _state = self

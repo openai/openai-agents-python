@@ -1,6 +1,6 @@
 {
   "baseline": "v0.24.0-alpha.6",
-  "baseline_commit": "839383f2b9b9ee8c9f9e8001e803b050da4ba441",
+  "baseline_commit": "3ce2bda7356e2d82504b29f1552a32798f4df6cf",
   "native_revision": "7c2ce90716335c889a5076ded9a630459f9c9899",
   "public_api": {
     "modules": {
@@ -325,7 +325,7 @@
       "agents.native_agents": {
         "declarations": [
           "@dataclass(frozen=True, kw_only=True)\nclass NativeRole:\n    name: str\n    instructions: str = field(repr=False)\n    description: str\n    model: str | None = None\n    model_settings: Mapping[Literal['reasoning_effort'], str] | None = None",
-          "class _ChildBeforeStep(Protocol):\n\n    def __call__(self, child: ChildInvocation, /, *, step_index: int) -> Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | Awaitable[Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None]:\n        pass",
+          "class _ChildBeforeStep(Protocol):\n\n    def __call__(self, child: ChildInvocation, /, *, step_index: int) -> Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[Any] | Environment[Any] | NativeAgents] | None | StopTurn]:\n        pass",
           "@dataclass(frozen=True, kw_only=True)\nclass NativeAgents:\n    additional_roles: Sequence[NativeRole] = ()\n    max_children: int | None = None\n    approval: Callable[[ToolContext[Any], NativeToolCall], bool | Awaitable[bool]] | None = field(default=None, repr=False)\n    max_depth: int = 1\n    before_step: _ChildBeforeStep | None = field(default=None, repr=False)\n    interactions: bool = False",
           "@dataclass(frozen=True, slots=True)\nclass ChildInvocation:\n    session_id: str\n    child_id: str\n    instance_id: str\n    turn_id: str\n\n    @property\n    def submission_id(self) -> str:\n        pass"
         ],
@@ -338,7 +338,7 @@
           "from collections.abc import Awaitable as Awaitable, Callable as Callable, Mapping as Mapping, Sequence as Sequence",
           "from dataclasses import dataclass as dataclass, field as field",
           "from typing import Any as Any, Literal as Literal, Protocol as Protocol",
-          "from .native_interception import NativeToolCall as NativeToolCall",
+          "from .native_interception import NativeToolCall as NativeToolCall, StopTurn",
           "from ._function_tools import Tool, ToolContext",
           "from .executor import Environment",
           "from .tools import ToolRef"
@@ -346,6 +346,7 @@
         "references": {
           "Environment": "agents.executor.Environment",
           "NativeToolCall": "agents.native_interception.NativeToolCall",
+          "StopTurn": "agents.native_interception.StopTurn",
           "Tool": "agents._function_tools.Tool",
           "ToolContext": "agents._function_tools.ToolContext",
           "ToolRef": "agents.tools.ToolRef"
@@ -533,7 +534,7 @@
           "class InteractionRequired(NativeError):\n    state: SessionState | None = None",
           "@dataclass(frozen=True)\nclass Completed(Generic[OutputT]):\n    turn: Turn[OutputT]\n    final_output: OutputT\n    usage: TokenUsageInfo | None = None\n    state: SessionState | None = field(default=None, repr=False)\n    repair_attempts: tuple[RecordedTurn, ...] = ()",
           "_InteractionHandler = Callable[[Interaction], ActionReply[Any] | Awaitable[ActionReply[Any]]]",
-          "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None]:\n        pass",
+          "class _BeforeStep(Protocol[_SelectionContextT_contra]):\n\n    def __call__(self, turn: Turn[Any], /, *, step_index: int) -> Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | StopTurn | Awaitable[Sequence[ToolRef | Tool[_SelectionContextT_contra] | Environment[_SelectionContextT_contra] | NativeAgents] | None | StopTurn]:\n        pass",
           "class Session(Generic[ContextT, OutputT]):\n\n    def __init__(self, engine: Any, thread: Any, home: TemporaryDirectory[str] | None, catalog: _ToolCatalog, mcp_tools: tuple[_MCP[Any], ...], context: ContextT | None, output: _PreparedOutput, instructions: str, *, _start_readers: bool=True) -> None:\n        pass\n\n    @property\n    def id(self) -> str:\n        pass\n\n    @property\n    def codex_account(self) -> CodexAccount | None:\n        pass\n\n    def events(self, *, after: int=0, include_execution_details: bool=False) -> EventStream:\n        pass\n\n    async def pending_interactions(self) -> tuple[Interaction, ...]:\n        pass\n\n    def interactions(self) -> AsyncIterator[Interaction]:\n        pass\n\n    @property\n    def capabilities(self) -> Capabilities:\n        pass\n\n    @property\n    def active_turn(self) -> Turn[Any] | None:\n        pass\n\n    def rate_limits(self) -> ApiRateLimits:\n        pass\n\n    @property\n    def restored_turn(self) -> Turn[Any] | None:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Turn[OutputT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[_TurnT], tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Turn[_TurnT]:\n        pass\n\n    @overload\n    async def submit(self, input: UserInput, *, if_busy: Literal['steer'], output_type: None=None, tools: None=None, before_step: None=None, writable_roots: None=None, parent_trace: None=None, trace_options: None=None, prepare_request: None=None) -> Turn[Any]:\n        pass\n\n    async def submit(self, input: UserInput, *, output_type: OutputSpec[Any] | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, before_step: _BeforeStep[ContextT] | None=None, if_busy: Literal['reject', 'queue', 'steer']='reject', writable_roots: Sequence[str | PathLike[str]] | None=None, parent_trace: TraceContext | Mapping[str, str | None] | None=None, trace_options: TraceOptions | Mapping[str, Any] | None=None, prepare_request: _PrepareRequest | None=None) -> Turn[Any]:\n        pass\n\n    async def compact(self, *, summary: str | None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, instructions: str | None=None, model: None=None, model_settings: None=None, tools: None=None) -> None:\n        pass\n\n    @overload\n    async def update(self, *, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None, model: None=None, model_settings: None=None, instructions: None=None) -> None:\n        pass\n\n    async def update(self, *, model: str | None=None, model_settings: ModelSettings | None=None, instructions: str | None=None, tools: Sequence[ToolRef | Tool[ContextT] | Environment[ContextT] | NativeAgents] | None=None) -> None:\n        pass\n\n    async def cancel_all(self, *, mode: Literal['graceful', 'force']='force') -> None:\n        pass\n\n    async def items(self, *, subagent_id: str | None=None) -> AsyncIterator[SessionItem]:\n        pass\n\n    async def subagents(self) -> AsyncIterator[Subagent]:\n        pass\n\n    async def turns(self, *, subagent_id: str | None=None) -> AsyncIterator[RecordedTurn]:\n        pass\n\n    async def checklist(self, *, subagent_id: str | None=None) -> ChecklistState | None:\n        pass\n\n    async def goal(self) -> NativeGoal | None:\n        pass\n\n    async def save_state(self) -> SessionState:\n        pass\n\n    async def fork(self) -> SessionState:\n        pass\n\n    async def checkpoint_status(self, *, kind: Literal['idle', 'manual_wait']) -> CheckpointStatus:\n        pass\n\n    async def suspend(self) -> SessionState:\n        pass"
         ],
         "exports": {
@@ -567,6 +568,7 @@
           "from .manual import ActionReply as ActionReply, Interaction as Interaction",
           "from .mcp import _MCP as _MCP",
           "from .native_agents import NativeAgents as NativeAgents",
+          "from .native_interception import StopTurn as StopTurn",
           "from .observation import EventStream as EventStream",
           "from .prepared_request import _PrepareRequest as _PrepareRequest",
           "from .rate_limits import ApiRateLimits as ApiRateLimits",
@@ -596,6 +598,7 @@
           "RecordedTurn": "agents.history.RecordedTurn",
           "SessionItem": "agents._events.SessionItem",
           "SessionState": "agents.state.SessionState",
+          "StopTurn": "agents.native_interception.StopTurn",
           "Subagent": "agents.subagents.Subagent",
           "TokenUsageInfo": "agents.usage.TokenUsageInfo",
           "Tool": "agents._function_tools.Tool",

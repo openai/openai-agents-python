@@ -19,6 +19,7 @@ from agents import (
     ModelRequestContext,
     NativeError,
     PromptedOutput,
+    StopTurn,
     TurnStoppedError,
     function_tool,
 )
@@ -105,6 +106,43 @@ async def test_fresh_context_each_step_preserves_history_and_tools(
     assert tool_output(responses.requests[1], "refresh-call") == "tool receipt"
     assert requests[0].request_id != requests[1].request_id
     assert "reference-before-tool" not in repr(requests[0])
+
+
+async def test_step_stop_prevents_another_context_transform_and_request(responses):
+    steps = []
+    projections = []
+    effects = []
+
+    @function_tool
+    def lookup() -> str:
+        effects.append("looked up")
+        return "record found"
+
+    def select(turn, *, step_index):
+        steps.append(step_index)
+        return None if step_index == 0 else StopTurn("iteration limit")
+
+    def transform(request):
+        projections.append(request.request_id)
+        return [*request.items, reference("request-only reference")]
+
+    responses.respond(function_call("lookup", {}, "lookup-call"))
+    async with (
+        timeout(20),
+        Agent(
+            instructions="Look up the record.",
+            tools=[lookup],
+            provider=provider(responses),
+            transform_context=transform,
+        ).session() as session,
+    ):
+        turn = await session.submit("Look up", before_step=select)
+        with pytest.raises(TurnStoppedError, match="^Turn stopped by policy$"):
+            await turn.get_result()
+        assert steps == [0, 1]
+        assert len(projections) == len(responses.requests) == 1
+        assert effects == ["looked up"]
+        assert "request-only reference" in json.dumps(responses.requests[0])
 
 
 async def test_none_keeps_original_input_even_after_mutating_callback_copy(responses):
