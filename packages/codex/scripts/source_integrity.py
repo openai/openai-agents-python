@@ -511,6 +511,7 @@ def native_bundle_identity(project):
         ".github/actions/setup-native/action.yml",
         ".github/scripts/download-native-snapshot.py",
         ".github/scripts/native-dependencies.py",
+        ".github/scripts/detect-changes.sh",
         "packages/codex/tests/fixtures/exec_server.rs",
     ):
         inputs[name] = hashlib.sha256((project / name).read_bytes()).hexdigest()

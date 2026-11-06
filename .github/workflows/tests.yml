@@ -259,6 +259,7 @@ jobs:
               controls = ('.github/actions/setup-native/action.yml',
                           '.github/scripts/download-native-snapshot.py',
                           '.github/scripts/native-dependencies.py',
+                          '.github/scripts/detect-changes.sh',
                           'packages/codex/tests/fixtures/exec_server.rs')
               for path in controls:
                   prior = subprocess.run(['git', 'show', f'{source}:{path}'], capture_output=True)

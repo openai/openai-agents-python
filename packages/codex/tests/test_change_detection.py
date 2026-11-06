@@ -938,6 +938,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "hatch_controls_changed",
         "uv_build_controls_changed",
         "native_setup_changed",
+        "detector_changed",
         "old_snapshot_after_docs",
         "snapshot_index_filtered",
         "snapshot_index_page_bound",
@@ -1081,6 +1082,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
         "dependencies_dependency_lock_changed",
         "dependencies_native_workflow_changed",
         "dependencies_selector_changed",
+        "dependencies_detector_changed",
         "dependencies_untrusted",
         "dependencies_failed_run",
         "dependencies_in_progress",
@@ -1155,6 +1157,7 @@ def test_native_build_selection(
     for name in (
         ".github/actions/setup-native/action.yml",
         ".github/scripts/native-dependencies.py",
+        ".github/scripts/detect-changes.sh",
     ):
         path = repo / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1407,6 +1410,9 @@ def test_native_build_selection(
     elif scenario == "native_setup_changed":
         path = repo / ".github/actions/setup-native/action.yml"
         path.write_text(path.read_text() + "\n# New toolchain setup\n")
+    elif scenario == "detector_changed":
+        path = repo / ".github/scripts/detect-changes.sh"
+        path.write_text(path.read_text() + "\n# Changed pre-selection executable\n")
     if scenario == "producer_changed":
         (repo / workflow_path).write_text(
             workflow_text.replace("runner: windows-latest", "runner: windows-2022"),
