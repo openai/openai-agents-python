@@ -1,8 +1,14 @@
 """Application-owned projections of the context sent to a model."""
 
-from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, TypeAlias, TypeVar
+from collections.abc import Awaitable as Awaitable, Callable as Callable, Sequence as Sequence
+from dataclasses import dataclass as dataclass, field as field
+from typing import (
+    Any as Any,
+    Generic as Generic,
+    Literal as Literal,
+    TypeAlias as TypeAlias,
+    TypeVar as TypeVar,
+)
 
 from ._public import preserve_module_identity as _preserve_module_identity
 
