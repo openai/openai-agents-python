@@ -1,0 +1,879 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from typing import Annotated
+
+import pytest
+
+pytest.importorskip("a2a")
+
+from a2a.helpers.proto_helpers import new_text_message
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.types import a2a_pb2 as p
+from a2a.utils.errors import InvalidParamsError
+from google.protobuf.json_format import MessageToDict
+from pydantic import BaseModel, PlainSerializer
+
+from agents import Agent, FunctionTool, NativeOutput, NativeProvider, PromptedOutput, function_tool
+from agents.a2a import A2ALimits, NativeA2AAgent, NativeA2ABinding, NativeA2AExecutor
+from tests.a2a_helpers import HostStore, call_context, invoke, request_context
+from tests.a2a_http import card
+from tests.native_fixtures import (
+    assistant_output,
+    function_call,
+    responses as responses,
+)
+
+
+def make_executor(tmp_path, responses, tools=(), *, output_type=None, **executor_options):
+    store = HostStore(tmp_path)
+    agent = Agent(
+        name="Synthetic specialist",
+        instructions="Use the synthetic test response.",
+        model="test-model",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+        tools=list(tools),
+        output_type=output_type,
+    )
+    return NativeA2AExecutor(
+        agent_factory=lambda binding, call_context: NativeA2AAgent(agent=agent),
+        store=store,
+        **executor_options,
+    )
+
+
+async def test_native_completion_is_exact_official_snapshot(tmp_path, responses):
+    responses.respond(assistant_output("finished"))
+    executor = make_executor(tmp_path, responses)
+    stored, _ = await invoke(executor, request_context())
+    assert stored.task.status.state == p.TASK_STATE_COMPLETED
+    assert stored.task.artifacts[0].parts[0].text == "finished"
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    record = executor.store.read(binding)
+    assert record.status == "completed"
+    assert record.acknowledges(stored.task)
+    assert executor.store.acknowledged(binding) == record.generation
+    assert len(responses.requests) == 1
+    recovered = await executor.recover(binding, call_context())
+    assert recovered == record
+    assert len(responses.requests) == 1
+
+
+class ResultNode(BaseModel):
+    name: str
+    children: list[ResultNode]
+
+
+@pytest.mark.parametrize("mode", ["native", "explicit_native", "prompted"])
+async def test_nested_typed_result_uses_its_declared_json_serializer(tmp_path, responses, mode):
+    tree = [{"name": "parent", "children": [{"name": "leaf", "children": []}]}]
+    names = Annotated[
+        list[ResultNode],
+        PlainSerializer(lambda nodes: [node.name.upper() for node in nodes], return_type=list[str]),
+    ]
+    declaration = {
+        "native": list[ResultNode],
+        "explicit_native": NativeOutput(names),
+        "prompted": PromptedOutput(names),
+    }[mode]
+    wire = tree if mode == "prompted" else {"response": tree}
+    responses.respond(assistant_output(json.dumps(wire)))
+    executor = make_executor(tmp_path, responses, output_type=declaration)
+
+    stored, _ = await invoke(executor, request_context())
+
+    assert len(responses.requests) == 1
+    assert stored.task.status.state == p.TASK_STATE_COMPLETED
+    expected = tree if mode == "native" else ["PARENT"]
+    assert MessageToDict(stored.task.artifacts[0].parts[0].data) == {"result": expected}
+
+
+async def test_typed_result_limit_uses_serialized_size(tmp_path, responses):
+    expanded = Annotated[int, PlainSerializer(lambda value: str(value) * 1024, return_type=str)]
+    responses.respond(assistant_output('{"response": 7}'))
+    executor = make_executor(
+        tmp_path, responses, output_type=expanded, limits=A2ALimits(message_bytes=512)
+    )
+
+    stored, _ = await invoke(executor, request_context())
+
+    assert len(responses.requests) == 1
+    assert stored.task.status.state == p.TASK_STATE_FAILED
+    assert not stored.task.artifacts
+
+
+@pytest.mark.parametrize(
+    ("output_type", "value", "state"),
+    [
+        pytest.param(int, 9007199254740993, p.TASK_STATE_FAILED, id="rounded-integer"),
+        pytest.param(
+            list[list[int]],
+            [[9007199254740993]],
+            p.TASK_STATE_FAILED,
+            id="nested-rounded-integer",
+        ),
+        pytest.param(int, 9007199254740992, p.TASK_STATE_COMPLETED, id="exact-integer"),
+    ],
+)
+async def test_structured_numbers_are_exact_or_fail_before_publication(
+    tmp_path, responses, output_type, value, state
+):
+    responses.respond(assistant_output(json.dumps({"response": value})))
+    executor = make_executor(tmp_path, responses, output_type=output_type)
+
+    stored, _ = await invoke(executor, request_context())
+
+    assert stored.task.status.state == state
+    if state == p.TASK_STATE_COMPLETED:
+        assert MessageToDict(stored.task.artifacts[0].parts[0].data) == {"result": value}
+    else:
+        assert not stored.task.artifacts
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    record = executor.store.read(binding)
+    assert record.status == ("completed" if state == p.TASK_STATE_COMPLETED else "failed")
+    assert record.acknowledges(stored.task)
+    assert await executor.recover(binding, call_context()) == record
+    assert len(responses.requests) == 1
+
+
+class Approval(BaseModel):
+    reason: str
+
+
+async def test_nontext_input_rejected_before_model_admission(tmp_path, responses):
+    executor = make_executor(tmp_path, responses)
+    with pytest.raises(InvalidParamsError):
+        await invoke(executor, request_context(reply={"arbitrary": "data"}))
+    assert not responses.requests
+
+
+@pytest.mark.parametrize("growth", ["metadata", "identifier", "parts"])
+async def test_complete_message_limit_rejects_non_prompt_growth(tmp_path, responses, growth):
+    executor = make_executor(tmp_path, responses, limits=A2ALimits(message_bytes=512))
+    context = request_context()
+    if growth == "metadata":
+        context.message.metadata.update({"oversized": "x" * 1024})
+    elif growth == "identifier":
+        context.message.message_id = "x" * 1024
+    else:
+        context.message.parts.extend([p.Part(text="")] * 100)
+
+    with pytest.raises(ValueError, match="configured byte limit"):
+        await invoke(executor, context)
+
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    assert executor.store.read(binding) is None
+    assert not responses.requests
+    assert binding not in executor._live
+
+
+@pytest.mark.parametrize("failure", ["snapshot", "store"])
+async def test_initial_commit_failure_propagates_without_admitting_native_work(
+    tmp_path, responses, monkeypatch, failure
+):
+    from contextlib import asynccontextmanager
+
+    executor = make_executor(
+        tmp_path, responses, limits=A2ALimits(checkpoint_bytes=1 if failure == "snapshot" else 1024)
+    )
+    primary = OSError("Synthetic initial store outage")
+    if failure == "store":
+        original = executor.store.own
+
+        @asynccontextmanager
+        async def failing_store(binding):
+            async with original(binding) as lease:
+
+                async def fail_commit(*args, **kwargs):
+                    raise primary
+
+                monkeypatch.setattr(lease, "commit", fail_commit)
+                yield lease
+
+        monkeypatch.setattr(executor.store, "own", failing_store)
+
+    with pytest.raises(ValueError if failure == "snapshot" else OSError) as raised:
+        await invoke(executor, request_context())
+
+    if failure == "store":
+        assert raised.value is primary
+    else:
+        assert str(raised.value) == "A2A snapshot exceeds configured byte limit"
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    assert executor.store.read(binding) is None
+    assert await executor.store.get(binding.task_id, call_context()) is None
+    assert not responses.requests
+    assert binding not in executor._live
+
+
+@pytest.mark.parametrize("conflict", [False, True])
+async def test_projection_requires_identical_message_for_existing_id(conflict):
+    from _agents_codex.a2a._server import _Projection
+
+    context = request_context()
+    task = p.Task(id="task-a", context_id="context-a", history=[context.message])
+    context = request_context(current=task)
+    context.message.CopyFrom(task.history[0])
+    if conflict:
+        context.message.metadata.update({"different": True})
+    projection = _Projection(context)
+
+    if conflict:
+        with pytest.raises(InvalidParamsError, match="Conflicting reuse"):
+            await projection.open()
+    else:
+        await projection.open()
+        projected = await projection.manager.get_task()
+        assert list(projected.history) == list(task.history)
+
+
+@pytest.mark.parametrize("invalid", ["message_id", "size", "multiple_pending"])
+async def test_invalid_continuation_preserves_pending_answer(tmp_path, responses, invalid):
+    tool = FunctionTool(
+        name="approve", description="Application approval", input_type=Approval, output_type=str
+    )
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    executor = make_executor(tmp_path, responses, [tool], limits=A2ALimits(message_bytes=1024))
+    first, _ = await invoke(executor, request_context())
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    answer = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": "yes",
+    }
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    original = saved
+    context = request_context(reply=answer, current=first.task)
+    if invalid == "message_id":
+        context.message.message_id = first.task.history[0].message_id
+    elif invalid == "size":
+        context.message.metadata.update({"oversized": "x" * 2048})
+    else:
+        checkpoint = json.loads(saved.checkpoint)
+        pending = checkpoint["native_continuation"]["pending_manual"]
+        pending.append({**pending[0], "call_id": "second-call"})
+        saved = replace(saved, checkpoint=json.dumps(checkpoint))
+        async with executor.store.own(binding) as lease:
+            await lease.commit(saved, expected_generation=original.generation)
+
+    with pytest.raises(ValueError if invalid == "size" else InvalidParamsError):
+        await invoke(executor, context)
+
+    assert executor.store.read(binding) == saved
+    assert len(responses.requests) == 1
+    if invalid == "multiple_pending":
+        async with executor.store.own(binding) as lease:
+            await lease.commit(original, expected_generation=saved.generation)
+    responses.respond(assistant_output("approved"))
+    completed, _ = await invoke(executor, request_context(reply=answer, current=first.task))
+    assert completed.task.status.state == p.TASK_STATE_COMPLETED
+    assert MessageToDict(completed.task.history[-1].parts[0].data) == answer
+    assert executor.store.read(binding).acknowledges(completed.task)
+    assert len(responses.requests) == 2
+
+
+@pytest.mark.parametrize("reason_size", [20, 300])
+async def test_generated_approval_limit_includes_message_envelope(tmp_path, responses, reason_size):
+    tool = FunctionTool(
+        name="approve", description="Application approval", input_type=Approval, output_type=str
+    )
+    responses.respond(function_call("approve", {"reason": "x" * reason_size}, "call-a"))
+    executor = make_executor(tmp_path, responses, [tool], limits=A2ALimits(message_bytes=512))
+
+    stored, events = await invoke(executor, request_context())
+
+    expected = p.TASK_STATE_INPUT_REQUIRED if reason_size == 20 else p.TASK_STATE_FAILED
+    assert stored.task.status.state == expected
+    for event in events:
+        if isinstance(event, p.TaskStatusUpdateEvent) and event.status.HasField("message"):
+            encoded = json.dumps(
+                MessageToDict(event.status.message), ensure_ascii=False, separators=(",", ":")
+            ).encode()
+            assert len(encoded) <= 512
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    assert saved.acknowledges(stored.task)
+    assert (saved.checkpoint is not None) is (reason_size == 20)
+    assert (saved.challenge is not None) is (reason_size == 20)
+    assert await executor.recover(binding, call_context()) == saved
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("message_limit", [160, 512])
+@pytest.mark.parametrize(
+    "outcome,state", [("failed", p.TASK_STATE_FAILED), ("canceled", p.TASK_STATE_CANCELED)]
+)
+async def test_terminal_diagnostic_respects_message_limit(
+    tmp_path, responses, message_limit, outcome, state
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        entered.set()
+        await release.wait()
+        return "released"
+
+    responses.respond(
+        function_call("hold", {}, "call-cancel")
+        if outcome == "canceled"
+        else assistant_output("x" * 2048)
+    )
+    executor = make_executor(
+        tmp_path, responses, [hold], limits=A2ALimits(message_bytes=message_limit)
+    )
+    context = request_context()
+    running = asyncio.create_task(invoke(executor, context))
+    queue = EventQueueSource()
+    try:
+        if outcome == "canceled":
+            await asyncio.wait_for(entered.wait(), 5)
+            await asyncio.wait_for(executor.cancel(context, queue), 5)
+        stored, events = await running
+        assert stored.task.status.state == state
+        assert stored.task.status.HasField("message") is (message_limit == 512)
+        assert not stored.task.artifacts
+        for event in events:
+            if isinstance(event, p.TaskStatusUpdateEvent) and event.status.HasField("message"):
+                encoded = json.dumps(
+                    MessageToDict(event.status.message), ensure_ascii=False, separators=(",", ":")
+                ).encode()
+                assert len(encoded) <= message_limit
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        saved = executor.store.read(binding)
+        assert saved.status == outcome and saved.acknowledges(stored.task)
+        assert saved.checkpoint is None and saved.challenge is None
+        assert await executor.recover(binding, call_context()) == saved
+        assert binding not in executor._live
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        await asyncio.gather(running, return_exceptions=True)
+        await queue.close(immediate=True)
+
+
+async def test_same_context_still_owns_independent_native_sessions(tmp_path, responses):
+    responses.respond(assistant_output("one"))
+    responses.respond(assistant_output("two"))
+    executor = make_executor(tmp_path, responses)
+    first, _ = await invoke(executor, request_context(task_id="first"))
+    second, _ = await invoke(executor, request_context(task_id="second"))
+    assert first.task.context_id == second.task.context_id
+    assert first.task.id != second.task.id
+    assert len(responses.requests[1]["input"]) == len(responses.requests[0]["input"])
+    assert "one" not in str(responses.requests[1]["input"])
+
+
+async def test_cancel_before_start_publication_admits_no_native_work(
+    tmp_path, responses, monkeypatch
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    gate, entered = asyncio.Event(), asyncio.Event()
+    original = EventQueueSource.enqueue_event
+
+    async def held(queue, event):
+        if (
+            isinstance(event, p.TaskStatusUpdateEvent)
+            and event.status.state == p.TASK_STATE_WORKING
+            and not entered.is_set()
+        ):
+            entered.set()
+            await gate.wait()
+        await original(queue, event)
+
+    monkeypatch.setattr(EventQueueSource, "enqueue_event", held)
+    executor = make_executor(tmp_path, responses)
+    context = request_context()
+    running = asyncio.create_task(invoke(executor, context))
+    await asyncio.wait_for(entered.wait(), 5)
+    cancel_queue = EventQueueSource()
+    canceling = asyncio.create_task(executor.cancel(context, cancel_queue))
+    await asyncio.sleep(0)
+    gate.set()
+    stored, _ = await running
+    await canceling
+    await cancel_queue.close(immediate=True)
+    assert stored.task.status.state == p.TASK_STATE_CANCELED
+    assert not responses.requests
+
+
+async def test_cancel_during_session_open_admits_no_submission(tmp_path, responses, monkeypatch):
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    gate, entered = asyncio.Event(), asyncio.Event()
+    original = Agent.session
+
+    @asynccontextmanager
+    async def held(agent, **options):
+        async with original(agent, **options) as session:
+            entered.set()
+            await gate.wait()
+            yield session
+
+    monkeypatch.setattr(Agent, "session", held)
+    executor = make_executor(tmp_path, responses)
+    context = request_context()
+    running = asyncio.create_task(invoke(executor, context))
+    await asyncio.wait_for(entered.wait(), 5)
+    queue = EventQueueSource()
+    canceling = asyncio.create_task(executor.cancel(context, queue))
+    await asyncio.sleep(0)
+    gate.set()
+    stored, _ = await running
+    await canceling
+    await queue.close(immediate=True)
+    assert stored.task.status.state == p.TASK_STATE_CANCELED
+    assert not responses.requests
+
+
+async def test_foreign_stale_and_repeated_answers_never_acquire_authority(tmp_path, responses):
+    tool = FunctionTool(
+        name="approve", description="Host approval", input_type=Approval, output_type=str
+    )
+    executor = make_executor(tmp_path, responses, [tool])
+    responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    first, _ = await invoke(executor, request_context())
+    proposal = MessageToDict(first.task.status.message.parts[0].data)
+    answer = {
+        "challenge": proposal["challenge"],
+        "generation": proposal["generation"],
+        "result": "yes",
+    }
+    for reply, principal in (
+        ({**answer, "challenge": "foreign"}, "alice"),
+        ({**answer, "generation": True}, "alice"),
+        (answer, "bob"),
+    ):
+        with pytest.raises(InvalidParamsError):
+            await invoke(
+                executor, request_context(reply=reply, principal=principal, current=first.task)
+            )
+    assert len(responses.requests) == 1
+    responses.respond(assistant_output("approved once"))
+    final, _ = await invoke(executor, request_context(reply=answer, current=first.task))
+    assert final.task.status.state == p.TASK_STATE_COMPLETED
+    with pytest.raises(InvalidParamsError):
+        await invoke(executor, request_context(reply=answer, current=final.task))
+    assert len(responses.requests) == 2
+
+
+async def test_cancel_after_completion_preserves_authoritative_result(tmp_path, responses):
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    responses.respond(assistant_output("completed result"))
+    executor = make_executor(tmp_path, responses)
+    final, _ = await invoke(executor, request_context())
+    queue = EventQueueSource()
+    try:
+        with pytest.raises(InvalidParamsError, match="cannot confirm cancellation"):
+            await executor.cancel(request_context(current=final.task), queue)
+    finally:
+        await queue.close(immediate=True)
+    current = await executor.store.get("task-a", call_context())
+    assert current.task == final.task
+
+
+def test_durable_record_snapshot_reads_are_independent():
+    from agents.a2a import NativeA2ATask
+
+    binding = NativeA2ABinding(principal="alice", task_id="task", context_id="context")
+    original = p.Task(
+        id="task", context_id="context", status=p.TaskStatus(state=p.TASK_STATE_COMPLETED)
+    )
+    record = NativeA2ATask(
+        binding=binding,
+        generation=1,
+        status="completed",
+        snapshot=original.SerializeToString(deterministic=True),
+    )
+    copy = record.task()
+    copy.status.state = p.TASK_STATE_WORKING
+    assert record.task() == original
+    assert record.acknowledges(original) and not record.acknowledges(copy)
+
+
+async def test_cleanup_failure_never_publishes_success_or_private_error(
+    tmp_path, responses, monkeypatch
+):
+    from contextlib import asynccontextmanager
+
+    original = Agent.session
+
+    @asynccontextmanager
+    async def failed_cleanup(agent, **options):
+        async with original(agent, **options) as session:
+            yield session
+        raise RuntimeError("synthetic-private-credential")
+
+    monkeypatch.setattr(Agent, "session", failed_cleanup)
+    responses.respond(assistant_output("unpublished result"))
+    executor = make_executor(tmp_path, responses)
+    final, _ = await invoke(executor, request_context())
+    assert final.task.status.state == p.TASK_STATE_FAILED
+    assert not final.task.artifacts
+    assert "synthetic-private-credential" not in str(final.task)
+
+
+@pytest.mark.parametrize("staggered", [False, True])
+async def test_multiple_manual_requests_rejected_without_continuation(
+    tmp_path, responses, monkeypatch, staggered
+):
+    import asyncio
+
+    from agents import Turn
+
+    first_observed = asyncio.Event()
+    observed = []
+    if staggered:
+        original = Turn.wait_for_request_or_result
+
+        async def observe_first(turn):
+            outcome = await original(turn)
+            observed.append([request.call_id for request in outcome.requests])
+            first_observed.set()
+            return outcome
+
+        async def before_event(event):
+            if event.get("item", {}).get("call_id") == "call-two":
+                await asyncio.wait_for(first_observed.wait(), 5)
+
+        monkeypatch.setattr(Turn, "wait_for_request_or_result", observe_first)
+        responses.before_event = before_event
+    tools = [
+        FunctionTool(name=name, description="Host decision", input_type=Approval, output_type=str)
+        for name in ("first", "second")
+    ]
+    responses.respond(
+        function_call("first", {"reason": "one"}, "call-one"),
+        function_call("second", {"reason": "two"}, "call-two"),
+    )
+    executor = make_executor(tmp_path, responses, tools)
+    final, _ = await invoke(executor, request_context())
+    if staggered:
+        assert observed == [["call-one"]]
+    assert final.task.status.state == p.TASK_STATE_FAILED
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+    assert saved.status == "failed" and saved.acknowledges(final.task)
+    assert saved.checkpoint is None and saved.challenge is None
+    assert await executor.recover(binding, call_context()) == saved
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize("boundary", ["manual_ready", "suspend", "close", "close_failure"])
+async def test_cancel_joins_native_session_transition(tmp_path, responses, monkeypatch, boundary):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    from agents import Session, Turn
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    if boundary == "manual_ready":
+        owner, method = Turn, "wait_for_request_or_result"
+    else:
+        owner = Session
+        method = "_capture_checkpoint" if boundary == "suspend" else "_close_session"
+    original = getattr(owner, method)
+
+    async def held(instance, *args, **kwargs):
+        if boundary == "manual_ready":
+            outcome = await original(instance, *args, **kwargs)
+        entered.set()
+        await release.wait()
+        if boundary == "manual_ready":
+            return outcome
+        outcome = await original(instance, *args, **kwargs)
+        if boundary == "close_failure":
+            raise RuntimeError("synthetic-private-cleanup-error")
+        return outcome
+
+    monkeypatch.setattr(owner, method, held)
+    tools = []
+    if boundary in {"manual_ready", "suspend"}:
+        tools = [
+            FunctionTool(
+                name="approve", description="Host approval", input_type=Approval, output_type=str
+            )
+        ]
+        responses.respond(function_call("approve", {"reason": "synthetic"}, "call-a"))
+    else:
+        responses.respond(assistant_output("unpublished result"))
+    executor = make_executor(tmp_path, responses, tools)
+    context = request_context()
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    queue = EventQueueSource()
+    running = asyncio.create_task(invoke(executor, context))
+    canceling = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        canceling = asyncio.create_task(executor.cancel(context, queue))
+        await asyncio.sleep(0)
+        returned_before_join = canceling.done()
+        release.set()
+        settled, cancellation = await asyncio.wait_for(
+            asyncio.gather(running, canceling, return_exceptions=True), 5
+        )
+        assert not returned_before_join, repr(cancellation)
+        assert not isinstance(settled, BaseException), repr(settled)
+        saved = executor.store.read(binding)
+        stored, _ = settled
+        if boundary == "close_failure":
+            assert isinstance(cancellation, InvalidParamsError)
+            assert saved.status == "failed"
+            assert stored.task.status.state == p.TASK_STATE_FAILED
+        else:
+            assert cancellation is None, repr(cancellation)
+            assert saved.status == "canceled"
+            assert stored.task.status.state == p.TASK_STATE_CANCELED
+        assert saved.checkpoint is None and saved.challenge is None
+        assert saved.acknowledges(stored.task)
+        assert not stored.task.artifacts
+        assert "synthetic-private-cleanup-error" not in str(stored.task)
+        assert binding not in executor._live
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        for pending in (running, canceling):
+            if pending is not None and not pending.done():
+                pending.cancel()
+        await asyncio.gather(
+            *(pending for pending in (running, canceling) if pending is not None),
+            return_exceptions=True,
+        )
+        await queue.close(immediate=True)
+
+
+async def test_cancel_interrupts_preseal_callback_and_joins_cleanup(
+    tmp_path, responses, monkeypatch
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    from agents import Session, function_tool
+
+    entered, draining, cleanup, joined = (asyncio.Event() for _ in range(4))
+    release, release_cleanup = asyncio.Event(), asyncio.Event()
+    canceled = asyncio.Event()
+    effects = []
+
+    @function_tool
+    async def held() -> str:
+        """Wait until the host releases this synthetic effect."""
+        entered.set()
+        try:
+            await release.wait()
+            effects.append("finished")
+            return "finished"
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+        finally:
+            cleanup.set()
+            await release_cleanup.wait()
+            joined.set()
+
+    original = Session._wait_manual_boundary
+
+    async def observe_draining(session, *args, **kwargs):
+        await entered.wait()
+        draining.set()
+        return await original(session, *args, **kwargs)
+
+    monkeypatch.setattr(Session, "_wait_manual_boundary", observe_draining)
+    manual = FunctionTool(
+        name="approve", description="Host approval", input_type=Approval, output_type=str
+    )
+    responses.respond(
+        function_call("approve", {"reason": "synthetic"}, "call-a"),
+        function_call("held", {}, "call-b"),
+    )
+    executor = make_executor(tmp_path, responses, [manual, held])
+    context = request_context()
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    queue = EventQueueSource()
+    running = asyncio.create_task(invoke(executor, context))
+    canceling = None
+    try:
+        await asyncio.wait_for(draining.wait(), 5)
+        canceling = asyncio.create_task(executor.cancel(context, queue))
+        await asyncio.wait_for(cleanup.wait(), 5)
+        assert canceled.is_set()
+        assert not joined.is_set() and not canceling.done()
+        release_cleanup.set()
+        settled, cancellation = await asyncio.wait_for(
+            asyncio.gather(running, canceling, return_exceptions=True), 5
+        )
+        assert not isinstance(settled, BaseException), repr(settled)
+        assert cancellation is None, repr(cancellation)
+        stored, _ = settled
+        saved = executor.store.read(binding)
+        assert joined.is_set() and effects == []
+        assert saved.status == "canceled"
+        assert stored.task.status.state == p.TASK_STATE_CANCELED
+        assert saved.acknowledges(stored.task)
+        assert saved.checkpoint is None and saved.challenge is None
+        assert not stored.task.artifacts
+        assert binding not in executor._live
+        assert len(responses.requests) == 1
+    finally:
+        release.set()
+        release_cleanup.set()
+        await asyncio.gather(
+            *(pending for pending in (running, canceling) if pending is not None),
+            return_exceptions=True,
+        )
+        await queue.close(immediate=True)
+
+
+async def test_oversized_final_snapshot_settles_and_recovers_failure(tmp_path, responses):
+    responses.respond(assistant_output("x" * 1024))
+    executor = make_executor(
+        tmp_path, responses, limits=A2ALimits(message_bytes=4096, checkpoint_bytes=512)
+    )
+    context = request_context()
+    stored, events = await invoke(executor, context)
+    binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+    saved = executor.store.read(binding)
+
+    assert stored.task.status.state == p.TASK_STATE_FAILED
+    assert saved.status == "failed"
+    assert stored.task.id == binding.task_id and stored.task.context_id == binding.context_id
+    assert saved.acknowledges(stored.task)
+    assert len(saved.snapshot) <= 512
+    assert saved.checkpoint is None and saved.challenge is None
+    assert not stored.task.artifacts
+    assert not any(isinstance(event, p.TaskArtifactUpdateEvent) for event in events)
+    assert len(responses.requests) == 1
+    assert binding not in executor._live
+
+    def forbidden_factory(*args):
+        raise AssertionError("Recovery must not execute the failed native task")
+
+    fresh = NativeA2AExecutor(agent_factory=forbidden_factory, store=executor.store)
+    assert await fresh.recover(binding, call_context()) == saved
+    recovered = await executor.store.get(binding.task_id, call_context())
+    assert recovered.task == stored.task
+    assert saved.acknowledges(recovered.task)
+    assert executor.store.read(binding) == saved
+    assert len(responses.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("prompt_size", "with_tool", "has_progress"),
+    [(305, False, False), (305, True, False), (260, True, True)],
+    ids=["near-limit", "near-limit-after-tool", "progress-fits"],
+)
+async def test_official_handler_acknowledges_failure_near_snapshot_limit(
+    tmp_path, responses, prompt_size, with_tool, has_progress
+):
+    import asyncio
+
+    effects = []
+
+    @function_tool
+    def record_effect(value: str) -> str:
+        effects.append(value)
+        return value
+
+    if with_tool:
+        responses.respond(function_call("record_effect", {"value": "once"}, "call-progress"))
+    responses.respond(assistant_output("x" * 1024))
+    executor = make_executor(
+        tmp_path,
+        responses,
+        [record_effect] if with_tool else [],
+        limits=A2ALimits(message_bytes=4096, checkpoint_bytes=512),
+    )
+    handler = DefaultRequestHandler(executor, executor.store, card("http://127.0.0.1:1"))
+    prompt = "p" * prompt_size
+    try:
+        task = await asyncio.wait_for(
+            handler.on_message_send(
+                p.SendMessageRequest(message=new_text_message(prompt, role=p.ROLE_USER)),
+                call_context(),
+            ),
+            20,
+        )
+    finally:
+        await handler.aclose()
+
+    binding = NativeA2ABinding(principal="alice", task_id=task.id, context_id=task.context_id)
+    saved = executor.store.read(binding)
+    assert task.status.state == p.TASK_STATE_FAILED and not task.status.HasField("message")
+    assert task.history[0].parts[0].text == prompt and not task.artifacts
+    assert ("progress" in task.metadata) is has_progress
+    assert saved.status == "failed" and saved.acknowledges(task)
+    assert executor.store.acknowledged(binding) == saved.generation
+    assert all(len(snapshot) <= 512 for snapshot in executor.store.saved)
+    assert await executor.recover(binding, call_context()) == saved
+    assert effects == (["once"] if with_tool else [])
+    assert len(responses.requests) == (2 if with_tool else 1)
+
+
+@pytest.mark.parametrize(("prompt_size", "has_message"), [(1, True), (305, False)])
+async def test_official_cancel_preserves_canceled_outcome_within_snapshot_limit(
+    tmp_path, responses, prompt_size, has_message
+):
+    import asyncio
+
+    entered, release, joined = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @function_tool
+    async def hold() -> str:
+        entered.set()
+        try:
+            await release.wait()
+            return "released"
+        finally:
+            joined.set()
+
+    responses.respond(function_call("hold", {}, "call-cancel"))
+    executor = make_executor(
+        tmp_path, responses, [hold], limits=A2ALimits(message_bytes=4096, checkpoint_bytes=512)
+    )
+    handler = DefaultRequestHandler(executor, executor.store, card("http://127.0.0.1:1"))
+    prompt = "p" * prompt_size
+    try:
+        running = await asyncio.wait_for(
+            handler.on_message_send(
+                p.SendMessageRequest(
+                    message=new_text_message(prompt, role=p.ROLE_USER),
+                    configuration=p.SendMessageConfiguration(return_immediately=True),
+                ),
+                call_context(),
+            ),
+            20,
+        )
+        await asyncio.wait_for(entered.wait(), 5)
+        task = await asyncio.wait_for(
+            handler.on_cancel_task(p.CancelTaskRequest(id=running.id), call_context()), 5
+        )
+        assert joined.is_set()
+    finally:
+        release.set()
+        await handler.aclose()
+
+    binding = NativeA2ABinding(principal="alice", task_id=task.id, context_id=task.context_id)
+    saved = executor.store.read(binding)
+    assert task.status.state == p.TASK_STATE_CANCELED
+    assert task.status.HasField("message") is has_message
+    assert task.history[0].parts[0].text == prompt
+    assert saved.status == "canceled" and saved.acknowledges(task)
+    assert executor.store.acknowledged(binding) == saved.generation
+    assert all(len(snapshot) <= 512 for snapshot in executor.store.saved)
+    assert await executor.recover(binding, call_context()) == saved
+    assert len(responses.requests) == 1

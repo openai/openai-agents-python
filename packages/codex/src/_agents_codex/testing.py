@@ -32,8 +32,10 @@ from http.server import (
     BaseHTTPRequestHandler as BaseHTTPRequestHandler,
     ThreadingHTTPServer as ThreadingHTTPServer,
 )
+from socketserver import TCPServer as TCPServer
 from threading import Lock as Lock, Thread as Thread
 from types import TracebackType as TracebackType
+from typing import cast as cast
 from uuid import uuid4 as uuid4
 
 from agents.config import JsonValue as JsonValue
@@ -82,6 +84,13 @@ def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) ->
     )
 
 
+class _LoopbackHTTPServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        # Numeric loopback needs no reverse DNS lookup during local startup.
+        TCPServer.server_bind(self)
+        self.server_name, self.server_port = cast(tuple[str, int], self.server_address)
+
+
 class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
     """Serve a script from a loopback HTTP endpoint through an ordinary native provider.
 
@@ -110,7 +119,7 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
     async def __aenter__(self) -> ScriptedResponses:
         if self._server is not None:
             raise RuntimeError("ScriptedResponses can only be entered once")
-        server = ThreadingHTTPServer(("127.0.0.1", 0), partial(_Handler, self))
+        server = _LoopbackHTTPServer(("127.0.0.1", 0), partial(_Handler, self))
         # server_close() joins only non-daemon handlers, including canceled native requests.
         server.daemon_threads = False
         thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
