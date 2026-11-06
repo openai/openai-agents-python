@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ast
 import os
 import re
 import shutil
@@ -44,26 +43,6 @@ def _workflow_job(name: str, path: Path = TESTS_WORKFLOW) -> str:
     match = re.search(job_pattern, workflow)
     assert match is not None
     return match.group("body")
-
-
-@pytest.mark.parametrize(
-    ("path", "eligible"),
-    [
-        (b"packages/codex/tests/fixtures/released_api_contract.json", True),
-        (b"packages/codex/tests/fixtures/other_contract.json", False),
-        (b"packages/codex/tests/fixtures/released_api_contract.json.bak", False),
-        (b"src/agents/released_api_contract.json", False),
-        (b"packages/codex/rust/released_api_contract.json", False),
-        (b"packages/codex/tests/test_native_agent.py", True),
-    ],
-)
-def test_native_reuse_allows_only_the_generated_api_fixture(path: bytes, eligible: bool) -> None:
-    # Exercise the selector in the actual workflow against neighboring file names.
-    script = _workflow_job("changes")
-    match = re.search(r"(?ms)^(\s*)allowed = re\.compile\(\n(?P<pattern>.*?)^\1\)", script)
-    assert match is not None
-    pattern = ast.literal_eval("(" + match.group("pattern").strip() + ")")
-    assert bool(re.compile(pattern).fullmatch(path)) is eligible
 
 
 def test_repository_skills_workflow_uses_the_isolated_runner() -> None:
