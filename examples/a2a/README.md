@@ -20,6 +20,21 @@ For work that must survive the calling worker, register `A2AJobProvider` with ex
 
 The provider checks `authorize(claim, operation)` against current host policy before contacting the service. After admitting the configured card, it calls `authorization()` for that endpoint's bearer token. Immediately before each mutation, it checks authority again and calls `reserve(claim, operation, action_id)`. The host must atomically reserve that action under the current claim and retain the reservation across worker loss. A reply reservation identifies the task, challenge and generation, independent of the answer's contents. Keep credentials, claims, receipts and checkpoints out of model input and logs.
 
+### Credential rotation and host validation
+
+`A2AJobProvider` rejects reflections of the bearer acquired for the current operation and clears its credential references when that operation ends. This filter does not recognize every credential previously issued to the service. A peer can return an earlier token after rotation, including through a task ID, form or completed artifact. Treat all peer data as private until the host validates it.
+
+The host must enforce its credential and output policy before logging, storing or releasing peer data. The policy must cover credentials that remain valid after rotation, including those used by another worker or job. Restore this policy from the host's credential authority when a worker restarts. A check against only the latest token, or a token list kept in one provider instance, is insufficient. Keep bearer tokens in the host's credential service; do not copy them into task receipts, results or native checkpoints.
+
+Apply the policy at these existing boundaries:
+
+- In `project(task)`, validate the complete private Task before logging or copying its fields. Return only approved application output. Reject unexpected fields or values with an exception that does not include the private input.
+- In `JobJournal.record(claim, update)`, validate the full receipt and value before writing either. Include task/context IDs and all input-required or auth-required form content. A refusal must raise before writing the rejected data. The deferred runner awaits this method before running the deferred tool's output projector or delivering output to the model.
+- In `JobJournal.save_result`, validate the final output before storing it for model delivery.
+- In journal `claim` and `authorize`, apply the current policy to saved updates and results before reuse. A restored job can use those rows without calling the provider or `record` again. Validate or quarantine rows written under an older policy, and refuse to resume if the required policy is unavailable.
+
+These hooks let the application enforce its own policy; the SDK does not supply that policy automatically. Keep the checks bound to the current tenant, principal, endpoint and job. For example, admit a closed set of expected result codes and map them to host-owned output instead of copying arbitrary peer text.
+
 Known receipts support observation without creating another task. Lost create, input or cancellation acknowledgments remain unknown; neither protocol message IDs nor another connection make a replay safe. The host owns reconciliation and scheduling. Business input requires one data-object proposal with a nonempty string `challenge` and a positive whole-number `generation`. Unsupported proposals retain the acknowledged receipt as unknown and cannot reserve or send an answer. `auth-required` remains separate from business approval. A host-approved `A2AInputReply` must match the current remote task, context, challenge and generation. The host must validate domain answers before reserving them.
 
 ## Expose a native Agent

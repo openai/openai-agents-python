@@ -132,17 +132,28 @@ async def test_cancelled_provider_releases_credentials_from_diagnostics(stage):
             encode=lambda value: new_text_message(value.text, role=p.ROLE_USER),
             project=project,
         )
-        pending = asyncio.create_task(provider.start(claim(provider), Query(text="test")))
+        diagnostic = None
+
+        async def start():
+            nonlocal diagnostic
+            try:
+                await provider.start(claim(provider), Query(text="test"))
+            except asyncio.CancelledError as exc:
+                # Capture before Task result retrieval can consume the traceback on Python 3.10.
+                diagnostic = traceback.TracebackException.from_exception(exc, capture_locals=True)
+                raise
+
+        pending = asyncio.create_task(start())
         try:
             if stage == "reserve":
                 await asyncio.wait_for(reserving.wait(), 5)
                 pending.cancel()
-            with pytest.raises(asyncio.CancelledError) as caught:
+            with pytest.raises(asyncio.CancelledError):
                 await asyncio.wait_for(pending, 5)
         finally:
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
-        diagnostic = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+        assert diagnostic is not None
         frames = [
             frame
             for frame in diagnostic.stack

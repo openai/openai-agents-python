@@ -69,6 +69,13 @@ class A2AJobProvider(Generic[_Input]):
     token for the fixed endpoint. reserve atomically spends an approved mutation;
     its reservation survives lost acknowledgments. Generic A2A creation has no
     idempotency guarantee. The host owns projection, storage, and wake-up scheduling.
+
+    The credential filter recognizes only the current operation's bearer. The host
+    must validate peer data against its durable credential policy before logging,
+    storing, or releasing it to a model. ``project`` admits completed task content;
+    ``JobJournal.record`` admits receipts and pending values. Journal ``claim`` and
+    ``authorize`` must also check saved data before reuse after a worker restart.
+    See ``examples/a2a/README.md`` for the required admission and rotation policy.
     """
 
     def __init__(
