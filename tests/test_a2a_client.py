@@ -154,7 +154,12 @@ async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
     assert isinstance(caught.value.__cause__, httpx.TimeoutException)
     if kind != "deadline":
         assert isinstance(caught.value.__cause__, httpx.ReadTimeout)
-    pending, seen = [caught.value], set()
+    # A streaming idle timeout occurs after the HTTP client's send frame has returned.
+    _assert_closed_connection_credentials(caught.value, require_client=kind != "stream-idle")
+
+
+def _assert_closed_connection_credentials(error, *, require_client=True):
+    pending, seen, clients = [error], set(), set()
     while pending:
         error = pending.pop()
         if id(error) in seen:
@@ -163,7 +168,100 @@ async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
         request = getattr(error, "_request", None)
         if request is not None:
             assert "authorization" not in request.headers
+        tb = error.__traceback__
+        while tb is not None:
+            frame = tb.tb_frame
+            if frame.f_code.co_filename.replace("\\", "/").endswith(
+                "/agents/_runtime/a2a/_client.py"
+            ):
+                for value in frame.f_locals.values():
+                    if isinstance(value, httpx.AsyncClient):
+                        clients.add(value)
+                        assert value.is_closed
+                        assert "authorization" not in value.headers
+            tb = tb.tb_next
         pending.extend(item for item in (error.__cause__, error.__context__) if item is not None)
+    if require_client:
+        assert clients
+
+
+@pytest.mark.parametrize("failure", ["timeout", "message-limit"])
+async def test_connection_credentials_survive_retry_but_not_teardown(failure):
+    received, authorizations = [], []
+
+    async def authorization():
+        authorizations.append(True)
+        return "synthetic-retry-token"
+
+    def app(url):
+        async def discovery(request):
+            return JSONResponse(MessageToDict(card(url)))
+
+        async def rpc(request):
+            received.append(request.headers.get("authorization"))
+            body = await request.json()
+            if failure == "timeout" and len(received) == 1:
+                await asyncio.sleep(1)
+            return JSONResponse(
+                {
+                    "jsonrpc": "2.0",
+                    "id": body["id"],
+                    "result": {
+                        "id": "task",
+                        "contextId": "context",
+                        "status": {"state": "TASK_STATE_WORKING"},
+                    },
+                }
+            )
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+        async with connect_a2a(
+            endpoint(url),
+            authorization=authorization,
+            limits=A2ALimits(timeout=0.3, message_bytes=128),
+        ) as client:
+            if failure == "timeout":
+                with pytest.raises(A2AClientTimeoutError) as caught:
+                    await client.get_task(p.GetTaskRequest(id="task"))
+            else:
+                with pytest.raises(ValueError, match="message exceeds") as caught:
+                    async for _ in client.send_message(
+                        p.SendMessageRequest(message=new_text_message("x" * 1024, role=p.ROLE_USER))
+                    ):
+                        pass
+            assert (await client.get_task(p.GetTaskRequest(id="task"))).id == "task"
+        _assert_closed_connection_credentials(caught.value)
+    assert received == ["Bearer synthetic-retry-token"] * (2 if failure == "timeout" else 1)
+    assert authorizations == [True]
+
+
+@pytest.mark.parametrize("close_method", ["context", "direct"])
+async def test_client_clears_credentials_before_cleanup_failure(monkeypatch, close_method):
+    from agents.a2a._client import _BoundedClient, _BoundedTransport
+
+    original_close = _BoundedTransport.aclose
+
+    async def close_then_fail(transport):
+        await original_close(transport)
+        raise RuntimeError("Synthetic cleanup failure")
+
+    monkeypatch.setattr(_BoundedTransport, "aclose", close_then_fail)
+    client = _BoundedClient(A2ALimits(), headers={"Authorization": "Bearer synthetic-close-token"})
+    with pytest.raises(RuntimeError, match="Synthetic cleanup failure"):
+        if close_method == "context":
+            async with client:
+                pass
+        else:
+            await client.aclose()
+    assert client.is_closed
+    assert "authorization" not in client.headers
 
 
 async def test_two_independent_servers_selected_from_500_entry_host_catalog(tmp_path, responses):

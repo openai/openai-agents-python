@@ -11,6 +11,7 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager as asynccontextmanager
 from dataclasses import dataclass as dataclass
+from types import TracebackType
 from typing import Any as Any
 from urllib.parse import urlsplit as urlsplit
 
@@ -153,6 +154,20 @@ class _BoundedClient(httpx.AsyncClient):
         self._request_deadline = limits.timeout
         self._message_limit = limits.message_bytes
 
+    async def aclose(self) -> None:
+        self.headers.pop("authorization", None)
+        await super().aclose()
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None = None,
+        exc_value: BaseException | None = None,
+        traceback: TracebackType | None = None,
+    ) -> None:
+        # HTTPX's context exit closes transports without calling aclose().
+        self.headers.pop("authorization", None)
+        await super().__aexit__(exc_type, exc_value, traceback)
+
     async def send(self, request: httpx.Request, **options: Any) -> httpx.Response:
         # HTTPX reads an ordinary response here. A streaming send returns at the headers.
         try:
@@ -242,21 +257,24 @@ async def connect_a2a(
     candidate = ""
     if token is None:
         raise PermissionError("A2A credentials are unavailable")
-    async with _BoundedClient(
-        limits, headers={"Authorization": f"Bearer {token}", "A2A-Version": "1.0", **carrier}
-    ) as http:
-        client = ClientFactory(
-            ClientConfig(
-                streaming=streaming,
-                polling=False,
-                httpx_client=http,
-                supported_protocol_bindings=["JSONRPC"],
-            )
-        ).create(selected)
-        try:
-            yield client
-        finally:
-            await client.close()
+    try:
+        async with _BoundedClient(limits, headers={"A2A-Version": "1.0", **carrier}) as http:
+            http.headers["Authorization"] = f"Bearer {token}"
+            token = None
+            client = ClientFactory(
+                ClientConfig(
+                    streaming=streaming,
+                    polling=False,
+                    httpx_client=http,
+                    supported_protocol_bindings=["JSONRPC"],
+                )
+            ).create(selected)
+            try:
+                yield client
+            finally:
+                await client.close()
+    finally:
+        token = None
 
 
 _preserve_module_identity(globals(), "agents.a2a._client")
