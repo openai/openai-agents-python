@@ -11,6 +11,7 @@ from collections.abc import (
 )
 from contextlib import asynccontextmanager as asynccontextmanager
 from dataclasses import dataclass as dataclass
+from traceback import clear_frames as _clear_frames
 from types import TracebackType
 from typing import Any as Any
 from urllib.parse import urlsplit as urlsplit
@@ -101,23 +102,51 @@ def _limits(value: A2ALimits | Mapping[str, Any]) -> A2ALimits:
     return value if isinstance(value, A2ALimits) else A2ALimits(**value)
 
 
+def _clear_transport_frames(error: BaseException) -> None:
+    # Dependency frames can retain private copies of the outgoing headers.
+    pending, seen = [error], set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if current.__traceback__ is not None:
+            _clear_frames(current.__traceback__)
+        pending.extend(
+            cause for cause in (current.__cause__, current.__context__) if cause is not None
+        )
+
+
 class _BoundedStream(httpx.AsyncByteStream):
     def __init__(self, response: httpx.Response, limit: int) -> None:
-        self.response, self.limit = response, limit
+        self.response: httpx.Response | None = response
+        self.limit = limit
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         size = 0
         try:
+            if self.response is None:
+                return
             async for chunk in self.response.aiter_raw():
                 size += len(chunk)
                 if size > self.limit:
                     raise ValueError("A2A response exceeds configured byte limit")
                 yield chunk
+        except BaseException as error:
+            _clear_transport_frames(error)
+            raise
         finally:
-            await self.response.aclose()
+            await self.aclose()
 
     async def aclose(self) -> None:
-        await self.response.aclose()
+        try:
+            if self.response is not None:
+                await self.response.aclose()
+        except BaseException as error:
+            _clear_transport_frames(error)
+            raise
+        finally:
+            self.response = None
 
 
 class _BoundedTransport(httpx.AsyncBaseTransport):
@@ -184,8 +213,13 @@ class _BoundedClient(httpx.AsyncClient):
                         raise ValueError("A2A message exceeds configured byte limit")
             with anyio.fail_after(self._request_deadline):
                 return await super().send(request, **options)
-        except TimeoutError as exc:
-            raise httpx.TimeoutException("A2A request deadline exceeded", request=request) from exc
+        except BaseException as exc:
+            _clear_transport_frames(exc)
+            if isinstance(exc, TimeoutError):
+                raise httpx.TimeoutException(
+                    "A2A request deadline exceeded", request=request
+                ) from exc
+            raise
         finally:
             # The wire send has finished. Later errors, including SSE read timeouts,
             # may retain this same request in their exception chain.

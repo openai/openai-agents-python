@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import traceback
 from dataclasses import replace
 
 import pytest
@@ -83,6 +84,72 @@ def claim(provider, update=None, action="start"):
     return JobClaim(
         binding=binding, key="host-owned-key", generation=1, action=action, update=update
     )
+
+
+@pytest.mark.parametrize("stage", ["reserve", "project"])
+async def test_cancelled_provider_releases_credentials_from_diagnostics(stage):
+    reserving = asyncio.Event()
+
+    async def authorize(claim, operation):
+        pass
+
+    async def reserve(claim, operation, action):
+        if stage == "reserve":
+            reserving.set()
+            await asyncio.Event().wait()
+        return True
+
+    def project(task):
+        raise asyncio.CancelledError
+
+    def app(url):
+        async def discovery(request):
+            return JSONResponse(MessageToDict(card(url)))
+
+        async def rpc(request):
+            assert request.headers["authorization"] == "Bearer alice-token"
+            body = await request.json()
+            task = {
+                "id": "task",
+                "contextId": "context",
+                "status": {"state": "TASK_STATE_COMPLETED"},
+            }
+            return JSONResponse({"jsonrpc": "2.0", "id": body["id"], "result": {"task": task}})
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+        provider = A2AJobProvider(
+            endpoint(url),
+            authorize=authorize,
+            authorization=token,
+            reserve=reserve,
+            encode=lambda value: new_text_message(value.text, role=p.ROLE_USER),
+            project=project,
+        )
+        pending = asyncio.create_task(provider.start(claim(provider), Query(text="test")))
+        try:
+            if stage == "reserve":
+                await asyncio.wait_for(reserving.wait(), 5)
+                pending.cancel()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await asyncio.wait_for(pending, 5)
+        finally:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+        diagnostic = traceback.TracebackException.from_exception(caught.value, capture_locals=True)
+        frames = [
+            frame
+            for frame in diagnostic.stack
+            if frame.filename.replace("\\", "/").endswith("/agents/_runtime/a2a/_provider.py")
+        ]
+        assert frames
+        assert "alice-token" not in "".join(traceback.StackSummary.from_list(frames).format())
 
 
 async def test_creation_shares_one_deadline_across_discovery_and_rpc(tmp_path):

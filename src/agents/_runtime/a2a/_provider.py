@@ -10,6 +10,7 @@ from collections.abc import (
     Awaitable as Awaitable,
     Callable as Callable,
     Mapping as Mapping,
+    Sequence as Sequence,
 )
 from contextlib import asynccontextmanager as asynccontextmanager
 from dataclasses import dataclass as dataclass, field as field
@@ -96,12 +97,15 @@ class A2AJobProvider(Generic[_Input]):
                 credentials.append(token)
             return token
 
-        # Discovery, admission and all RPCs in one job operation share a deadline.
-        with anyio.fail_after(self.limits.timeout):
-            async with connect_a2a(
-                self.endpoint, authorization=authorization, limits=self.limits
-            ) as client:
-                yield client
+        try:
+            # Discovery, admission and all RPCs in one job operation share a deadline.
+            with anyio.fail_after(self.limits.timeout):
+                async with connect_a2a(
+                    self.endpoint, authorization=authorization, limits=self.limits
+                ) as client:
+                    yield client
+        finally:
+            credentials.clear()
 
     async def _check(self, claim: JobClaim, operation: Operation) -> None:
         allowed = False
@@ -131,7 +135,7 @@ class A2AJobProvider(Generic[_Input]):
         task: p.Task,
         expected: dict[str, str] | None = None,
         *,
-        credentials: tuple[str, ...] = (),
+        credentials: Sequence[str] = (),
     ) -> JobUpdate:
         if (
             not task.id
@@ -222,7 +226,7 @@ class A2AJobProvider(Generic[_Input]):
                     return JobUpdate("unknown")
                 async for event in client.send_message(request):
                     if event.HasField("task"):
-                        result = self._update(event.task, credentials=tuple(credentials))
+                        result = self._update(event.task, credentials=credentials)
                         break
         except Exception:
             pass
@@ -239,7 +243,7 @@ class A2AJobProvider(Generic[_Input]):
                 result = self._update(
                     await client.get_task(p.GetTaskRequest(id=receipt["task_id"])),
                     receipt,
-                    credentials=tuple(credentials),
+                    credentials=credentials,
                 )
         except Exception:
             pass
@@ -300,7 +304,7 @@ class A2AJobProvider(Generic[_Input]):
             async with self._connect(credentials) as client:
                 await self._check(claim, operation)
                 task = await client.get_task(p.GetTaskRequest(id=receipt["task_id"]))
-                current = self._update(task, receipt, credentials=tuple(credentials))
+                current = self._update(task, receipt, credentials=credentials)
                 if current.status == "unknown":
                     return current
                 if operation == "cancel" and current.status not in {"pending", "input_required"}:
@@ -343,14 +347,12 @@ class A2AJobProvider(Generic[_Input]):
                         result = self._update(
                             await client.cancel_task(p.CancelTaskRequest(id=receipt["task_id"])),
                             receipt,
-                            credentials=tuple(credentials),
+                            credentials=credentials,
                         )
                     else:
                         async for event in client.send_message(request):
                             if event.HasField("task"):
-                                result = self._update(
-                                    event.task, receipt, credentials=tuple(credentials)
-                                )
+                                result = self._update(event.task, receipt, credentials=credentials)
                                 break
         except Exception:
             pass

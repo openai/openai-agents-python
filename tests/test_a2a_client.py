@@ -9,6 +9,7 @@ import pytest
 
 pytest.importorskip("a2a")
 
+import httpcore
 import httpx
 from a2a.client import ClientCallContext
 from a2a.client.errors import A2AClientTimeoutError
@@ -160,6 +161,7 @@ async def test_rpc_timeout_exception_chain_does_not_expose_bearer(kind):
 
 def _assert_closed_connection_credentials(error, *, require_client=True):
     pending, seen, clients = [error], set(), set()
+    objects = []
     while pending:
         error = pending.pop()
         if id(error) in seen:
@@ -171,6 +173,10 @@ def _assert_closed_connection_credentials(error, *, require_client=True):
         tb = error.__traceback__
         while tb is not None:
             frame = tb.tb_frame
+            if frame.f_globals.get("__name__", "").startswith(
+                ("agents.a2a.", "agents._runtime.a2a.", "httpx.", "httpcore.")
+            ):
+                objects.extend(frame.f_locals.values())
             if frame.f_code.co_filename.replace("\\", "/").endswith(
                 "/agents/_runtime/a2a/_client.py"
             ):
@@ -183,6 +189,24 @@ def _assert_closed_connection_credentials(error, *, require_client=True):
         pending.extend(item for item in (error.__cause__, error.__context__) if item is not None)
     if require_client:
         assert clients
+    seen_objects = set()
+    while objects:
+        value = objects.pop()
+        if id(value) in seen_objects:
+            continue
+        seen_objects.add(id(value))
+        if isinstance(value, httpcore.Request):
+            assert all(name.lower() != b"authorization" for name, _ in value.headers)
+        elif isinstance(value, httpx.Request):
+            assert "authorization" not in value.headers
+        if isinstance(value, dict):
+            objects.extend(value.values())
+        elif isinstance(value, (list, tuple, set)):
+            objects.extend(value)
+        elif isinstance(value, httpx.AsyncByteStream) or type(value).__module__.startswith(
+            ("agents.a2a.", "agents._runtime.a2a.", "httpx", "httpcore")
+        ):
+            objects.extend(getattr(value, "__dict__", {}).values())
 
 
 @pytest.mark.parametrize("failure", ["timeout", "message-limit"])
@@ -262,6 +286,75 @@ async def test_client_clears_credentials_before_cleanup_failure(monkeypatch, clo
             await client.aclose()
     assert client.is_closed
     assert "authorization" not in client.headers
+
+
+async def test_stream_cleanup_failure_releases_private_response():
+    from agents.a2a._client import _BoundedStream
+
+    class FailingStream(httpx.AsyncByteStream):
+        def __init__(self):
+            self.request = httpcore.Request(
+                "GET", "https://example.test", headers={"Authorization": "Bearer synthetic-token"}
+            )
+
+        async def aclose(self):
+            raise RuntimeError("Synthetic stream cleanup failure")
+
+    stream = _BoundedStream(httpx.Response(200, stream=FailingStream()), 1024)
+    with pytest.raises(RuntimeError, match="Synthetic stream cleanup failure") as caught:
+        await stream.aclose()
+    _assert_closed_connection_credentials(caught.value, require_client=False)
+
+
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_cancelled_connection_releases_transport_credentials(streaming):
+    receiving = asyncio.Event()
+
+    def app(url):
+        async def discovery(request):
+            return JSONResponse(MessageToDict(card(url)))
+
+        async def rpc(request):
+            assert request.headers["authorization"] == "Bearer alice-token"
+
+            async def body():
+                yield b": heartbeat\n\n" if streaming else b" "
+                receiving.set()
+                await asyncio.Event().wait()
+
+            return StreamingResponse(
+                body(), media_type="text/event-stream" if streaming else "application/json"
+            )
+
+        return Starlette(
+            routes=[
+                Route("/.well-known/agent-card.json", discovery),
+                Route("/rpc", rpc, methods=["POST"]),
+            ]
+        )
+
+    async with serve(app) as url:
+
+        async def operation():
+            async with connect_a2a(
+                endpoint(url), authorization=token, streaming=streaming
+            ) as client:
+                if streaming:
+                    async for _ in client.send_message(
+                        p.SendMessageRequest(message=new_text_message("test", role=p.ROLE_USER))
+                    ):
+                        pass
+                else:
+                    await client.get_task(p.GetTaskRequest(id="task"))
+
+        pending = asyncio.create_task(operation())
+        try:
+            await asyncio.wait_for(receiving.wait(), 5)
+        finally:
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError) as caught:
+                await pending
+        _assert_closed_connection_credentials(caught.value, require_client=not streaming)
 
 
 async def test_two_independent_servers_selected_from_500_entry_host_catalog(tmp_path, responses):

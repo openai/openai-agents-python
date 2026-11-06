@@ -18,6 +18,7 @@ from collections.abc import (
     Callable as Callable,
     Coroutine as Coroutine,
     Mapping as Mapping,
+    Sequence as Sequence,
 )
 from contextlib import asynccontextmanager as asynccontextmanager, suppress as suppress
 from dataclasses import dataclass as dataclass, replace as replace
@@ -576,7 +577,7 @@ def _finite_float(text: str) -> float:
     return value
 
 
-def _private_text(value: object, secrets: tuple[str, ...]) -> bool:
+def _private_text(value: object, secrets: Sequence[str]) -> bool:
     if isinstance(value, str):
         return any(secret in value for secret in secrets)
     if isinstance(value, dict):
