@@ -927,6 +927,7 @@ def test_native_selection_only_runs_for_trusted_code_events(
     "scenario",
     [
         "reuse",
+        "host_autocrlf",
         "python_dependencies_changed",
         "sdk_license_changed",
         "packaging_exclusions_changed",
@@ -1113,6 +1114,13 @@ def test_native_build_selection(
     pending_python = scenario == "in_progress" or scenario.startswith("pending_python_")
     scenario = scenario.removeprefix("pending_python_")
     repo, initial = change_repo
+    # Preserve authored fixture bytes when the selector runs Git archive.
+    _git(repo, "config", "core.autocrlf", "false")
+    if scenario == "host_autocrlf":
+        config = repo.parent / "host-gitconfig"
+        config.write_text("[core]\n\tautocrlf = true\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+        scenario = "reuse"
     workflow_path = ".github/workflows/tests.yml"
     workflow_text = (ROOT / workflow_path).read_text()
     (repo / "LICENSE").write_text("Synthetic SDK license\n")
