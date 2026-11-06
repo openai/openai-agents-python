@@ -8,10 +8,10 @@ permissions:
   contents: read
 jobs:
   benchmark:
-    name: Cold Windows python 64 cores sample 5
+    name: Cold Windows python 16 cores sample 6
     runs-on:
       group: codex-runners
-      labels: codex-windows-x64-xl
+      labels: codex-windows-x64
     timeout-minutes: 180
     defaults:
       run:
@@ -21,8 +21,8 @@ jobs:
       RUSTUP_TOOLCHAIN: 1.95.0
       OPENAI_AGENTS_NATIVE_TIMINGS: '1'
       OPENAI_AGENTS_NATIVE_RECEIPT_DIR: ${{ github.workspace }}/dist
-      CARGO_BUILD_JOBS: '64'
-      BENCHMARK_SAMPLE: '5'
+      CARGO_BUILD_JOBS: '16'
+      BENCHMARK_SAMPLE: '6'
       BENCHMARK_SOURCE_SHA: 0f3e347486770c9ad17ed92c0e3ff0d19c32cb34
     steps:
     - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
@@ -173,7 +173,7 @@ jobs:
       if: always()
       uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
       with:
-        name: experimental-windows-python-64-sample-5
+        name: experimental-windows-python-16-sample-6
         path: |
           ${{ runner.temp }}/benchmark-machine.json
           ${{ runner.temp }}/benchmark-samples.jsonl
