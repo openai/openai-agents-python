@@ -54,7 +54,13 @@ from agents import (
 from agents._events import OutputText, URLCitation, WebSearchSource
 from agents.config import JsonValue
 from agents.history import RecordedTurn
-from agents.observation import EventStream, ModelOutputItemCompleted, ToolFinished, ToolStarted
+from agents.observation import (
+    EventStream,
+    HostedToolCallSummary,
+    ModelOutputItemCompleted,
+    ToolFinished,
+    ToolStarted,
+)
 from agents.subagents import Subagent
 from agents.tools import WebSearchLocation
 
@@ -81,6 +87,11 @@ annotated_text: OutputText = {
 async def hosted_search_types(turn: Turn[str]) -> None:
     async for event in turn.events():
         if not isinstance(event, ModelOutputItemCompleted):
+            continue
+        if isinstance(event.item, HostedToolCallSummary):
+            assert_type(event.item.id, str)
+            assert_type(event.item.turn_id, str)
+            assert_type(event.item.status, str)
             continue
         if event.item["type"] == "message":
             assert_type(event.item.get("display_text"), str | None)

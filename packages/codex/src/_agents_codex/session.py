@@ -2820,7 +2820,8 @@ class Session(Generic[ContextT, OutputT]):
         recorded completions, including completions after a turn settles.
         Use interactions() for live requests that need an answer.
         Set include_execution_details=True for a trusted reader that needs
-        command, patch, and MCP payloads. The default includes their IDs and status.
+        command, patch, MCP, or provider-hosted tool payloads. Hosted completions
+        default to HostedToolCallSummary; hosted progress includes only its event type.
         """
         self._check_loop()
         self._check_callback_operation("observe its own Session")

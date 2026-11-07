@@ -166,7 +166,8 @@ class Turn(Generic[OutputT]):
         completion still in the buffer, open a new turn cursor and pass the last
         sequence you read as after.
         Set include_execution_details=True for a trusted reader that needs
-        command, patch, and MCP payloads. The default includes their IDs and status.
+        command, patch, MCP, or provider-hosted tool payloads. Hosted completions
+        default to HostedToolCallSummary; hosted progress includes only its event type.
         """
         from .observation import EventStream
 

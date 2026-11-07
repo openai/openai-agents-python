@@ -125,9 +125,22 @@ class OutputTextDelta(_SubmissionEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class HostedToolCallSummary:
+    """Identity and status of a hosted call, without provider payloads."""
+
+    type: Literal["file_search_call", "code_interpreter_call", "image_generation_call"]
+    id: str
+    turn_id: str
+    status: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ModelOutputItemCompleted(_SubmissionEvent):
     """A completed hosted tool call or an assistant message with annotations.
 
+    FileSearch, CodeInterpreter, and ImageGeneration calls default to
+    HostedToolCallSummary. Read with
+    include_execution_details=True to receive their complete typed items.
     Citation offsets refer to the individual text part. Use Session.items()
     to recover recorded items if the event buffer drops an observation.
     """
@@ -138,6 +151,7 @@ class ModelOutputItemCompleted(_SubmissionEvent):
         | FileSearchCallItem
         | CodeInterpreterCallItem
         | ImageGenerationCallItem
+        | HostedToolCallSummary
     )
     type: Literal["model_output_item_completed"] = field(
         default="model_output_item_completed", init=False
@@ -148,6 +162,8 @@ class ModelOutputItemCompleted(_SubmissionEvent):
 class HostedToolCallProgress(_SubmissionEvent):
     """A provider lifecycle, code, or partial-image event.
 
+    By default, event contains only the provider event type. Read with
+    include_execution_details=True to receive its complete provider payload.
     This passive stream can report gaps. Partial images are previews; read the
     completed image item from Session.items() for the authoritative result.
     """
@@ -449,9 +465,37 @@ class EventStream(AsyncIterator[Observation]):
                     if event.sequence > self._after:
                         self._after = event.sequence
                         if isinstance(event, ModelOutputItemCompleted):
-                            event = replace(event, item=deepcopy(event.item))
+                            model_item = event.item
+                            if (
+                                not self._include_execution_details
+                                and not isinstance(model_item, HostedToolCallSummary)
+                                and (
+                                    model_item["type"] == "file_search_call"
+                                    or model_item["type"] == "code_interpreter_call"
+                                    or model_item["type"] == "image_generation_call"
+                                )
+                            ):
+                                model_item = HostedToolCallSummary(
+                                    type=model_item["type"],
+                                    id=model_item["id"],
+                                    turn_id=model_item["turn_id"],
+                                    status=model_item["status"],
+                                )
+                            else:
+                                model_item = deepcopy(model_item)
+                            event = replace(event, item=model_item)
                         elif isinstance(event, HostedToolCallProgress):
-                            event = replace(event, event=deepcopy(event.event))
+                            event_type = event.event.get("type")
+                            event = replace(
+                                event,
+                                event=(
+                                    deepcopy(event.event)
+                                    if self._include_execution_details
+                                    else {
+                                        "type": event_type if isinstance(event_type, str) else None
+                                    }
+                                ),
+                            )
                         elif isinstance(event, ExecutionItemCompleted):
                             item = event.item
                             if self._include_execution_details:
