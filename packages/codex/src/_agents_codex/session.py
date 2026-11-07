@@ -91,7 +91,10 @@ from .agent import (
     OutputT as OutputT,
     _copy_model_settings as _copy_model_settings,
 )
-from .canonical_storage import CustomStorage as CustomStorage
+from .canonical_storage import (
+    CustomStorage as CustomStorage,
+    SessionStoreCleanup as SessionStoreCleanup,
+)
 from .compaction import CompactionContext
 from .completion import CompletionContext, ContinueTurn
 from .executor import (
@@ -9427,8 +9430,10 @@ class Session(Generic[ContextT, OutputT]):
             raise first
 
 
-def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | None:
-    """Return the retained Session or provider after failed cleanup, if any.
+def get_cleanup(
+    error: BaseException,
+) -> Session[Any, Any] | NativeProvider | SessionStoreCleanup | None:
+    """Return the retained Session, provider, or storage cleanup owner, if any.
 
     Await the owner's ``aclose()`` to retry retirement. This also works after
     Python 3.10 Tasks replace cancellation exceptions: their contexts retain
@@ -9438,7 +9443,7 @@ def get_cleanup(error: BaseException) -> Session[Any, Any] | NativeProvider | No
     """
     for current in _error_contexts(error):
         owner = getattr(current, "cleanup", None)
-        if isinstance(owner, (Session, NativeProvider)):
+        if isinstance(owner, (Session, NativeProvider, SessionStoreCleanup)):
             return owner
     return None
 

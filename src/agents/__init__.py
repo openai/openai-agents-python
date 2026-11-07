@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from .canonical_storage import (
         CustomStorage as CustomStorage,
         SessionStore as SessionStore,
+        SessionStoreCleanup as SessionStoreCleanup,
         SQLiteSessionStore as SQLiteSessionStore,
     )
     from .compaction import CompactionContext as CompactionContext
@@ -211,6 +212,7 @@ _MODULES = {
     "LocalStorage": ".state",
     "CustomStorage": ".canonical_storage",
     "SessionStore": ".canonical_storage",
+    "SessionStoreCleanup": ".canonical_storage",
     "SQLiteSessionStore": ".canonical_storage",
     "LocalRecoveryRequired": ".recovery",
     "ReconciledCall": ".recovery",

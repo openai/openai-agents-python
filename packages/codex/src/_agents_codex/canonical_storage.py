@@ -6,6 +6,7 @@ reenter the SDK. Payloads are trusted opaque native records, not portable state.
 
 from __future__ import annotations
 
+import asyncio as asyncio
 import json as json
 import os as os
 import sqlite3 as sqlite3
@@ -18,8 +19,9 @@ from collections.abc import Iterator as Iterator
 from contextlib import contextmanager as contextmanager
 from dataclasses import dataclass as dataclass
 from pathlib import Path as Path
-from typing import Protocol as Protocol, runtime_checkable as runtime_checkable
+from typing import Any as Any, Protocol as Protocol, runtime_checkable as runtime_checkable
 
+from ._lifecycle import _join as _join
 from ._public import preserve_module_identity as _preserve_module_identity
 from .tools import ToolOutput as ToolOutput
 
@@ -84,6 +86,41 @@ class SessionStore(Protocol):
     def release(self, session_id: str, token: str) -> None: ...
 
 
+class SessionStoreCleanup:
+    """Retry only an unfinished reconciliation writer release.
+
+    Obtain this owner through get_cleanup(error). Await aclose() after the
+    backend recovers. It never repeats reconciliation or writes another receipt.
+    """
+
+    def __init__(self, owner: Any) -> None:
+        self._owner: Any = owner
+        self._pending: asyncio.Task[None] | None = None
+
+    async def aclose(self) -> None:
+        """Join release of the original writer; retry after a transient failure."""
+        if self._owner is None:
+            return
+        pending = self._pending
+        if pending is None or (pending.done() and (pending.cancelled() or pending.exception())):
+
+            async def release() -> None:
+                await self._owner.aclose()
+                self._owner = None
+
+            pending = asyncio.create_task(release())
+            self._pending = pending
+        try:
+            await _join(pending)
+        except BaseException as error:
+            if self._owner is not None:
+                error.cleanup = self  # type: ignore[attr-defined]
+            raise
+        finally:
+            if pending.done() and self._pending is pending:
+                self._pending = None
+
+
 @dataclass(frozen=True)
 class CustomStorage:
     """Select an application-owned canonical store for a native Session.
@@ -111,6 +148,8 @@ class CustomStorage:
         Structured content and explicit failure retain their original meaning.
         This operation acquires exclusive ownership and never runs the tool.
         A known receipt cannot be replaced. Reopen with current tools afterward.
+        If cleanup fails, get_cleanup(error) returns an owner whose aclose()
+        releases the original writer without repeating the reconciliation.
         """
         from agents import _native
 
@@ -118,9 +157,15 @@ class CustomStorage:
             raise TypeError("output must be str or ToolOutput")
         response = ToolOutput.text(output) if isinstance(output, str) else output
         response._validate()
-        await _native.reconcile_canonical_store(
+        operation = _native.reconcile_canonical_store(
             self.backend, session_id, turn_id, call_id, json.dumps(response.to_native())
         )
+        cleanup = SessionStoreCleanup(operation)
+        try:
+            await operation.run()
+        except BaseException as error:
+            error.cleanup = cleanup  # type: ignore[attr-defined]
+            raise
 
 
 class SQLiteSessionStore:

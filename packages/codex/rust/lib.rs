@@ -3071,22 +3071,63 @@ fn _validate_known_root_function_output(output_json: &str) -> PyResult<()> {
         .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
+// The facade owns this object before awaiting native work. Cancellation cannot
+// discard the only reference to a writer whose release still needs a retry.
+#[pyclass(module = "agents._native")]
+struct CanonicalReconciliation {
+    store: Arc<canonical_storage::CanonicalStore>,
+    thread_id: codex_protocol::ThreadId,
+    input: std::sync::Mutex<Option<(String, String, String)>>,
+}
+
+#[pymethods]
+impl CanonicalReconciliation {
+    fn run<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let (turn_id, call_id, output) = self
+            .input
+            .lock()
+            .map_err(py_error)?
+            .take()
+            .ok_or_else(|| py_error("Reconciliation already started"))?;
+        let store = Arc::clone(&self.store);
+        let id = self.thread_id;
+        async_bridge::future_into_py(py, async move {
+            async_bridge::retain_writer_operation(async move {
+                store
+                    .reconcile(id, &turn_id, &call_id, &output)
+                    .await
+                    .map_err(py_error)
+            })
+            .await
+        })
+    }
+
+    fn aclose<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let store = Arc::clone(&self.store);
+        let id = self.thread_id;
+        async_bridge::future_into_py(py, async move {
+            async_bridge::retain_writer_operation(async move {
+                use codex_thread_store::ThreadStore as _;
+                store.discard_thread(id).await.map_err(py_error)
+            })
+            .await
+        })
+    }
+}
+
 #[pyfunction]
-fn reconcile_canonical_store<'py>(
-    py: Python<'py>,
+fn reconcile_canonical_store(
     backend: Py<PyAny>,
     thread_id: String,
     turn_id: String,
     call_id: String,
     output: String,
-) -> PyResult<Bound<'py, PyAny>> {
+) -> PyResult<CanonicalReconciliation> {
     let id = codex_protocol::ThreadId::from_string(&thread_id).map_err(py_error)?;
-    async_bridge::future_into_py(py, async move {
-        let store = canonical_storage::CanonicalStore::new(backend);
-        store
-            .reconcile(id, &turn_id, &call_id, &output)
-            .await
-            .map_err(py_error)
+    Ok(CanonicalReconciliation {
+        store: Arc::new(canonical_storage::CanonicalStore::new(backend)),
+        thread_id: id,
+        input: std::sync::Mutex::new(Some((turn_id, call_id, output))),
     })
 }
 
@@ -3202,6 +3243,7 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
         .thread_stack_size(codex_async_utils::THREAD_STACK_SIZE_BYTES);
     pyo3_async_runtimes::tokio::init(runtime);
     module.add_class::<Engine>()?;
+    module.add_class::<CanonicalReconciliation>()?;
     module.add_class::<python_tools::ManualToolGrant>()?;
     module.add_class::<NativeChildTurn>()?;
     module.add_class::<NativeThread>()?;

@@ -336,7 +336,16 @@ impl CanonicalStore {
         }
         .await;
         let released = self.discard_thread(id).await;
-        result.and(released)
+        match (result, released) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(primary), Ok(())) => Err(primary),
+            (Ok(()), Err(cleanup)) => Err(cleanup),
+            (Err(primary), Err(cleanup)) => Err(ThreadStoreError::Internal {
+                message: format!(
+                    "Reconciliation failed: {primary}; writer cleanup failed: {cleanup}"
+                ),
+            }),
+        }
     }
 
     pub(crate) async fn close_all(&self) -> ThreadStoreResult<()> {
