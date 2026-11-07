@@ -51,6 +51,9 @@ from .native_agents import ChildInvocation as ChildInvocation, NativeAgents as N
 from .native_interception import Allow as Allow, Deny as Deny, ReplaceArguments as ReplaceArguments
 from .tools import (
     Checklist as Checklist,
+    CodeInterpreter as CodeInterpreter,
+    FileSearch as FileSearch,
+    ImageGeneration as ImageGeneration,
     NativeGoals as NativeGoals,
     ToolCallInfo as ToolCallInfo,
     ToolOutput as ToolOutput,
@@ -215,6 +218,9 @@ Tool: TypeAlias = (
     | Checklist
     | NativeGoals
     | WebSearch
+    | FileSearch
+    | CodeInterpreter
+    | ImageGeneration
     | NativeAgents
 )
 

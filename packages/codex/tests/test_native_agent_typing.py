@@ -52,6 +52,7 @@ from agents import (
     function_tool,
 )
 from agents._events import OutputText, URLCitation, WebSearchSource
+from agents.config import JsonValue
 from agents.history import RecordedTurn
 from agents.observation import EventStream, ModelOutputItemCompleted, ToolFinished, ToolStarted
 from agents.subagents import Subagent
@@ -83,10 +84,21 @@ async def hosted_search_types(turn: Turn[str]) -> None:
             continue
         if event.item["type"] == "message":
             assert_type(event.item.get("display_text"), str | None)
-        else:
+        elif event.item["type"] == "web_search_call":
             action = event.item["action"]
             if action is not None and action["type"] == "search":
                 assert_type(action.get("sources"), list[WebSearchSource] | None)
+        elif event.item["type"] == "file_search_call":
+            assert_type(event.item["queries"], list[str])
+            assert_type(event.item["results"], list[dict[str, JsonValue]] | None)
+        elif event.item["type"] == "code_interpreter_call":
+            assert_type(event.item["container_id"], str)
+            assert_type(event.item["code"], str | None)
+            assert_type(event.item["outputs"], list[dict[str, JsonValue]] | None)
+        elif event.item["type"] == "image_generation_call":
+            assert_type(event.item["result"], str | None)
+            assert_type(event.item["revised_prompt"], str | None)
+            assert_type(event.item["provider_data"], dict[str, JsonValue])
 
 
 provider_error = NativeError(

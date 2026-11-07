@@ -1,0 +1,1754 @@
+diff --git a/codex-rs/analytics/src/reducer.rs b/codex-rs/analytics/src/reducer.rs
+index 9e66e334560b0632802f475d044743cb1298e409..ad9cd7ba55eb928eaa7c9d6f1b44a18b86b8b936 100644
+--- a/codex-rs/analytics/src/reducer.rs
++++ b/codex-rs/analytics/src/reducer.rs
+@@ -516,6 +516,7 @@ impl TurnToolCounts {
+             | ThreadItem::Sleep(_)
+             | ThreadItem::EnteredReviewMode { .. }
+             | ThreadItem::ExitedReviewMode { .. }
++            | ThreadItem::HostedToolCall { .. }
+             | ThreadItem::ContextCompaction { .. } => return,
+         }
+         self.total += 1;
+@@ -2674,6 +2675,7 @@ pub(crate) fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
+         | ThreadItem::Sleep(_)
+         | ThreadItem::EnteredReviewMode { .. }
+         | ThreadItem::ExitedReviewMode { .. }
++        | ThreadItem::HostedToolCall { .. }
+         | ThreadItem::ContextCompaction { .. } => None,
+     }
+ }
+diff --git a/codex-rs/app-server-protocol/src/protocol/thread_history.rs b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+index e560c3d448916f928daf3ad8be85df29165f8ac9..9d6f529fb955d5d7e0f2e0472dbe4ec1d9c668c1 100644
+--- a/codex-rs/app-server-protocol/src/protocol/thread_history.rs
++++ b/codex-rs/app-server-protocol/src/protocol/thread_history.rs
+@@ -642,6 +642,7 @@ impl ThreadHistoryBuilder {
+             | codex_protocol::items::TurnItem::DynamicToolCall(_)
+             | codex_protocol::items::TurnItem::CollabAgentToolCall(_)
+             | codex_protocol::items::TurnItem::SubAgentActivity(_)
++            | codex_protocol::items::TurnItem::HostedToolCall(_)
+             | codex_protocol::items::TurnItem::Extension(_)
+             | codex_protocol::items::TurnItem::EnteredReviewMode(_)
+             | codex_protocol::items::TurnItem::ExitedReviewMode(_) => true,
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/item.rs b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
+index 1106021715ff6d43fc6b993eab836da04503d6f0..0fdc3b1d23d983218da67587bacd59edee0eb3ad 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/item.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/item.rs
+@@ -233,6 +233,10 @@ impl CommandAction {
+ #[ts(tag = "type")]
+ #[ts(export_to = "v2/")]
+ pub enum ThreadItem {
++    HostedToolCall {
++        id: String,
++        item: JsonValue,
++    },
+     #[serde(rename_all = "camelCase")]
+     #[ts(rename_all = "camelCase")]
+     UserMessage {
+@@ -450,6 +454,7 @@ impl ThreadItem {
+     pub fn id(&self) -> &str {
+         match self {
+             ThreadItem::UserMessage { id, .. }
++            | ThreadItem::HostedToolCall { id, .. }
+             | ThreadItem::HookPrompt { id, .. }
+             | ThreadItem::AgentMessage { id, .. }
+             | ThreadItem::FunctionCallOutput { id, .. }
+@@ -991,12 +996,16 @@ impl From<CoreTurnItem> for ThreadItem {
+                 ExtensionItem::Sleep(item) => ThreadItem::Sleep(item),
+                 ExtensionItem::WebSearch(item) => ThreadItem::WebSearch(item),
+             },
++            CoreTurnItem::HostedToolCall(item) => ThreadItem::HostedToolCall {
++                id: item.id,
++                item: serde_json::to_value(item.item).unwrap_or_default(),
++            },
+             CoreTurnItem::ImageGeneration(image) => {
+                 ThreadItem::ImageGeneration(ImageGenerationItem {
+                     id: image.id,
+                     status: image.status,
+                     revised_prompt: image.revised_prompt,
+-                    result: image.result,
++                    result: image.result.unwrap_or_default(),
+                     transparent_background: None,
+                     failure: None,
+                     saved_path: image.saved_path,
+diff --git a/codex-rs/app-server/src/notification_media.rs b/codex-rs/app-server/src/notification_media.rs
+index 4223ea796d2882be95a5153f43212e5356d0fa8d..dbb2055b22fad1c0eb80075e393bda4741c37935 100644
+--- a/codex-rs/app-server/src/notification_media.rs
++++ b/codex-rs/app-server/src/notification_media.rs
+@@ -36,7 +36,7 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                         });
+                     }
+                 }
+-                ResponseItem::ImageGenerationCall { result, .. } => result.clear(),
++                ResponseItem::ImageGenerationCall { result, .. } => *result = None,
+                 ResponseItem::AdditionalTools { .. }
+                 | ResponseItem::AgentMessage { .. }
+                 | ResponseItem::Reasoning { .. }
+@@ -45,6 +45,8 @@ pub(crate) fn without_notification_media(notification: ServerNotification) -> Se
+                 | ResponseItem::ToolSearchCall { .. }
+                 | ResponseItem::CustomToolCall { .. }
+                 | ResponseItem::ToolSearchOutput { .. }
++                | ResponseItem::FileSearchCall { .. }
++                | ResponseItem::CodeInterpreterCall { .. }
+                 | ResponseItem::WebSearchCall { .. }
+                 | ResponseItem::Compaction { .. }
+                 | ResponseItem::ConfigurationUpdate { .. }
+@@ -212,6 +214,7 @@ fn without_thread_item_media(mut item: ThreadItem) -> ThreadItem {
+         | ThreadItem::Sleep(_)
+         | ThreadItem::EnteredReviewMode { .. }
+         | ThreadItem::ExitedReviewMode { .. }
++        | ThreadItem::HostedToolCall { .. }
+         | ThreadItem::ContextCompaction { .. } => {}
+     }
+     item
+diff --git a/codex-rs/app-server/src/request_processors/turn_processor.rs b/codex-rs/app-server/src/request_processors/turn_processor.rs
+index d5456eeca6b3fd713163e319097583c204e861f8..7e48a9530d5de08b26dd85f73eceaed8352f0c25 100644
+--- a/codex-rs/app-server/src/request_processors/turn_processor.rs
++++ b/codex-rs/app-server/src/request_processors/turn_processor.rs
+@@ -64,7 +64,9 @@ fn validate_response_item_image_urls(items: &[ResponseItem]) -> Result<(), JSONR
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::ToolSearchOutput { .. }
+         | ResponseItem::WebSearchCall { .. }
+-        | ResponseItem::ImageGenerationCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
++            | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::CompactionTrigger { .. }
+diff --git a/codex-rs/codex-api/src/common.rs b/codex-rs/codex-api/src/common.rs
+index 6d06a772419412521635d0a9dcbe9690b43fe9e5..1f0f4668a3d6a79774bd228eca9a73b0f0654274 100644
+--- a/codex-rs/codex-api/src/common.rs
++++ b/codex-rs/codex-api/src/common.rs
+@@ -87,6 +87,7 @@ pub enum ResponseEvent {
+     },
+     SafetyBuffering(SafetyBuffering),
+     OutputItemDone(ResponseItem),
++    HostedToolCallProgress(codex_protocol::protocol::HostedToolCallProgressEvent),
+     OutputItemAdded(ResponseItem),
+     /// Emitted when the server includes `OpenAI-Model` on the stream response.
+     /// This can differ from the requested model when backend safety routing applies.
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 72189a41fbb967f64061bb66615aaa463661bdb6..30bc97b1157daf506f6962f0cddf5fb66bb32532 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -164,9 +164,8 @@ struct ResponseCompletedOutputTokensDetails {
+     reasoning_tokens: i64,
+ }
+ 
+-#[derive(Deserialize, Debug)]
++#[derive(Debug)]
+ pub struct ResponsesStreamEvent {
+-    #[serde(rename = "type")]
+     pub(crate) kind: String,
+     pub(crate) headers: Option<Value>,
+     metadata: Option<Value>,
+@@ -179,8 +178,54 @@ pub struct ResponsesStreamEvent {
+     text: Option<String>,
+     summary_index: Option<i64>,
+     content_index: Option<i64>,
+-    #[serde(default, deserialize_with = "deserialize_present_value")]
+     safety_buffering: Option<Value>,
++    raw: Value,
++}
++
++impl<'de> Deserialize<'de> for ResponsesStreamEvent {
++    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
++    where
++        D: serde::Deserializer<'de>,
++    {
++        // Parse typed fields as before, while retaining the original progress envelope.
++        #[derive(Deserialize)]
++        struct Fields {
++            #[serde(rename = "type")]
++            kind: String,
++            headers: Option<Value>,
++            metadata: Option<Value>,
++            response: Option<Value>,
++            error: Option<Value>,
++            item: Option<Value>,
++            item_id: Option<String>,
++            call_id: Option<String>,
++            delta: Option<String>,
++            text: Option<String>,
++            summary_index: Option<i64>,
++            content_index: Option<i64>,
++            #[serde(default, deserialize_with = "deserialize_present_value")]
++            safety_buffering: Option<Value>,
++        }
++        let raw = Value::deserialize(deserializer)?;
++        let fields: Fields =
++            serde_json::from_value(raw.clone()).map_err(serde::de::Error::custom)?;
++        Ok(Self {
++            kind: fields.kind,
++            headers: fields.headers,
++            metadata: fields.metadata,
++            response: fields.response,
++            error: fields.error,
++            item: fields.item,
++            item_id: fields.item_id,
++            call_id: fields.call_id,
++            delta: fields.delta,
++            text: fields.text,
++            summary_index: fields.summary_index,
++            content_index: fields.content_index,
++            safety_buffering: fields.safety_buffering,
++            raw,
++        })
++    }
+ }
+ 
+ fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+@@ -424,6 +469,17 @@ impl ResponsesEventError {
+ pub fn process_responses_event(
+     event: ResponsesStreamEvent,
+ ) -> std::result::Result<Option<ResponseEvent>, ResponsesEventError> {
++    if event.kind.starts_with("response.file_search_call.")
++        || event.kind.starts_with("response.code_interpreter_call.")
++        || event
++            .kind
++            .starts_with("response.code_interpreter_call_code.")
++        || event.kind.starts_with("response.image_generation_call.")
++    {
++        return Ok(Some(ResponseEvent::HostedToolCallProgress(
++            codex_protocol::protocol::HostedToolCallProgressEvent { event: event.raw },
++        )));
++    }
+     match event.kind.as_str() {
+         "error" => {
+             if let Some(error) = event.error.as_ref().and_then(parse_flex_unavailable) {
+@@ -756,6 +812,42 @@ mod error_tests;
+ 
+ #[cfg(test)]
+ mod tests {
++
++    #[test]
++    fn hosted_progress_preserves_provider_envelope_and_partial_image_indices() {
++        for value in [
++            serde_json::json!({"type":"response.image_generation_call.partial_image", "item_id":"ig_test",
++                "output_index":2,"sequence_number":4,"partial_image_index":0,"partial_image_b64":"AA==",
++                "quality":null,"future":{"x":1}}),
++            serde_json::json!({"type":"response.code_interpreter_call_code.delta", "item_id":"ci_test",
++                "output_index":1,"sequence_number":5,"delta":"print(1)"}),
++            serde_json::json!({"type":"response.file_search_call.searching", "item_id":"fs_test",
++                "output_index":0,"sequence_number":6}),
++        ] {
++            let event = serde_json::from_value(value.clone()).unwrap();
++            let Some(super::ResponseEvent::HostedToolCallProgress(progress)) =
++                super::process_responses_event(event).unwrap()
++            else {
++                panic!("expected hosted progress");
++            };
++            assert_eq!(progress.event, value);
++        }
++    }
++
++    #[test]
++    fn hosted_item_added_accepts_image_without_final_result() {
++        let event = serde_json::from_value(serde_json::json!({
++            "type":"response.output_item.added", "output_index":0, "sequence_number":1,
++            "item":{"type":"image_generation_call","id":"ig_test","status":"in_progress","result":null,"future":"kept"}
++        })).unwrap();
++        let Some(super::ResponseEvent::OutputItemAdded(item)) =
++            super::process_responses_event(event).unwrap()
++        else {
++            panic!("expected added image item");
++        };
++        assert_eq!(serde_json::to_value(item).unwrap()["future"], "kept");
++    }
++
+     use super::*;
+     use assert_matches::assert_matches;
+     use bytes::Bytes;
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index da478e35f30a24fbe52140d8f0ac70adac8fa1bd..3916664bee2fe6f6742190baaf061eb5a71e9f99 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -108,6 +108,8 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_context_baselines: bool
+             | ResponseItem::CustomToolCallOutput { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::CompactionTrigger { .. }
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index b3ae84d194ebd9316f091926ca830d37b2e6f031..37fbb20b42ee9f7f4dba219a67176fa0618680e8 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -969,6 +969,17 @@ impl ModelClient {
+         {
+             include.push("web_search_call.action.sources".to_string());
+         }
++        for tool in prompt.tools.iter() {
++            match tool {
++                codex_tools::ToolSpec::FileSearch(config) if config.include_search_results => {
++                    include.push("file_search_call.results".to_string());
++                }
++                codex_tools::ToolSpec::CodeInterpreter(_) => {
++                    include.push("code_interpreter_call.outputs".to_string());
++                }
++                _ => {}
++            }
++        }
+         let verbosity = if model_info.support_verbosity {
+             self.state.model_verbosity.or(model_info.default_verbosity)
+         } else {
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index 92a75729d6e2a997164a8a8add2904ae56aff32b..c5ecc4075ef9861c49d760407b4aa8a9d97f0aaa 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -158,6 +158,8 @@ fn normalize_image_details(items: &mut [ResponseItem], model_info: &ModelInfo) {
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/context_manager/history.rs b/codex-rs/core/src/context_manager/history.rs
+index ac1578c9765ad64f12d83545a8e14283585dbd71..a6dc27d87c8a4f7339e6fac5f5af2276c5bc6885 100644
+--- a/codex-rs/core/src/context_manager/history.rs
++++ b/codex-rs/core/src/context_manager/history.rs
+@@ -1032,6 +1032,8 @@ fn is_api_message(message: &ResponseItem, metadata: Option<&CodexHarnessMetadata
+         | ResponseItem::LocalShellCall { .. }
+         | ResponseItem::Reasoning { .. }
+         | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
+@@ -1171,17 +1173,27 @@ fn estimate_response_item_model_visible_bytes(item: &ResponseItem) -> i64 {
+         ResponseItem::WebSearchCall { action, .. } => {
+             action.as_ref().map(json_content_bytes).unwrap_or_default()
+         }
++        ResponseItem::FileSearchCall {
++            provider_fields, ..
++        }
++        | ResponseItem::CodeInterpreterCall {
++            provider_fields, ..
++        } => json_content_bytes(provider_fields),
+         ResponseItem::ImageGenerationCall {
+             revised_prompt,
+             result,
+             ..
+-        } => text_bytes(revised_prompt.as_deref().unwrap_or_default()).saturating_add(
+-            if result.is_empty() {
+-                0
+-            } else {
+-                RESIZED_IMAGE_BYTES_ESTIMATE
+-            },
+-        ),
++        } => text_bytes(
++            revised_prompt
++                .as_ref()
++                .and_then(|value| value.as_deref())
++                .unwrap_or_default(),
++        )
++        .saturating_add(if result.as_deref().is_none_or(str::is_empty) {
++            0
++        } else {
++            RESIZED_IMAGE_BYTES_ESTIMATE
++        }),
+         ResponseItem::ContextCompaction {
+             encrypted_content: None,
+             ..
+@@ -1336,6 +1348,8 @@ fn is_model_generated_item(item: &ResponseItem) -> bool {
+         | ResponseItem::FunctionCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::LocalShellCall { .. }
+diff --git a/codex-rs/core/src/context_manager/history_tests.rs b/codex-rs/core/src/context_manager/history_tests.rs
+index 5e74e756c390b8411303b94264ef903278825502..1f05ff1efdc554b53bbb33774fefb750e5074b03 100644
+--- a/codex-rs/core/src/context_manager/history_tests.rs
++++ b/codex-rs/core/src/context_manager/history_tests.rs
+@@ -1397,8 +1397,9 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
+         ResponseItem::ImageGenerationCall {
+             id: Some(ResponseItemId::with_suffix("ig", "123")),
+             status: "generating".to_string(),
+-            revised_prompt: Some("lobster".to_string()),
+-            result: "Zm9v".to_string(),
++            revised_prompt: Some(Some("lobster".to_string())),
++            result: Some("Zm9v".to_string()),
++            provider_fields: Default::default(),
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::Message {
+@@ -1418,8 +1419,9 @@ fn for_prompt_preserves_image_generation_calls_when_images_are_supported() {
+             ResponseItem::ImageGenerationCall {
+                 id: Some(ResponseItemId::with_suffix("ig", "123")),
+                 status: "generating".to_string(),
+-                revised_prompt: Some("lobster".to_string()),
+-                result: "Zm9v".to_string(),
++                revised_prompt: Some(Some("lobster".to_string())),
++                result: Some("Zm9v".to_string()),
++                provider_fields: Default::default(),
+                 internal_chat_message_metadata_passthrough: None,
+             },
+             ResponseItem::Message {
+@@ -1450,8 +1452,9 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
+         ResponseItem::ImageGenerationCall {
+             id: Some(ResponseItemId::with_suffix("ig", "123")),
+             status: "completed".to_string(),
+-            revised_prompt: Some("lobster".to_string()),
+-            result: "Zm9v".to_string(),
++            revised_prompt: Some(Some("lobster".to_string())),
++            result: Some("Zm9v".to_string()),
++            provider_fields: Default::default(),
+             internal_chat_message_metadata_passthrough: None,
+         },
+     ]);
+@@ -1471,8 +1474,9 @@ fn for_prompt_clears_image_generation_result_when_images_are_unsupported() {
+             ResponseItem::ImageGenerationCall {
+                 id: Some(ResponseItemId::with_suffix("ig", "123")),
+                 status: "completed".to_string(),
+-                revised_prompt: Some("lobster".to_string()),
+-                result: String::new(),
++                revised_prompt: Some(Some("lobster".to_string())),
++                result: None,
++                provider_fields: Default::default(),
+                 internal_chat_message_metadata_passthrough: None,
+             },
+         ]
+diff --git a/codex-rs/core/src/context_manager/normalize.rs b/codex-rs/core/src/context_manager/normalize.rs
+index 7fc45ba217a3b7b733ee6225132f7c5eac99ed8c..1ba20d118ca9ea0640e6d6ec465863c3e80b3d06 100644
+--- a/codex-rs/core/src/context_manager/normalize.rs
++++ b/codex-rs/core/src/context_manager/normalize.rs
+@@ -369,7 +369,7 @@ pub(crate) fn strip_images_when_unsupported(
+                 }
+             }
+             ResponseItem::ImageGenerationCall { result, .. } => {
+-                result.clear();
++                *result = None;
+             }
+             _ => {}
+         }
+diff --git a/codex-rs/core/src/event_mapping.rs b/codex-rs/core/src/event_mapping.rs
+index 7fe7147bdaed4145ee8ba3117d4377aac8d1486f..986a8e29260629795f96e2f2ed99482e6dbe3ec6 100644
+--- a/codex-rs/core/src/event_mapping.rs
++++ b/codex-rs/core/src/event_mapping.rs
+@@ -247,6 +247,14 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+                 results: None,
+             }))
+         }
++        ResponseItem::FileSearchCall { id, .. } | ResponseItem::CodeInterpreterCall { id, .. } => {
++            Some(TurnItem::HostedToolCall(
++                codex_protocol::items::HostedToolCallItem {
++                    id: id.as_deref()?.to_string(),
++                    item: item.clone(),
++                },
++            ))
++        }
+         ResponseItem::ImageGenerationCall {
+             id,
+             status,
+@@ -257,8 +265,9 @@ pub fn parse_turn_item(item: &ResponseItem) -> Option<TurnItem> {
+             codex_protocol::items::ImageGenerationItem {
+                 id: id.as_deref()?.to_string(),
+                 status: status.clone(),
+-                revised_prompt: revised_prompt.clone(),
++                revised_prompt: revised_prompt.clone().flatten(),
+                 result: result.clone(),
++                provider_data: serde_json::to_value(item).ok()?,
+                 saved_path: None,
+             },
+         )),
+diff --git a/codex-rs/core/src/event_mapping_tests.rs b/codex-rs/core/src/event_mapping_tests.rs
+index e912c8bbb4dad2e57866906c53bfffcc18bcd7fa..3a7eec8cccafe6cc98c047f1a73add9b72fda270 100644
+--- a/codex-rs/core/src/event_mapping_tests.rs
++++ b/codex-rs/core/src/event_mapping_tests.rs
+@@ -698,3 +698,28 @@ fn parses_partial_web_search_call_without_action_as_other() {
+         other => panic!("expected TurnItem::WebSearch, got {other:?}"),
+     }
+ }
++
++#[test]
++fn hosted_item_projection_preserves_raw_provider_data_and_existing_image_wire_name() {
++    for value in [
++        serde_json::json!({"type":"file_search_call","id":"fs_test","status":"completed","queries":[],"results":[],"future":7}),
++        serde_json::json!({"type":"code_interpreter_call","id":"ci_test","status":"completed","code":null,"outputs":null,"container_id":"cntr_test","future":7}),
++        serde_json::json!({"type":"image_generation_call","id":"ig_test","status":"in_progress","result":null,"quality":"high","future":7}),
++    ] {
++        let item: ResponseItem = serde_json::from_value(value.clone()).unwrap();
++        assert!(
++            crate::tools::router::ToolRouter::build_tool_call(item.clone())
++                .unwrap()
++                .is_none()
++        );
++        let projected = serde_json::to_value(parse_turn_item(&item).unwrap()).unwrap();
++        if value["type"] == "image_generation_call" {
++            assert_eq!(projected["type"], "ImageGeneration");
++            assert_eq!(projected["provider_data"], value);
++            assert!(projected["result"].is_null());
++        } else {
++            assert_eq!(projected["type"], "hosted_tool_call");
++            assert_eq!(projected["item"], value);
++        }
++    }
++}
+diff --git a/codex-rs/core/src/image_preparation.rs b/codex-rs/core/src/image_preparation.rs
+index 02d15459d464ffaa81c812996afb4d80b1da3035..97ddf03d25d84f311941824552be2f8b415f6abe 100644
+--- a/codex-rs/core/src/image_preparation.rs
++++ b/codex-rs/core/src/image_preparation.rs
+@@ -193,6 +193,8 @@ pub(crate) async fn prepare_response_items(
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/realtime_history_tests.rs b/codex-rs/core/src/realtime_history_tests.rs
+index 4886b093486f7c12288bd7394efa7e3a97a637ff..a50b3dbbd19ff30a2b7c7c688644da2b894cf458 100644
+--- a/codex-rs/core/src/realtime_history_tests.rs
++++ b/codex-rs/core/src/realtime_history_tests.rs
+@@ -250,7 +250,8 @@ fn promotes_backing_agent_artifacts_once_without_a_client_request() {
+             id: "image-1".to_string(),
+             status: "in_progress".to_string(),
+             revised_prompt: None,
+-            result: String::new(),
++            result: Some(String::new()),
++            provider_data: serde_json::Value::Null,
+             saved_path: None,
+         }),
+         started_at_ms: 0,
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index 57e7a2b849610ec5972098e6963646b181561a6a..907103ee01ea6b9a19b99c9ddbe1d4c30fa3a3ed 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -2263,6 +2263,7 @@ pub(super) fn realtime_text_for_event(msg: &EventMsg) -> Option<RealtimeEventTex
+         | EventMsg::EnteredReviewMode(_)
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::HostedToolCallProgress(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::ItemStarted(_)
+         | EventMsg::HookStarted(_)
+@@ -2799,6 +2800,10 @@ async fn try_run_sampling_request(
+         record_turn_ttft_metric(&turn_context, &event).await;
+ 
+         match event {
++            ResponseEvent::HostedToolCallProgress(event) => {
++                sess.send_event(&turn_context, EventMsg::HostedToolCallProgress(event))
++                    .await;
++            }
+             ResponseEvent::Created { response_id } => {
+                 if let Some(response_id) = response_id {
+                     turn_context
+@@ -2889,6 +2894,8 @@ async fn try_run_sampling_request(
+                     | ResponseItem::CustomToolCallOutput { .. }
+                     | ResponseItem::ToolSearchOutput { .. }
+                     | ResponseItem::WebSearchCall { .. }
++                    | ResponseItem::FileSearchCall { .. }
++                    | ResponseItem::CodeInterpreterCall { .. }
+                     | ResponseItem::ImageGenerationCall { .. }
+                     | ResponseItem::Compaction { .. }
+                     | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
+index 19e62cd66a3176c22a3e109deecb32b2863e7cfc..ee64183b4e123f2e4280f22d12c8fc62191224fb 100644
+--- a/codex-rs/core/src/stream_events_utils.rs
++++ b/codex-rs/core/src/stream_events_utils.rs
+@@ -441,6 +441,8 @@ pub(crate) async fn handle_non_tool_response_item(
+         ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output",
+         ResponseItem::ToolSearchOutput { .. } => "tool_search_output",
+         ResponseItem::WebSearchCall { .. } => "web_search_call",
++        ResponseItem::FileSearchCall { .. } => "file_search_call",
++        ResponseItem::CodeInterpreterCall { .. } => "code_interpreter_call",
+         ResponseItem::ImageGenerationCall { .. } => "image_generation_call",
+         ResponseItem::Compaction { .. } => "compaction",
+         ResponseItem::ConfigurationUpdate { .. } => "configuration_update",
+@@ -457,7 +459,10 @@ pub(crate) async fn handle_non_tool_response_item(
+     match item {
+         ResponseItem::Message { .. }
+         | ResponseItem::Reasoning { .. }
+-        | ResponseItem::WebSearchCall { .. } => {
++        | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
++        | ResponseItem::ImageGenerationCall { .. } => {
+             let mut turn_item = parse_turn_item(item)?;
+             finalize_turn_item(sess, contributor_policy, &mut turn_item, plan_mode).await;
+             Some(turn_item)
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index fc14b1c59b41f7b704d79cee2c060c8ca7b3f2ce..60df9f0f67a04c7a9c86614d9a7d694f6c5dc48b 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -557,3 +557,25 @@ fn completed_item_keeps_mailbox_delivery_open_for_commentary_messages() {
+         &item, /*plan_mode*/ false,
+     ));
+ }
++
++#[tokio::test]
++async fn hosted_items_reach_native_finalization_including_images() {
++    let (session, _) = crate::session::tests::make_session_and_context().await;
++    for value in [
++        serde_json::json!({"type":"file_search_call","id":"fs_test","status":"completed","queries":[]}),
++        serde_json::json!({"type":"code_interpreter_call","id":"ci_test","status":"completed","code":null,"outputs":null,"container_id":"cntr_test"}),
++        serde_json::json!({"type":"image_generation_call","id":"ig_test","status":"completed","result":"AA==","future":"kept"}),
++    ] {
++        let item = serde_json::from_value(value).unwrap();
++        assert!(
++            super::finalize_non_tool_response_item(
++                &session,
++                super::TurnItemContributorPolicy::Skip,
++                &item,
++                false,
++            )
++            .await
++            .is_some()
++        );
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/extension_tools.rs b/codex-rs/core/src/tools/handlers/extension_tools.rs
+index ea483528d0e5f2e21f674208ce187c53a16b1ca9..8ec4d3d7444a11d8dd4adf7f56c5ceda61519da6 100644
+--- a/codex-rs/core/src/tools/handlers/extension_tools.rs
++++ b/codex-rs/core/src/tools/handlers/extension_tools.rs
+@@ -121,6 +121,9 @@ impl CoreToolRuntime for ExtensionToolAdapter {
+                 }),
+                 ToolSpec::Function(_)
+                 | ToolSpec::ToolSearch { .. }
++                | ToolSpec::FileSearch(_)
++                | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::WebSearch { .. } => false,
+             },
+             ToolPayload::ToolSearch { .. } => false,
+diff --git a/codex-rs/core/src/tools/registry.rs b/codex-rs/core/src/tools/registry.rs
+index 462c76ea7dcacfe1e8e8a9904fd76785491fe995..6df19d87c2e51e15e5d0f6e2fff42aa9c10f092a 100644
+--- a/codex-rs/core/src/tools/registry.rs
++++ b/codex-rs/core/src/tools/registry.rs
+@@ -480,6 +480,9 @@ impl ToolRegistry {
+                 ToolSpec::Function(_)
+                 | ToolSpec::Freeform(_)
+                 | ToolSpec::ToolSearch { .. }
++                | ToolSpec::FileSearch(_)
++                | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::WebSearch { .. } => "",
+             };
+             if !description.trim().is_empty() {
+diff --git a/codex-rs/core/src/tools/router.rs b/codex-rs/core/src/tools/router.rs
+index 531a97b52a62b6018c0784bfcb970829c6742396..ca32c68f2144a4c74b872b8222c188047c13af4b 100644
+--- a/codex-rs/core/src/tools/router.rs
++++ b/codex-rs/core/src/tools/router.rs
+@@ -190,7 +190,11 @@ impl ToolRouter {
+                             ResponsesApiNamespaceTool::Custom(tool) => tool.name == name.name,
+                         })
+                 }
+-                ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => false,
++                ToolSpec::ToolSearch { .. }
++                | ToolSpec::FileSearch(_)
++                | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::ImageGeneration(_)
++                | ToolSpec::WebSearch { .. } => false,
+             })
+         {
+             return true;
+diff --git a/codex-rs/core/src/tools/router_tests.rs b/codex-rs/core/src/tools/router_tests.rs
+index 05a1e2e65a3b18611b4accebb2787a4bb6f41d54..d6405e7bc69cdb5fa57aaab1a91f8b94c6609b65 100644
+--- a/codex-rs/core/src/tools/router_tests.rs
++++ b/codex-rs/core/src/tools/router_tests.rs
+@@ -644,6 +644,9 @@ fn namespace_function_names(specs: &[ToolSpec], namespace_name: &str) -> Vec<Str
+             ToolSpec::Function(_)
+             | ToolSpec::Freeform(_)
+             | ToolSpec::ToolSearch { .. }
++            | ToolSpec::FileSearch(_)
++            | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::ImageGeneration(_)
+             | ToolSpec::WebSearch { .. }
+             | ToolSpec::Namespace(_) => None,
+         })
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 7f38777d3771a00f4098297bfd96fbbb60c90446..931d1663d318930ffbe0e106b790ca329e413ded 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -171,12 +171,28 @@ pub(crate) async fn build_tool_router(
+         &mut registry,
+     );
+     append_dynamic_tool_runtimes(&turn_context.dynamic_tools, &mut registry);
++    let captured_hosted = step_store.get_or_init(|| {
++        session
++            .services
++            .thread_extension_data
++            .get::<codex_extension_api::HostedModelTools>()
++            .map(|tools| tools.as_ref().clone())
++            .unwrap_or_default()
++    });
++    if model_info.use_responses_lite && !captured_hosted.tools.is_empty() {
++        return Err(CodexErrorDetails::InvalidRequest(
++            "Provider-hosted tools require Responses; Responses Lite is unsupported".into(),
++        )
++        .into());
++    }
+     let mut hosted_specs = hosted_model_tool_specs(
+         turn_context,
+         model_info,
+         standalone_web_search_tool.as_slice(),
+     );
+ 
++    hosted_specs.extend(captured_hosted.tools.iter().cloned().map(ToolSpec::from));
++
+     // Keep one immutable selected plan with the issuing step, including helper
+     // identities. Every downstream catalog is derived from the retained registry.
+     let selection = if let Some(selected) = step_store.get::<SelectedStepTools>() {
+@@ -574,7 +590,10 @@ fn finalize_selected_tool_router(
+                     ToolSpec::Namespace(namespace) => namespace.name.as_str(),
+                     ToolSpec::Function(_) | ToolSpec::Freeform(_) => DEFAULT_FUNCTION_NAMESPACE,
+                     ToolSpec::ToolSearch { .. } => TOOL_SEARCH_TOOL_NAME,
+-                    ToolSpec::WebSearch { .. } => continue,
++                    ToolSpec::FileSearch(_)
++                    | ToolSpec::CodeInterpreter(_)
++                    | ToolSpec::ImageGeneration(_)
++                    | ToolSpec::WebSearch { .. } => continue,
+                 };
+                 let owner = tool.runtime.mcp_server_name();
+                 match namespace_owners.get(namespace_name) {
+@@ -1004,7 +1023,12 @@ fn register_code_mode_executors(
+             ToolSpec::Namespace(namespace) if !namespace.tools.is_empty() => {
+                 codex_tools::code_mode_name_for_tool_name(&tool_name)
+             }
+-            ToolSpec::Namespace(_) | ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
++            ToolSpec::Namespace(_)
++            | ToolSpec::ToolSearch { .. }
++            | ToolSpec::FileSearch(_)
++            | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::ImageGeneration(_)
++            | ToolSpec::WebSearch { .. } => {
+                 continue;
+             }
+         };
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index df3ae9d77ae163f97d45f40b7972ff0fc791ba4f..b681419d1f3c96b535b7f613a7508cec11ea430c 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -110,6 +110,9 @@ impl ToolPlanProbe {
+                 )),
+                 ToolSpec::Function(_)
+                 | ToolSpec::ToolSearch { .. }
++                | ToolSpec::FileSearch(_)
++                | ToolSpec::CodeInterpreter(_)
++                | ToolSpec::ImageGeneration(_)
+                 | ToolSpec::WebSearch { .. }
+                 | ToolSpec::Freeform(_) => None,
+             })
+@@ -3299,3 +3302,83 @@ async fn selected_plan_cannot_admit_an_unknown_runtime() {
+         .is_err()
+     );
+ }
++
++#[tokio::test]
++async fn hosted_step_selection_retains_captured_specs_without_local_executors() {
++    let (mut session, mut turn) = make_session_and_context().await;
++    update_turn_settings_for_test(&mut turn, |settings| {
++        Arc::make_mut(&mut settings.model_info).use_responses_lite = false;
++    });
++    let hosted: codex_extension_api::HostedModelTools = serde_json::from_value(json!({"tools":[
++        {"type":"file_search","vector_store_ids":["vs_original"],"include_search_results":true},
++        {"type":"code_interpreter","container":"cntr_test"},
++        {"type":"image_generation","partial_images":2}
++    ]}))
++    .unwrap();
++    session.services.thread_extension_data.insert(hosted);
++    let selector = Arc::new(StepSelector {
++        calls: Default::default(),
++        names: vec![ToolName::plain("file_search")],
++    });
++    let mut extensions = codex_extension_api::ExtensionRegistryBuilder::default();
++    extensions.tool_contributor(selector.clone());
++    session.services.extensions = Arc::new(extensions.build());
++    let step = StepContext::for_test(Arc::new(turn));
++    for attempt in 0..2 {
++        if attempt == 1 {
++            session
++                .services
++                .thread_extension_data
++                .insert(codex_extension_api::HostedModelTools::default());
++        }
++        let router = super::build_tool_router(
++            &session,
++            step.turn.as_ref(),
++            &step.settings.model_info,
++            &step.environments,
++            &step.mcp,
++            false,
++            &step.extension_data,
++            None,
++        )
++        .await
++        .unwrap();
++        let specs = router.model_visible_specs();
++        assert_eq!(specs.len(), 1);
++        assert_eq!(specs[0].name(), "file_search");
++        assert_eq!(
++            serde_json::to_value(&specs[0]).unwrap()["vector_store_ids"],
++            json!(["vs_original"])
++        );
++        assert!(!router.exposes_tool(&ToolName::plain("file_search")));
++    }
++    assert_eq!(selector.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
++}
++
++#[tokio::test]
++async fn hosted_tools_fail_explicitly_on_responses_lite() {
++    let (session, mut turn) = make_session_and_context().await;
++    update_turn_settings_for_test(&mut turn, |settings| {
++        Arc::make_mut(&mut settings.model_info).use_responses_lite = true;
++    });
++    session.services.thread_extension_data.insert(
++        serde_json::from_value::<codex_extension_api::HostedModelTools>(json!({"tools":[
++            {"type":"image_generation"}
++        ]}))
++        .unwrap(),
++    );
++    let step = StepContext::for_test(Arc::new(turn));
++    let result = super::build_tool_router(
++        &session,
++        step.turn.as_ref(),
++        &step.settings.model_info,
++        &step.environments,
++        &step.mcp,
++        false,
++        &step.extension_data,
++        None,
++    )
++    .await;
++    let error = result.err().expect("Lite must reject hosted tools");
++    assert!(error.to_string().contains("Responses Lite"));
++}
+diff --git a/codex-rs/core/src/tools/tool_namespaces_info.rs b/codex-rs/core/src/tools/tool_namespaces_info.rs
+index f43cb1fe3671aa07e37f4944f184099015c3aea8..ea578e053262c33df30e0c747e5221f64f4fbcf8 100644
+--- a/codex-rs/core/src/tools/tool_namespaces_info.rs
++++ b/codex-rs/core/src/tools/tool_namespaces_info.rs
+@@ -40,7 +40,10 @@ pub(super) fn collect_tool_namespaces_info(
+                 native_tool_search_visible = true;
+                 direct_functions.insert((TOOL_SEARCH_TOOL_NAME, TOOL_SEARCH_FUNCTION_NAME));
+             }
+-            ToolSpec::WebSearch { .. } => {}
++            ToolSpec::FileSearch(_)
++            | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::ImageGeneration(_)
++            | ToolSpec::WebSearch { .. } => {}
+         }
+     }
+ 
+diff --git a/codex-rs/core/src/turn_timing.rs b/codex-rs/core/src/turn_timing.rs
+index 03fff5fca68523294ad16fd4d730486c28cb1c20..dcf3185c9c13709347cabfeb6a85f599fd9c9fb8 100644
+--- a/codex-rs/core/src/turn_timing.rs
++++ b/codex-rs/core/src/turn_timing.rs
+@@ -406,6 +406,7 @@ fn response_event_records_turn_ttft(event: &ResponseEvent) -> bool {
+         | ResponseEvent::ReasoningSummaryPartAdded { .. }
+         | ResponseEvent::RateLimits(_)
+         | ResponseEvent::ApiRateLimits(_)
++        | ResponseEvent::HostedToolCallProgress(_)
+         | ResponseEvent::ModelsEtag(_) => false,
+     }
+ }
+@@ -437,6 +438,8 @@ fn response_item_records_turn_ttft(item: &ResponseItem) -> bool {
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::ToolSearchCall { .. }
+         | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::ContextCompaction { .. } => true,
+diff --git a/codex-rs/ext/extension-api/src/lib.rs b/codex-rs/ext/extension-api/src/lib.rs
+index d06c3fdcaadd0e6eb76e7107a7cbcb620f448c7d..2fcb6f2486a90e7bf690c1950f8113f12e4c5500 100644
+--- a/codex-rs/ext/extension-api/src/lib.rs
++++ b/codex-rs/ext/extension-api/src/lib.rs
+@@ -28,6 +28,7 @@ pub use codex_protocol::security_risk::SecurityRiskScore;
+ pub use codex_tools::ConversationHistory;
+ pub use codex_tools::ExtensionTurnItem;
+ pub use codex_tools::FunctionCallError;
++pub use codex_tools::HostedModelTools;
+ pub use codex_tools::JsonToolOutput;
+ pub use codex_tools::NoopTurnItemEmitter;
+ pub use codex_tools::ResponsesApiTool;
+diff --git a/codex-rs/ext/goal/src/accounting.rs b/codex-rs/ext/goal/src/accounting.rs
+index 8b6e43c38158d7250ff11047149cb46ff9f2af1b..81e6a2850699bb9a43644834b383d54ffae61914 100644
+--- a/codex-rs/ext/goal/src/accounting.rs
++++ b/codex-rs/ext/goal/src/accounting.rs
+@@ -188,6 +188,7 @@ impl GoalAccountingState {
+             | TurnItem::WebSearch(_)
+             | TurnItem::ImageView(_)
+             | TurnItem::Extension(_)
++            | TurnItem::HostedToolCall(_)
+             | TurnItem::ImageGeneration(_)
+             | TurnItem::EnteredReviewMode(_)
+             | TurnItem::ExitedReviewMode(_)
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+index 1924028222cb3e29c59d61b2bbfe35b94b8f769a..cb64853ebd5e53ed60ca7c36651ca5b1b87cc27a 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/transcript_tests.rs
+@@ -1155,8 +1155,9 @@ fn transcript_omits_media_payloads_and_keeps_readable_content() {
+         ResponseItem::ImageGenerationCall {
+             id: None,
+             status: "completed".to_string(),
+-            revised_prompt: Some("A screenshot.".to_string()),
+-            result: oversized_image,
++            revised_prompt: Some(Some("A screenshot.".to_string())),
++            result: Some(oversized_image),
++            provider_fields: Default::default(),
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::ToolSearchCall {
+diff --git a/codex-rs/ext/image-generation/src/tests.rs b/codex-rs/ext/image-generation/src/tests.rs
+index a2008d4e52f17e162ea6d8b5ea9c0a01ed76ecd5..c851026c8fee16d3798f0dbf339c57361b5ac397 100644
+--- a/codex-rs/ext/image-generation/src/tests.rs
++++ b/codex-rs/ext/image-generation/src/tests.rs
+@@ -134,7 +134,8 @@ async fn recent_image_fallback_selects_newest_images_in_chronological_order() {
+             id: Some(ResponseItemId::with_suffix("ig", "generated-call")),
+             status: "completed".to_string(),
+             revised_prompt: None,
+-            result: "generated".to_string(),
++            result: Some("generated".to_string()),
++            provider_fields: Default::default(),
+             internal_chat_message_metadata_passthrough: None,
+         },
+         ResponseItem::FunctionCallOutput {
+diff --git a/codex-rs/ext/image-generation/src/tool.rs b/codex-rs/ext/image-generation/src/tool.rs
+index d2777fb2023782ad7508fc4bddc097d33fb96359..19e50bf6a16f2fcd627054716bfac0ea64ba56e8 100644
+--- a/codex-rs/ext/image-generation/src/tool.rs
++++ b/codex-rs/ext/image-generation/src/tool.rs
+@@ -503,7 +503,10 @@ fn recent_images(
+             | ResponseItem::CustomToolCallOutput { output, .. } => {
+                 image_references.extend(output_images(output).cloned());
+             }
+-            ResponseItem::ImageGenerationCall { result, .. } if !result.is_empty() => {
++            ResponseItem::ImageGenerationCall {
++                result: Some(result),
++                ..
++            } if !result.is_empty() => {
+                 image_references.push(ImageReference::Inline {
+                     image_url: format!("data:image/png;base64,{result}"),
+                 });
+@@ -517,6 +520,8 @@ fn recent_images(
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }
+diff --git a/codex-rs/guardian-context/src/transcript.rs b/codex-rs/guardian-context/src/transcript.rs
+index 530c4bc90d18b9f60098e6b0a4e248d0f4fdd32b..9a32229d42b0ef15b7a247b76d41ef03c6fb5b32 100644
+--- a/codex-rs/guardian-context/src/transcript.rs
++++ b/codex-rs/guardian-context/src/transcript.rs
+@@ -327,6 +327,8 @@ pub fn collect_transcript(
+                 ..
+             }
+             | ResponseItem::AdditionalTools { .. }
++            | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::ToolSearchCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+diff --git a/codex-rs/otel/src/events/session_telemetry.rs b/codex-rs/otel/src/events/session_telemetry.rs
+index ae58956b026fd0598f07f334f63cfeff948a491c..a349f439d4fb1290496c4f5f18bdc5612293831f 100644
+--- a/codex-rs/otel/src/events/session_telemetry.rs
++++ b/codex-rs/otel/src/events/session_telemetry.rs
+@@ -1393,6 +1393,7 @@ impl SessionTelemetry {
+             ResponseEvent::ServerReasoningIncluded(_) => "server_reasoning_included".into(),
+             ResponseEvent::RateLimits(_) => "rate_limits".into(),
+             ResponseEvent::ApiRateLimits(_) => "api_rate_limits".into(),
++            ResponseEvent::HostedToolCallProgress(_) => "hosted_tool_call_progress".into(),
+             ResponseEvent::ModelsEtag(_) => "models_etag".into(),
+         }
+     }
+@@ -1411,6 +1412,8 @@ impl SessionTelemetry {
+             ResponseItem::CustomToolCall { .. } => "custom_tool_call".into(),
+             ResponseItem::CustomToolCallOutput { .. } => "custom_tool_call_output".into(),
+             ResponseItem::WebSearchCall { .. } => "web_search_call".into(),
++            ResponseItem::FileSearchCall { .. } => "file_search_call".into(),
++            ResponseItem::CodeInterpreterCall { .. } => "code_interpreter_call".into(),
+             ResponseItem::ImageGenerationCall { .. } => "image_generation_call".into(),
+             ResponseItem::Compaction { .. } => "compaction".into(),
+             ResponseItem::ConfigurationUpdate { .. } => "configuration_update".into(),
+diff --git a/codex-rs/protocol/src/items.rs b/codex-rs/protocol/src/items.rs
+index 6bd277a3bb386207dc8ca0e5b39deda5e8511cf5..3b531e049774523c183fff9440a77c503033eb76 100644
+--- a/codex-rs/protocol/src/items.rs
++++ b/codex-rs/protocol/src/items.rs
+@@ -70,6 +70,8 @@ pub enum TurnItem {
+     /// This remains separate from [`Self::Extension`] because core still owns
+     /// hosted image persistence and legacy-event fanout.
+     ImageGeneration(ImageGenerationItem),
++    #[serde(rename = "hosted_tool_call")]
++    HostedToolCall(HostedToolCallItem),
+     EnteredReviewMode(EnteredReviewModeItem),
+     ExitedReviewMode(ExitedReviewModeItem),
+     FileChange(FileChangeItem),
+@@ -429,6 +431,12 @@ pub struct ImageViewItem {
+     pub path: PathUri,
+ }
+ 
++#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
++pub struct HostedToolCallItem {
++    pub id: String,
++    pub item: crate::models::ResponseItem,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema, PartialEq)]
+ pub struct ImageGenerationItem {
+     pub id: String,
+@@ -436,7 +444,10 @@ pub struct ImageGenerationItem {
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[ts(optional)]
+     pub revised_prompt: Option<String>,
+-    pub result: String,
++    pub result: Option<String>,
++    /// Complete provider item, including fields unknown to this Core revision.
++    #[serde(default)]
++    pub provider_data: serde_json::Value,
+     #[serde(default, skip_serializing_if = "Option::is_none")]
+     #[ts(optional)]
+     pub saved_path: Option<AbsolutePathBuf>,
+@@ -789,6 +800,7 @@ impl TurnItem {
+             TurnItem::ImageView(item) => item.id.clone(),
+             TurnItem::Extension(item) => item.id().to_string(),
+             TurnItem::ImageGeneration(item) => item.id.clone(),
++            TurnItem::HostedToolCall(item) => item.id.clone(),
+             TurnItem::EnteredReviewMode(item) => item.id.clone(),
+             TurnItem::ExitedReviewMode(item) => item.id.clone(),
+             TurnItem::FileChange(item) => item.id.clone(),
+diff --git a/codex-rs/protocol/src/legacy_events.rs b/codex-rs/protocol/src/legacy_events.rs
+index d7de9dcbf9a185d986cf2cbe8768c0e3bce3aaaa..69eef7f7d7267301351c204a1a92cca5299faae9 100644
+--- a/codex-rs/protocol/src/legacy_events.rs
++++ b/codex-rs/protocol/src/legacy_events.rs
+@@ -458,7 +458,7 @@ impl ImageGenerationItem {
+             call_id: self.id.clone(),
+             status: self.status.clone(),
+             revised_prompt: self.revised_prompt.clone(),
+-            result: self.result.clone(),
++            result: self.result.clone().unwrap_or_default(),
+             transparent_background: None,
+             failure: None,
+             saved_path: self.saved_path.clone(),
+@@ -558,7 +558,7 @@ impl TurnItem {
+                     path: item.path.clone(),
+                 })]
+             }
+-            TurnItem::Extension(_) => Vec::new(),
++            TurnItem::Extension(_) | TurnItem::HostedToolCall(_) => Vec::new(),
+             TurnItem::ImageGeneration(item) => vec![item.as_legacy_event()],
+             TurnItem::EnteredReviewMode(_) | TurnItem::ExitedReviewMode(_) => Vec::new(),
+             TurnItem::FileChange(item) => item
+diff --git a/codex-rs/protocol/src/models.rs b/codex-rs/protocol/src/models.rs
+index d14d79bbe52377d4189529e8e6673d8ec13c293d..378a0964b37bba98db60c9809b7b4ff4792171e9 100644
+--- a/codex-rs/protocol/src/models.rs
++++ b/codex-rs/protocol/src/models.rs
+@@ -1214,15 +1214,45 @@ pub enum ResponseItem {
+     //   "revised_prompt":"A gray tabby cat hugging an otter...",
+     //   "result":"..."
+     // }
+-    ImageGenerationCall {
++    FileSearchCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         id: Option<ResponseItemId>,
+         status: String,
++        #[serde(flatten)]
++        provider_fields: serde_json::Map<String, serde_json::Value>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
++    CodeInterpreterCall {
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+-        revised_prompt: Option<String>,
+-        result: String,
++        id: Option<ResponseItemId>,
++        status: String,
++        #[serde(flatten)]
++        provider_fields: serde_json::Map<String, serde_json::Value>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
++    },
++    ImageGenerationCall {
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        #[ts(optional)]
++        id: Option<ResponseItemId>,
++        status: String,
++        #[serde(
++            default,
++            skip_serializing_if = "Option::is_none",
++            with = "serde_with::rust::double_option"
++        )]
++        #[ts(optional = nullable, as = "Option<String>")]
++        #[schemars(with = "Option<String>")]
++        revised_prompt: Option<Option<String>>,
++        #[serde(default)]
++        result: Option<String>,
++        #[serde(flatten)]
++        provider_fields: serde_json::Map<String, serde_json::Value>,
+         #[serde(default, skip_serializing_if = "Option::is_none")]
+         #[ts(optional)]
+         internal_chat_message_metadata_passthrough: Option<InternalChatMessageMetadataPassthrough>,
+@@ -1279,6 +1309,8 @@ impl ResponseItem {
+             | Self::ToolSearchOutput { id, .. }
+             | Self::WebSearchCall { id, .. }
+             | Self::Reasoning { id, .. }
++            | Self::FileSearchCall { id, .. }
++            | Self::CodeInterpreterCall { id, .. }
+             | Self::ImageGenerationCall { id, .. }
+             | Self::Compaction { id, .. }
+             | Self::ContextCompaction { id, .. } => id.as_ref(),
+@@ -1301,6 +1333,8 @@ impl ResponseItem {
+             | Self::ToolSearchOutput { id, .. }
+             | Self::WebSearchCall { id, .. }
+             | Self::Reasoning { id, .. }
++            | Self::FileSearchCall { id, .. }
++            | Self::CodeInterpreterCall { id, .. }
+             | Self::ImageGenerationCall { id, .. }
+             | Self::Compaction { id, .. }
+             | Self::ContextCompaction { id, .. } => *id = new_id,
+@@ -1323,6 +1357,8 @@ impl ResponseItem {
+             Self::CustomToolCallOutput { .. } => Some("ctco"),
+             Self::ToolSearchOutput { .. } => Some("tso"),
+             Self::WebSearchCall { .. } => Some("ws"),
++            Self::FileSearchCall { .. } => Some("fs"),
++            Self::CodeInterpreterCall { .. } => Some("ci"),
+             Self::ImageGenerationCall { .. } => Some("ig"),
+             Self::Compaction { .. } | Self::ContextCompaction { .. } => Some("cmp"),
+             Self::ConfigurationUpdate { .. } | Self::CompactionTrigger { .. } | Self::Other => None,
+@@ -1448,6 +1484,14 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::FileSearchCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
++            | Self::CodeInterpreterCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ImageGenerationCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -1515,6 +1559,14 @@ impl ResponseItem {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+             }
++            | Self::FileSearchCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
++            | Self::CodeInterpreterCall {
++                internal_chat_message_metadata_passthrough: metadata,
++                ..
++            }
+             | Self::ImageGenerationCall {
+                 internal_chat_message_metadata_passthrough: metadata,
+                 ..
+@@ -2469,6 +2521,28 @@ impl std::fmt::Display for FunctionCallOutputPayload {
+ 
+ #[cfg(test)]
+ mod tests {
++
++    #[test]
++    fn hosted_response_items_preserve_nullable_and_unknown_provider_fields() {
++        for value in [
++            serde_json::json!({"type":"file_search_call","id":"fs_test","status":"completed",
++                "queries":["docs"],"results":[{"file_id":"file_test","text":"answer","extra":7}],"future":{"a":null}}),
++            serde_json::json!({"type":"code_interpreter_call","id":"ci_test","status":"completed",
++                "container_id":"cntr_test","code":"print(1)","outputs":[{"type":"logs","logs":"1"}],"future":true}),
++            serde_json::json!({"type":"image_generation_call","id":"ig_test","status":"in_progress",
++                "result":null,"quality":"high","size":"1024x1024","future":{"a":1}}),
++            serde_json::json!({"type":"image_generation_call","id":"ig_null","status":"completed",
++                "result":"aW1hZ2U=","revised_prompt":null}),
++        ] {
++            let item: super::ResponseItem = serde_json::from_value(value.clone()).unwrap();
++            assert_eq!(item.id().unwrap().as_str(), value["id"].as_str().unwrap());
++            assert_eq!(serde_json::to_value(&item).unwrap(), value);
++            let restored: super::ResponseItem =
++                serde_json::from_value(serde_json::to_value(&item).unwrap()).unwrap();
++            assert_eq!(restored, item);
++        }
++    }
++
+     use super::*;
+     use anyhow::Result;
+     use codex_execpolicy::Policy;
+@@ -2768,8 +2842,9 @@ mod tests {
+             ResponseItem::ImageGenerationCall {
+                 id: Some(ResponseItemId::with_suffix("ig", "123")),
+                 status: "completed".to_string(),
+-                revised_prompt: Some("A small blue square".to_string()),
+-                result: "Zm9v".to_string(),
++                revised_prompt: Some(Some("A small blue square".to_string())),
++                result: Some("Zm9v".to_string()),
++                provider_fields: Default::default(),
+                 internal_chat_message_metadata_passthrough: None,
+             }
+         );
+@@ -2791,7 +2866,8 @@ mod tests {
+                 id: Some(ResponseItemId::with_suffix("ig", "123")),
+                 status: "completed".to_string(),
+                 revised_prompt: None,
+-                result: "Zm9v".to_string(),
++                result: Some("Zm9v".to_string()),
++                provider_fields: Default::default(),
+                 internal_chat_message_metadata_passthrough: None,
+             }
+         );
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index f4f6785823bb666facd45fec1559f025ccc7fce9..98ce6c473f6ef73ca4c756636e9813f9845e3914 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -1549,6 +1549,7 @@ pub enum EventMsg {
+     ExitedReviewMode(ExitedReviewModeEvent),
+ 
+     RawResponseItem(RawResponseItemEvent),
++    HostedToolCallProgress(HostedToolCallProgressEvent),
+     RawResponseCompleted(RawResponseCompletedEvent),
+ 
+     ItemStarted(ItemStartedEvent),
+@@ -1933,6 +1934,11 @@ impl CodexErrorInfo {
+     }
+ }
+ 
++#[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
++pub struct HostedToolCallProgressEvent {
++    pub event: serde_json::Value,
++}
++
+ #[derive(Debug, Clone, Deserialize, Serialize, TS, JsonSchema)]
+ pub struct RawResponseItemEvent {
+     pub item: ResponseItem,
+@@ -5447,7 +5453,8 @@ mod tests {
+                 id: "ig-1".into(),
+                 status: "in_progress".into(),
+                 revised_prompt: None,
+-                result: String::new(),
++                result: Some(String::new()),
++                provider_data: serde_json::Value::Null,
+                 saved_path: None,
+             }),
+             started_at_ms: 0,
+@@ -5555,7 +5562,8 @@ mod tests {
+                 id: "ig-1".into(),
+                 status: "completed".into(),
+                 revised_prompt: Some("A tiny blue square".into()),
+-                result: "Zm9v".into(),
++                result: Some("Zm9v".into()),
++                provider_data: serde_json::Value::Null,
+                 saved_path: Some(test_path_buf("/tmp/ig-1.png").abs()),
+             }),
+             started_at_ms: Some(0),
+diff --git a/codex-rs/rollout-trace/src/protocol_event.rs b/codex-rs/rollout-trace/src/protocol_event.rs
+index 26b6d6261eb120870a43e8e4c54ee074221ae95a..c5797853d7f29aa7f3c11576b0995d51eb7afd57 100644
+--- a/codex-rs/rollout-trace/src/protocol_event.rs
++++ b/codex-rs/rollout-trace/src/protocol_event.rs
+@@ -412,6 +412,7 @@ pub(crate) fn tool_runtime_trace_event(event: &EventMsg) -> Option<ToolRuntimeTr
+         | EventMsg::EnteredReviewMode(_)
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::HostedToolCallProgress(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::ItemStarted(_)
+         | EventMsg::ItemCompleted(_)
+@@ -492,6 +493,7 @@ pub(crate) fn wrapped_protocol_event_type(event: &EventMsg) -> Option<&'static s
+         | EventMsg::EnteredReviewMode(_)
+         | EventMsg::ExitedReviewMode(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::HostedToolCallProgress(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::ItemStarted(_)
+         | EventMsg::ItemCompleted(_)
+diff --git a/codex-rs/rollout/src/persistence_metrics.rs b/codex-rs/rollout/src/persistence_metrics.rs
+index 9c71472add7192d533bb1d0144c360e415b505e7..26a8434d0dd5bcd2bbd4dd7be5bf91f07125f4f2 100644
+--- a/codex-rs/rollout/src/persistence_metrics.rs
++++ b/codex-rs/rollout/src/persistence_metrics.rs
+@@ -302,6 +302,7 @@ fn turn_item_type(item: &TurnItem) -> &'static str {
+         TurnItem::WebSearch(_) => "web_search",
+         TurnItem::ImageView(_) => "image_view",
+         TurnItem::Extension(_) => "extension",
++        TurnItem::HostedToolCall(_) => "hosted_tool_call",
+         TurnItem::ImageGeneration(_) => "image_generation",
+         TurnItem::EnteredReviewMode(_) => "entered_review_mode",
+         TurnItem::ExitedReviewMode(_) => "exited_review_mode",
+@@ -325,6 +326,8 @@ fn response_item_type(item: &ResponseItemEnvelope) -> &'static str {
+         ResponseItem::CustomToolCall { .. } => "response.custom_tool_call",
+         ResponseItem::CustomToolCallOutput { .. } => "response.custom_tool_call_output",
+         ResponseItem::WebSearchCall { .. } => "response.web_search_call",
++        ResponseItem::FileSearchCall { .. } => "response.file_search_call",
++        ResponseItem::CodeInterpreterCall { .. } => "response.code_interpreter_call",
+         ResponseItem::ImageGenerationCall { .. } => "response.image_generation_call",
+         ResponseItem::Compaction { .. } => "response.compaction",
+         ResponseItem::ConfigurationUpdate { .. } => "response.configuration_update",
+diff --git a/codex-rs/rollout/src/policy.rs b/codex-rs/rollout/src/policy.rs
+index 074583491272453e76574467bc48ae5eb903d6df..96bfb5bcd4e1df29ffb407a67be29e39dd63dfbd 100644
+--- a/codex-rs/rollout/src/policy.rs
++++ b/codex-rs/rollout/src/policy.rs
+@@ -92,6 +92,8 @@ pub fn should_persist_response_item(item: &ResponseItem) -> bool {
+         | ResponseItem::CustomToolCall { .. }
+         | ResponseItem::CustomToolCallOutput { .. }
+         | ResponseItem::WebSearchCall { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
+         | ResponseItem::Compaction { .. }
+@@ -117,6 +119,8 @@ pub fn should_persist_response_item_for_memories(item: &ResponseItem) -> bool {
+         ResponseItem::AdditionalTools { .. }
+         | ResponseItem::Reasoning { .. }
+         | ResponseItem::ConfigurationUpdate { .. }
++        | ResponseItem::FileSearchCall { .. }
++        | ResponseItem::CodeInterpreterCall { .. }
+         | ResponseItem::ImageGenerationCall { .. }
+         | ResponseItem::Compaction { .. }
+         | ResponseItem::CompactionTrigger { .. }
+@@ -186,6 +190,7 @@ pub fn persisted_event_msg(
+         | EventMsg::TurnModerationMetadata(_)
+         | EventMsg::AgentReasoningSectionBreak(_)
+         | EventMsg::RawResponseItem(_)
++        | EventMsg::HostedToolCallProgress(_)
+         | EventMsg::RawResponseCompleted(_)
+         | EventMsg::SessionConfigured(_)
+         | EventMsg::EnvironmentConnected(_)
+diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
+index 81364f514203347e10987016f264f2d2fe211fe2..42c5ce35d00a36694fd389ca71b2038e68a21064 100644
+--- a/codex-rs/thread-store/src/local/thread_history.rs
++++ b/codex-rs/thread-store/src/local/thread_history.rs
+@@ -539,6 +539,7 @@ WHERE thread_id = ?
+             | ThreadItem::ImageGeneration(_)
+             | ThreadItem::EnteredReviewMode { .. }
+             | ThreadItem::ExitedReviewMode { .. }
++            | ThreadItem::HostedToolCall { .. }
+             | ThreadItem::ContextCompaction { .. } => {}
+         }
+     }
+diff --git a/codex-rs/thread-store/src/local/thread_history/search.rs b/codex-rs/thread-store/src/local/thread_history/search.rs
+index 7fa10e2419d1c729587cc9824eca99e9c20c319d..a56753e796200ae3c17a1e270f924355b8a06949 100644
+--- a/codex-rs/thread-store/src/local/thread_history/search.rs
++++ b/codex-rs/thread-store/src/local/thread_history/search.rs
+@@ -349,6 +349,7 @@ fn searchable_text(item: &ThreadItem) -> Option<Cow<'_, str>> {
+         | ThreadItem::ImageGeneration(_)
+         | ThreadItem::EnteredReviewMode { .. }
+         | ThreadItem::ExitedReviewMode { .. }
++        | ThreadItem::HostedToolCall { .. }
+         | ThreadItem::ContextCompaction { .. } => None,
+     }
+ }
+diff --git a/codex-rs/tools/src/code_mode.rs b/codex-rs/tools/src/code_mode.rs
+index 7deb8c810a76ca8e69efb01b1d0d8362501aace5..33a11b4811a3a79742f08c73ab7c4b9391e14470 100644
+--- a/codex-rs/tools/src/code_mode.rs
++++ b/codex-rs/tools/src/code_mode.rs
+@@ -223,7 +223,11 @@ fn code_mode_tool_definitions_for_spec(
+                 }
+             })
+             .collect(),
+-        ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => Vec::new(),
++        ToolSpec::ToolSearch { .. }
++        | ToolSpec::FileSearch(_)
++        | ToolSpec::CodeInterpreter(_)
++        | ToolSpec::ImageGeneration(_)
++        | ToolSpec::WebSearch { .. } => Vec::new(),
+     }
+ }
+ 
+diff --git a/codex-rs/tools/src/hosted_tools.rs b/codex-rs/tools/src/hosted_tools.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bc3b917e8df547ca832acba3948fd1a05e120936
+--- /dev/null
++++ b/codex-rs/tools/src/hosted_tools.rs
+@@ -0,0 +1,216 @@
++//! Provider-executed Responses tools. These declarations never register local executors.
++use serde::{Deserialize, Serialize};
++
++/// Trusted host declarations, captured before each step selects its tool catalog.
++#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
++pub struct HostedModelTools {
++    pub tools: Vec<HostedToolSpec>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum HostedToolSpec {
++    FileSearch(FileSearchTool),
++    CodeInterpreter(CodeInterpreterTool),
++    ImageGeneration(ImageGenerationTool),
++}
++
++impl From<HostedToolSpec> for crate::ToolSpec {
++    fn from(spec: HostedToolSpec) -> Self {
++        match spec {
++            HostedToolSpec::FileSearch(config) => Self::FileSearch(config),
++            HostedToolSpec::CodeInterpreter(config) => Self::CodeInterpreter(config),
++            HostedToolSpec::ImageGeneration(config) => Self::ImageGeneration(config),
++        }
++    }
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(untagged)]
++pub enum CodeInterpreterContainer {
++    Existing(String),
++    Auto(AutoCodeInterpreterContainer),
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++#[serde(tag = "type", rename_all = "snake_case")]
++pub enum CodeInterpreterNetworkPolicy {
++    Disabled,
++    Allowlist {
++        allowed_domains: Vec<String>,
++        #[serde(default, skip_serializing_if = "Option::is_none")]
++        domain_secrets: Option<Vec<CodeInterpreterDomainSecret>>,
++    },
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct FileSearchTool {
++    pub vector_store_ids: Vec<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub filters: Option<serde_json::Value>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub max_num_results: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub ranking_options: Option<FileSearchRankingOptions>,
++    /// Requests raw results through the top-level Responses include list.
++    #[serde(default, skip_serializing)]
++    pub include_search_results: bool,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct FileSearchRankingOptions {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub ranker: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub score_threshold: Option<f64>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub hybrid_search: Option<FileSearchHybridSearch>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct FileSearchHybridSearch {
++    pub embedding_weight: f64,
++    pub text_weight: f64,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct CodeInterpreterTool {
++    pub container: CodeInterpreterContainer,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub allowed_callers: Option<Vec<String>>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct AutoCodeInterpreterContainer {
++    #[serde(rename = "type")]
++    pub kind: AutoCodeInterpreterContainerKind,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub file_ids: Option<Vec<String>>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub memory_limit: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub network_policy: Option<CodeInterpreterNetworkPolicy>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct CodeInterpreterDomainSecret {
++    pub domain: String,
++    pub name: String,
++    pub value: String,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct ImageGenerationTool {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub action: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub background: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub complexity: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub input_fidelity: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub moderation: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_format: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub quality: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub size: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub frame_count: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub frame_duration_ms: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub output_compression: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub partial_images: Option<u32>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub input_image_mask: Option<ImageGenerationMask>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub svg: Option<ImageGenerationSvg>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct ImageGenerationMask {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub file_id: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub image_url: Option<String>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct ImageGenerationSvg {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub model: Option<String>,
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub reasoning: Option<ImageGenerationSvgReasoning>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub struct ImageGenerationSvgReasoning {
++    #[serde(default, skip_serializing_if = "Option::is_none")]
++    pub effort: Option<String>,
++}
++
++#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
++pub enum AutoCodeInterpreterContainerKind {
++    #[serde(rename = "auto")]
++    Auto,
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn hosted_declarations_serialize_provider_fields_without_include_flag() {
++        let input = json!({"tools": [
++            {"type":"file_search", "vector_store_ids":["vs_test"],
++             "filters":{"type":"and", "filters":[{"type":"eq", "key":"team", "value":"docs"}]},
++             "max_num_results":4, "ranking_options":{"hybrid_search":{"embedding_weight":0.8,"text_weight":0.2}},
++             "include_search_results":true},
++            {"type":"code_interpreter", "container":{"type":"auto", "file_ids":["file_test"],
++             "memory_limit":"4g", "network_policy":{"type":"disabled"}}},
++            {"type":"image_generation", "model":"gpt-image-2", "action":"edit", "quality":"high",
++             "size":"1024x1024", "background":"transparent", "partial_images":2,
++             "input_image_mask":{"image_url":"data:image/png;base64,AA=="}}
++        ]});
++        let tools: HostedModelTools = serde_json::from_value(input.clone()).unwrap();
++        let specs: Vec<crate::ToolSpec> = tools.tools.into_iter().map(Into::into).collect();
++        let mut expected = input["tools"].clone();
++        expected[0]
++            .as_object_mut()
++            .unwrap()
++            .remove("include_search_results");
++        assert_eq!(serde_json::to_value(&specs).unwrap(), expected);
++        assert!(
++            matches!(&specs[0], crate::ToolSpec::FileSearch(config) if config.include_search_results)
++        );
++        assert_eq!(
++            specs.iter().map(crate::ToolSpec::name).collect::<Vec<_>>(),
++            vec!["file_search", "code_interpreter", "image_generation"]
++        );
++    }
++
++    #[test]
++    fn hosted_container_accepts_existing_id_and_rejects_wrong_auto_discriminator() {
++        let existing: HostedToolSpec = serde_json::from_value(json!({
++            "type":"code_interpreter", "container":"cntr_test"
++        }))
++        .unwrap();
++        assert_eq!(
++            serde_json::to_value(existing).unwrap()["container"],
++            "cntr_test"
++        );
++        assert!(
++            serde_json::from_value::<HostedToolSpec>(json!({
++                "type":"code_interpreter", "container":{"type":"container_auto"}
++            }))
++            .is_err()
++        );
++    }
++}
+diff --git a/codex-rs/tools/src/lib.rs b/codex-rs/tools/src/lib.rs
+index b07c7b0cd2edbec2c75a57ce4e28864e63162b89..5da5bdf96b6e01792e9ae6d82525e131b480c910 100644
+--- a/codex-rs/tools/src/lib.rs
++++ b/codex-rs/tools/src/lib.rs
+@@ -4,6 +4,7 @@
+ mod code_mode;
+ mod dynamic_tool;
+ mod function_call_error;
++mod hosted_tools;
+ mod image_detail;
+ mod indirect_namespace_prefixes;
+ mod json_schema;
+@@ -30,6 +31,7 @@ pub use code_mode::tool_spec_to_code_mode_tool_definition;
+ pub use codex_protocol::ToolName;
+ pub use dynamic_tool::parse_dynamic_tool;
+ pub use function_call_error::FunctionCallError;
++pub use hosted_tools::*;
+ pub use image_detail::can_request_original_image_detail;
+ pub use image_detail::normalize_output_image_detail;
+ pub use image_detail::sanitize_original_image_detail;
+diff --git a/codex-rs/tools/src/tool_search.rs b/codex-rs/tools/src/tool_search.rs
+index 8cd45d9005bfefd4f5604a2ab20ecd1dff6e551f..81c6cdf25f7046262c7780f9152d8a01af55de2f 100644
+--- a/codex-rs/tools/src/tool_search.rs
++++ b/codex-rs/tools/src/tool_search.rs
+@@ -43,7 +43,11 @@ impl ToolSearchInfo {
+                 entry: ToolSearchEntry { search_text, spec },
+                 source_info,
+             }),
+-            ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => None,
++            ToolSpec::ToolSearch { .. }
++            | ToolSpec::FileSearch(_)
++            | ToolSpec::CodeInterpreter(_)
++            | ToolSpec::ImageGeneration(_)
++            | ToolSpec::WebSearch { .. } => None,
+         }
+     }
+ 
+@@ -86,7 +90,11 @@ fn normalize_search_spec(spec: ToolSpec) -> Option<LoadableToolSpec> {
+             tools: vec![ResponsesApiNamespaceTool::Custom(tool)],
+         },
+         ToolSpec::Namespace(namespace) => namespace,
+-        ToolSpec::ToolSearch { .. } | ToolSpec::WebSearch { .. } => {
++        ToolSpec::ToolSearch { .. }
++        | ToolSpec::FileSearch(_)
++        | ToolSpec::CodeInterpreter(_)
++        | ToolSpec::ImageGeneration(_)
++        | ToolSpec::WebSearch { .. } => {
+             return None;
+         }
+     };
+@@ -133,6 +141,9 @@ fn default_tool_search_text(spec: &ToolSpec) -> String {
+         ToolSpec::ToolSearch { description, .. } => {
+             push_search_part(&mut parts, description.clone());
+         }
++        ToolSpec::FileSearch(_) | ToolSpec::CodeInterpreter(_) | ToolSpec::ImageGeneration(_) => {
++            push_search_part(&mut parts, spec.name().to_string());
++        }
+         ToolSpec::WebSearch { .. } => {
+             push_search_part(&mut parts, "web search".to_string());
+         }
+diff --git a/codex-rs/tools/src/tool_spec.rs b/codex-rs/tools/src/tool_spec.rs
+index beda4a776276febf54b4eae7a1246ac671826ca0..92da4cf1007b3039eb2ca6326c24818e7a3fcc78 100644
+--- a/codex-rs/tools/src/tool_spec.rs
++++ b/codex-rs/tools/src/tool_spec.rs
+@@ -51,6 +51,12 @@ pub enum ToolSpec {
+         #[serde(skip_serializing_if = "Option::is_none")]
+         search_content_types: Option<Vec<String>>,
+     },
++    #[serde(rename = "file_search")]
++    FileSearch(crate::FileSearchTool),
++    #[serde(rename = "code_interpreter")]
++    CodeInterpreter(crate::CodeInterpreterTool),
++    #[serde(rename = "image_generation")]
++    ImageGeneration(crate::ImageGenerationTool),
+     #[serde(rename = "custom")]
+     Freeform(FreeformTool),
+ }
+@@ -62,6 +68,9 @@ impl ToolSpec {
+             ToolSpec::Namespace(namespace) => namespace.name.as_str(),
+             ToolSpec::ToolSearch { .. } => "tool_search",
+             ToolSpec::WebSearch { .. } => "web_search",
++            ToolSpec::FileSearch(_) => "file_search",
++            ToolSpec::CodeInterpreter(_) => "code_interpreter",
++            ToolSpec::ImageGeneration(_) => "image_generation",
+             ToolSpec::Freeform(tool) => tool.name.as_str(),
+         }
+     }
+diff --git a/codex-rs/tui/src/app/agent_status_feed.rs b/codex-rs/tui/src/app/agent_status_feed.rs
+index bab6e567373108f8c410795f54573b369809e2ad..a2138760819245e43515c08e05f7e18ea8507821 100644
+--- a/codex-rs/tui/src/app/agent_status_feed.rs
++++ b/codex-rs/tui/src/app/agent_status_feed.rs
+@@ -193,6 +193,7 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
+             let path = path.render_for_ui();
+             return bounded_summary(&format!("Viewed {path}"));
+         }
++        ThreadItem::HostedToolCall { .. } => return None,
+         ThreadItem::ImageGeneration(_) => return Some("Generated an image".to_string()),
+         ThreadItem::EnteredReviewMode { .. } => return Some("Entered review mode".to_string()),
+         ThreadItem::ExitedReviewMode { .. } => return Some("Exited review mode".to_string()),
+diff --git a/codex-rs/tui/src/chatwidget/protocol.rs b/codex-rs/tui/src/chatwidget/protocol.rs
+index 85ea551334db60d948a9b215e5026679a4fc723f..1b16d9f1efcac64bf8b638356a5200e2d37e69d9 100644
+--- a/codex-rs/tui/src/chatwidget/protocol.rs
++++ b/codex-rs/tui/src/chatwidget/protocol.rs
+@@ -603,6 +603,7 @@ impl ChatWidget {
+             ThreadItem::WebSearch(item) => {
+                 self.on_web_search_begin(item.id);
+             }
++            ThreadItem::HostedToolCall { .. } => {}
+             ThreadItem::ImageGeneration(_) => {
+                 self.on_image_generation_begin();
+             }
+diff --git a/codex-rs/tui/src/chatwidget/replay.rs b/codex-rs/tui/src/chatwidget/replay.rs
+index df7207f91acfca083efae8426781749bacb0f267..b6e4737e74a67c47569936f3ff5a4e15fae57723 100644
+--- a/codex-rs/tui/src/chatwidget/replay.rs
++++ b/codex-rs/tui/src/chatwidget/replay.rs
+@@ -431,6 +431,7 @@ impl ChatWidget {
+             ThreadItem::ExitedReviewMode { .. } => {
+                 self.exit_review_mode_after_item();
+             }
++            ThreadItem::HostedToolCall { .. } => {}
+             ThreadItem::ContextCompaction { id } => {
+                 self.on_context_compaction_completed(&id, from_replay);
+             }
+diff --git a/codex-rs/tui/src/dynamic_tools.rs b/codex-rs/tui/src/dynamic_tools.rs
+index c2a3fa8d1599d335cee82374ceaea85dbe09e378..aa792484a163a2d039851c699095b1700fb50883 100644
+--- a/codex-rs/tui/src/dynamic_tools.rs
++++ b/codex-rs/tui/src/dynamic_tools.rs
+@@ -1018,7 +1018,8 @@ async fn execute_inner(
+                                     | ThreadItem::ImageView { .. }
+                                     | ThreadItem::EnteredReviewMode { .. }
+                                     | ThreadItem::ExitedReviewMode { .. }
+-                                    | ThreadItem::ContextCompaction { .. } => None,
++                                    | ThreadItem::HostedToolCall { .. }
++        | ThreadItem::ContextCompaction { .. } => None,
+                                 })
+                                 });
+                             polls.push(json!({
+@@ -1509,6 +1510,9 @@ fn turn_summary(turn: &Turn, include_outputs: bool, output_chars: usize) -> Valu
+             ThreadItem::ExitedReviewMode { id, review } => json!({
+                 "type": "exitedReviewMode", "id": id, "review": truncate(review, DEFAULT_OUTPUT_CHARS)
+             }),
++            ThreadItem::HostedToolCall { id, item } => json!({
++                "type":"hostedToolCall", "id":id, "toolType":item.get("type"), "status":item.get("status")
++            }),
+             ThreadItem::ContextCompaction { id } => json!({
+                 "type": "contextCompaction", "id": id
+             }),
+diff --git a/codex-rs/tui/src/thread_transcript/other_items.rs b/codex-rs/tui/src/thread_transcript/other_items.rs
+index 68116133904ebb2f3d8ada3c24255f7111dc02d0..ba9dd32b7a46e2dcf736ecb89ae813cd5c8a5add 100644
+--- a/codex-rs/tui/src/thread_transcript/other_items.rs
++++ b/codex-rs/tui/src/thread_transcript/other_items.rs
+@@ -103,6 +103,7 @@ pub(super) fn cells(item: ThreadItem, cwd: &AbsolutePathBuf) -> TranscriptCells
+                 "<< Code review finished: {review} >>"
+             ))));
+         }
++        ThreadItem::HostedToolCall { .. } => {}
+         ThreadItem::ContextCompaction { .. } => {
+             cells.push(Arc::new(history_cell::new_info_event(
+                 "Context compacted".to_string(),
+diff --git a/codex-rs/utils/audio/src/lib.rs b/codex-rs/utils/audio/src/lib.rs
+index 0f1f53b8bbdb5c9c13677aaf8efd0e9b41053287..0316d77ac77bdef857385e628d5dd6ba0d196a82 100644
+--- a/codex-rs/utils/audio/src/lib.rs
++++ b/codex-rs/utils/audio/src/lib.rs
+@@ -79,6 +79,8 @@ pub fn prepare_response_items(items: &mut [ResponseItem]) {
+             | ResponseItem::CustomToolCall { .. }
+             | ResponseItem::ToolSearchOutput { .. }
+             | ResponseItem::WebSearchCall { .. }
++            | ResponseItem::FileSearchCall { .. }
++            | ResponseItem::CodeInterpreterCall { .. }
+             | ResponseItem::ImageGenerationCall { .. }
+             | ResponseItem::Compaction { .. }
+             | ResponseItem::ConfigurationUpdate { .. }

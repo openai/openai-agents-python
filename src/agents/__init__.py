@@ -115,6 +115,9 @@ if TYPE_CHECKING:
     from .subagents import Subagent as Subagent
     from .tools import (
         Checklist as Checklist,
+        CodeInterpreter as CodeInterpreter,
+        FileSearch as FileSearch,
+        ImageGeneration as ImageGeneration,
         NativeGoals as NativeGoals,
         ToolCallInfo as ToolCallInfo,
         ToolOutput as ToolOutput,
@@ -163,6 +166,9 @@ _MODULES = {
     "NativeGoals": ".tools",
     "NativeGoal": ".state",
     "WebSearch": ".tools",
+    "FileSearch": ".tools",
+    "CodeInterpreter": ".tools",
+    "ImageGeneration": ".tools",
     "SessionState": ".state",
     "ChecklistState": ".state",
     "ChecklistStep": ".state",

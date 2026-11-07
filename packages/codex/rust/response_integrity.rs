@@ -122,7 +122,10 @@ impl Stream for Generation {
                         // not suppress that genuine native progress.
                         ResponseItem::FunctionCall { .. }
                         | ResponseItem::CustomToolCall { .. }
-                        | ResponseItem::WebSearchCall { .. } => {
+                        | ResponseItem::WebSearchCall { .. }
+                        | ResponseItem::FileSearchCall { .. }
+                        | ResponseItem::CodeInterpreterCall { .. }
+                        | ResponseItem::ImageGenerationCall { .. } => {
                             this.pending_assistant = false;
                             this.completed_native_item = true;
                         }

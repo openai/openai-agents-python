@@ -24,9 +24,14 @@ from typing import (
 
 from typing_extensions import TypedDict as TypedDict
 
+from agents.config import JsonValue as JsonValue
+
 from ._events import (
+    CodeInterpreterCallItem,
     ExecutionItem as ExecutionItem,
+    FileSearchCallItem,
     FunctionCallStatus as FunctionCallStatus,
+    ImageGenerationCallItem,
     MessageItem,
     WebSearchCallItem,
 )
@@ -121,15 +126,36 @@ class OutputTextDelta(_SubmissionEvent):
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelOutputItemCompleted(_SubmissionEvent):
-    """A completed web search call or an assistant message with annotations.
+    """A completed hosted tool call or an assistant message with annotations.
 
     Citation offsets refer to the individual text part. Use Session.items()
     to recover recorded items if the event buffer drops an observation.
     """
 
-    item: MessageItem | WebSearchCallItem
+    item: (
+        MessageItem
+        | WebSearchCallItem
+        | FileSearchCallItem
+        | CodeInterpreterCallItem
+        | ImageGenerationCallItem
+    )
     type: Literal["model_output_item_completed"] = field(
         default="model_output_item_completed", init=False
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class HostedToolCallProgress(_SubmissionEvent):
+    """A provider lifecycle, code, or partial-image event.
+
+    This passive stream can report gaps. Partial images are previews; read the
+    completed image item from Session.items() for the authoritative result.
+    """
+
+    item_id: str
+    event: dict[str, JsonValue]
+    type: Literal["hosted_tool_call_progress"] = field(
+        default="hosted_tool_call_progress", init=False
     )
 
 
@@ -261,6 +287,7 @@ Observation: TypeAlias = (
     | SubagentLifecycle
     | OutputTextDelta
     | ModelOutputItemCompleted
+    | HostedToolCallProgress
     | UsageUpdated
     | ApiRateLimitsUpdated
     | ContextCompacted
@@ -280,8 +307,9 @@ class _ObservationBuffer:
     def __init__(self, session_id: str) -> None:
         self.session_id = session_id
         self.loop = asyncio.get_running_loop()
-        self.records: deque[tuple[Observation, int]] = deque()
+        self.records: deque[tuple[Observation, int, int]] = deque()
         self.characters = 0
+        self.image_characters = 0
         self.sequence = 0
         self.closed = False
         self.changed = asyncio.Event()
@@ -300,7 +328,7 @@ class _ObservationBuffer:
 
     def turn_started(self, turn_id: str) -> TurnStarted | None:
         """Find the retained owner of a late native completion."""
-        for event, _ in reversed(self.records):
+        for event, _, _ in reversed(self.records):
             if isinstance(event, TurnStarted) and event.turn_id == turn_id:
                 return event
         return None
@@ -312,6 +340,7 @@ class _ObservationBuffer:
         # Drop the prefix so the retained observations form a contiguous suffix.
         self.records.clear()
         self.characters = 0
+        self.image_characters = 0
         self.notify()
 
     def append(self, event: _ObservationT) -> _ObservationT | None:
@@ -325,15 +354,33 @@ class _ObservationBuffer:
         )
         if isinstance(event, (ExecutionItemCompleted, ModelOutputItemCompleted)):
             size += len(json.dumps(event.item, ensure_ascii=False, separators=(",", ":")))
-        if size > 65_536:
+        image_size = 0
+        if isinstance(event, HostedToolCallProgress):
+            metadata = event.event
+            partial = metadata.get("partial_image_b64")
+            if metadata.get(
+                "type"
+            ) == "response.image_generation_call.partial_image" and isinstance(partial, str):
+                image_size = len(partial)
+                metadata = {
+                    key: value for key, value in metadata.items() if key != "partial_image_b64"
+                }
+            size += len(json.dumps(metadata, ensure_ascii=False, separators=(",", ":")))
+        if size > 65_536 or image_size > 16 * 1024 * 1024:
             self._mark_gap()
         else:
             self.sequence += 1
-            self.records.append((event, size))
+            self.records.append((event, size, image_size))
             self.characters += size
-            while len(self.records) > 256 or self.characters > 65_536:
-                _, removed = self.records.popleft()
+            self.image_characters += image_size
+            while (
+                len(self.records) > 256
+                or self.characters > 65_536
+                or self.image_characters > 32 * 1024 * 1024
+            ):
+                _, removed, removed_image = self.records.popleft()
                 self.characters -= removed
+                self.image_characters -= removed_image
             self.notify()
         if self.repair_parent is not None and isinstance(event, _SubmissionEvent):
             buffer, parent_id = self.repair_parent
@@ -398,11 +445,13 @@ class EventStream(AsyncIterator[Observation]):
                         sequence=self._after,
                         first_sequence=first,
                     )
-                for event, _ in records:
+                for event, _, _ in records:
                     if event.sequence > self._after:
                         self._after = event.sequence
                         if isinstance(event, ModelOutputItemCompleted):
                             event = replace(event, item=deepcopy(event.item))
+                        elif isinstance(event, HostedToolCallProgress):
+                            event = replace(event, event=deepcopy(event.event))
                         elif isinstance(event, ExecutionItemCompleted):
                             item = event.item
                             if self._include_execution_details:
