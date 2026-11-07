@@ -790,7 +790,7 @@ async def test_provider_http_pool_close_and_duplicate_ownership(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Provider HTTP pooling is Linux-only")
-@pytest.mark.parametrize("invalid", ["malformed", "missing"])
+@pytest.mark.parametrize("invalid", ["malformed", "malformed-der", "missing"])
 async def test_provider_http_pool_invalid_ca_retires_warm_socket(
     tls_files: dict[str, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, invalid: str
 ) -> None:
@@ -811,6 +811,8 @@ async def test_provider_http_pool_invalid_ca_retires_warm_socket(
             assert original_socket() >= 0
             if invalid == "malformed":
                 trust.write_text("not a PEM certificate\n")
+            elif invalid == "malformed-der":
+                trust.write_text("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n")
             else:
                 trust.unlink()
             await rejected(peer, agent, "invalid-file-cannot-reuse-trusted-A")

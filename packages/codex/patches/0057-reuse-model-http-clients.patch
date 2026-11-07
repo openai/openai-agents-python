@@ -147,26 +147,10 @@ index d3b8054767a89c56ac5209ba9aa87508a7b73746..30a68449d44214e4693c5d5874eb8a45
      ///
      /// # Exceptional use only
 diff --git a/codex-rs/http-client/src/custom_ca.rs b/codex-rs/http-client/src/custom_ca.rs
-index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d253dcf61e 100644
+index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..90334046289bcf66c38631380d11c3d1116bbd1b 100644
 --- a/codex-rs/http-client/src/custom_ca.rs
 +++ b/codex-rs/http-client/src/custom_ca.rs
-@@ -40,12 +40,15 @@
- //! - those subprocess tests also scrub inherited CA environment variables before launch so their
- //!   result depends only on the test fixtures and env vars set by the test itself
- 
-+use std::collections::VecDeque;
- use std::env;
- use std::fs;
- use std::io;
- use std::path::Path;
- use std::path::PathBuf;
- use std::sync::Arc;
-+use std::sync::LazyLock;
-+use std::sync::Mutex;
- 
- use codex_utils_rustls_provider::ensure_rustls_crypto_provider;
- use rustls::ClientConfig;
-@@ -54,6 +57,8 @@ use rustls_pki_types::CertificateDer;
+@@ -54,6 +54,8 @@ use rustls_pki_types::CertificateDer;
  use rustls_pki_types::pem::PemObject;
  use rustls_pki_types::pem::SectionKind;
  use rustls_pki_types::pem::{self};
@@ -175,7 +159,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
  use thiserror::Error;
  use tracing::info;
  use tracing::warn;
-@@ -306,28 +311,8 @@ fn build_reqwest_client_with_env(
+@@ -306,27 +308,7 @@ fn build_reqwest_client_with_env(
          );
          builder = builder.use_rustls_tls();
  
@@ -200,165 +184,49 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 -                    });
 -                }
 -            };
--            builder = builder.add_root_certificate(certificate);
-+        for certificate in bundle.load_reqwest_certificates(&REQWEST_CA_CACHE)?.iter() {
-+            builder = builder.add_root_certificate(certificate.clone());
++        for certificate in bundle.reqwest_certificates(&bundle.load_certificates()?)? {
+             builder = builder.add_root_certificate(certificate);
          }
          return match builder.build() {
-             Ok(client) => Ok(client),
-@@ -424,6 +409,71 @@ impl EnvSource for ProcessEnv {
+@@ -424,6 +406,10 @@ impl EnvSource for ProcessEnv {
      }
  }
  
-+// Retain public certificates only: a selected PEM file may also contain private keys.
-+// Hash freshly read bytes, never paths/metadata. Bound native certificate objects as well
-+// as their source DER; the byte bound does not claim to measure native allocations.
-+const CA_CACHE_MAX_ENTRIES: usize = 4;
-+const CA_CACHE_MAX_CERTIFICATES: usize = 1024;
-+const CA_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
-+static REQWEST_CA_CACHE: LazyLock<Mutex<ReqwestCaCache>> =
-+    LazyLock::new(|| Mutex::new(ReqwestCaCache::default()));
-+
-+struct CachedReqwestCa {
-+    digest: [u8; 32],
-+    certificates: Arc<[reqwest::Certificate]>,
-+    der_bytes: usize,
-+}
-+
-+#[derive(Default)]
-+struct ReqwestCaCache {
-+    entries: VecDeque<CachedReqwestCa>,
-+}
-+
-+impl ReqwestCaCache {
-+    fn load(
-+        &mut self,
-+        digest: [u8; 32],
-+        parse: impl FnOnce()
-+            -> Result<(Arc<[reqwest::Certificate]>, usize), BuildCustomCaTransportError>,
-+    ) -> Result<Arc<[reqwest::Certificate]>, BuildCustomCaTransportError> {
-+        if let Some(index) = self.entries.iter().position(|entry| entry.digest == digest) {
-+            let entry = self.entries.remove(index).expect("located CA cache entry");
-+            let certificates = entry.certificates.clone();
-+            self.entries.push_back(entry);
-+            return Ok(certificates);
-+        }
-+        // Parse before mutating the cache. Errors and panics cannot evict valid entries.
-+        let (certificates, der_bytes) = parse()?;
-+        if certificates.len() > CA_CACHE_MAX_CERTIFICATES || der_bytes > CA_CACHE_MAX_BYTES {
-+            return Ok(certificates);
-+        }
-+        while self.entries.len() >= CA_CACHE_MAX_ENTRIES
-+            || self
-+                .entries
-+                .iter()
-+                .map(|entry| entry.der_bytes)
-+                .sum::<usize>()
-+                + der_bytes
-+                > CA_CACHE_MAX_BYTES
-+            || self
-+                .entries
-+                .iter()
-+                .map(|entry| entry.certificates.len())
-+                .sum::<usize>()
-+                + certificates.len()
-+                > CA_CACHE_MAX_CERTIFICATES
-+        {
-+            self.entries.pop_front();
-+        }
-+        self.entries.push_back(CachedReqwestCa {
-+            digest,
-+            certificates: certificates.clone(),
-+            der_bytes,
-+        });
-+        Ok(certificates)
-+    }
-+}
++// Bound the custom CA material admitted to a Provider's model HTTP pool.
++const SDK_MODEL_CA_MAX_CERTIFICATES: usize = 1024;
++const SDK_MODEL_CA_MAX_BYTES: usize = 4 * 1024 * 1024;
 +
  /// Identifies the CA bundle selected for a client and the policy decision that selected it.
  ///
  /// This is the concrete output of the environment-precedence logic. Callers use `source_env` for
-@@ -436,6 +486,94 @@ struct ConfiguredCaBundle {
+@@ -436,6 +422,68 @@ struct ConfiguredCaBundle {
  }
  
  impl ConfiguredCaBundle {
-+    fn load_reqwest_certificates(
++    fn load_certificates_and_digest(
 +        &self,
-+        cache: &Mutex<ReqwestCaCache>,
-+    ) -> Result<Arc<[reqwest::Certificate]>, BuildCustomCaTransportError> {
-+        self.load_reqwest_certificates_and_digest(cache)
-+            .map(|(certificates, _, _)| certificates)
-+    }
-+
-+    fn load_reqwest_certificates_and_digest(
-+        &self,
-+        cache: &Mutex<ReqwestCaCache>,
-+    ) -> Result<(Arc<[reqwest::Certificate]>, [u8; 32], bool), BuildCustomCaTransportError> {
-+        // Always read first, including after a hit. Rotation, deletion and access
-+        // errors retain their current file/env context; errors are never cached.
++    ) -> Result<(Vec<CertificateDer<'static>>, [u8; 32], bool), BuildCustomCaTransportError> {
++        // Read and parse again before each pool lookup. Rotation, deletion and
++        // access errors keep their current file/env context; errors are not retained.
 +        let result = (|| {
 +            let pem_data = self.read_pem_data()?;
 +            let digest = Sha256::digest(&pem_data).into();
-+            // Keep PEM normalization and its tracing events outside the lock.
-+            // Cache only the expensive reqwest/native-TLS certificate wrappers.
 +            let certificates = self.parse_certificate_bytes(&pem_data)?;
-+            info!(
++            let der_bytes: usize = certificates
++                .iter()
++                .map(|certificate| certificate.len())
++                .sum();
++            let admissible = pem_data.len() <= SDK_MODEL_CA_MAX_BYTES
++                && certificates.len() <= SDK_MODEL_CA_MAX_CERTIFICATES
++                && der_bytes <= SDK_MODEL_CA_MAX_BYTES;
++            Ok((certificates, digest, admissible))
++        })();
++        match &result {
++            Ok((certificates, _, _)) => info!(
 +                source_env = self.source_env,
 +                ca_path = %self.path.display(),
 +                certificate_count = certificates.len(),
 +                "loaded certificates from custom CA bundle"
-+            );
-+            let der_bytes = certificates
-+                .iter()
-+                .map(|certificate| certificate.len())
-+                .sum();
-+            let parse =
-+                || -> Result<(Arc<[reqwest::Certificate]>, usize), BuildCustomCaTransportError> {
-+                    let certificates = certificates
-+                        .iter()
-+                        .enumerate()
-+                        .map(|(idx, cert)| {
-+                            reqwest::Certificate::from_der(cert.as_ref()).map_err(|source| {
-+                                BuildCustomCaTransportError::RegisterCertificate {
-+                                    source_env: self.source_env,
-+                                    path: self.path.clone(),
-+                                    certificate_index: idx + 1,
-+                                    source,
-+                                }
-+                            })
-+                        })
-+                        .collect::<Result<Vec<_>, _>>()?;
-+                    Ok((Arc::from(certificates), der_bytes))
-+                };
-+            // Avoid monopolizing the cache for unusually large input. The same
-+            // parsing/errors still apply, but none of this input is retained.
-+            if pem_data.len() > CA_CACHE_MAX_BYTES
-+                || certificates.len() > CA_CACHE_MAX_CERTIFICATES
-+                || der_bytes > CA_CACHE_MAX_BYTES
-+            {
-+                return parse().map(|(certificates, _)| (certificates, digest, false));
-+            }
-+            // Coalesce concurrent wrapper construction. No file I/O, tracing,
-+            // await or client construction occurs under this lock. A poisoned cache can
-+            // recover: entries change only after a successful parse completes.
-+            cache
-+                .lock()
-+                .unwrap_or_else(std::sync::PoisonError::into_inner)
-+                .load(digest, parse)
-+                .map(|certificates| (certificates, digest, true))
-+        })();
-+        match &result {
-+            Ok(_) => {}
-+            Err(BuildCustomCaTransportError::RegisterCertificate {
-+                certificate_index,
-+                source,
-+                ..
-+            }) => warn!(
-+                source_env = self.source_env,
-+                ca_path = %self.path.display(),
-+                certificate_index,
-+                error = %source,
-+                "failed to register CA certificate"
 +            ),
 +            Err(error) => warn!(
 +                source_env = self.source_env,
@@ -370,10 +238,37 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +        result
 +    }
 +
++    fn reqwest_certificates(
++        &self,
++        certificates: &[CertificateDer<'_>],
++    ) -> Result<Vec<reqwest::Certificate>, BuildCustomCaTransportError> {
++        certificates
++            .iter()
++            .enumerate()
++            .map(|(idx, certificate)| {
++                reqwest::Certificate::from_der(certificate.as_ref()).map_err(|source| {
++                    warn!(
++                        source_env = self.source_env,
++                        ca_path = %self.path.display(),
++                        certificate_index = idx + 1,
++                        error = %source,
++                        "failed to register CA certificate"
++                    );
++                    BuildCustomCaTransportError::RegisterCertificate {
++                        source_env: self.source_env,
++                        path: self.path.clone(),
++                        certificate_index: idx + 1,
++                        source,
++                    }
++                })
++            })
++            .collect()
++    }
++
      /// Loads certificates from this selected CA bundle.
      ///
      /// The bundle already represents the output of environment-precedence selection, so this is
-@@ -476,7 +614,13 @@ impl ConfiguredCaBundle {
+@@ -476,7 +524,13 @@ impl ConfiguredCaBundle {
      fn parse_certificates(
          &self,
      ) -> Result<Vec<CertificateDer<'static>>, BuildCustomCaTransportError> {
@@ -388,7 +283,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
          let normalized_pem = NormalizedPem::from_pem_data(self.source_env, &self.path, &pem_data);
  
          let mut certificates = Vec::new();
-@@ -817,8 +961,114 @@ mod tests {
+@@ -817,8 +871,112 @@ mod tests {
              BuildCustomCaTransportError::InvalidCaFile { .. }
          ));
      }
@@ -400,12 +295,6 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +        let first = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
 +        let same = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
 +        assert_eq!(first.digest(), same.digest());
-+        let (Some((_, first_certs, _, _)), Some((_, same_certs, _, _))) =
-+            (&first.bundle, &same.bundle)
-+        else {
-+            panic!("expected custom CA")
-+        };
-+        assert!(std::sync::Arc::ptr_eq(first_certs, same_certs));
 +        fs::write(
 +            &path,
 +            include_str!("../tests/fixtures/test-intermediate.pem"),
@@ -420,9 +309,13 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +    }
 +
 +    #[test]
-+    fn sdk_oversized_receipt_is_valid_but_not_retained() {
++    fn sdk_oversized_receipt_is_valid_but_not_pooled() {
 +        let dir = TempDir::new().unwrap();
-+        let large = format!("{}{}", TEST_CERT, "\n".repeat(super::CA_CACHE_MAX_BYTES));
++        let large = format!(
++            "{}{}",
++            TEST_CERT,
++            "\n".repeat(super::SDK_MODEL_CA_MAX_BYTES)
++        );
 +        let path = write_cert_file(&dir, "sdk-large.pem", &large);
 +        let env = map_env(&[(SSL_CERT_FILE_ENV, path.to_str().unwrap())]);
 +        let receipt = super::SdkModelCaSnapshot::load_with_env(&env).unwrap();
@@ -435,16 +328,17 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
  mod tls_tests;
 +
 +#[cfg(test)]
-+#[path = "custom_ca_cache_tests.rs"]
-+mod cache_tests;
++#[path = "custom_ca_reqwest_tests.rs"]
++mod reqwest_tests;
 +
-+// A successful receipt validates exactly the freshly read bytes used for its hash.
++// The receipt holds freshly parsed public DER for its hash. Certificate wrappers
++// are constructed only when the existing model HTTP pool needs a new client.
 +// The construction receipt holds its path only for scoped build errors. Pool entries
 +// retain neither that receipt/path nor raw PEM, private material or error values.
 +pub(crate) struct SdkModelCaSnapshot {
 +    bundle: Option<(
 +        ConfiguredCaBundle,
-+        Arc<[reqwest::Certificate]>,
++        Vec<CertificateDer<'static>>,
 +        [u8; 32],
 +        bool,
 +    )>,
@@ -458,8 +352,7 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +    fn load_with_env(env: &dyn EnvSource) -> Result<Self, BuildCustomCaTransportError> {
 +        let bundle = match env.configured_ca_bundle() {
 +            Some(bundle) => {
-+                let (certificates, digest, admissible) =
-+                    bundle.load_reqwest_certificates_and_digest(&REQWEST_CA_CACHE)?;
++                let (certificates, digest, admissible) = bundle.load_certificates_and_digest()?;
 +                Some((bundle, certificates, digest, admissible))
 +            }
 +            None => None,
@@ -485,10 +378,10 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +            ensure_rustls_crypto_provider();
 +            // Only SSL_CERT_FILE with SSL_CERT_DIR absent can reach this SDK path.
 +            // rustls-native-certs would otherwise reopen this same file. Its roots
-+            // are already present in the validated snapshot; keep webpki roots.
++            // are present in the freshly parsed snapshot; keep webpki roots.
 +            builder = builder.use_rustls_tls().tls_built_in_native_certs(false);
-+            for certificate in certificates.iter() {
-+                builder = builder.add_root_certificate(certificate.clone());
++            for certificate in bundle.reqwest_certificates(certificates)? {
++                builder = builder.add_root_certificate(certificate);
 +            }
 +            return builder.build().map_err(|source| {
 +                BuildCustomCaTransportError::BuildClientWithCustomCa {
@@ -503,19 +396,18 @@ index 6ca705d0abf9f6672932f75b95fc7e41ee9cfc31..66eb59be2a36c32ddcbd2661831eb3d2
 +            .map_err(BuildCustomCaTransportError::BuildClientWithSystemRoots)
 +    }
 +}
-diff --git a/codex-rs/http-client/src/custom_ca_cache_tests.rs b/codex-rs/http-client/src/custom_ca_cache_tests.rs
+diff --git a/codex-rs/http-client/src/custom_ca_reqwest_tests.rs b/codex-rs/http-client/src/custom_ca_reqwest_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..931a6a881ac77f1dadbd1193c12a40159382f111
+index 0000000000000000000000000000000000000000..4325a2cfd0e941073687c745911b8242dc4d2cbb
 --- /dev/null
-+++ b/codex-rs/http-client/src/custom_ca_cache_tests.rs
-@@ -0,0 +1,323 @@
-+//! Positive parse caching must not cache file authority, errors or TLS clients.
++++ b/codex-rs/http-client/src/custom_ca_reqwest_tests.rs
+@@ -0,0 +1,168 @@
++//! Fresh certificate conversion must preserve file authority and TLS verification.
 +use super::*;
 +use pretty_assertions::assert_eq;
 +use std::io::Read;
 +use std::io::Write;
 +use std::net::TcpListener;
-+use std::sync::Barrier;
 +use std::time::Duration;
 +
 +const FIRST_CA: &str = include_str!("../tests/fixtures/test-ca.pem");
@@ -528,53 +420,24 @@ index 0000000000000000000000000000000000000000..931a6a881ac77f1dadbd1193c12a4015
 +    }
 +}
 +
-+#[test]
-+fn identical_public_certificates_are_reused_across_files_and_rotation_is_fresh() {
-+    let temp = tempfile::TempDir::new().unwrap();
-+    let first_path = temp.path().join("first.pem");
-+    let second_path = temp.path().join("second.pem");
-+    fs::write(&first_path, FIRST_CA).unwrap();
-+    fs::write(&second_path, FIRST_CA).unwrap();
-+    let cache = Mutex::new(ReqwestCaCache::default());
-+    let first = bundle(&first_path)
-+        .load_reqwest_certificates(&cache)
-+        .unwrap();
-+    let same = bundle(&second_path)
-+        .load_reqwest_certificates(&cache)
-+        .unwrap();
-+    assert!(Arc::ptr_eq(&first, &same));
-+    fs::write(&first_path, SECOND_CA).unwrap();
-+    let rotated = bundle(&first_path)
-+        .load_reqwest_certificates(&cache)
-+        .unwrap();
-+    assert!(!Arc::ptr_eq(&first, &rotated));
-+    assert_eq!(rotated.len(), 1);
-+    fs::write(&first_path, FIRST_CA).unwrap();
-+    assert!(Arc::ptr_eq(
-+        &first,
-+        &bundle(&first_path)
-+            .load_reqwest_certificates(&cache)
-+            .unwrap()
-+    ));
++fn load(path: &Path) -> Result<Vec<reqwest::Certificate>, BuildCustomCaTransportError> {
++    let bundle = bundle(path);
++    bundle.reqwest_certificates(&bundle.load_certificates()?)
 +}
 +
 +#[test]
-+fn invalid_der_empty_and_missing_files_never_use_a_warm_hit_or_cache_errors() {
++fn invalid_der_empty_and_missing_files_report_current_context_after_success() {
 +    let temp = tempfile::TempDir::new().unwrap();
 +    let path = temp.path().join("current.pem");
-+    let cache = Mutex::new(ReqwestCaCache::default());
 +    fs::write(&path, FIRST_CA).unwrap();
-+    bundle(&path).load_reqwest_certificates(&cache).unwrap();
++    load(&path).unwrap();
 +    for contents in [
 +        "",
 +        "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
 +    ] {
 +        fs::write(&path, contents).unwrap();
 +        for _ in 0..2 {
-+            let error = bundle(&path)
-+                .load_reqwest_certificates(&cache)
-+                .err()
-+                .unwrap();
++            let error = load(&path).err().unwrap();
 +            match error {
 +                BuildCustomCaTransportError::InvalidCaFile {
 +                    path: actual,
@@ -592,142 +455,19 @@ index 0000000000000000000000000000000000000000..931a6a881ac77f1dadbd1193c12a4015
 +                error => panic!("unexpected error: {error}"),
 +            }
 +        }
-+        assert_eq!(cache.lock().unwrap().entries.len(), 1);
 +    }
 +    fs::remove_file(&path).unwrap();
 +    assert!(matches!(
-+        bundle(&path).load_reqwest_certificates(&cache),
++        load(&path),
 +        Err(BuildCustomCaTransportError::ReadCaFile { source, .. })
 +            if source.kind() == io::ErrorKind::NotFound
 +    ));
 +    fs::write(&path, SECOND_CA).unwrap();
-+    assert_eq!(
-+        bundle(&path)
-+            .load_reqwest_certificates(&cache)
-+            .unwrap()
-+            .len(),
-+        1
-+    );
-+}
-+
-+#[test]
-+fn simultaneous_loads_share_the_success_and_poison_recovery_retains_valid_entries() {
-+    let temp = tempfile::TempDir::new().unwrap();
-+    let path = temp.path().join("current.pem");
-+    fs::write(&path, FIRST_CA).unwrap();
-+    let cache = Arc::new(Mutex::new(ReqwestCaCache::default()));
-+    let barrier = Arc::new(Barrier::new(8));
-+    let threads = (0..8)
-+        .map(|_| {
-+            let cache = cache.clone();
-+            let barrier = barrier.clone();
-+            let path = path.clone();
-+            std::thread::spawn(move || {
-+                barrier.wait();
-+                bundle(&path).load_reqwest_certificates(&cache).unwrap()
-+            })
-+        })
-+        .collect::<Vec<_>>();
-+    let values = threads
-+        .into_iter()
-+        .map(|thread| thread.join().unwrap())
-+        .collect::<Vec<_>>();
-+    assert!(values.iter().all(|value| Arc::ptr_eq(value, &values[0])));
-+    let poisoned = cache.clone();
-+    assert!(
-+        std::thread::spawn(move || {
-+            let _guard = poisoned.lock().unwrap();
-+            panic!("synthetic cache poison");
-+        })
-+        .join()
-+        .is_err()
-+    );
-+    assert!(Arc::ptr_eq(
-+        &values[0],
-+        &bundle(&path).load_reqwest_certificates(&cache).unwrap()
-+    ));
-+}
-+
-+#[test]
-+fn cache_evicts_old_entries_and_does_not_retain_oversized_inputs() {
-+    let temp = tempfile::TempDir::new().unwrap();
-+    let path = temp.path().join("current.pem");
-+    let cache = Mutex::new(ReqwestCaCache::default());
-+    fs::write(&path, FIRST_CA).unwrap();
-+    let first = bundle(&path).load_reqwest_certificates(&cache).unwrap();
-+    for index in 0..CA_CACHE_MAX_ENTRIES {
-+        fs::write(&path, format!("# distinct content {index}\n{FIRST_CA}")).unwrap();
-+        bundle(&path).load_reqwest_certificates(&cache).unwrap();
-+    }
-+    assert_eq!(cache.lock().unwrap().entries.len(), CA_CACHE_MAX_ENTRIES);
-+    fs::write(&path, FIRST_CA).unwrap();
-+    assert!(!Arc::ptr_eq(
-+        &first,
-+        &bundle(&path).load_reqwest_certificates(&cache).unwrap()
-+    ));
-+    let large = format!(
-+        "# {}\n{FIRST_CA}",
-+        "padding".repeat(CA_CACHE_MAX_BYTES / 7 + 1)
-+    );
-+    fs::write(&path, large).unwrap();
-+    let uncached = bundle(&path).load_reqwest_certificates(&cache).unwrap();
-+    assert!(!Arc::ptr_eq(
-+        &uncached,
-+        &bundle(&path).load_reqwest_certificates(&cache).unwrap()
-+    ));
-+    assert_eq!(cache.lock().unwrap().entries.len(), CA_CACHE_MAX_ENTRIES);
-+}
-+
-+#[test]
-+fn retained_certificate_count_and_der_bytes_are_bounded() {
-+    let certificate = reqwest::Certificate::from_pem(FIRST_CA.as_bytes()).unwrap();
-+    let mut cache = ReqwestCaCache::default();
-+    for index in 0..8 {
-+        cache
-+            .load([index; 32], || {
-+                Ok((
-+                    Arc::from(vec![certificate.clone(); 256]),
-+                    CA_CACHE_MAX_BYTES / 4,
-+                ))
-+            })
-+            .unwrap();
-+        assert!(cache.entries.len() <= CA_CACHE_MAX_ENTRIES);
-+        assert!(
-+            cache
-+                .entries
-+                .iter()
-+                .map(|entry| entry.certificates.len())
-+                .sum::<usize>()
-+                <= CA_CACHE_MAX_CERTIFICATES
-+        );
-+        assert!(
-+            cache
-+                .entries
-+                .iter()
-+                .map(|entry| entry.der_bytes)
-+                .sum::<usize>()
-+                <= CA_CACHE_MAX_BYTES
-+        );
-+    }
-+    let prior = cache.entries.len();
-+    cache
-+        .load([99; 32], || {
-+            Ok((
-+                Arc::from(vec![certificate.clone(); CA_CACHE_MAX_CERTIFICATES + 1]),
-+                1,
-+            ))
-+        })
-+        .unwrap();
-+    cache
-+        .load([100; 32], || {
-+            Ok((Arc::from(vec![certificate]), CA_CACHE_MAX_BYTES + 1))
-+        })
-+        .unwrap();
-+    assert_eq!(cache.entries.len(), prior);
++    assert_eq!(load(&path).unwrap().len(), 1);
 +}
 +
 +#[tokio::test]
-+async fn warm_certificates_preserve_tls_verification_and_rotation_removes_old_trust() {
++async fn fresh_certificates_preserve_tls_verification_and_rotation_removes_old_trust() {
 +    use rcgen::BasicConstraints;
 +    use rcgen::CertificateParams;
 +    use rcgen::CertifiedIssuer;
@@ -758,16 +498,14 @@ index 0000000000000000000000000000000000000000..931a6a881ac77f1dadbd1193c12a4015
 +    let second_server = server(&second_root);
 +    let temp = tempfile::TempDir::new().unwrap();
 +    let path = temp.path().join("current.pem");
-+    let cache = Mutex::new(ReqwestCaCache::default());
 +    fs::write(&path, first_root.pem()).unwrap();
-+    let cold = bundle(&path).load_reqwest_certificates(&cache).unwrap();
-+    let warm = bundle(&path).load_reqwest_certificates(&cache).unwrap();
-+    assert!(Arc::ptr_eq(&cold, &warm));
-+    assert!(request(&cold, first_server.clone()).await);
-+    assert!(request(&warm, first_server.clone()).await);
-+    assert!(!request(&warm, second_server.clone()).await);
++    let first = load(&path).unwrap();
++    let reloaded = load(&path).unwrap();
++    assert!(request(&first, first_server.clone()).await);
++    assert!(request(&reloaded, first_server.clone()).await);
++    assert!(!request(&reloaded, second_server.clone()).await);
 +    fs::write(&path, second_root.pem()).unwrap();
-+    let rotated = bundle(&path).load_reqwest_certificates(&cache).unwrap();
++    let rotated = load(&path).unwrap();
 +    assert!(!request(&rotated, first_server).await);
 +    assert!(request(&rotated, second_server).await);
 +}
