@@ -289,9 +289,10 @@ jobs:
           """.split())
           env = {key: value for key, value in os.environ.items() if key.upper() in keep}
           subprocess.run(
-              [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
-               "import os, sys, pytest; sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
-               "sys.exit(pytest.main(['-q', 'packages/codex/tests/qualification/unix_peer_approval.py']))"],
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
+               "import faulthandler, os, sys; faulthandler.dump_traceback_later(45); "
+               "import pytest; sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
+               "sys.exit(pytest.main(['-vv', '-s', 'packages/codex/tests/qualification/unix_peer_approval.py']))"],
               cwd=stage, env=env, check=True, timeout=90,
           )
           subprocess.run(
