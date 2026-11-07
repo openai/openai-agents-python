@@ -69,6 +69,8 @@ pub struct ThreadOptions {
     pub(crate) before_compact: bool,
     #[serde(rename = "_before_complete")]
     pub(crate) before_complete: bool,
+    #[serde(rename = "_buffered_responses")]
+    buffered_responses: bool,
     // The public native-agent declaration; the same owner guards root and children.
     #[serde(rename = "_native_agent_roles")]
     native_agent_roles: Option<Vec<String>>,
@@ -203,6 +205,11 @@ impl ThreadOptions {
             self.share_instructions_with_subagents,
         ));
         let mut options = StartThreadOptions::new(configuration);
+        options
+            .thread_extension_init
+            .insert(codex_core::BufferedResponsesPreference(
+                self.buffered_responses,
+            ));
         options
             .thread_extension_init
             .insert(codex_extension_api::HostedModelTools {

@@ -18,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from owned_process import _note, defer_cleanup_signals, terminate_group
-from worker import reject_inherited_overrides
+from worker import reject_inherited_overrides, validate_transport
 from workloads import WORKLOADS, get_workload
 
 
@@ -78,7 +78,17 @@ def comparison(stable, native):
     }
 
 
-def validate_sample(row, *, side, case, sample, expected_versions, identities, iterations=None):
+def validate_sample(
+    row,
+    *,
+    side,
+    case,
+    sample,
+    expected_versions,
+    identities,
+    iterations=None,
+    v1_response_mode="streaming",
+):
     """Check scheduling, declared identities and existing worker count receipts."""
     if row.get("errors") != 0:
         raise ValueError("Worker validation failed")
@@ -124,12 +134,57 @@ def validate_sample(row, *, side, case, sample, expected_versions, identities, i
     )
     if row.get("workload") != workload.dictionary():
         raise ValueError("Worker workload differs from the scheduled work")
+    if v1_response_mode not in ("streaming", "buffered"):
+        raise ValueError("Unknown scheduled native response mode")
+    expected_mode = v1_response_mode if side == "v1" and case != "startup_import" else None
+    if "response_mode" not in row or row["response_mode"] != expected_mode:
+        raise ValueError("Native response mode differs from the scheduled mode")
+    expected_transport = (
+        None
+        if case == "startup_import"
+        else (
+            "sse"
+            if (workload.stream if side == "v0" else v1_response_mode == "streaming")
+            else "json"
+        )
+    )
+    if "wire_transport" not in row or row["wire_transport"] != expected_transport:
+        raise ValueError("Wire transport metadata differs from the scheduled mode")
     if case == "startup_import":
         if any(
-            name in row for name in ("operations", "server", "completed_operations", "tool_calls")
+            name in row
+            for name in (
+                "operations",
+                "server",
+                "completed_operations",
+                "tool_calls",
+                "charged_operations",
+                "full_owner_wall_ms",
+                "full_owner_cpu_ms",
+            )
         ):
             raise ValueError("Import-only row contains operation/server work")
     else:
+        if v1_response_mode == "buffered" and workload.stream:
+            raise ValueError("Buffered benchmarks cannot measure token-live workloads")
+        validate_transport(
+            workload, row.get("server", {}), engine=side, response_mode=v1_response_mode
+        )
+        charged = workload.concurrency * (workload.prefill + workload.iterations)
+        if type(row.get("charged_operations")) is not int or row["charged_operations"] != charged:
+            raise ValueError("Charged operation count differs from the scheduled work")
+        for clock in ("wall", "cpu"):
+            total = row.get(f"full_owner_{clock}_ms")
+            per_operation = row.get(f"full_owner_{clock}_ms_per_operation")
+            if (
+                type(total) not in (int, float)
+                or not math.isfinite(total)
+                or total <= 0
+                or type(per_operation) not in (int, float)
+                or not math.isfinite(per_operation)
+                or not math.isclose(per_operation, total / charged, rel_tol=1e-12)
+            ):
+                raise ValueError("Invalid full-owner metric or operation denominator")
         count = workload.concurrency * workload.iterations
         measured_tools = count * workload.tools_per_round * workload.tool_rounds
         all_tools = (
@@ -168,7 +223,7 @@ def validate_sample(row, *, side, case, sample, expected_versions, identities, i
     identities[side] = identity
 
 
-def summarize(records, *, expected_versions, iterations=None):
+def summarize(records, *, expected_versions, iterations=None, v1_response_mode="streaming"):
     summary, identities = {}, {}
     for case, sides in records.items():
         if set(sides) != {"v0", "v1"}:
@@ -195,6 +250,7 @@ def summarize(records, *, expected_versions, iterations=None):
                     expected_versions=expected_versions,
                     identities=identities,
                     iterations=iterations,
+                    v1_response_mode=v1_response_mode,
                 )
         fields = ["import_ms"]
         if case != "startup_import":
@@ -207,6 +263,8 @@ def summarize(records, *, expected_versions, iterations=None):
                 "elapsed_ms",
                 "cpu_ms",
                 "final_close_ms",
+                "full_owner_wall_ms_per_operation",
+                "full_owner_cpu_ms_per_operation",
             ]
         if case != "startup_import" and WORKLOADS[case].stream:
             fields += ["first_delta_p50_ms", "first_delta_p95_ms"]
@@ -241,6 +299,9 @@ def main():
     parser.add_argument("--v1-python", type=Path, required=True)
     parser.add_argument("--v0-version", required=True)
     parser.add_argument("--v1-version", required=True)
+    parser.add_argument(
+        "--v1-response-mode", choices=["streaming", "buffered"], default="streaming"
+    )
     parser.add_argument("--server-python", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--samples", type=int, default=5)
@@ -265,6 +326,12 @@ def main():
         or not args.v1_version.strip()
     ):
         parser.error("Use positive counts/timeout, distinct cases and explicit expected versions")
+    if args.v1_response_mode == "buffered" and any(
+        case != "startup_import" and WORKLOADS[case].stream for case in args.cases
+    ):
+        parser.error(
+            "Buffered comparisons require final-result workloads; select --cases explicitly"
+        )
     expected_versions = {"v0": args.v0_version, "v1": args.v1_version}
     identities = {}
 
@@ -295,6 +362,7 @@ def main():
         },
         "sample_order": [],
         "expected_sdk_versions": expected_versions,
+        "v1_response_mode": args.v1_response_mode,
         "completed": False,
         "rss_scope": "Unqualified raw process ru_maxrss only; no RSS comparison or verdict",
         "statistics": (
@@ -341,6 +409,8 @@ def main():
                         "--sample-index",
                         str(sample),
                     ]
+                    if side == "v1" and args.v1_response_mode == "buffered":
+                        command += ["--response-mode", "buffered"]
                     if case == "startup_import":
                         command.append("--import-only")
                     else:
@@ -421,6 +491,7 @@ def main():
                         expected_versions=expected_versions,
                         identities=identities,
                         iterations=args.iterations,
+                        v1_response_mode=args.v1_response_mode,
                     )
                     records[case][side].append(data)
                     value = data.get("latency_p50_ms", data["import_ms"])
@@ -430,7 +501,10 @@ def main():
                         flush=True,
                     )
             summary = summarize(
-                records, expected_versions=expected_versions, iterations=args.iterations
+                records,
+                expected_versions=expected_versions,
+                iterations=args.iterations,
+                v1_response_mode=args.v1_response_mode,
             )
             (args.output_dir / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
             primary = summary[case]["primary"]

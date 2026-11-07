@@ -117,3 +117,27 @@ SDK_BENCH_SERVER_PYTHON="$PEER_PY" "$NATIVE_PY" "$BENCH/worker.py" \
 A `--profile` row is explicitly diagnostic. The comparison rejects diagnostic/profiled/instrumented rows rather than mixing them into latency/CPU summaries. Profiling retains the existing exercise window, which includes setup/warmup/close; instrumented counts or times are not uninstrumented latency shares.
 
 Generated metadata, errors and logs can contain local absolute paths. Review and separately sanitize a public export, preserving original hashes and recording the export's own digest. This directory contains no historical raw results, profiles, installed environments or credentials. Record the source-manifest hash with results; a manifest identifies source bytes, not a performance qualification.
+
+## Optional native buffered Responses mode
+
+The default command keeps the native provider's streaming transport and omits the new provider keyword, so it can still benchmark older native SDK wheels. A native wheel that supports `NativeProvider(response_mode="buffered")` can opt into final-result HTTP JSON delivery with `compare.py --v1-response-mode buffered`. Unsupported wheels fail explicitly; the benchmark never retries in another mode. The stable v0 adapter uses SSE for live workloads and JSON for final-result workloads. Its behavior does not change when selecting the native mode.
+
+Select only final-result workloads for a buffered comparison, for example:
+
+```sh
+"$PEER_PY" "$BENCH/compare.py" \
+  --v0-python "$STABLE_PY" --v1-python "$NATIVE_PY" \
+  --v0-version 0.24.0 --v1-version 0.24.0-alpha.6 \
+  --server-python "$PEER_PY" --output-dir "$RESULTS/buffered" \
+  --v1-response-mode buffered --samples 5 --iterations 20 \
+  --cases oneshot_text oneshot_tool oneshot_output_64k_1_plain \
+          oneshot_output_64k_256_plain oneshot_output_64k_4096_plain
+```
+
+Omit `--v1-response-mode buffered` and use a fresh output directory for the default SSE control. Keep the same source, wheel, dependencies, interpreter, CA and host conditions. The three 64 KiB cases are final-only `Agent.run` calls in independent fresh conversations, with one prefill and 20 measured calls by default. Their chunk setting controls the SSE reference workload; a JSON response has zero SSE chunks. This removes peer framing work too, so wall-time differences do not isolate client processing. Client process CPU and peer CPU remain separate.
+
+Rows record the native response mode and expected wire transport, checked against all actual request receipts, per-response chunk counts and total emitted chunks. Both modes retain the same final output, input/history and tool-result checks. Buffered comparisons reject live-observation workloads. They report no first-delta metric or token-live claim; buffered progress arrives after the complete body. Existing live streaming cursor, gap and exact chunk checks remain unchanged.
+
+`elapsed_ms`, `cpu_ms` and latency p50/p95 still cover measured operations after prefill. For oneshot cases, these are warmed fresh-conversation measurements. New `full_owner_wall_ms` and `full_owner_cpu_ms` span Adapter construction through successful joined provider/telemetry exit, including prefill and ordinary client scheduling, prompt work and in-scope peer-stat requests. They exclude SDK import, peer startup and final correctness validation. These spans overlap the existing metrics and must not be added to them. Failed runs cannot qualify.
+
+`charged_operations = concurrency * (prefill + iterations)` counts turns, including prefill. It counts fresh conversations only for oneshot cases; conversation cases reuse Sessions. Summaries apply the existing paired estimator to `full_owner_wall_ms_per_operation` and `full_owner_cpu_ms_per_operation`, retaining raw totals and matched vectors. Import-only rows have no owner/operation/transport metrics. RSS stays unqualified and does not enter comparisons. The existing confidence-interval limitations and engineering parity rule still apply.

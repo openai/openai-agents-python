@@ -79,7 +79,7 @@ class ModelRequestDispatching(_SubmissionEvent):
     reasoning_summary: str | None
     service_tier: str | None
     wire: Literal["responses", "responses_lite"]
-    transport: Literal["http_sse", "websocket"]
+    transport: Literal["http_sse", "http_json", "websocket"]
     type: Literal["model_request_dispatching"] = field(
         default="model_request_dispatching", init=False
     )
@@ -577,7 +577,7 @@ def _request_observation(
     if (
         not isinstance(value["model"], str)
         or value["wire"] not in ("responses", "responses_lite")
-        or value["transport"] not in ("http_sse", "websocket")
+        or value["transport"] not in ("http_sse", "http_json", "websocket")
     ):
         return None
     if any(

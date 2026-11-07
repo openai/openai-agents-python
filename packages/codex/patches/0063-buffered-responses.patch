@@ -1,0 +1,1187 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index 61d3e12d4c59edaed9778a9bcc2cc4c65bf7e4e2..3b372ed32ccd1a9b2fbb651cd019e83990db09f9 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -2039,6 +2039,7 @@ dependencies = [
+  "anyhow",
+  "assert_matches",
+  "async-channel",
++ "async-stream",
+  "base64 0.22.1",
+  "bytes",
+  "chrono",
+diff --git a/codex-rs/codex-api/Cargo.toml b/codex-rs/codex-api/Cargo.toml
+index 82bec69218844915b5e986fc17d473966466e888..f752991f797c41265d31b3776a7954f41d8dd71f 100644
+--- a/codex-rs/codex-api/Cargo.toml
++++ b/codex-rs/codex-api/Cargo.toml
+@@ -6,6 +6,7 @@ license.workspace = true
+ 
+ [dependencies]
+ async-channel = { workspace = true }
++async-stream = { workspace = true }
+ base64 = { workspace = true }
+ bytes = { workspace = true }
+ chrono = { workspace = true }
+diff --git a/codex-rs/codex-api/src/endpoint/mod.rs b/codex-rs/codex-api/src/endpoint/mod.rs
+index 77b3054aeeca459f33b679e3165f12652eaeaf53..e846ffec067f08a72319286f2e2ac5c60cbadac6 100644
+--- a/codex-rs/codex-api/src/endpoint/mod.rs
++++ b/codex-rs/codex-api/src/endpoint/mod.rs
+@@ -4,6 +4,7 @@ pub(crate) mod models;
+ pub(crate) mod realtime_call;
+ pub(crate) mod realtime_websocket;
+ pub(crate) mod responses;
++mod responses_json;
+ pub(crate) mod responses_websocket;
+ pub(crate) mod search;
+ mod session;
+diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
+index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d854c6b2bd 100644
+--- a/codex-rs/codex-api/src/endpoint/responses.rs
++++ b/codex-rs/codex-api/src/endpoint/responses.rs
+@@ -72,28 +72,75 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         request: ResponsesApiRequest,
+         options: ResponsesOptions,
+     ) -> Result<ResponseStream, ApiError> {
+-        let ResponsesOptions {
+-            session_id,
+-            thread_id,
+-            session_source,
+-            extra_headers,
+-            compression,
+-            turn_state,
+-        } = options;
++        let (body, options) = Self::encode_request(request, options)?;
++        self.stream_encoded(
++            body,
++            options.extra_headers,
++            options.compression,
++            options.turn_state,
++        )
++        .await
++    }
++
++    #[instrument(
++        name = "responses.json_request",
++        level = "info",
++        skip_all,
++        fields(
++            transport = "responses_http",
++            http.method = "POST",
++            api.path = "/responses"
++        )
++    )]
++    pub async fn json_request(
++        &self,
++        mut request: ResponsesApiRequest,
++        options: ResponsesOptions,
++    ) -> Result<
++        (
++            Option<String>,
++            futures::stream::BoxStream<'static, Result<crate::common::ResponseEvent, ApiError>>,
++        ),
++        ApiError,
++    > {
++        request.stream = false;
++        request.stream_options = None;
++        let (body, options) = Self::encode_request(request, options)?;
++        let response = self
++            .send_encoded(
++                body,
++                options.extra_headers,
++                options.compression,
++                "application/json",
++            )
++            .await?;
++        Ok(super::responses_json::response_stream(
++            response,
++            self.session.provider().stream_idle_timeout,
++            options.turn_state,
++        ))
++    }
++
++    fn encode_request(
++        request: ResponsesApiRequest,
++        mut options: ResponsesOptions,
++    ) -> Result<(EncodedJsonBody, ResponsesOptions), ApiError> {
+         let body = EncodedJsonBody::encode(&request)
+             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
+ 
+-        let mut headers = extra_headers;
+-        if let Some(ref thread_id) = thread_id {
+-            insert_header(&mut headers, "x-client-request-id", thread_id);
++        let headers = &mut options.extra_headers;
++        if let Some(ref thread_id) = options.thread_id {
++            insert_header(headers, "x-client-request-id", thread_id);
+         }
+-        headers.extend(build_session_headers(session_id, thread_id));
+-        if let Some(subagent) = subagent_header(&session_source) {
+-            insert_header(&mut headers, "x-openai-subagent", &subagent);
++        headers.extend(build_session_headers(
++            options.session_id.take(),
++            options.thread_id.take(),
++        ));
++        if let Some(subagent) = subagent_header(&options.session_source) {
++            insert_header(headers, "x-openai-subagent", &subagent);
+         }
+ 
+-        self.stream_encoded(body, headers, compression, turn_state)
+-            .await
++        Ok((body, options))
+     }
+ 
+     #[instrument(
+@@ -127,33 +174,41 @@ impl<T: HttpTransport> ResponsesClient<T> {
+         compression: Compression,
+         turn_state: Option<Arc<OnceLock<String>>>,
+     ) -> Result<ResponseStream, ApiError> {
++        let stream_response = self
++            .send_encoded(body, extra_headers, compression, "text/event-stream")
++            .await?;
++
++        Ok(spawn_response_stream(
++            stream_response,
++            self.session.provider().stream_idle_timeout,
++            self.sse_telemetry.clone(),
++            turn_state,
++        ))
++    }
++    async fn send_encoded(
++        &self,
++        body: EncodedJsonBody,
++        extra_headers: HeaderMap,
++        compression: Compression,
++        accept: &'static str,
++    ) -> Result<codex_client::StreamResponse, ApiError> {
+         let request_compression = match compression {
+             Compression::None => RequestCompression::None,
+             Compression::Zstd => RequestCompression::Zstd,
+         };
+ 
+-        let stream_response = self
+-            .session
++        self.session
+             .stream_encoded_json_with(
+                 Method::POST,
+                 "/responses",
+                 extra_headers,
+                 Some(body),
+                 |req| {
+-                    req.headers.insert(
+-                        http::header::ACCEPT,
+-                        HeaderValue::from_static("text/event-stream"),
+-                    );
++                    req.headers
++                        .insert(http::header::ACCEPT, HeaderValue::from_static(accept));
+                     req.compression = request_compression;
+                 },
+             )
+-            .await?;
+-
+-        Ok(spawn_response_stream(
+-            stream_response,
+-            self.session.provider().stream_idle_timeout,
+-            self.sse_telemetry.clone(),
+-            turn_state,
+-        ))
++            .await
+     }
+ }
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json.rs b/codex-rs/codex-api/src/endpoint/responses_json.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5d544f8c6ceb711d7d635583e82194782711dd1b
+--- /dev/null
++++ b/codex-rs/codex-api/src/endpoint/responses_json.rs
+@@ -0,0 +1,209 @@
++//! Lazy buffered Responses ingress. The caller's mapper owns and polls the body.
++use crate::api_rate_limits::parse_api_rate_limits;
++use crate::common::ResponseEvent;
++use crate::error::ApiError;
++use crate::rate_limits::parse_all_rate_limits;
++use crate::sse::ResponsesStreamEvent;
++use crate::sse::process_responses_event;
++use codex_client::StreamResponse;
++use codex_protocol::error::ResponseIntegrityReason;
++use codex_protocol::models::ContentItem;
++use codex_protocol::models::ReasoningItemContent;
++use codex_protocol::models::ReasoningItemReasoningSummary;
++use codex_protocol::models::ResponseItem;
++use futures::StreamExt;
++use futures::stream::BoxStream;
++use serde_json::Value;
++use std::sync::Arc;
++use std::sync::OnceLock;
++use std::time::Duration;
++
++pub(super) fn response_stream(
++    response: StreamResponse,
++    idle_timeout: Duration,
++    turn_state: Option<Arc<OnceLock<String>>>,
++) -> (
++    Option<String>,
++    BoxStream<'static, Result<ResponseEvent, ApiError>>,
++) {
++    let headers = response.headers;
++    let request_id = headers
++        .get("x-request-id")
++        .and_then(|v| v.to_str().ok())
++        .map(str::to_owned);
++    if let Some(turn_state) = turn_state
++        && let Some(value) = headers
++            .get("x-codex-turn-state")
++            .and_then(|v| v.to_str().ok())
++    {
++        let _ = turn_state.set(value.to_owned());
++    }
++    let events = async_stream::try_stream! {
++        if let Some(model) = headers.get("openai-model").and_then(|v| v.to_str().ok()) {
++            yield ResponseEvent::ServerModel(model.to_owned());
++        }
++        for snapshot in parse_all_rate_limits(&headers) {
++            yield ResponseEvent::RateLimits(snapshot);
++        }
++        if let Some(snapshot) = parse_api_rate_limits(&headers) {
++            yield ResponseEvent::ApiRateLimits(snapshot);
++        }
++        if let Some(etag) = headers.get("x-models-etag").and_then(|v| v.to_str().ok()) {
++            yield ResponseEvent::ModelsEtag(etag.to_owned());
++        }
++        if headers.contains_key("x-reasoning-included") {
++            yield ResponseEvent::ServerReasoningIncluded(true);
++        }
++        let mut bytes = response.bytes;
++        let mut body = Vec::new();
++        loop {
++            let next = tokio::time::timeout(idle_timeout, bytes.next())
++                .await
++                .map_err(|_| ApiError::Stream("idle timeout waiting for Responses JSON".into()))?;
++            let Some(next) = next else {
++                break;
++            };
++            let chunk = next.map_err(|error| match error {
++                error @ codex_client::TransportError::Policy(_) => ApiError::Transport(error),
++                error => ApiError::Stream(error.to_string()),
++            })?;
++            body.extend_from_slice(&chunk);
++        }
++        let mut response: Value = serde_json::from_slice(&body)
++            .map_err(|error| ApiError::Stream(format!("failed to decode Responses JSON: {error}")))?;
++        drop(body);
++        // Move output aside without validating it or cloning the large body.
++        let output = response
++            .as_object_mut()
++            .and_then(|object| object.remove("output"));
++        let response_id = response
++            .get("id")
++            .and_then(Value::as_str)
++            .map(str::to_owned);
++        let terminal = ResponsesStreamEvent::from_json_response(response)?;
++        yield ResponseEvent::Created { response_id };
++        if let Some(observation) = terminal.response_observation() {
++            yield ResponseEvent::ResponseObserved(observation);
++        }
++        if let Some(model) = terminal.response_model() {
++            yield ResponseEvent::ServerModel(model);
++        }
++        if let Some(limits) = terminal.api_rate_limits() {
++            yield ResponseEvent::ApiRateLimits(limits);
++        }
++        // A known terminal rejection precedes local output conversion or policy
++        // interception. The mapper acknowledges the genuine observation first.
++        let completed = process_responses_event(terminal).map_err(|error| error.into_api_error())?;
++        let output = match output {
++            Some(Value::Array(output)) => output,
++            _ => Err(invalid_item())?,
++        };
++        // Decode the whole available body before any tool can run. Per-item
++        // authorization still belongs to the existing ordered interceptors.
++        let output = output
++            .into_iter()
++            .map(|raw| serde_json::from_value::<ResponseItem>(raw).map_err(|_| invalid_item()))
++            .collect::<Result<Vec<_>, _>>()?;
++        for item in output {
++            // Added seeds only identity, never full text followed by the same delta.
++            let added = match &item {
++                ResponseItem::Message {
++                    id,
++                    role,
++                    phase,
++                    internal_chat_message_metadata_passthrough,
++                    ..
++                } => ResponseItem::Message {
++                    id: id.clone(),
++                    role: role.clone(),
++                    content: Vec::new(),
++                    phase: phase.clone(),
++                    internal_chat_message_metadata_passthrough:
++                        internal_chat_message_metadata_passthrough.clone(),
++                },
++                ResponseItem::Reasoning {
++                    id,
++                    internal_chat_message_metadata_passthrough,
++                    ..
++                } => ResponseItem::Reasoning {
++                    id: id.clone(),
++                    summary: Vec::new(),
++                    content: None,
++                    encrypted_content: None,
++                    internal_chat_message_metadata_passthrough:
++                        internal_chat_message_metadata_passthrough.clone(),
++                },
++                _ => item.clone(),
++            };
++            yield ResponseEvent::OutputItemAdded(added);
++            match &item {
++                ResponseItem::Message { content, .. } => {
++                    for part in content {
++                        if let ContentItem::OutputText { text, .. } = part {
++                            yield ResponseEvent::OutputTextDelta(text.clone());
++                        }
++                    }
++                }
++                ResponseItem::Reasoning {
++                    id,
++                    summary,
++                    content,
++                    ..
++                } => {
++                    for (index, ReasoningItemReasoningSummary::SummaryText { text }) in
++                        summary.iter().enumerate()
++                    {
++                        let summary_index = index as i64;
++                        yield ResponseEvent::ReasoningSummaryPartAdded { summary_index };
++                        yield ResponseEvent::ReasoningSummaryDelta {
++                            delta: text.clone(),
++                            summary_index,
++                        };
++                        // Sequential-summary models consume Done; ordinary models
++                        // consume Delta instead. Match Core's absent-ID projection.
++                        yield ResponseEvent::ReasoningSummaryDone {
++                            item_id: id.as_deref().unwrap_or_default().to_owned(),
++                            text: text.clone(),
++                            summary_index,
++                        };
++                    }
++                    for (index, part) in content.iter().flatten().enumerate() {
++                        let (ReasoningItemContent::ReasoningText { text }
++                        | ReasoningItemContent::Text { text }) = part;
++                        yield ResponseEvent::ReasoningContentDelta {
++                            delta: text.clone(),
++                            content_index: index as i64,
++                        };
++                    }
++                }
++                ResponseItem::CustomToolCall {
++                    id, call_id, input, ..
++                } => {
++                    yield ResponseEvent::ToolCallInputDelta {
++                        item_id: id.as_deref().unwrap_or(call_id).to_owned(),
++                        call_id: Some(call_id.clone()),
++                        delta: input.clone(),
++                    };
++                }
++                _ => {}
++            }
++            // Full annotations, encrypted reasoning and call arguments travel
++            // through the existing Core history/policy path, not a parallel runner.
++            yield ResponseEvent::OutputItemDone(item);
++        }
++        if let Some(completed) = completed {
++            yield completed;
++        }
++    };
++    (request_id, Box::pin(events))
++}
++
++fn invalid_item() -> ApiError {
++    ApiError::ResponseIntegrity {
++        reason: ResponseIntegrityReason::UndecodableOutputItem,
++    }
++}
++
++#[cfg(test)]
++#[path = "responses_json_tests.rs"]
++mod tests;
+diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..18c7ee66b62939ab32f3a2070e34d566d920da2f
+--- /dev/null
++++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
+@@ -0,0 +1,522 @@
++use super::*;
++use bytes::Bytes;
++use codex_client::TransportError;
++use futures::Stream;
++use http::HeaderMap;
++use http::StatusCode;
++use serde_json::json;
++use std::pin::Pin;
++use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
++use std::task::{Context, Poll};
++
++type Events = Vec<Result<ResponseEvent, ApiError>>;
++
++// Even absent quota headers emit Core's explicit default-reset snapshot. Do not
++// discard arbitrary events: every fixture here expects this exact header prefix.
++fn default_header_reset(event: Option<&Result<ResponseEvent, ApiError>>) -> bool {
++    matches!(event, Some(Ok(ResponseEvent::RateLimits(
++        codex_protocol::protocol::RateLimitSnapshot {
++            limit_id: Some(id), limit_name: None, normal_model_slug: None,
++            primary: None, secondary: None, credits: None, individual_limit: None,
++            spend_control_reached: None, plan_type: None, rate_limit_reached_type: None,
++        }
++    ))) if id == "codex")
++}
++fn terminal(status: &str, output: Value) -> Value {
++    json!({"id":"resp-json","status":status,"output":output,"usage":{
++        "input_tokens":10,"output_tokens":4,"total_tokens":14,
++        "input_tokens_details":{"cached_tokens":2},"output_tokens_details":{"reasoning_tokens":1}}})
++}
++fn message(id: &str, text: &str) -> Value {
++    json!({"type":"message","id":id,"role":"assistant","phase":"final_answer", "content":[
++        {"type":"output_text","text":text,"annotations":[{"type":"url_citation","url":"https://example.com","start_index":0,"end_index":1,"title":"source"}]}]})
++}
++fn from_bytes(body: Vec<u8>) -> BoxStream<'static, Result<ResponseEvent, ApiError>> {
++    response_stream(
++        StreamResponse {
++            status: StatusCode::OK,
++            headers: HeaderMap::new(),
++            bytes: Box::pin(futures::stream::iter([Ok(Bytes::from(body))])),
++        },
++        Duration::from_secs(5),
++        None,
++    )
++    .1
++}
++async fn collect(value: Value) -> Events {
++    tokio::time::timeout(
++        Duration::from_secs(5),
++        from_bytes(serde_json::to_vec(&value).unwrap()).collect(),
++    )
++    .await
++    .expect("lazy projection must settle")
++}
++#[tokio::test]
++async fn unicode_multi_item_blank_tail_and_citations_retain_full_done_items() {
++    let first = message("msg-first", "Résumé 👋\n終わり");
++    let last = message("msg-last", " \n");
++    let events = collect(terminal("completed", json!([first.clone(), last.clone()]))).await;
++    let text: Vec<_> = events
++        .iter()
++        .filter_map(|e| match e {
++            Ok(ResponseEvent::OutputTextDelta(s)) => Some(s.as_str()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(text, ["Résumé 👋\n終わり", " \n"]);
++    let done: Vec<_> = events
++        .iter()
++        .filter_map(|e| match e {
++            Ok(ResponseEvent::OutputItemDone(item)) => Some(serde_json::to_value(item).unwrap()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(done, [first, last]);
++    assert!(
++        events
++            .iter()
++            .filter_map(|e| match e {
++                Ok(ResponseEvent::OutputItemAdded(ResponseItem::Message { content, .. })) =>
++                    Some(content),
++                _ => None,
++            })
++            .all(Vec::is_empty)
++    );
++    assert!(
++        matches!(events.last(), Some(Ok(ResponseEvent::Completed {response_id,..})) if response_id=="resp-json")
++    );
++}
++#[tokio::test]
++async fn complete_received_facts_precede_late_refusal_without_earlier_tool_effect() {
++    let call = json!({"type":"function_call","id":"fc-first","call_id":"call-first","name":"f","arguments":"{}"});
++    let refusal = json!({"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"unsupported"}]});
++    let events = collect(terminal("completed", json!([call, refusal]))).await;
++    assert!(default_header_reset(events.first()));
++    let events = &events[1..];
++    assert_eq!(events.len(), 3);
++    assert!(
++        matches!(&events[0], Ok(ResponseEvent::Created {response_id: Some(id)}) if id == "resp-json")
++    );
++    assert!(
++        matches!(&events[1], Ok(ResponseEvent::ResponseObserved(observation)) if observation.response_id.as_deref()==Some("resp-json") && observation.usage.as_ref().is_some_and(|u| u.total_tokens==Some(14) && u.cached_input_tokens==Some(2)))
++    );
++    assert!(!events.iter().any(|e| matches!(
++        e,
++        Ok(ResponseEvent::OutputItemAdded(_) | ResponseEvent::OutputItemDone(_))
++    )));
++    assert!(matches!(
++        events.last(),
++        Some(Err(ApiError::ResponseIntegrity {
++            reason: ResponseIntegrityReason::UndecodableOutputItem
++        }))
++    ));
++}
++#[tokio::test]
++async fn terminal_error_precedes_bad_items_and_interruption_retains_real_partial_output() {
++    for (status, reason) in [
++        ("failed", "context_length_exceeded"),
++        ("incomplete", "content_filter"),
++        ("incomplete", "max_output_tokens"),
++    ] {
++        let mut body = terminal(status, json!([{"type":"message","content":"malformed"}]));
++        if status == "failed" {
++            body["error"] = json!({"code":reason,"message":"synthetic rejection"});
++        } else {
++            body["incomplete_details"] = json!({"reason":reason});
++        }
++        let events = collect(body).await;
++        assert!(default_header_reset(events.first()));
++        let events = &events[1..];
++        assert_eq!(events.len(), 3);
++        assert!(
++            matches!(&events[0], Ok(ResponseEvent::Created {response_id: Some(id)}) if id == "resp-json")
++        );
++        assert!(matches!(&events[1], Ok(ResponseEvent::ResponseObserved(_))));
++        match reason {
++            "context_length_exceeded" => assert!(matches!(
++                events.last(),
++                Some(Err(ApiError::ContextWindowExceeded))
++            )),
++            "content_filter" => {
++                assert!(matches!(events.last(), Some(Err(ApiError::ContentFilter))))
++            }
++            _ => assert!(
++                matches!(events.last(),Some(Err(ApiError::Stream(message))) if message.contains("max_output_tokens"))
++            ),
++        }
++        assert!(
++            !events
++                .iter()
++                .any(|e| matches!(e, Ok(ResponseEvent::OutputItemAdded(_))))
++        );
++    }
++    for status in ["incomplete", "completed"] {
++        let mut body = terminal(status, json!([message("msg-partial", "partial")]));
++        body["incomplete_details"] = json!({"reason":"interrupted"});
++        body["end_turn"] = json!(false);
++        let events = collect(body).await;
++        assert!(
++            events
++                .iter()
++                .any(|e| matches!(e,Ok(ResponseEvent::OutputTextDelta(text)) if text=="partial"))
++        );
++        assert!(matches!(
++            events.last(),
++            Some(Ok(ResponseEvent::Completed {
++                end_turn: Some(false),
++                ..
++            }))
++        ));
++    }
++}
++#[tokio::test]
++async fn reasoning_projection_preserves_summary_indices_raw_content_and_encrypted_done() {
++    let reasoning = json!({"type":"reasoning","id":"rs-real","summary":[{"type":"summary_text","text":"first"},{"type":"summary_text","text":"second"}],
++        "content":[{"type":"reasoning_text","text":"raw one"},{"type":"text","text":"raw two"}],"encrypted_content":"opaque"});
++    let events = collect(terminal(
++        "completed",
++        json!([reasoning.clone(), message("msg-answer", "answer")]),
++    ))
++    .await;
++    assert!(events.iter().any(|e| matches!(e,Ok(ResponseEvent::OutputItemAdded(ResponseItem::Reasoning {summary,content:None,encrypted_content:None,..})) if summary.is_empty())));
++    for (index, text) in [(0, "first"), (1, "second")] {
++        assert!(events.iter().any(|e| matches!(e,Ok(ResponseEvent::ReasoningSummaryPartAdded {summary_index}) if *summary_index==index)));
++        assert!(events.iter().any(|e| matches!(e,Ok(ResponseEvent::ReasoningSummaryDelta {summary_index,delta}) if *summary_index==index && delta==text)));
++        assert!(events.iter().any(|e| matches!(e,Ok(ResponseEvent::ReasoningSummaryDone {item_id,summary_index,text:actual}) if item_id=="rs-real" && *summary_index==index && actual==text)));
++    }
++    let raw: Vec<_> = events
++        .iter()
++        .filter_map(|e| match e {
++            Ok(ResponseEvent::ReasoningContentDelta {
++                delta,
++                content_index,
++            }) => Some((*content_index, delta.as_str())),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(raw, [(0, "raw one"), (1, "raw two")]);
++    assert!(events.iter().any(|e| matches!(e,Ok(ResponseEvent::OutputItemDone(item @ ResponseItem::Reasoning {..})) if serde_json::to_value(item).unwrap()==reasoning)));
++}
++#[tokio::test]
++async fn tools_and_structured_text_retain_actual_arguments_ids_and_order() {
++    let function = json!({"type":"function_call","id":"fc-real","call_id":"call-f","name":"f","arguments":"{\"n\":1}"});
++    let custom = json!({"type":"custom_tool_call","id":"ctc-real","call_id":"call-c","name":"c","input":"raw\ninput"});
++    let events = collect(terminal(
++        "completed",
++        json!([
++            function.clone(),
++            custom.clone(),
++            message("msg-json", "{\"ok\":true}")
++        ]),
++    ))
++    .await;
++    let done: Vec<_> = events
++        .iter()
++        .filter_map(|e| match e {
++            Ok(ResponseEvent::OutputItemDone(item)) => Some(serde_json::to_value(item).unwrap()),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(done[0], function);
++    assert_eq!(done[1], custom);
++    assert!(events.iter().any(|e|matches!(e,Ok(ResponseEvent::ToolCallInputDelta {item_id,call_id:Some(call_id),delta}) if item_id=="ctc-real" && call_id=="call-c" && delta=="raw\ninput")));
++    assert!(
++        events
++            .iter()
++            .any(|e| matches!(e,Ok(ResponseEvent::OutputTextDelta(text)) if text=="{\"ok\":true}"))
++    );
++}
++struct PendingBody {
++    polls: Arc<AtomicUsize>,
++    dropped: Arc<AtomicBool>,
++}
++impl Stream for PendingBody {
++    type Item = Result<Bytes, TransportError>;
++    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
++        self.polls.fetch_add(1, Ordering::SeqCst);
++        Poll::Pending
++    }
++}
++impl Drop for PendingBody {
++    fn drop(&mut self) {
++        self.dropped.store(true, Ordering::SeqCst);
++    }
++}
++#[tokio::test]
++async fn lazy_body_is_not_polled_at_headers_and_drop_releases_pending_body_directly() {
++    for stage in 0..3 {
++        let polls = Arc::new(AtomicUsize::new(0));
++        let dropped = Arc::new(AtomicBool::new(false));
++        let mut headers = HeaderMap::new();
++        headers.insert(
++            "openai-model",
++            http::HeaderValue::from_static("synthetic-json-model"),
++        );
++        let (_, mut events) = response_stream(
++            StreamResponse {
++                status: StatusCode::OK,
++                headers,
++                bytes: Box::pin(PendingBody {
++                    polls: polls.clone(),
++                    dropped: dropped.clone(),
++                }),
++            },
++            Duration::from_secs(5),
++            None,
++        );
++        assert_eq!(polls.load(Ordering::SeqCst), 0);
++        if stage > 0 {
++            assert!(matches!(
++                events.next().await,
++                Some(Ok(ResponseEvent::ServerModel(_)))
++            ));
++            assert_eq!(polls.load(Ordering::SeqCst), 0);
++            let reset = events.next().await;
++            assert!(default_header_reset(reset.as_ref()));
++            assert_eq!(polls.load(Ordering::SeqCst), 0);
++        }
++        if stage > 1 {
++            assert!(
++                tokio::time::timeout(Duration::from_millis(1), events.next())
++                    .await
++                    .is_err()
++            );
++            assert!(polls.load(Ordering::SeqCst) > 0);
++        }
++        drop(events);
++        assert!(dropped.load(Ordering::SeqCst));
++    }
++}
++#[tokio::test]
++async fn body_timeout_transport_error_and_truncation_are_stream_failures_without_terminal_facts() {
++    let dropped = Arc::new(AtomicBool::new(false));
++    let (_, mut pending) = response_stream(
++        StreamResponse {
++            status: StatusCode::OK,
++            headers: HeaderMap::new(),
++            bytes: Box::pin(PendingBody {
++                polls: Arc::new(AtomicUsize::new(0)),
++                dropped: dropped.clone(),
++            }),
++        },
++        Duration::from_millis(1),
++        None,
++    );
++    let reset = pending.next().await;
++    assert!(default_header_reset(reset.as_ref()));
++    assert!(
++        matches!(pending.next().await,Some(Err(ApiError::Stream(message))) if message.contains("idle timeout"))
++    );
++    drop(pending);
++    assert!(dropped.load(Ordering::SeqCst));
++    let (_, events) = response_stream(
++        StreamResponse {
++            status: StatusCode::OK,
++            headers: HeaderMap::new(),
++            bytes: Box::pin(futures::stream::iter([Err(TransportError::Network(
++                "synthetic body failure".into(),
++            ))])),
++        },
++        Duration::from_secs(5),
++        None,
++    );
++    let events: Events = events.collect().await;
++    assert!(default_header_reset(events.first()));
++    assert!(
++        matches!(&events[1..],[Err(ApiError::Stream(message))] if message.contains("synthetic body failure"))
++    );
++    for bytes in [b"{\"id\":\"partial\"".to_vec(), vec![0xff], b"{}".to_vec()] {
++        let events: Events = from_bytes(bytes).collect().await;
++        assert!(default_header_reset(events.first()));
++        assert!(matches!(&events[1..], [Err(ApiError::Stream(_))]));
++    }
++}
++
++#[derive(Default)]
++struct SyntheticAuth;
++impl crate::AuthProvider for SyntheticAuth {
++    fn add_auth_headers(&self, headers: &mut HeaderMap) {
++        headers.insert(
++            http::header::AUTHORIZATION,
++            http::HeaderValue::from_static("Bearer synthetic-json-key"),
++        );
++    }
++}
++fn client(url: String) -> anyhow::Result<crate::ResponsesClient<codex_client::ReqwestTransport>> {
++    let http = codex_http_client::HttpClientBuilder::new().build_direct()?;
++    Ok(crate::ResponsesClient::new(
++        codex_client::ReqwestTransport::from_http_client(http),
++        crate::Provider {
++            name: "synthetic-json-provider".into(),
++            base_url: url,
++            query_params: None,
++            headers: HeaderMap::new(),
++            retry: crate::RetryConfig {
++                max_attempts: 3,
++                base_delay: Duration::from_millis(1),
++                retry_429: true,
++                retry_5xx: true,
++                retry_transport: true,
++            },
++            stream_idle_timeout: Duration::from_secs(60),
++        },
++        Arc::new(SyntheticAuth),
++    ))
++}
++fn request() -> crate::ResponsesApiRequest {
++    crate::ResponsesApiRequest {
++        model: "synthetic-json-model".into(),
++        stream: false,
++        service_tier: None,
++        input: Vec::new(),
++        tools: None,
++        tool_choice: "auto".into(),
++        parallel_tool_calls: false,
++        reasoning: None,
++        store: false,
++        stream_options: None,
++        include: Vec::new(),
++        prompt_cache_key: None,
++        text: None,
++        client_metadata: None,
++        access_programs: None,
++    }
++}
++#[tokio::test]
++async fn real_http_preserves_auth_request_headers_and_turn_state_without_body_error_retry()
++-> anyhow::Result<()> {
++    use wiremock::matchers::{body_partial_json, header, method, path};
++    use wiremock::{Mock, MockServer, ResponseTemplate};
++    for malformed in [false, true] {
++        let server = MockServer::start().await;
++        let body = if malformed {
++            b"{\"id\":\"truncated\"".to_vec()
++        } else {
++            serde_json::to_vec(&terminal(
++                "completed",
++                json!([message("msg-real", "real output")]),
++            ))?
++        };
++        Mock::given(method("POST"))
++            .and(path("/responses"))
++            .and(header("accept", "application/json"))
++            .and(header("authorization", "Bearer synthetic-json-key"))
++            .and(header("x-client-request-id", "thread-real"))
++            .and(body_partial_json(
++                json!({"model":"synthetic-json-model","stream":false,"store":false}),
++            ))
++            .respond_with(
++                ResponseTemplate::new(200)
++                    .insert_header("x-request-id", "req-json")
++                    .insert_header("x-codex-turn-state", "real-state")
++                    .set_body_raw(body, "application/json"),
++            )
++            .expect(1)
++            .mount(&server)
++            .await;
++        let turn_state = Arc::new(OnceLock::new());
++        let (id, events) = client(server.uri())?
++            .json_request(
++                request(),
++                crate::ResponsesOptions {
++                    session_id: Some("session-real".into()),
++                    thread_id: Some("thread-real".into()),
++                    turn_state: Some(turn_state.clone()),
++                    ..Default::default()
++                },
++            )
++            .await?;
++        assert_eq!(id.as_deref(), Some("req-json"));
++        assert_eq!(turn_state.get().map(String::as_str), Some("real-state"));
++        let events: Events = tokio::time::timeout(Duration::from_secs(5), events.collect()).await?;
++        assert!(default_header_reset(events.first()));
++        if malformed {
++            assert!(matches!(&events[1..], [Err(ApiError::Stream(_))]));
++        } else {
++            assert!(matches!(
++                events.last(),
++                Some(Ok(ResponseEvent::Completed { .. }))
++            ));
++        }
++        server.verify().await;
++    }
++    Ok(())
++}
++#[tokio::test]
++async fn real_held_http_body_returns_headers_and_drop_retires_owned_socket() -> anyhow::Result<()> {
++    use tokio::io::{AsyncReadExt, AsyncWriteExt};
++    for poll_body in [false, true] {
++        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
++        let address = listener.local_addr()?;
++        let client = client(format!("http://{address}"))?;
++        let mut server = tokio::spawn(async move {
++            let (mut socket, _) = listener.accept().await?;
++            let mut request = Vec::new();
++            let mut chunk = [0u8; 4096];
++            let header_end = loop {
++                let count = socket.read(&mut chunk).await?;
++                anyhow::ensure!(count > 0, "request closed before headers");
++                request.extend_from_slice(&chunk[..count]);
++                if let Some(end) = request.windows(4).position(|p| p == b"\r\n\r\n") {
++                    break end + 4;
++                }
++            };
++            let length = String::from_utf8_lossy(&request[..header_end])
++                .lines()
++                .find_map(|line| {
++                    let (name, value) = line.split_once(':')?;
++                    name.eq_ignore_ascii_case("content-length")
++                        .then(|| value.trim().parse::<usize>().unwrap())
++                })
++                .unwrap_or(0);
++            while request.len() - header_end < length {
++                let count = socket.read(&mut chunk).await?;
++                anyhow::ensure!(count > 0, "request body closed");
++                request.extend_from_slice(&chunk[..count]);
++            }
++            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 10000\r\nConnection: close\r\n\r\n").await?;
++            let count = socket.read(&mut chunk).await?;
++            anyhow::ensure!(count == 0, "response-body owner did not release its socket");
++            Ok::<_, anyhow::Error>(())
++        });
++        let result: anyhow::Result<()> = async {
++            let (_, mut events) = tokio::time::timeout(
++                Duration::from_secs(5),
++                client.json_request(request(), Default::default()),
++            )
++            .await??;
++            if poll_body {
++                let reset = events.next().await;
++                anyhow::ensure!(
++                    default_header_reset(reset.as_ref()),
++                    "expected default quota reset before body"
++                );
++                anyhow::ensure!(
++                    tokio::time::timeout(Duration::from_millis(10), events.next())
++                        .await
++                        .is_err(),
++                    "held body must remain pending"
++                );
++            }
++            drop(events);
++            Ok(())
++        }
++        .await;
++        if result.is_err() {
++            server.abort();
++        }
++        let joined = tokio::time::timeout(Duration::from_secs(5), &mut server).await;
++        let retirement = match joined {
++            Ok(joined) => joined.map_err(anyhow::Error::from).and_then(|r| r),
++            Err(error) => {
++                server.abort();
++                let _ = server.await;
++                Err(error.into())
++            }
++        };
++        result?;
++        retirement?;
++        drop(client);
++    }
++    Ok(())
++}
+diff --git a/codex-rs/codex-api/src/sse/responses.rs b/codex-rs/codex-api/src/sse/responses.rs
+index 30bc97b1157daf506f6962f0cddf5fb66bb32532..5b862aa2b6a85c69cf7945b1ee497cfaeecda6e3 100644
+--- a/codex-rs/codex-api/src/sse/responses.rs
++++ b/codex-rs/codex-api/src/sse/responses.rs
+@@ -164,7 +164,7 @@ struct ResponseCompletedOutputTokensDetails {
+     reasoning_tokens: i64,
+ }
+ 
+-#[derive(Debug)]
++#[derive(Debug, Default)]
+ pub struct ResponsesStreamEvent {
+     pub(crate) kind: String,
+     pub(crate) headers: Option<Value>,
+@@ -236,6 +236,24 @@ where
+ }
+ 
+ impl ResponsesStreamEvent {
++    pub(crate) fn from_json_response(response: Value) -> Result<Self, ApiError> {
++        let kind = match response.get("status").and_then(Value::as_str) {
++            Some("completed") => "response.completed",
++            Some("failed") => "response.failed",
++            Some("incomplete") => "response.incomplete",
++            _ => {
++                return Err(ApiError::Stream(
++                    "Responses JSON has no terminal status".into(),
++                ));
++            }
++        };
++        Ok(Self {
++            kind: kind.to_owned(),
++            response: Some(response),
++            ..Self::default()
++        })
++    }
++
+     /// Read only safe typed facts; malformed or missing counters stay unknown.
+     pub(crate) fn response_observation(
+         &self,
+diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
+index 0c5537ebaa01a0286d574cf9f4b720a18232a611..81391ca070ff4ec0574028c86d0a1e05744007dd 100644
+--- a/codex-rs/core/src/client.rs
++++ b/codex-rs/core/src/client.rs
+@@ -1739,6 +1739,16 @@ impl ModelClientSession {
+                 .client
+                 .current_client_setup(ClientRouting::Workspace)
+                 .await?;
++            if prompt.prefer_buffered_response
++                && !client_setup
++                    .auth
++                    .as_ref()
++                    .is_some_and(|auth| matches!(auth.auth_mode(), AuthMode::ApiKey))
++            {
++                return Err(CodexErr::InvalidRequest(
++                    "Buffered Responses requires API-key authentication".into(),
++                ));
++            }
+             let include_internal = self
+                 .client
+                 .state
+@@ -1783,6 +1793,10 @@ impl ModelClientSession {
+                 responses_metadata,
+                 include_internal,
+             )?;
++            if prompt.prefer_buffered_response {
++                request.stream = false;
++                request.stream_options = None;
++            }
+             self.client.set_guardian_metadata(
+                 &mut request.client_metadata,
+                 responses_metadata.parent_response_id.as_deref(),
+@@ -1860,20 +1874,47 @@ impl ModelClientSession {
+                     } else {
+                         codex_extension_api::ModelRequestWire::Responses
+                     },
+-                    codex_extension_api::ModelRequestTransport::HttpSse,
++                    if prompt.prefer_buffered_response {
++                        codex_extension_api::ModelRequestTransport::HttpJson
++                    } else {
++                        codex_extension_api::ModelRequestTransport::HttpSse
++                    },
+                 )
+             };
+-            let stream_result = client.stream_request(request, options).await;
++            let stream_result = if prompt.prefer_buffered_response {
++                client
++                    .json_request(request, options)
++                    .await
++                    .map(|(id, events)| (id, None, events))
++            } else {
++                client
++                    .stream_request(request, options)
++                    .await
++                    .map(|mut stream| {
++                        let id = stream.upstream_request_id.take();
++                        let interrupt = stream.interrupt.take();
++                        (
++                            id,
++                            interrupt,
++                            Box::pin(stream)
++                                as futures::stream::BoxStream<
++                                    'static,
++                                    std::result::Result<ResponseEvent, ApiError>,
++                                >,
++                        )
++                    })
++            };
+ 
+             match stream_result {
+-                Ok(stream) => {
+-                    let (mut stream, _) = map_response_stream(
+-                        stream,
++                Ok((request_id, interrupt, events)) => {
++                    let (mut stream, _) = map_response_events(
++                        request_id,
++                        crate::model_request::intercept_stream(events, interceptors),
+                         request_session_telemetry,
+                         inference_trace_attempt,
+                         Arc::clone(&self.client.state.provider),
+-                        interceptors,
+                     );
++                    stream.interrupt = interrupt;
+                     stream.request_observation = request_observation;
+                     return Ok(stream);
+                 }
+@@ -2365,6 +2406,13 @@ impl ModelClientSession {
+         responses_metadata: &CodexResponsesMetadata,
+         inference_trace: &InferenceTraceContext,
+     ) -> Result<ResponseStream> {
++        if prompt.prefer_buffered_response
++            && (model_info.use_responses_lite || self.client.responses_websocket_enabled())
++        {
++            return Err(CodexErr::InvalidRequest(
++                "Buffered Responses requires HTTP without Responses Lite or WebSockets".into(),
++            ));
++        }
+         let thread_id = self.client.state.thread_id.to_string();
+         let mut transformed = None;
+         for contributor in &self.client.request_contributors {
+diff --git a/codex-rs/core/src/client_common.rs b/codex-rs/core/src/client_common.rs
+index c5ecc4075ef9861c49d760407b4aa8a9d97f0aaa..5958654daba43d24e51cf75d77c24b3f4d949385 100644
+--- a/codex-rs/core/src/client_common.rs
++++ b/codex-rs/core/src/client_common.rs
+@@ -20,12 +20,18 @@ use tokio::sync::mpsc;
+ use tokio::sync::oneshot;
+ use tokio_util::sync::CancellationToken;
+ 
++/// Immutable host-selected HTTP response mode stored on the actual thread.
++#[derive(Clone, Copy, Debug, Default)]
++pub struct BufferedResponsesPreference(pub bool);
++
+ /// API request payload for a single model turn
+ #[derive(Debug, Clone)]
+ pub struct Prompt {
+     /// Conversation context input items.
+     pub input: Vec<ResponseItem>,
+ 
++    pub(crate) prefer_buffered_response: bool,
++
+     /// Tool definitions to inject into this request, empty when supplied by history.
+     pub(crate) tools: Arc<[ToolSpec]>,
+ 
+@@ -57,6 +63,7 @@ impl Default for Prompt {
+     fn default() -> Self {
+         Self {
+             input: Vec::new(),
++            prefer_buffered_response: false,
+             tools: Arc::default(),
+             tool_admission: None,
+             sampling_stop: None,
+diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
+index 4c7dbcfe02bb2b86fae619b2e0d28b644c5a578d..f50892eca9a6505244c582d393d1dee0a93e01be 100644
+--- a/codex-rs/core/src/compact.rs
++++ b/codex-rs/core/src/compact.rs
+@@ -387,6 +387,11 @@ async fn run_compact_task_inner_impl(
+             .attach_to_compaction_prompt(&mut turn_input);
+         let turn_input_len = turn_input.len();
+         let prompt = Prompt {
++            prefer_buffered_response: sess
++                .services
++                .thread_extension_data
++                .get::<crate::BufferedResponsesPreference>()
++                .is_some_and(|mode| mode.0),
+             input: turn_input,
+             base_instructions: sess.get_prompt_base_instructions().await,
+             sampling_stop: sampling_stop.clone(),
+diff --git a/codex-rs/core/src/compact_remote_v2_attempt.rs b/codex-rs/core/src/compact_remote_v2_attempt.rs
+index 910ffb3661b9327b81d0ae4273a0665420441a59..acd1cb86081d70317c87d615aecae154510cc0ae 100644
+--- a/codex-rs/core/src/compact_remote_v2_attempt.rs
++++ b/codex-rs/core/src/compact_remote_v2_attempt.rs
+@@ -86,6 +86,11 @@ pub(super) async fn run_remote_compact_v2_attempt(
+         .attach_to_compaction_prompt(&mut input);
+     input.push(ResponseItem::CompactionTrigger {});
+     let prompt = Prompt {
++        prefer_buffered_response: sess
++            .services
++            .thread_extension_data
++            .get::<crate::BufferedResponsesPreference>()
++            .is_some_and(|mode| mode.0),
+         input,
+         tools: if step_context.uses_incremental_tools() {
+             Arc::default()
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 9e75242032c01f76e101602f539f221721fc8344..4a70340b3d252bcd2ebfcef897013e5dc62a0f45 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -233,6 +233,7 @@ pub use client::ModelClientSession;
+ pub use client::X_CODEX_INSTALLATION_ID_HEADER;
+ pub use client::X_CODEX_ROUTING_HINT_HEADER;
+ pub use client::X_CODEX_TURN_METADATA_HEADER;
++pub use client_common::BufferedResponsesPreference;
+ pub use client_common::Prompt;
+ pub use client_common::ResponseEvent;
+ pub use client_common::ResponseStream;
+diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
+index df043dd20b2c9c25d4838a021ed0530d65788659..965f2112fca580d7374d5d679d9a679f948c45e1 100644
+--- a/codex-rs/core/src/session/turn.rs
++++ b/codex-rs/core/src/session/turn.rs
+@@ -1670,6 +1670,7 @@ pub(crate) fn build_prompt(
+         input.retain_mut(|item| step_context.tool_router.project_tool_catalog_item(item));
+     }
+     Prompt {
++        prefer_buffered_response: false,
+         input,
+         tools: if step_context.uses_incremental_tools() {
+             Arc::default()
+@@ -1755,6 +1756,11 @@ async fn run_sampling_request(
+             step_context.as_ref(),
+             base_instructions.clone(),
+         );
++        prompt.prefer_buffered_response = sess
++            .services
++            .thread_extension_data
++            .get::<crate::BufferedResponsesPreference>()
++            .is_some_and(|mode| mode.0);
+         prompt.tool_admission = Some(crate::model_request::tool_admission(
+             sess.thread_id.to_string(),
+             Arc::clone(&step_context.turn.extension_data),
+diff --git a/codex-rs/ext/extension-api/src/model_request_observation.rs b/codex-rs/ext/extension-api/src/model_request_observation.rs
+index fe2ebeb27bbd9791843db68c9c86135fa494fc2a..266241e3b5452547600d748727256e66fbab43a6 100644
+--- a/codex-rs/ext/extension-api/src/model_request_observation.rs
++++ b/codex-rs/ext/extension-api/src/model_request_observation.rs
+@@ -36,12 +36,14 @@ impl ModelRequestWire {
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub enum ModelRequestTransport {
+     HttpSse,
++    HttpJson,
+     Websocket,
+ }
+ impl ModelRequestTransport {
+     fn as_str(self) -> &'static str {
+         match self {
+             Self::HttpSse => "http_sse",
++            Self::HttpJson => "http_json",
+             Self::Websocket => "websocket",
+         }
+     }

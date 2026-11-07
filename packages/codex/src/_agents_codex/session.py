@@ -1821,6 +1821,12 @@ class Session(Generic[ContextT, OutputT]):
                 "do not yet have durable intent and result receipts"
             )
         tools, mcp_tools, native_agents = _split_tools(agent.tools, programmatic_tool_calling)
+        if (
+            native_agents is not None
+            and agent.provider is not None
+            and agent.provider.response_mode == "buffered"
+        ):
+            raise CapabilityError("Buffered Responses do not support native child agents")
         available = agent.tools
         checklist = any(isinstance(tool, Checklist) for tool in available)
         goals = any(isinstance(tool, NativeGoals) for tool in available)
@@ -2226,6 +2232,7 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError("Select one explicit Apps registration per Session")
                 options = {
                     "_hosted_tools": hosted_tools,
+                    "_buffered_responses": provider.response_mode == "buffered",
                     "_transform_context": agent.transform_context is not None,
                     "_before_compact": agent.before_compact is not None,
                     "_before_complete": agent.before_complete is not None,

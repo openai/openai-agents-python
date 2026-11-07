@@ -23,6 +23,10 @@ def row(side, sample, case="oneshot_text"):
     workload = get_workload("oneshot_text" if case == "startup_import" else case)
     value = sample + 10.0
     result = {
+        "response_mode": "streaming" if side == "v1" and case != "startup_import" else None,
+        "wire_transport": None
+        if case == "startup_import"
+        else ("sse" if side == "v1" or workload.stream else "json"),
         "engine": side,
         "case": case,
         "sample_index": sample,
@@ -57,6 +61,30 @@ def row(side, sample, case="oneshot_text"):
             * workload.tools_per_round
             * workload.tool_rounds,
         )
+        charged = workload.concurrency * (workload.prefill + workload.iterations)
+        result["charged_operations"] = charged
+        for clock in ("wall", "cpu"):
+            result[f"full_owner_{clock}_ms"] = value * charged
+            result[f"full_owner_{clock}_ms_per_operation"] = value
+        streaming = side == "v1" or workload.stream
+        receipts = [
+            {
+                "stream": streaming,
+                "round": round_index,
+                "text_chunks": workload.chunks
+                if streaming and round_index == workload.tool_rounds
+                else 0,
+            }
+            for _ in range(charged)
+            for round_index in range(workload.tool_rounds + 1)
+        ]
+        result["server"] = {
+            "requests": len(receipts),
+            "receipts": receipts,
+            "errors": 0,
+            "receipts_dropped": 0,
+            "emitted_text_chunks": charged * workload.chunks if streaming else 0,
+        }
         for field in (
             "cold_first_result_ms",
             "construction_ms",
@@ -287,6 +315,110 @@ class SummaryQualificationTests(unittest.TestCase):
                 identities=identities,
             )
         self.assertEqual(identities, {})
+
+
+class BufferedQualificationTests(unittest.TestCase):
+    def test_buffered_final_result_keeps_json_receipts_and_no_live_metrics(self):
+        value = records("oneshot_output_64k_256_plain")
+        for item in value["oneshot_output_64k_256_plain"]["v1"]:
+            item.update(response_mode="buffered", wire_transport="json")
+            item["server"]["emitted_text_chunks"] = 0
+            for receipt in item["server"]["receipts"]:
+                receipt.update(stream=False, text_chunks=0)
+        summary = compare.summarize(value, expected_versions=VERSIONS, v1_response_mode="buffered")
+        metrics = summary["oneshot_output_64k_256_plain"]["metrics"]
+        self.assertNotIn("first_delta_p50_ms", metrics)
+        self.assertEqual(
+            metrics["full_owner_cpu_ms_per_operation"]["stable_values"], [10, 11, 12, 13, 14]
+        )
+
+    def test_mode_transport_and_denominator_drift_fail_closed(self):
+        for change in (
+            lambda item: item.update(response_mode="buffered"),
+            lambda item: item.update(wire_transport="json"),
+            lambda item: item["server"]["receipts"][0].update(stream=False),
+            lambda item: item["server"].update(emitted_text_chunks=0),
+            lambda item: item.update(charged_operations=20),
+            lambda item: item.update(full_owner_cpu_ms_per_operation=1),
+            lambda item: item.update(full_owner_cpu_ms=float("nan")),
+        ):
+            value = records()
+            change(value["oneshot_text"]["v1"][0])
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                compare.summarize(value, expected_versions=VERSIONS)
+
+    def test_stable_live_stream_is_sse_and_buffered_live_is_rejected(self):
+        value = records("warm_stream")
+        compare.summarize(value, expected_versions=VERSIONS)
+        value["warm_stream"]["v0"][0]["server"]["receipts"][0]["stream"] = False
+        with self.assertRaises(ValueError):
+            compare.summarize(value, expected_versions=VERSIONS)
+        with self.assertRaises(ValueError):
+            compare.summarize(
+                records("warm_stream"), expected_versions=VERSIONS, v1_response_mode="buffered"
+            )
+
+    def test_large_cases_remain_independent_final_result_operations(self):
+        for chunks in (1, 256, 4096):
+            workload = get_workload(f"oneshot_output_64k_{chunks}_plain")
+            self.assertEqual(
+                (
+                    workload.mode,
+                    workload.stream,
+                    workload.output_chars,
+                    workload.chunks,
+                    workload.prefill,
+                    workload.iterations,
+                ),
+                ("oneshot", False, 65536, chunks, 1, 20),
+            )
+
+
+class FullOwnerBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_owner_clocks_include_construction_prefill_and_joined_exit(self):
+        import worker
+
+        events = []
+        counter = 0
+
+        def cpu():
+            nonlocal counter
+            counter += 1
+            events.append("cpu")
+            return counter * 1_000_000
+
+        class Adapter:
+            def __init__(self, *args, **kwargs):
+                self.tool_calls = 0
+                events.append("construct")
+
+            async def __aenter__(self):
+                events.append("enter")
+                return self
+
+            async def __aexit__(self, *args):
+                events.append("joined_exit")
+
+            async def run(self, prompt):
+                events.append("run")
+                return {"text": "answer", "deltas": [], "first_delta_ns": None}
+
+        workload = get_workload("oneshot_text", iterations=1)
+        with (
+            mock.patch.object(worker.time, "process_time_ns", side_effect=cpu),
+            mock.patch.object(
+                worker, "stats_at", return_value={"process_cpu_ns": 0, "monotonic_ns": 1}
+            ),
+            mock.patch.object(worker, "expected_text", return_value="answer"),
+        ):
+            result = await worker.exercise(Adapter, workload, "unused", 0, None)
+        self.assertLess(events.index("cpu"), events.index("construct"))
+        self.assertLess(events.index("joined_exit"), len(events) - 1)
+        self.assertEqual(events[-1], "cpu")
+        self.assertEqual(events.count("run"), 2)
+        self.assertEqual(result["charged_operations"], 2)
+        self.assertEqual(result["full_owner_cpu_ms"], 3)
+        self.assertEqual(result["full_owner_cpu_ms_per_operation"], 1.5)
 
 
 class InstrumentationTests(unittest.TestCase):

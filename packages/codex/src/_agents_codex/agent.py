@@ -152,6 +152,18 @@ class NativeProvider:
     HTTP. The native runtime selects the final transport when WebSockets are
     enabled and owns retries.
 
+    Set ``response_mode="buffered"`` to request complete JSON responses from an
+    endpoint that supports nonstreaming Responses. Model output events become
+    available after the full response arrives, without token-level progress.
+    Each model response is buffered separately. Tool calls start after that
+    response completes; events remain available while tools execute.
+    Successful output uses the normal Session history and tool processing.
+    Provider failures deliver no partial output; validated response metadata
+    remains available in the turn record. This mode uses HTTP with
+    API-key authentication and cannot be combined with
+    ``supports_websockets=True`` or ``CodexLogin``. The default is ``"streaming"``.
+    Native child agents are not supported in buffered mode.
+
     Set ``auth=CodexLogin()`` to use the saved Codex login over HTTP.
     Omit ``api_key`` and ``base_url`` in this experimental mode.
 
@@ -176,6 +188,7 @@ class NativeProvider:
     base_url: str | None = field(default=None, repr=False)
     api_key: str | None = field(default=None, repr=False)
     supports_websockets: bool | None = None
+    response_mode: Literal["streaming", "buffered"] = "streaming"
     auth: CodexLogin | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -185,18 +198,28 @@ class NativeProvider:
                 raise ValueError(f"{name} must be a non-empty string when provided")
         if self.supports_websockets is not None and not isinstance(self.supports_websockets, bool):
             raise ValueError("supports_websockets must be a bool or None")
+        if self.response_mode not in ("streaming", "buffered"):
+            raise ValueError("response_mode must be 'streaming' or 'buffered'")
+        if self.response_mode == "buffered" and self.supports_websockets is True:
+            raise ValueError("Buffered Responses cannot use WebSockets")
         if self.auth is not None:
             if not isinstance(self.auth, CodexLogin):
                 raise TypeError("auth must be CodexLogin or None")
+            if self.response_mode == "buffered":
+                raise ValueError("Buffered Responses require API-key authentication")
             if self.api_key is not None or self.base_url is not None or self.supports_websockets:
                 raise ValueError("CodexLogin requires HTTP and its own endpoint and credentials")
 
     @property
     def _websockets_enabled(self) -> bool:
-        return self.auth is None and (
-            self.supports_websockets
-            if self.supports_websockets is not None
-            else self.base_url is None
+        return (
+            self.auth is None
+            and self.response_mode == "streaming"
+            and (
+                self.supports_websockets
+                if self.supports_websockets is not None
+                else self.base_url is None
+            )
         )
 
     def __reduce_ex__(self, protocol: SupportsIndex) -> Any:
