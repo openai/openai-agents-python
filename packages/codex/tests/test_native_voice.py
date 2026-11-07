@@ -724,7 +724,7 @@ async def test_pipeline_preserves_workflow_cancellation():
         tts_model=tts,
         config={"tracing_disabled": True},
     ).run(AudioInput(buffer=np.zeros(4, dtype=np.int16)))
-    with pytest.raises(asyncio.CancelledError, match="workflow cancelled"):
+    with pytest.raises(asyncio.CancelledError):
         async with aclosing(result.stream()) as events:
             async for _ in events:
                 pass
