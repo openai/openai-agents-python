@@ -78,6 +78,8 @@ A process can stop after a tool applies an effect and before the SDK records its
 
 Check each effect against trusted application records or the system that owns the effect. Keep the conversation closed if you cannot confirm an outcome. The SDK supports explicit reconciliation of retained root calls with a missing result. An unresolved child call or an active child whose runtime cannot be restored causes a `RuntimeError` on reopen.
 
+Local history supports root recovery and inspection of settled child history. It does not automatically recover an active child graph or reconcile uncertain child effects. Your application owns external-effect reconciliation and decides whether to start new work. Preserve the refusal when a child outcome remains unknown; do not edit saved history to force reopening.
+
 Suppose `call` is the only unresolved root call. Your application journal confirms that the tool recorded a handoff. Reopen the original profile with a matching result.
 
 ```python
