@@ -428,7 +428,7 @@ Read `recorded_turn.get("receipt")` from `session.turns()` to inspect the settin
 - The executor and approval policy, including the environment ID, transport, working directory, explicit write roots, and network settings.
 - Loaded instruction file paths, source categories, and SHA-256 hashes, plus the hash of the developer instructions.
 
-Live Sessions and trusted `LocalStorage` report these details for each executor the step selected. On `LocalStorage` reopen, the SDK compares the full native policy for a local executor or a WSS Environment with explicit write roots. An implicit WSS Environment follows the [relocation and model-only reopen rules](state.md#restore-executor-policy).
+Live Sessions and trusted `LocalStorage` report these details for each executor the step selected. On `LocalStorage` reopen, the SDK compares the full native policy for a local executor or a strict WSS Environment. An explicitly selected legacy WSS Environment follows the [relocation and model-only reopen rules](state.md#restore-executor-policy).
 
 Interpret `receipt["executors"]` as follows:
 
