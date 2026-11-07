@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import asynccontextmanager
 
 import pytest
@@ -383,6 +384,7 @@ async def test_managed_environment_selected_manual_restore_keeps_slots_and_lease
             if with_children
             else Environment(
                 url=executor.url,
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=str(executor.root),
                 headers={"Authorization": "Bearer " + executor.token},
                 tools=[],

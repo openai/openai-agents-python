@@ -202,6 +202,7 @@ async def test_saved_model_is_admitted_before_native_agents_restore(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
+        # The saved model has no Environment; admit it under the same legacy policy.
         saved = await save_ordinary_model(peer, saved_model)
         before_model_requests = len(peer.requests)
         before_executor_requests = list(executor.requests)
@@ -211,13 +212,17 @@ async def test_saved_model_is_admitted_before_native_agents_restore(
             with pytest.raises(
                 RuntimeError, match="model metadata is incompatible with NativeAgents"
             ):
-                async with current.session(state=saved, environment=declaration(executor)):
+                async with current.session(
+                    state=saved, environment=declaration(executor, write_policy="legacy")
+                ):
                     pytest.fail("Fallback metadata admitted an unsupported saved model")
             # Admission precedes executor connection and any current provider request.
             assert len(peer.requests) == before_model_requests
             assert executor.requests == before_executor_requests
             return
-        async with current.session(state=saved, environment=declaration(executor)) as session:
+        async with current.session(
+            state=saved, environment=declaration(executor, write_policy="legacy")
+        ) as session:
             assert len(peer.requests) == before_model_requests, "Restoring history must not run it"
             root = await session.submit("Start one native child")
             assert (await (root).get_result()).final_output == "root complete"
@@ -248,6 +253,7 @@ async def test_native_restore_cannot_exchange_admitted_checkpoint_for_same_prefi
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
+        # The saved model has no Environment; admit it under the same legacy policy.
         initial = await save_ordinary_model(peer, "gpt-5.5")
         actual = await save_ordinary_model(peer, "gpt-5.5-review-alias")
         before_model_requests = len(peer.requests)
@@ -271,7 +277,9 @@ async def test_native_restore_cannot_exchange_admitted_checkpoint_for_same_prefi
             with pytest.raises(
                 RuntimeError, match="restored model differs from its initially admitted model"
             ):
-                async with current.session(state=actual, environment=declaration(executor)):
+                async with current.session(
+                    state=actual, environment=declaration(executor, write_policy="legacy")
+                ):
                     pytest.fail("A different prefix-matched model changed the frozen catalog")
         assert len(peer.requests) == before_model_requests
 
@@ -351,6 +359,7 @@ async def worker() -> None:
             context="original-context",
             environment=Environment(
                 url=request["executor_url"],
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=request["cwd"],
                 headers={"Authorization": "Bearer " + request["executor_token"]},
                 tools=["exec_command", "write_stdin", "apply_patch"],
@@ -407,6 +416,7 @@ async def worker() -> None:
             state=saved,
             environment=Environment(
                 url=request["executor_url"],
+                **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
                 cwd=request["cwd"],
                 headers={"Authorization": "Bearer " + request["executor_token"]},
                 tools=["exec_command", "write_stdin", "apply_patch"],

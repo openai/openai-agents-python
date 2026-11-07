@@ -188,6 +188,7 @@ async def public_command(url, token, workspace, command, requests):
         try:
             selected = Environment(
                 url=url,
+                write_policy="legacy",
                 cwd=str(workspace),
                 tools=["exec_command"],
                 headers={"Authorization": "Bearer " + token},

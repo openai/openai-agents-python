@@ -1,4 +1,4 @@
-"""Live Core exec and patch approval qualification."""
+"""Live Core exec and patch approval qualification with explicit legacy permissions."""
 
 import asyncio
 import json
@@ -75,7 +75,7 @@ async def test_owned_native_environment_prompt(responses, tmp_path, monkeypatch,
             )
         responses.respond(assistant_output("finished"))
         async with Agent(instructions="Use selected tools", provider=native).session(
-            environment=declaration(peer)
+            environment=declaration(peer, write_policy="legacy")
         ) as session:
             observe = Observe(session._native)
             session._native = observe
@@ -183,7 +183,9 @@ async def test_run_only_answers_live_environment_approval_with_handler(
         agent = Agent(instructions="Use selected tools", provider=native)
         if interactive:
             result = await agent.run(
-                "Use the selected builtin", environment=declaration(peer), on_interaction=answer
+                "Use the selected builtin",
+                environment=declaration(peer, write_policy="legacy"),
+                on_interaction=answer,
             )
             assert result.final_output == "finished"
             assert len(delivered) == 1
@@ -192,7 +194,9 @@ async def test_run_only_answers_live_environment_approval_with_handler(
             assert target.read_text() == ("proof" if route == "exec" else "proof\n")
         else:
             with pytest.raises(InteractionRequired, match="on_interaction"):
-                await agent.run("Use the selected builtin", environment=declaration(peer))
+                await agent.run(
+                    "Use the selected builtin", environment=declaration(peer, write_policy="legacy")
+                )
             assert not target.exists()
             assert delivered == []
 
@@ -233,7 +237,7 @@ async def test_root_approval_enqueue_joins_before_successor(
 
         responses.respond(prompt(first))
         async with Agent(instructions="Use selected tools", provider=native).session(
-            environment=declaration(peer)
+            environment=declaration(peer, write_policy="legacy")
         ) as session:
             reached = asyncio.Event()
             cancelling = asyncio.Event()
@@ -329,7 +333,7 @@ async def test_cancelled_responder_preserves_consumed_live_root_approval(
         )
         responses.respond(assistant_output("finished"))
         async with Agent(instructions="Use selected tools", provider=native).session(
-            environment=declaration(peer)
+            environment=declaration(peer, write_policy="legacy")
         ) as session:
             observe = Observe(session._native)
             session._native = observe

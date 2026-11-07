@@ -144,6 +144,12 @@ executor = Environment(
     tools=["exec_command", "write_stdin", "apply_patch"],
     headers={"Authorization": "Bearer application-owned-token"},
 )
+assert_type(Environment[object].local(cwd="/workspace"), Environment[object])
+assert_type(Environment[object].local(cwd="/workspace", write_policy="strict"), Environment[object])
+assert_type(
+    Environment[object](url="wss://executor.invalid", cwd="/workspace", write_policy="legacy"),
+    Environment[object],
+)
 executor_agent = Agent(instructions="Use native tools.", tools=[])
 assert_type(Agent[None](instructions="Use native tools.", tools=[]), Agent[None, str])
 

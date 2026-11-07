@@ -113,6 +113,8 @@ class ExecutorPeer:
     start_reply_dropped: asyncio.Event = field(default_factory=asyncio.Event)
     synthetic_process_output: str | None = field(default=None, repr=False)
     synthetic_sandbox_denied: bool = False
+    # Override advertised admission metadata, not real executor enforcement.
+    advertised_platform: str | None = None
     synthetic_process_starts: list[str] = field(default_factory=list)
 
     async def wait_disconnected(self) -> None:
@@ -320,6 +322,16 @@ class ExecutorPeer:
                                                     }
                                                 )
                                                 continue
+                                        elif (
+                                            methods.get(value.get("id"))
+                                            in ("initialize", "environment/info")
+                                            and self.advertised_platform is not None
+                                        ):
+                                            result = value["result"]
+                                            info = result.get("environmentInfo", result)
+                                            info["platformOs"] = self.advertised_platform
+                                            await destination.send_json(value)
+                                            continue
                                         elif (
                                             methods.get(value.get("id")) == "process/start"
                                             and self.drop_start_reply_after is not None

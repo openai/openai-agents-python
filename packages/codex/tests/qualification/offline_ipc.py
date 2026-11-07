@@ -231,10 +231,12 @@ async def qualify(root, fixture, dns_log):
             agent = Agent(instructions="Use the selected job.", provider=provider)
             launch = executor_command(root, helper, fixture, ports[0])
             async with gateway(launch, tls, root) as (url, starts):
+                # Keep this network and approval fixture on its legacy write profile.
                 restricted = Environment(
                     url=url,
                     cwd="/job",
                     tools=["exec_command"],
+                    write_policy="legacy",
                     headers={"Authorization": "Bearer job-fixture"},
                 )
                 permitted = replace(restricted, network=NetworkPolicy(allow_all_unix_sockets=True))

@@ -84,7 +84,10 @@ async def test_environment_interruption_expires_issued_reply_before_session_clos
             owner = asyncio.current_task()
             environment = remote(peer)
             if route == "approval":
-                environment = replace(environment, tools=["exec_command"])
+                # Strict writes refuse escalation; this route needs a live legacy prompt.
+                environment = replace(
+                    environment, tools=["exec_command"], write_policy="legacy", writable_roots=None
+                )
             yield environment
 
         async def borrower():
@@ -115,6 +118,7 @@ async def test_environment_interruption_expires_issued_reply_before_session_clos
             assert not target.exists() and len(responses.requests) == 1
         finally:
             finish_close.set()
+            task.cancel()
             await asyncio.gather(task, return_exceptions=True)
 
 

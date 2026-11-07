@@ -63,11 +63,13 @@ async def test_unix_peer_approval(peer_os, tmp_path, monkeypatch):
         provider = NativeProvider(base_url=str(server.make_url("/v1")), api_key="fixture")
         stack.push_async_callback(provider.aclose)
         agent = Agent(instructions="Use the selected job.", provider=provider)
+        # The protocol-only peer has no filesystem RPCs for strict write admission.
         environment = Environment(
             url=str(server.make_url("/").with_scheme("wss")),
             cwd="/job",
             headers={"Authorization": "Bearer fixture"},
             tools=["exec_command"],
+            write_policy="legacy",
             network=NetworkPolicy(allow_all_unix_sockets=True),
         )
         with pytest.raises(RuntimeError, match="POSIX executor workspace"):

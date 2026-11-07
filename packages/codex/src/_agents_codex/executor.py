@@ -230,9 +230,10 @@ class Environment(Generic[ContextT_contra]):
 
     ``writable_roots`` grants additional directories on the executor. The working
     directory is always writable under the same metadata protections. An empty
-    sequence keeps only that directory and enables strict write enforcement.
-    Omitting this setting on a remote executor keeps its legacy approval behavior.
-    Strict write enforcement requires a Linux or macOS executor.
+    sequence keeps only that directory writable. Strict write enforcement is the
+    default and requires a Linux or macOS executor. To retain remote approval
+    behavior, explicitly select ``write_policy="legacy"`` without writable roots.
+    Local executors support only ``write_policy="strict"``.
 
     With ``exec_command``, set ``network`` to a NetworkPolicy or a dictionary with
     the same fields. Omit the policy to keep the executor's default restricted
@@ -311,6 +312,7 @@ class Environment(Generic[ContextT_contra]):
     network: NetworkPolicy | RuntimeNetworkPolicy | None = None
     writable_roots: Sequence[str | PathLike[str]] | None = None
     mounts: Sequence[LocalStorageMount | dict[str, Any]] = ()
+    write_policy: Literal["strict", "legacy"] = "strict"
 
     @classmethod
     def local(
@@ -336,6 +338,7 @@ class Environment(Generic[ContextT_contra]):
         ) = None,
         policy_timeout: float = 30,
         mounts: Sequence[LocalStorageMount | dict[str, Any]] = (),
+        write_policy: Literal["strict"] = "strict",
     ) -> Environment[ContextT_contra]:
         """Run selected tools locally through the SDK's native sandbox.
 
@@ -364,9 +367,20 @@ class Environment(Generic[ContextT_contra]):
             transform_result=transform_result,
             policy_timeout=policy_timeout,
             mounts=mounts,
+            write_policy=write_policy,
         )
 
     def __post_init__(self) -> None:
+        if self.write_policy not in ("strict", "legacy"):
+            raise ValueError("write_policy must be strict or legacy")
+        if self.write_policy == "legacy":
+            if self._is_local:
+                raise ValueError("Legacy write policy requires a remote Environment")
+            if self.writable_roots is not None:
+                raise ValueError("Legacy write policy does not accept writable_roots; use strict")
+        elif self.writable_roots is None:
+            # Reuse native roots so existing strict policy identities remain stable.
+            object.__setattr__(self, "writable_roots", ())
         if self._is_local:
             if self.headers or self.connect_timeout is not None:
                 raise ValueError("A local executor does not accept connection settings")

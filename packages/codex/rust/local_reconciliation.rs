@@ -319,8 +319,8 @@ async fn validate_recorded_executor_policy(
         return Ok(());
     }
     let matches = if strict_writes == Some(true) || current_strict_writes {
-        // Legacy receipts lacked the mode and still require an exact profile.
-        strict_writes.is_none_or(|strict| strict == current_strict_writes) && previous == &current
+        // A strict reopen requires durable evidence of the recorded strict mode.
+        strict_writes == Some(current_strict_writes) && previous == &current
     } else if current.is_empty() {
         // Opening without an Environment leaves a model-only Session.
         previous.iter().all(can_drop_implicit_remote)
