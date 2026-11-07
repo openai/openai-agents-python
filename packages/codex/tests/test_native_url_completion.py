@@ -341,7 +341,7 @@ async def test_close_retires_url_completion_waiters(responses: ResponsesFixture)
             peer.finish.set()
 
 
-@pytest.mark.parametrize("decision", ["accept", "decline", "timeout"])
+@pytest.mark.parametrize("decision", ["accept", "decline", "timeout_then_cancel"])
 async def test_url_error_batch_is_registered_before_early_completion_and_retires_together(
     responses: ResponsesFixture, decision
 ):
@@ -372,10 +372,28 @@ async def test_url_error_batch_is_registered_before_early_completion_and_retires
                 with pytest.raises(InteractionExpiredError):
                     await first.accept_url()
             else:
-                with pytest.raises(TimeoutError):
-                    await first.wait_url_completion(timeout=0.05)
-                with pytest.raises(InteractionExpiredError):
-                    await second.wait_url_completion(timeout=8)
+                # An observer deadline owns neither consent nor the native batch.
+                sibling = asyncio.create_task(second.wait_url_completion(timeout=8))
+                try:
+                    with pytest.raises(TimeoutError):
+                        await first.wait_url_completion(timeout=0.05)
+                    assert not sibling.done()
+                    assert len(responses.requests) == 1
+                    assert {
+                        request.elicitation_id for request in await session.pending_interactions()
+                    } == {"required-A", "required-B"}
+                    # Explicit owner expiry retires the whole native error batch,
+                    # even though B's peer-completion notification arrived early.
+                    await first.cancel_url_completion()
+                    with pytest.raises(InteractionExpiredError):
+                        await sibling
+                    with pytest.raises(InteractionExpiredError):
+                        await first.accept_url()
+                    with pytest.raises(InteractionExpiredError):
+                        await second.accept_url()
+                finally:
+                    sibling.cancel()
+                    await asyncio.gather(sibling, return_exceptions=True)
             assert (await turn.get_result()).final_output == "batch done"
             assert not peer.answers
             assert not await session.pending_interactions()
