@@ -183,6 +183,26 @@ jobs:
       - name: Build the SDK and native runtime together
         if: inputs.native_source_run == ''
         run: uv build --wheel "$OPENAI_AGENTS_BUILD_SOURCE" --out-dir "$GITHUB_WORKSPACE/dist"
+      - name: Test Windows project-search filename handling
+        if: runner.os == 'Windows' && inputs.native_source_run == ''
+        run: |
+          python -I -S - <<'PYTHON'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          root = Path(os.environ["OPENAI_AGENTS_BUILD_SOURCE"]) / "packages/codex"
+          sys.path.insert(0, str(root / "scripts"))
+          from native_env import cargo_build_options
+
+          options, _ = cargo_build_options(root, dict(os.environ))
+          subprocess.run(
+              ["cargo", "test", "--locked", "--release", *options, "-p", "codex-exec-server",
+               "--lib", "invalid_filename", "--", "--nocapture"],
+              cwd=root / ".upstream/codex/codex-rs", check=True,
+          )
+          PYTHON
       - name: Build the shared test executor
         if: inputs.native_source_run == ''
         run: |
