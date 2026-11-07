@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from agents import Agent, NativeError, NativeProvider, ToolContext, function_tool, testing
-from agents.testing import ScriptedResponses, text, tool_call
+from agents.testing import ScriptedResponse, ScriptedResponses, text, tool_call
 
 
 @pytest.mark.serial
@@ -156,7 +156,7 @@ async def test_loopback_startup_does_not_require_reverse_dns(monkeypatch):
 
 
 async def test_http_response_order_and_request_snapshots(capsys):
-    assert testing.__all__ == ["ScriptedResponses", "text", "tool_call"]
+    assert testing.__all__ == ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]
     arguments = {"key": "synthetic-record"}
     call = tool_call("lookup", arguments, call_id="http-call")
     arguments["key"] = "later-mutation"
@@ -570,3 +570,70 @@ async def test_numeric_loopback_peer_serves_without_reverse_dns(monkeypatch):
             assert response.status == 200
             assert b"local answer" in response.read()
         assert len(peer.requests) == 1
+
+
+async def test_response_metadata_is_captured_before_http_startup():
+    usage = {"input_tokens": 4, "output_tokens": 3, "total_tokens": 7}
+    headers = {"x-ratelimit-remaining-requests": "5"}
+    peer = ScriptedResponses(ScriptedResponse([text("answer")], usage=usage, headers=headers))
+    usage["total_tokens"] = 999
+    headers["x-ratelimit-remaining-requests"] = "0"
+    async with peer:
+        status, content_type, payload = await request(
+            peer.provider, "POST", "/v1/responses", {"input": "synthetic"}
+        )
+        assert status == 200 and content_type == "text/event-stream"
+        events = [json.loads(line[6:]) for line in payload.strip().split("\n\n")]
+        assert events[-1]["response"]["usage"] == {
+            "input_tokens": 4,
+            "output_tokens": 3,
+            "total_tokens": 7,
+        }
+        assert "usage" not in events[0]["response"]
+
+
+def test_response_framing_remains_owned_by_scripted_peer():
+    with pytest.raises(ValueError, match="Invalid scripted response headers"):
+        ScriptedResponses(ScriptedResponse([text("answer")], headers={"Content-Length": "0"}))
+
+
+async def test_scripted_usage_and_headers_drive_native_budget_and_rate_observations():
+    from agents import RunBudget
+    from agents.observation import ApiRateLimitsUpdated
+
+    effects = []
+
+    @function_tool
+    def lookup() -> str:
+        """Look up a synthetic record."""
+        effects.append("lookup")
+        return "found"
+
+    async with ScriptedResponses(
+        ScriptedResponse(
+            [tool_call("lookup", {}, call_id="budget-lookup")],
+            usage={"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+            headers={
+                "x-ratelimit-limit-requests": "10",
+                "x-ratelimit-remaining-requests": "5",
+                "x-ratelimit-reset-requests": "1s",
+            },
+        )
+    ) as peer:
+        agent = Agent(
+            instructions="Use lookup.", model="gpt-5.5", provider=peer.provider, tools=[lookup]
+        )
+        async with agent.session() as session:
+            turn = await session.submit("Lookup.", budget=RunBudget(max_tokens=7))
+            with pytest.raises(NativeError) as stopped:
+                await turn.get_result()
+            assert stopped.value.code == "run_budget_exceeded"
+            events = [event async for event in turn.events()]
+            limits = [event for event in events if isinstance(event, ApiRateLimitsUpdated)]
+            assert len(limits) == 1
+            assert limits[0].snapshot.requests is not None
+            assert limits[0].snapshot.requests.limit == 10
+            assert limits[0].snapshot.requests.remaining == 5
+            assert limits[0].snapshot.requests.reset_after_seconds == 1
+            assert effects == ["lookup"]
+            assert len(peer.requests) == 1

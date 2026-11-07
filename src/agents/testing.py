@@ -26,6 +26,7 @@ from _agents_codex.testing import (
     Lock as Lock,
     Mapping as Mapping,
     NativeProvider as NativeProvider,
+    ScriptedResponse as ScriptedResponse,
     ScriptedResponses as ScriptedResponses,
     Sequence as Sequence,
     TCPServer as TCPServer,
@@ -50,4 +51,4 @@ from _agents_codex.testing import (
     uuid4 as uuid4,
 )
 
-__all__ = ["ScriptedResponses", "text", "tool_call"]
+__all__ = ["ScriptedResponse", "ScriptedResponses", "text", "tool_call"]

@@ -21,12 +21,13 @@ from __future__ import annotations
 
 import asyncio as asyncio
 import json as json
+import re as re
 import socket as socket
 from collections import deque as deque
 from collections.abc import Mapping as Mapping, Sequence as Sequence
 from contextlib import AbstractAsyncContextManager as AbstractAsyncContextManager
 from copy import deepcopy as deepcopy
-from dataclasses import dataclass as dataclass
+from dataclasses import dataclass as dataclass, field as field
 from functools import partial as partial
 from http.server import (
     BaseHTTPRequestHandler as BaseHTTPRequestHandler,
@@ -84,6 +85,19 @@ def tool_call(name: str, arguments: Mapping[str, JsonValue], *, call_id: str) ->
     )
 
 
+@dataclass(frozen=True)
+class ScriptedResponse:
+    """One response with optional provider usage and HTTP metadata.
+
+    Omitted usage stays unknown. Content type and framing remain SDK-owned.
+    ScriptedResponses captures items, usage and headers before starting HTTP.
+    """
+
+    items: Sequence[_ScriptItem]
+    usage: Mapping[str, JsonValue] | None = field(default=None, kw_only=True)
+    headers: Mapping[str, str] | None = field(default=None, kw_only=True)
+
+
 class _LoopbackHTTPServer(ThreadingHTTPServer):
     def server_bind(self) -> None:
         # Numeric loopback needs no reverse DNS lookup during local startup.
@@ -108,8 +122,28 @@ class ScriptedResponses(AbstractAsyncContextManager["ScriptedResponses"]):
     served it; requests and tool_output provide readback.
     """
 
-    def __init__(self, *responses: Sequence[_ScriptItem]) -> None:
-        self._responses = deque(tuple(response) for response in responses)
+    def __init__(self, *responses: Sequence[_ScriptItem] | ScriptedResponse) -> None:
+        captured: list[ScriptedResponse] = []
+        for script in responses:
+            response = script if isinstance(script, ScriptedResponse) else ScriptedResponse(script)
+            headers = dict(response.headers or {})
+            for name, value in headers.items():
+                if (
+                    not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name)
+                    or name.lower() in {"content-type", "content-length", "transfer-encoding"}
+                    or not isinstance(value, str)
+                    or "\r" in value
+                    or "\n" in value
+                ):
+                    raise ValueError("Invalid scripted response headers")
+                value.encode("latin-1")
+            usage = (
+                None
+                if response.usage is None
+                else json.loads(json.dumps(dict(response.usage), allow_nan=False))
+            )
+            captured.append(ScriptedResponse(tuple(response.items), usage=usage, headers=headers))
+        self._responses = deque(captured)
         self._requests: list[dict[str, JsonValue]] = []
         self._unexpected = 0
         self._lock = Lock()
@@ -261,12 +295,16 @@ class _Handler(BaseHTTPRequestHandler):
             # A 400 is terminal in the ordinary native retry policy.
             self.send_error(400)
             return
-        response = {"id": response_id}
+        response: dict[str, object] = {"id": response_id}
         created = json.dumps({"type": "response.created", "response": response})
+        if items.usage is not None:
+            response["usage"] = items.usage
         completed = json.dumps({"type": "response.completed", "response": response})
-        events = [created, *(item.encoded for item in items), completed]
+        events = [created, *(item.encoded for item in items.items), completed]
         payload = "".join(f"data: {event}\n\n" for event in events).encode()
         self.send_response(200)
+        for name, value in (items.headers or {}).items():
+            self.send_header(name, value)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
