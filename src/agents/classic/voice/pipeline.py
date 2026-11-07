@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterator
-from contextlib import contextmanager
-from typing import Any
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
+from typing import Any, Protocol
 
 from .._config_coercion import coerce_dataclass_config
 from ..exceptions import UserError
@@ -18,7 +18,33 @@ from .input import AudioInput, StreamedAudioInput
 from .model import STTModel, TTSModel
 from .pipeline_config import VoicePipelineConfig
 from .result import StreamedAudioResult
-from .workflow import VoiceWorkflowBase
+
+
+class _VoiceWorkflow(Protocol):
+    """The text iteration boundary shared by speech workflows."""
+
+    def run(self, transcription: str) -> AsyncIterator[str]: ...
+
+    def on_start(self) -> AsyncIterator[str]: ...
+
+
+@asynccontextmanager
+async def _closing_workflow(iterator: AsyncIterator[str]) -> AsyncIterator[AsyncIterator[str]]:
+    """Close a yielded workflow before releasing its producer's ownership."""
+    primary_error: BaseException | None = None
+    try:
+        yield iterator
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            try:
+                await close()
+            except BaseException:
+                if primary_error is None:
+                    raise
 
 
 class VoicePipeline:
@@ -31,7 +57,7 @@ class VoicePipeline:
     def __init__(
         self,
         *,
-        workflow: VoiceWorkflowBase,
+        workflow: _VoiceWorkflow,
         stt_model: STTModel | str | None = None,
         tts_model: TTSModel | str | None = None,
         config: VoicePipelineConfig | dict[str, Any] | None = None,
@@ -39,7 +65,7 @@ class VoicePipeline:
         """Create a new voice pipeline.
 
         Args:
-            workflow: The workflow to run. See `VoiceWorkflowBase`.
+            workflow: The text workflow. Existing subclasses may use `VoiceWorkflowBase`.
             stt_model: The speech-to-text model to use. If not provided, a default OpenAI
                 model will be used.
             tts_model: The text-to-speech model to use. If not provided, a default OpenAI
@@ -131,8 +157,9 @@ class VoicePipeline:
             with self._trace_context():
                 try:
                     input_text = await self._process_audio_input(audio_input)
-                    async for text_event in self.workflow.run(input_text):
-                        await output._add_text(text_event)
+                    async with _closing_workflow(self.workflow.run(input_text)) as texts:
+                        async for text_event in texts:
+                            await output._add_text(text_event)
                     await output._turn_done()
                     await output._done()
                 except asyncio.CancelledError:
@@ -159,9 +186,10 @@ class VoicePipeline:
                         try:
                             emitted_intro = False
                             try:
-                                async for intro_text in self.workflow.on_start():
-                                    await output._add_text(intro_text)
-                                    emitted_intro = True
+                                async with _closing_workflow(self.workflow.on_start()) as texts:
+                                    async for intro_text in texts:
+                                        await output._add_text(intro_text)
+                                        emitted_intro = True
                             except Exception as e:
                                 log_model_and_tool_action_warning(
                                     logger, "Voice workflow on_start failed", e
@@ -181,9 +209,11 @@ class VoicePipeline:
                             )
 
                             async for input_text in transcription_session.transcribe_turns():
-                                result = self.workflow.run(input_text)
-                                async for text_event in result:
-                                    await output._add_text(text_event)
+                                async with _closing_workflow(
+                                    self.workflow.run(input_text)
+                                ) as texts:
+                                    async for text_event in texts:
+                                        await output._add_text(text_event)
                                 await output._turn_done()
                         except asyncio.CancelledError as e:
                             primary_exception = e

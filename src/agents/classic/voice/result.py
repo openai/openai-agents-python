@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncGenerator, Awaitable
 from typing import Any
 
 from ..exceptions import UserError
@@ -394,7 +394,7 @@ class StreamedAudioResult:
                     self._stored_exception = error
                     break
 
-    async def stream(self) -> AsyncIterator[VoiceStreamEvent]:
+    async def stream(self) -> AsyncGenerator[VoiceStreamEvent, None]:
         """Stream the events and audio data as they're generated."""
         saw_session_end = False
         saw_terminal_event = False
@@ -439,7 +439,18 @@ class StreamedAudioResult:
             # An error is a terminal event too. The producer reports it and then still has to
             # close the transcription session, so cancelling here instead of waiting would tear
             # that session down mid-close.
-            if saw_terminal_event and self.text_generation_task is not None:
+            # A synthesis failure can terminate playback while the producer is
+            # still awaiting more workflow output. Cancel it below rather than
+            # waiting forever for work whose speech consumer has already failed.
+            synthesis_failed = any(
+                task.done() and not task.cancelled() and task.exception() is not None
+                for task in self._tasks
+            )
+            if (
+                saw_terminal_event
+                and self.text_generation_task is not None
+                and not synthesis_failed
+            ):
                 try:
                     # asyncio.wait() completes without propagating the producer outcome. A
                     # cancellation raised by this shield therefore belongs to the consumer on
