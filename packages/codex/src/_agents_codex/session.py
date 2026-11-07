@@ -1667,6 +1667,29 @@ def _capture_web_search_config(search: WebSearch | None) -> dict[str, Any]:
     return config
 
 
+def _configure_child_roles(
+    config: dict[str, Any], home: TemporaryDirectory[str], native_agents: NativeAgents[Any]
+) -> None:
+    for role in native_agents.additional_roles:
+        role_path = Path(home.name) / ("role-" + role.name + ".toml")
+        role_fields = {"developer_instructions": role.instructions}
+        if role.model is not None:
+            role_fields["model"] = role.model
+        if role.model_settings and "reasoning_effort" in role.model_settings:
+            role_fields["model_reasoning_effort"] = role.model_settings["reasoning_effort"]
+        role_path.write_text(
+            "".join(
+                key + " = " + json.dumps(value, ensure_ascii=False) + "\n"
+                for key, value in role_fields.items()
+            ),
+            encoding="utf-8",
+        )
+        config["agents." + role.name] = {
+            "description": role.description,
+            "config_file": str(role_path),
+        }
+
+
 class Session(Generic[ContextT, OutputT]):
     """Own a native thread, its readers, and at most one active submission.
 
@@ -2319,26 +2342,7 @@ class Session(Generic[ContextT, OutputT]):
                     runtime["native_goal_store"] = home.name
                 workspace.mkdir(exist_ok=True)
                 if native_agents is not None:
-                    for role in native_agents.additional_roles:
-                        role_path = Path(home.name) / ("role-" + role.name + ".toml")
-                        role_fields = {"developer_instructions": role.instructions}
-                        if role.model is not None:
-                            role_fields["model"] = role.model
-                        if role.model_settings and "reasoning_effort" in role.model_settings:
-                            role_fields["model_reasoning_effort"] = role.model_settings[
-                                "reasoning_effort"
-                            ]
-                        role_path.write_text(
-                            "".join(
-                                key + " = " + json.dumps(value, ensure_ascii=False) + "\n"
-                                for key, value in role_fields.items()
-                            ),
-                            encoding="utf-8",
-                        )
-                        config["agents." + role.name] = {
-                            "description": role.description,
-                            "config_file": str(role_path),
-                        }
+                    _configure_child_roles(config, home, native_agents)
 
                 async def initialize_engine() -> Any:
                     create_engine = (
