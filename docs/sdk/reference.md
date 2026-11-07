@@ -127,17 +127,19 @@ Turn calls use the Session's opening event loop. After `run_sync()`, that loop h
 
 A `Subagent` record contains a captured descendant's identity, status, `is_live` and optional observed `turn`. A snapshot can become stale.
 
-`await child.start(input)` checks that the child is still the same live instance and returns a `Turn[str]` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](delegation.md#native-children).
+`await child.start(input)` checks that the child is still the same live instance and returns a `ChildTurn` only while the child is idle. To steer an active child turn, use `await child.turn.steer(input)`. It cannot create or resume a closed child. Manual replies use live requests, not input to this method. See [native children](delegation.md#native-children).
+
+`ChildTurn` exposes result waits, events, identifiers and ordinary steering. It does not advertise root-only `cancel()` or `steer_exact()`. Use `Subagent.try_cancel(child_turn)` for the weaker native child interruption guarantee. Child results retain the same `ChildTurn` view in `Completed.turn`.
 
 ## Results and usage
 
 ### Completed
 
-A `Completed` result contains `turn`, `final_output`, `usage`, optional `state` and `repair_attempts`. `turn` is the exact root or child `Turn` that produced the result. `state` is populated only when a one-shot run requests `return_state=True`.
+A `Completed` result contains `turn`, `final_output`, `thread_usage`, optional `state` and `repair_attempts`. `turn` is the exact root `Turn` or supported `ChildTurn` view that produced the result. `state` is populated only when a one-shot run requests `return_state=True`.
 
 Usage is a cumulative thread snapshot or `None`, not a per-turn cost. Root usage excludes children.
 
-`repair_attempts` is a tuple of `RecordedTurn` receipts for opted-in prompted-output corrections; it is empty when no repair ran. Their per-turn usage is separate from `Completed.usage`, which still describes the original thread. Missing usage remains `None`. The final output may come from a repair without rewriting the original native history. See [structured output configuration](configuration.md).
+`repair_attempts` is a tuple of `RecordedTurn` receipts for opted-in prompted-output corrections; it is empty when no repair ran. Their per-turn usage is separate from `Completed.thread_usage`, which still describes the original thread. Missing usage remains `None`. The final output may come from a repair without rewriting the original native history. See [structured output configuration](configuration.md).
 
 ### RecordedTurn and RecordedResponse
 
@@ -147,7 +149,7 @@ Live `ModelRequestDispatching` and `ModelResponseLinked` observations come from 
 
 ### TokenUsageInfo and TokenUsage
 
-Import these immutable data classes from `agents.usage`. `Completed.usage` is a `TokenUsageInfo` or `None`. `TokenUsageInfo` contains `total_token_usage: TokenUsage`, `last_token_usage: TokenUsage` and `model_context_window: int | None`.
+Import these immutable data classes from `agents.usage`. `Completed.thread_usage` is a `TokenUsageInfo` or `None`. `TokenUsageInfo` contains `total_token_usage: TokenUsage`, `last_token_usage: TokenUsage` and `model_context_window: int | None`.
 
 `TokenUsage` contains integer fields `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens`, `reasoning_output_tokens` and `total_tokens`. Cached and reasoning counts are already included in the totals.
 
@@ -258,11 +260,11 @@ An `ActionRequested` request carries typed arguments and permission to reply to 
 
 The one-shot handler returns the matching request's candidate reply. The SDK checks the reply's identity, validates its value and delivers it. An invalid reply fails the run and closes its Session.
 
-### ApprovalRequest and ElicitationRequest
+### ApprovalRequest, FormRequest and UrlRequest
 
 Both types carry a native request's `description`. For `ApprovalRequest`, return `request.reply("allow_once")` or `request.reply("deny")` from a one-shot handler, or call `await request.respond(decision)` in an explicit Session.
 
-For an `ElicitationRequest` form, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
+For a `FormRequest`, inspect `request.schema` for its fields and supported constraints. Return `request.reply(values)` from a one-shot handler, or call `await request.respond(values)` in an explicit Session. Decline with `request.reply(None)` or `await request.decline()`, respectively.
 
 Standard forms can use primitive or general schemas, including nested objects and arrays on the general route; see [form schema support](approvals.md#handle-native-approvals-and-forms) for validation limits.
 
@@ -483,3 +485,7 @@ A dictionary with `type="input_text"` and `text`.
 ### InputImage
 
 A dictionary with `type="input_image"` and an `image_url` containing base64 image data as a URL, with optional `detail="auto"`.
+
+## Migration run handles
+
+The optional `agents.migration` adapter exposes `SDKRunner.start(...) -> SDKRunHandle` for a run that starts in the current event loop. Await `handle.get_result()` for its accepted result, or call `handle.cancel()` and then await settlement to join cleanup. `handle.replay_events()` and `result.replay_events()` yield buffered accepted semantic events after successful completion. They do not provide live model or tool progress. Classic Runner streaming APIs keep their existing behavior.

@@ -156,34 +156,48 @@ Match manual requests with `FunctionTool.match()`. Other native request types ne
 
 To expire pending root requests, use `await turn.cancel(mode="force")`. To include children and the queue, use `await session.cancel_all(mode="force")`. Session exit also expires pending requests. Cancelling a `turn.get_result()` task or closing an observation cursor leaves them live. See [interrupt work](sessions.md#interrupt-work).
 
+### Handle requests for a retained Session
+
+An optional Session handler uses the same bound replies as a one-shot handler:
+
+```python
+async with agent.session(on_interaction=answer) as session:
+    turn = await session.submit("Find the label for record-a.")
+    result = await turn.get_result()
+```
+
+The handler remains registered across root turns and receives supported requests from the Session registry, including URL requests with no Turn IDs. It does not enable unsupported startup prompts. Handler failures reach their identified Turn; a failure for a Session-scoped request fails the Session. Closing the Session joins started handlers. A root result alone does not close a retained Session.
+
+Applications that own their interaction tasks can keep using `session.interactions()`. Deliver the same prepared reply with `await session.respond(await answer(request))`. A reply does not reserve its request; another consumer can answer first, and delivery then raises `InteractionExpiredError`. Preserve the exact-request check when building reusable handlers.
+
 ### Answer interactions during a one-shot run
 
-Pass `on_interaction` to `agent.run()` or `agent.run_sync()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the [`answer` handler](#manual-tool-results). The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
+Pass `on_interaction` to `agent.run()`, `agent.run_sync()`, or `agent.session()`. The handler returns the reply created by the exact request it receives, directly or through an awaitable. For a manual function, use the [`answer` handler](#manual-tool-results). The SDK validates and submits the reply. Do not call `respond()` in a handler and return `None`. That fails, as does a reply for a different, expired or already answered request.
 
 #### Handle native approvals and forms
 
 The handler can receive supported native root requests too. Approval requests use `request.reply("allow_once")` or `request.reply("deny")`. Form requests use `request.reply(values)`; `request.reply(None)` declines a form or URL request. Native acknowledgement means the reply was enqueued, not that an external approval or URL verification succeeded. Native child requests require `NativeAgents(interactions=True)`; manual child requests do not require that option.
 
-Import `ApprovalRequest` and `ElicitationRequest` from `agents` to distinguish native approval requests from form or URL requests:
+Import `ApprovalRequest`, `FormRequest` and `UrlRequest` from `agents` to distinguish native approval, form and URL requests. `ElicitationRequest` is the union of the form and URL variants. Their `mode` fields are `"form"` and `"url"`, respectively:
 
 | Request | Inspect | One-shot reply | Explicit Session reply |
 | --- | --- | --- | --- |
 | `ApprovalRequest` | `description` | `reply("allow_once")` or `reply("deny")` | `await respond("allow_once")` or `await respond("deny")` |
-| `ElicitationRequest` form | `description` and `schema` | `reply(values)` or `reply(None)` to decline | `await respond(values)` or `await decline()` |
-| `ElicitationRequest` URL | `description`, `url` and `elicitation_id`; `schema` is empty | `reply_url_accept()` to consent or `reply(None)` to decline | `await accept_url()` to consent or `await decline()` |
+| `FormRequest` | `description` and `schema` | `reply(values)` or `reply(None)` to decline | `await respond(values)` or `await decline()` |
+| `UrlRequest` | `description`, `url` and `elicitation_id` | `reply_url_accept()` to consent or `reply(None)` to decline | `await accept_url()` to consent or `await decline()` |
 
 This handler requires an asynchronous application function `collect_form_values(description, schema)`. That function must render the supplied fields and return the user's answer mapping, or `None` to decline. Pass `answer_native` as `on_interaction` when the run expects native requests:
 
 ```python
-from agents import ApprovalRequest, ElicitationRequest
+from agents import ApprovalRequest, FormRequest, UrlRequest
 
 
 async def answer_native(request):
     if isinstance(request, ApprovalRequest):
         return request.reply("deny")
-    if isinstance(request, ElicitationRequest):
-        if not request.schema:
-            return request.reply(None)
+    if isinstance(request, UrlRequest):
+        return request.reply(None)
+    if isinstance(request, FormRequest):
         values = await collect_form_values(request.description, request.schema)
         return request.reply(values)
     raise TypeError("Unexpected interaction")
@@ -191,9 +205,11 @@ async def answer_native(request):
 
 #### Form schemas and handler lifetime
 
-`ElicitationRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints. The SDK never visits a URL. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
+`FormRequest.reply(values)` validates the full supported schema immediately and captures detached JSON. A handler can catch `ValueError` around that call and request a corrected answer before returning. Delivery still verifies the live request. Manual tool output validation happens at delivery and has a separate contract.
 
-URL consent does not establish completion or verification. In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server to report completion for that URL interaction. The application decides whether to trust that server's report. A timeout expires the interaction and raises `TimeoutError`. Cancelling the waiter stops only that wait. Keep the Session open while waiting. The preceding handler declines URLs by default.
+`FormRequest.schema` is a detached schema mapping. The SDK validates form replies against the supported supplied field constraints. The SDK never visits a URL. A Session-scoped URL request has `turn_id=None` and `submission_id=None`, even while a turn is active. Do not infer an originating turn from the Session's current work.
+
+URL consent does not establish completion or verification. In an explicit Session, after consent, `await request.wait_url_completion(timeout=30)` waits for the issuing server to report completion for that URL interaction. The application decides whether to trust that server's report. A timeout raises `TimeoutError` and stops only that observer. Cancelling the waiter also stops only that wait. To expire the shared lifecycle, call `await request.cancel_url_completion()` explicitly; other completion waiters then receive `InteractionExpiredError`. Keep the Session open while waiting. The preceding handler declines URLs by default.
 
 Handlers may run concurrently. Synchronous handlers run in worker threads and must support concurrent calls. When root work finishes, fails, or is cancelled, the run closes its Session and waits for handlers to finish. Python cannot forcibly stop synchronous worker threads. Use an explicit Session if children must continue after the root finishes or if you need to retry an invalid manual result.
 

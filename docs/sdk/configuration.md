@@ -213,7 +213,7 @@ for repair in result.repair_attempts:
     print(repair["id"], repair["parent_turn_id"], repair["usage"])
 ```
 
-`Completed.usage` is cumulative for the original thread and excludes correction threads. Missing usage is `None`, not zero. Follow the [usage accounting limits](observability.md#read-usage-without-double-counting) when comparing successive snapshots.
+`Completed.thread_usage` is cumulative for the original thread and excludes correction threads. Missing usage is `None`, not zero. Follow the [usage accounting limits](observability.md#read-usage-without-double-counting) when comparing successive snapshots.
 
 Corrections receive the invalid output, schema and effective model connection. They receive none of the original tools, application context or instructions. `final_output` may come from a correction, while the original native history stays intact. `session.turns()` and `session.items()` retain correction records beside their parent.
 
