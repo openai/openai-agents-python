@@ -189,10 +189,15 @@ jobs:
           mkdir -p "$stage/examples/codex/canonical_storage" "$stage/packages/codex"
           cp -R packages/codex/tests "$stage/packages/codex/tests"
           cp examples/codex/canonical_storage/main.py "$stage/examples/codex/canonical_storage"
-          uv venv --seed --python 3.10 "$stage/venv"
+          # Linux userns profiles attach to the helper paths installed above.
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            python="$RUNNER_TEMP/sdk-3.10/bin/python"
+          else
+            uv venv --seed --python 3.10 "$stage/venv"
+            python="$stage/venv/bin/python"
+          fi
           uv export --frozen --group dev --no-emit-workspace --no-hashes \
             --format requirements.txt --output-file "$stage/constraints.txt" > /dev/null
-          python="$stage/venv/bin/python"
           "$python" -m pip install --constraint "$stage/constraints.txt" dist/*.whl aiohttp pytest pytest-asyncio
           cd "$stage"
           "$python" -I -B - <<'PYTHON'
