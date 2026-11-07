@@ -43,6 +43,25 @@ Each list supplies one model response. On successful context exit, the peer chec
 
 Close Sessions before leaving the peer context. One-shot `agent.run()` does this automatically. The peer records request bodies, including prompts and tool results, but not HTTP headers. Keep test data synthetic.
 
+## Supply usage and rate-limit metadata
+
+Use `ScriptedResponse` when a test needs provider usage or HTTP response headers. Existing item lists still work:
+
+```python
+from agents.testing import ScriptedResponse, ScriptedResponses, text
+
+response = ScriptedResponse(
+    [text("Synthetic answer.")],
+    usage={"input_tokens": 4, "output_tokens": 3, "total_tokens": 7},
+    headers={"x-ratelimit-remaining-requests": "5"},
+)
+peer = ScriptedResponses(response)
+```
+
+The peer captures the items and metadata at construction. It sends usage on `response.completed` and headers on the same HTTP response. The ordinary native parser produces usage and rate-limit observations. Omitted usage stays unknown; reported zero stays zero. Content type, content length, and transfer encoding remain SDK-owned.
+
+A token or cost budget stops the next sampling admission. An already admitted final response can reach or exceed its limit and still succeed. To test rejection, script a tool call with usage and assert that the next model request is refused. Assert any tool effects that occurred before that boundary too.
+
 ## Run the check
 
 Use the Python interpreter from your SDK environment:
