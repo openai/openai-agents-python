@@ -33,48 +33,52 @@ async def main():
     client: AsyncMongoClient[Any] = AsyncMongoClient(MONGO_URI)
 
     try:
-        await client.admin.command("ping")
-    except Exception:
-        print("MongoDB is not available on 127.0.0.1:27017")
-        print("For local development only (no authentication; Docker Engine 28.0.0+):")
-        print("Start it with: docker run -d -p 127.0.0.1:27017:27017 mongo")
-        print(
-            "For shared or production use, configure authentication, TLS, and network access controls."
+        try:
+            await client.admin.command("ping")
+        except Exception:
+            print("MongoDB is not available on 127.0.0.1:27017")
+            print("For local development only (no authentication; Docker Engine 28.0.0+):")
+            print("Start it with: docker run -d -p 127.0.0.1:27017:27017 mongo")
+            print(
+                "For shared or production use, configure authentication, TLS, and network access controls."
+            )
+            return
+
+        session_a = MongoDBSession("conversation_a", client=client, database=DATABASE)
+        session_b = MongoDBSession("conversation_b", client=client, database=DATABASE)
+
+        # Clean slate for the demo.
+        await session_a.clear_session()
+        await session_b.clear_session()
+
+        # --- Session A: multi-turn conversation ---
+        print("=== Session A ===")
+        result = await Runner.run(
+            agent, "What city is the Golden Gate Bridge in?", session=session_a
         )
-        return
+        print(f"Turn 1: {result.final_output}")
 
-    session_a = MongoDBSession("conversation_a", client=client, database=DATABASE)
-    session_b = MongoDBSession("conversation_b", client=client, database=DATABASE)
+        result = await Runner.run(agent, "What state is it in?", session=session_a)
+        print(f"Turn 2: {result.final_output}")
 
-    # Clean slate for the demo.
-    await session_a.clear_session()
-    await session_b.clear_session()
+        result = await Runner.run(agent, "What's the population of that state?", session=session_a)
+        print(f"Turn 3: {result.final_output}")
 
-    # --- Session A: multi-turn conversation ---
-    print("=== Session A ===")
-    result = await Runner.run(agent, "What city is the Golden Gate Bridge in?", session=session_a)
-    print(f"Turn 1: {result.final_output}")
+        # --- Session B: independent conversation on the same client ---
+        print("\n=== Session B ===")
+        result = await Runner.run(agent, "What is the capital of France?", session=session_b)
+        print(f"Turn 1: {result.final_output}")
 
-    result = await Runner.run(agent, "What state is it in?", session=session_a)
-    print(f"Turn 2: {result.final_output}")
+        # Show isolation.
+        a_items = await session_a.get_items()
+        b_items = await session_b.get_items()
+        print(f"\nSession A items: {len(a_items)}, Session B items: {len(b_items)}")
 
-    result = await Runner.run(agent, "What's the population of that state?", session=session_a)
-    print(f"Turn 3: {result.final_output}")
-
-    # --- Session B: independent conversation on the same client ---
-    print("\n=== Session B ===")
-    result = await Runner.run(agent, "What is the capital of France?", session=session_b)
-    print(f"Turn 1: {result.final_output}")
-
-    # Show isolation.
-    a_items = await session_a.get_items()
-    b_items = await session_b.get_items()
-    print(f"\nSession A items: {len(a_items)}, Session B items: {len(b_items)}")
-
-    # Cleanup.
-    await session_a.clear_session()
-    await session_b.clear_session()
-    await client.close()
+        # Cleanup.
+        await session_a.clear_session()
+        await session_b.clear_session()
+    finally:
+        await client.close()
 
 
 if __name__ == "__main__":

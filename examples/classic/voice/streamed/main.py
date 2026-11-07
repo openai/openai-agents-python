@@ -9,7 +9,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.containers import Container
 from textual.reactive import reactive
-from textual.widgets import Button, RichLog, Static
+from textual.widgets import RichLog, Static
 from typing_extensions import override
 
 from agents.classic.voice import StreamedAudioInput, VoicePipeline
@@ -210,10 +210,6 @@ class RealtimeApp(App[None]):
 
     async def on_key(self, event: events.Key) -> None:
         """Handle key press events."""
-        if event.key == "enter":
-            self.query_one(Button).press()
-            return
-
         if event.key == "q":
             self.exit()
             return
