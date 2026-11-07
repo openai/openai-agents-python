@@ -1359,7 +1359,7 @@ class BaseSandboxSession(abc.ABC):
         :param compression_scheme: either "tar" or "zip". If not provided,
             it will try to infer from the path.
         :param archive_limits: optional per-call archive resource limits. If omitted,
-            the session default is used.
+            the session default is used, or SDK defaults if the session has none.
         """
         if archive_limits is not None:
             archive_limits.validate()
