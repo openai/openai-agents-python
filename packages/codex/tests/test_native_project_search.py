@@ -353,23 +353,32 @@ async def test_remote_search_reads_the_selected_executor(
 
 @pytest.mark.requires_native_linux_sandbox
 @pytest.mark.parametrize("name", ["project_glob", "project_grep"])
-@pytest.mark.parametrize("control", ["\t", "\n", "\r"])
-async def test_search_rejects_control_paths_before_filesystem_access(
+@pytest.mark.parametrize(
+    "path,denied_subtree",
+    [
+        ("sec\trets", "secrets"),
+        ("sec\nrets", "secrets"),
+        ("sec\rrets", "secrets"),
+        ("./secrets", "secrets"),
+        ("public/./secrets", "public/secrets"),
+    ],
+)
+async def test_search_rejects_normalizing_paths_before_filesystem_access(
     responses: ResponsesFixture,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     name: ExecutorToolName,
-    control: str,
+    path: str,
+    denied_subtree: str,
 ) -> None:
     async with ExecutorPeer(tmp_path / "remote").serve() as peer:
         monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
         project = peer.root / "project"
-        secrets = project / "secrets"
+        secrets = project / denied_subtree
         secrets.mkdir(parents=True)
-        private = "private control-path needle 927a"
+        private = "private normalized-path needle 927a"
         (secrets / "secret.txt").write_text(private + "\n")
-        path = f"sec{control}rets"
         approved_paths: list[str] = []
         request_index = 0
 
@@ -378,7 +387,10 @@ async def test_search_rejects_control_paths_before_filesystem_access(
             assert context.tool_name == name
             approved_paths.append(arguments["path"])
             request_index = len(peer.requests)
-            return arguments["path"].split("/")[0] != "secrets"
+            requested_path = arguments["path"]
+            return requested_path != denied_subtree and not requested_path.startswith(
+                denied_subtree + "/"
+            )
 
         result = await run_search(
             responses,

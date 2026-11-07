@@ -146,9 +146,10 @@ fn relative_path(value: &str) -> bool {
         && !value.starts_with('/')
         && !value.contains(['\\', ':'])
         && !value.chars().any(char::is_control)
-        && value
-            .split('/')
-            .all(|part| part != ".." && !part.is_empty())
+        && (value == "."
+            || value
+                .split('/')
+                .all(|part| !matches!(part, "" | "." | "..")))
 }
 fn glob(pattern: &str) -> Result<globset::GlobMatcher, ()> {
     if pattern.len() > 4096 || pattern.contains(['\\', '\0']) {
@@ -182,7 +183,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for Search {
     fn spec(&self) -> ToolSpec {
         let mut properties = json!({
             "pattern": {"type":"string", "description": if self.tool.grep() { "Case-sensitive Rust regular expression (no backtracking)." } else { "Case-sensitive glob, relative to the selected subtree." }},
-            "path": {"type":"string", "default":".", "description":"Relative subtree under the fixed project root; no absolute paths, parent components, URIs, backslashes or control characters."},
+            "path": {"type":"string", "default":".", "description":"Relative subtree under the fixed project root. Use '.' for the root; otherwise use nonempty components other than '.' or '..'. No absolute paths, URIs, backslashes or control characters."},
             "max_results": {"type":"integer", "minimum":1, "maximum":1000, "default":100}
         });
         if self.tool.grep() {
@@ -284,8 +285,8 @@ async fn search(
         root.clone()
     } else {
         match root.join(&args.path) {
-            Ok(path) => path,
-            Err(_) => {
+            Ok(path) if relative(root, &path).as_deref() == Some(args.path.as_str()) => path,
+            Ok(_) | Err(_) => {
                 result.error(&args.path, "invalid_path");
                 return result;
             }
@@ -519,22 +520,30 @@ mod tests {
         assert_eq!(result.truncation_reasons, vec!["max_results"]);
     }
     #[tokio::test]
-    async fn control_paths_cannot_select_a_different_subtree() {
+    async fn normalized_paths_cannot_select_a_different_subtree() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
         std::fs::create_dir(base.join("secrets")).unwrap();
         std::fs::write(base.join("secrets/secret.txt"), "private needle\n").unwrap();
+        std::fs::create_dir_all(base.join("public/secrets")).unwrap();
+        std::fs::write(base.join("public/secrets/secret.txt"), "private needle\n").unwrap();
         let root = PathUri::from_host_native_path(&base).unwrap();
         let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
-        for control in ['\t', '\n', '\r'] {
+        for path in [
+            "sec\trets",
+            "sec\nrets",
+            "sec\rrets",
+            "./secrets",
+            "public/./secrets",
+            "secrets/.",
+        ] {
             for tool in [SearchTool::ProjectGlob, SearchTool::ProjectGrep] {
-                let path = format!("sec{control}rets");
                 let result = search(
                     &fs,
                     &root,
                     tool,
                     Arguments {
-                        path: path.clone(),
+                        path: path.into(),
                         ..args(if tool.grep() { "needle" } else { "*" })
                     },
                 )
@@ -545,6 +554,58 @@ mod tests {
                 assert_eq!(result.errors[0].path, path);
                 assert_eq!(result.errors[0].code, "invalid_path");
             }
+        }
+    }
+
+    #[test]
+    fn literal_subtrees_round_trip_without_normalization() {
+        assert!(relative_path("."));
+        for uri in ["file:///project", "file:///C:/project"] {
+            let root = PathUri::parse(uri).unwrap();
+            assert_eq!(root.join(".").unwrap(), root);
+            for path in [
+                "secrets",
+                "public/secrets",
+                ".hidden",
+                "...",
+                "trailing.",
+                "space name",
+                "trailing space ",
+                "%2e",
+                "%2e%2e",
+                "C|/secrets",
+                "question?hash#percent%",
+                "unicodé/文件",
+            ] {
+                assert!(relative_path(path), "{path:?}");
+                assert_eq!(
+                    relative(&root, &root.join(path).unwrap()).as_deref(),
+                    Some(path)
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn drive_like_path_cannot_change_root_convention() {
+        let root = PathUri::parse("file:///").unwrap();
+        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
+        for tool in [SearchTool::ProjectGlob, SearchTool::ProjectGrep] {
+            let result = search(
+                &fs,
+                &root,
+                tool,
+                Arguments {
+                    path: "C|/secrets".into(),
+                    ..args(if tool.grep() { "needle" } else { "*" })
+                },
+            )
+            .await;
+            assert!(result.matches.is_empty());
+            assert!(!result.truncated);
+            assert_eq!(result.errors.len(), 1);
+            assert_eq!(result.errors[0].path, "C|/secrets");
+            assert_eq!(result.errors[0].code, "invalid_path");
         }
     }
 
