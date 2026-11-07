@@ -2690,31 +2690,26 @@ class Session(Generic[ContextT, OutputT]):
             if owned_provider:
                 assert provider is not None
                 await _close_after_error(error, provider.aclose)
-            if lease is not None:
-                try:
-                    lease.raise_if_interrupted(error)
-                except BaseException as interrupted:
-                    # The manager's own error is the one the caller receives.
-                    error = interrupted
-                    raise
-                finally:
-                    if (
-                        owned_provider
-                        and provider is not None
-                        and not vars(provider).get("_closed")
-                    ):
-                        # The manager may have exited while orphan home cleanup
-                        # still needs the implicit provider's supported aclose().
+            try:
+                if lease is not None:
+                    try:
+                        lease.raise_if_interrupted(error)
+                    except BaseException as interrupted:
+                        # The manager's own error is the one the caller receives.
+                        error = interrupted
+                        raise
+                raise
+            finally:
+                # Both the original error and a manager-selected replacement
+                # must retain the same existing owner for unfinished cleanup.
+                if (
+                    provider is not None
+                    and not vars(provider).get("_closed", False)
+                    and (owned_provider or opening.lease is not None)
+                ):
+                    cast(Any, error).cleanup = provider
+                    if owned_provider:
                         cast(Any, error).provider = provider
-            if (
-                provider is not None
-                and not vars(provider).get("_closed", False)
-                and (owned_provider or opening.lease is not None)
-            ):
-                cast(Any, error).cleanup = provider
-                if owned_provider:
-                    cast(Any, error).provider = provider
-            raise
 
     def __init__(
         self,
