@@ -35,7 +35,9 @@ The native runtime commits and flushes tool intent before dispatch. Python callb
 
 ## Recovery
 
-Close a failed Session before recovery. A missing receipt blocks reopening for automatic model or tool work, including repeated reopen attempts. Check the external system using the original turn and call IDs. When authoritative records establish the actual outcome, record the result with `storage.reconcile()`.
+Close a failed Session before recovery. A missing receipt blocks reopening for automatic model or tool work, including repeated reopen attempts. Reopening raises `LocalRecoveryRequired` with `calls`, `turns`, and `items` captured under the canonical writer lease, before Core starts. Each call includes its original thread, turn, and call IDs, name, and arguments. This also covers a process stop between durable native intent and the callback's application journal. Do not parse the opaque snapshot to obtain these identities.
+
+Check the external system using those original identities and your application business key. When authoritative records establish the actual outcome, record the result with `storage.reconcile()`. A missing application journal alone does not establish that an effect never happened. Failed-opening cleanup preserves the original recovery error and its records. If cleanup remains incomplete, retry through the captured provider's `aclose()` before reconciliation. A retained canonical failure can still be reported after physical writer release.
 
 In the following excerpt, `storage` is the same `CustomStorage` configuration, the IDs identify the unresolved call, and `verified_result` comes from your external-system check. Pass a string or a `ToolOutput` for error, image or mixed content; reconciliation uses the same conversion as an ordinary callback:
 
