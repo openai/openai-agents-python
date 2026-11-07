@@ -1970,11 +1970,11 @@ class Session(Generic[ContextT, OutputT]):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the command network policy"
                     )
-                if (
-                    saved.executor_policy_digest is None
-                    and executor is not None
-                    and (executor._is_local or executor.writable_roots is not None)
-                ):
+                recorded_strict = (
+                    saved.executor_policy_digest is not None
+                    and saved.executor_policy_digest != _IMPLICIT_REMOTE_EXECUTOR_POLICY_DIGEST
+                )
+                if recorded_strict != (executor is not None and executor.write_policy == "strict"):
                     raise ValueError(
                         "Checkpoint and Environment must agree on the applied executor policy"
                     )

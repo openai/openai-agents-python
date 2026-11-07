@@ -589,6 +589,7 @@ async def test_hosted_local_resume_admits_saved_model_before_executor_io(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
+        # The source has no Environment; keep this model-admission fixture in legacy mode.
         storage = LocalStorage(tmp_path / "profile")
         provider = NativeProvider(base_url=model.url, api_key="stored-hosted-fixture")
         async with provider:
@@ -609,7 +610,9 @@ async def test_hosted_local_resume_admits_saved_model_before_executor_io(
             if admitted:
                 model.respond(assistant_output("resumed receipt"))
                 async with destination.session(
-                    storage=storage, resume=identity, environment=declaration(executor)
+                    storage=storage,
+                    resume=identity,
+                    environment=declaration(executor, write_policy="legacy"),
                 ) as resumed:
                     assert resumed.id == identity
                     assert (await (await resumed.submit("continue")).get_result()).final_output == (
@@ -621,7 +624,9 @@ async def test_hosted_local_resume_admits_saved_model_before_executor_io(
             else:
                 with pytest.raises((ValueError, RuntimeError), match="hosted"):
                     async with destination.session(
-                        storage=storage, resume=identity, environment=declaration(executor)
+                        storage=storage,
+                        resume=identity,
+                        environment=declaration(executor, write_policy="legacy"),
                     ):
                         pytest.fail("Stored Lite must not admit a hosted executor")
                 assert executor.attempts == 0 and not executor.requests
@@ -753,6 +758,7 @@ async def test_portable_search_model_admission_precedes_executor_io(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
+        # The source has no Environment; keep this model-admission fixture in legacy mode.
         provider = NativeProvider(base_url=model.url, api_key="portable-search-fixture")
         async with provider:
             original = Agent(instructions="Act", model=saved_model, provider=provider)
@@ -772,11 +778,15 @@ async def test_portable_search_model_admission_precedes_executor_io(
                 programmatic_tool_calling=True,
             )
             if admitted:
-                async with restored.session(state=state, environment=declaration(executor)):
+                async with restored.session(
+                    state=state, environment=declaration(executor, write_policy="legacy")
+                ):
                     assert executor.attempts > 0
             else:
                 with pytest.raises((ValueError, RuntimeError), match="hosted"):
-                    async with restored.session(state=state, environment=declaration(executor)):
+                    async with restored.session(
+                        state=state, environment=declaration(executor, write_policy="legacy")
+                    ):
                         pytest.fail("Saved Lite model cannot use the destination hosted grant")
                 assert executor.attempts == 0 and not executor.requests
             assert len(model.requests) == count and not searches
@@ -792,6 +802,7 @@ async def test_hosted_portable_data_checked_before_executor_connect(
         ExecutorPeer(tmp_path / "remote").serve() as executor,
     ):
         trust(executor, tmp_path, monkeypatch)
+        # The source has no Environment; keep this model-admission fixture in legacy mode.
         provider = NativeProvider(base_url=model.url, api_key="portable-preflight-fixture")
         async with provider:
             original = Agent(instructions="Act", model="gpt-5.5", provider=provider)
@@ -816,14 +827,20 @@ async def test_hosted_portable_data_checked_before_executor_connect(
                 programmatic_tool_calling=True,
             )
             if corruption == "none":
-                async with restored.session(state=state, environment=declaration(executor)):
+                async with restored.session(
+                    state=state, environment=declaration(executor, write_policy="legacy")
+                ):
                     assert executor.attempts > 0
             else:
                 with pytest.raises((ValueError, RuntimeError)):
-                    async with restored.session(state=state, environment=declaration(executor)):
+                    async with restored.session(
+                        state=state, environment=declaration(executor, write_policy="legacy")
+                    ):
                         pytest.fail("Invalid native data must not admit a connection")
                 assert executor.attempts == 0 and not executor.requests
                 # A rejected restore did not create or reserve the portable root.
-                async with restored.session(state=good, environment=declaration(executor)):
+                async with restored.session(
+                    state=good, environment=declaration(executor, write_policy="legacy")
+                ):
                     assert executor.attempts > 0
             assert len(model.requests) == count and not searches

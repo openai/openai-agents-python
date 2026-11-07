@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import Annotated
 
@@ -15,14 +17,24 @@ from a2a.utils.errors import InvalidParamsError
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel, PlainSerializer
 
-from agents import Agent, FunctionTool, NativeOutput, NativeProvider, PromptedOutput, function_tool
+from agents import (
+    Agent,
+    Environment,
+    FunctionTool,
+    NativeOutput,
+    NativeProvider,
+    PromptedOutput,
+    function_tool,
+)
 from agents.a2a import A2ALimits, NativeA2AAgent, NativeA2ABinding, NativeA2AExecutor
 from tests.a2a_helpers import HostStore, call_context, invoke, request_context
 from tests.a2a_http import card
+from tests.native_executor_fixtures import ExecutorPeer
 from tests.native_fixtures import (
     assistant_output,
     function_call,
     responses as responses,
+    tool_output,
 )
 
 
@@ -58,6 +70,180 @@ async def test_native_completion_is_exact_official_snapshot(tmp_path, responses)
     recovered = await executor.recover(binding, call_context())
     assert recovered == record
     assert len(responses.requests) == 1
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("mode", ["same", "changed", "omitted"])
+async def test_current_trusted_environment_survives_a2a_suspend_and_resume(
+    tmp_path, responses, monkeypatch, mode
+):
+    async with ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        acquired, disposed, factories = 0, 0, 0
+        resumed = False
+        approved = []
+
+        @asynccontextmanager
+        async def environment():
+            nonlocal acquired, disposed
+            acquired += 1
+            phase = "resumed" if resumed else "initial"
+
+            def approval(context, arguments):
+                approved.append(f"{phase}:{context.call_id}")
+                return True
+
+            try:
+                yield Environment(
+                    url=peer.url,
+                    headers={"Authorization": "Bearer " + peer.token},
+                    cwd=str(peer.root),
+                    tools=["exec_command"],
+                    approval=approval,
+                    writable_roots=[str(extra)] if resumed and mode == "changed" else [],
+                )
+            finally:
+                disposed += 1
+
+        decision = FunctionTool(
+            name="decision", description="Choose.", input_type=Approval, output_type=bool
+        )
+        agent = Agent(
+            instructions="Inspect the workspace, ask, then inspect again.",
+            model="test-model",
+            provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+            tools=[decision],
+        )
+
+        def configure(binding, call_context):
+            nonlocal factories
+            factories += 1
+            return NativeA2AAgent(
+                agent=agent,
+                environment=None if resumed and mode == "omitted" else environment(),
+            )
+
+        executor = NativeA2AExecutor(agent_factory=configure, store=HostStore(tmp_path))
+        responses.respond(
+            function_call("exec_command", {"cmd": "pwd", "max_output_tokens": 100}, "before")
+        )
+        responses.respond(function_call("decision", {"reason": "synthetic"}, "decision"))
+        initial = request_context()
+        initial.message.metadata.update(
+            {"environment": {"cwd": "/peer-selected", "writable_roots": ["/"]}}
+        )
+        first, _ = await invoke(executor, initial)
+        assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+        assert len(responses.requests) == 2
+        assert str(peer.root) in tool_output(responses.requests[1], "before")
+        assert (acquired, disposed) == (1, 1)
+        assert approved == ["initial:before"]
+        proposal = MessageToDict(first.task.status.message.parts[0].data)
+        resumed = True
+        if mode == "same":
+            responses.respond(
+                function_call("exec_command", {"cmd": "pwd", "max_output_tokens": 100}, "after")
+            )
+            responses.respond(assistant_output("trusted workspace"))
+        completed, _ = await invoke(
+            executor,
+            request_context(
+                reply={
+                    "challenge": proposal["challenge"],
+                    "generation": proposal["generation"],
+                    "result": True,
+                },
+                current=first.task,
+            ),
+        )
+        assert factories == 2
+        assert completed.task.status.state == (
+            p.TASK_STATE_COMPLETED if mode == "same" else p.TASK_STATE_FAILED
+        )
+        assert len(responses.requests) == (4 if mode == "same" else 2)
+        if mode == "same":
+            assert str(peer.root) in tool_output(responses.requests[3], "after")
+            assert completed.task.artifacts[0].parts[0].text == "trusted workspace"
+        assert disposed == acquired
+        assert approved == (
+            ["initial:before", "resumed:after"] if mode == "same" else ["initial:before"]
+        )
+        starts = [request for request in peer.requests if request["method"] == "process/start"]
+        assert len(starts) == (2 if mode == "same" else 1)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        assert executor.store.read(binding).checkpoint is None
+        assert binding not in executor._live
+
+
+async def test_managed_environment_reopens_for_model_only_a2a_continuation(
+    tmp_path, responses, monkeypatch
+):
+    async with ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        acquired, disposed = 0, 0
+
+        @asynccontextmanager
+        async def environment():
+            nonlocal acquired, disposed
+            acquired += 1
+            try:
+                yield Environment(
+                    url=peer.url,
+                    cwd=str(peer.root),
+                    **(
+                        {"write_policy": "legacy"}
+                        if sys.platform == "win32"
+                        else {"writable_roots": []}
+                    ),
+                    headers={"Authorization": "Bearer " + peer.token},
+                    tools=["exec_command"],
+                )
+            finally:
+                await peer.wait_disconnected()
+                disposed += 1
+
+        decision = FunctionTool(
+            name="decision", description="Choose.", input_type=Approval, output_type=bool
+        )
+        agent = Agent(
+            instructions="Ask for a decision.",
+            model="test-model",
+            tools=[decision],
+            provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+        )
+        executor = NativeA2AExecutor(
+            agent_factory=lambda binding, context: NativeA2AAgent(
+                agent=agent, environment=environment()
+            ),
+            store=HostStore(tmp_path),
+        )
+        responses.respond(function_call("decision", {"reason": "synthetic"}, "decision"))
+        first, _ = await invoke(executor, request_context())
+        assert first.task.status.state == p.TASK_STATE_INPUT_REQUIRED
+        assert (acquired, disposed) == (1, 1)
+        assert any(tool.get("name") == "exec_command" for tool in responses.requests[0]["tools"])
+        proposal = MessageToDict(first.task.status.message.parts[0].data)
+        responses.respond(assistant_output("approved"))
+        completed, _ = await invoke(
+            executor,
+            request_context(
+                reply={
+                    "challenge": proposal["challenge"],
+                    "generation": proposal["generation"],
+                    "result": True,
+                },
+                current=first.task,
+            ),
+        )
+        assert completed.task.status.state == p.TASK_STATE_COMPLETED
+        assert completed.task.artifacts[0].parts[0].text == "approved"
+        assert (acquired, disposed) == (2, 2)
+        assert len(responses.requests) == 2
+        assert not [request for request in peer.requests if request["method"] == "process/start"]
 
 
 class ResultNode(BaseModel):
@@ -436,6 +622,191 @@ async def test_cancel_during_session_open_admits_no_submission(tmp_path, respons
     await queue.close(immediate=True)
     assert stored.task.status.state == p.TASK_STATE_CANCELED
     assert not responses.requests
+
+
+@pytest.mark.parametrize("resume", [False, True], ids=["initial", "manual-resume"])
+@pytest.mark.parametrize("rollback", ["normal", "late-entry", "failure"])
+async def test_cancel_interrupts_managed_environment_entry_and_joins_rollback(
+    tmp_path, responses, monkeypatch, resume, rollback
+):
+    import asyncio
+    from contextvars import ContextVar
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    from agents import _native
+
+    entered, rolling_back, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    owner_context = ContextVar("synthetic_environment_owner")
+    owners = []
+
+    @asynccontextmanager
+    async def environment():
+        owners.append(asyncio.current_task())
+        token = owner_context.set("managed-source")
+        try:
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                if rollback != "late-entry":
+                    raise
+                yield Environment(
+                    url="wss://executor.invalid", cwd="/workspace", write_policy="legacy"
+                )
+                return
+            finally:
+                assert owner_context.get() == "managed-source"
+                owners.append(asyncio.current_task())
+                rolling_back.set()
+                await release.wait()
+                if rollback == "failure":
+                    raise RuntimeError("synthetic-private-entry-rollback")
+        finally:
+            owner_context.reset(token)
+        # A model-only saved session may attach this explicit remote legacy profile.
+        yield Environment(url="wss://executor.invalid", cwd="/workspace", write_policy="legacy")
+
+    decision = FunctionTool(
+        name="approve", description="Host approval", input_type=Approval, output_type=str
+    )
+    agent = Agent(
+        instructions="Ask for approval.",
+        model="test-model",
+        provider=NativeProvider(base_url=responses.url, api_key="synthetic"),
+        tools=[decision],
+    )
+    selected = not resume
+    executor = NativeA2AExecutor(
+        agent_factory=lambda binding, context: NativeA2AAgent(
+            agent=agent, environment=environment() if selected else None
+        ),
+        store=HostStore(tmp_path),
+    )
+    context = request_context()
+    if resume:
+        responses.respond(function_call("approve", {"reason": "synthetic"}, "approval"))
+        waiting, _ = await invoke(executor, context)
+        proposal = MessageToDict(waiting.task.status.message.parts[0].data)
+        context = request_context(
+            current=waiting.task,
+            reply={
+                "challenge": proposal["challenge"],
+                "generation": proposal["generation"],
+                "result": "approved",
+            },
+        )
+        selected = True
+    requests_before = len(responses.requests)
+    acquisitions = []
+
+    def unexpected_acquisition(*args, **kwargs):
+        acquisitions.append(True)
+        pytest.fail("Canceled Environment entry acquired native work")
+
+    monkeypatch.setattr(_native, "create_engine", unexpected_acquisition)
+    monkeypatch.setattr(_native, "create_checkpoint_engine", unexpected_acquisition)
+    running = asyncio.create_task(invoke(executor, context))
+    queue = EventQueueSource()
+    canceling = []
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        canceling.append(asyncio.create_task(executor.cancel(context, queue)))
+        await asyncio.wait_for(rolling_back.wait(), 5)
+        canceling.append(asyncio.create_task(executor.cancel(context, queue)))
+        await asyncio.sleep(0)
+        assert not running.done() and all(not task.done() for task in canceling)
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        assert executor.store.read(binding).status == "running"
+        assert len(responses.requests) == requests_before and not acquisitions
+        release.set()
+        stored, _ = await asyncio.wait_for(running, 5)
+        cancellations = await asyncio.wait_for(
+            asyncio.gather(*canceling, return_exceptions=True), 5
+        )
+        if rollback == "failure":
+            assert all(isinstance(error, InvalidParamsError) for error in cancellations)
+            expected_status, expected_state = "failed", p.TASK_STATE_FAILED
+        else:
+            assert cancellations == [None, None]
+            expected_status, expected_state = "canceled", p.TASK_STATE_CANCELED
+        assert stored.task.status.state == expected_state
+        assert not stored.task.artifacts
+        saved = executor.store.read(binding)
+        assert (
+            saved.status == expected_status and saved.checkpoint is None and saved.challenge is None
+        )
+        assert saved.acknowledges(stored.task)
+        assert "synthetic-private-entry-rollback" not in str(stored.task)
+        assert binding not in executor._live
+        assert len(owners) == 2 and owners[0] is owners[1]
+        assert len(responses.requests) == requests_before and not acquisitions
+    finally:
+        release.set()
+        for task in (running, *canceling):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(running, *canceling, return_exceptions=True)
+        await queue.close(immediate=True)
+
+
+@pytest.mark.parametrize("explicit_cancel", [False, True])
+async def test_caller_cancellation_during_managed_entry_joins_rollback_and_propagates(
+    tmp_path, responses, explicit_cancel
+):
+    import asyncio
+
+    from a2a.server.events.event_queue_v2 import EventQueueSource
+
+    entered, rolling_back, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def environment():
+        try:
+            entered.set()
+            await asyncio.Event().wait()
+        finally:
+            rolling_back.set()
+            await release.wait()
+        yield Environment(url="wss://executor.invalid", cwd="/workspace", write_policy="legacy")
+
+    executor = make_executor(tmp_path, responses)
+    original = executor._factory
+    executor._factory = lambda binding, context: replace(
+        original(binding, context), environment=environment()
+    )
+    context = request_context()
+    queue = EventQueueSource()
+    running = asyncio.create_task(executor.execute(context, queue))
+    canceling = None
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        if explicit_cancel:
+            canceling = asyncio.create_task(executor.cancel(context, queue))
+            await asyncio.wait_for(rolling_back.wait(), 5)
+        running.cancel("synthetic-caller-cancel")
+        await asyncio.wait_for(rolling_back.wait(), 5)
+        await asyncio.sleep(0)
+        assert not running.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError) as canceled:
+            await asyncio.wait_for(running, 5)
+        if sys.version_info >= (3, 11):
+            assert canceled.value.args == ("synthetic-caller-cancel",)
+        if canceling is not None:
+            await asyncio.wait_for(canceling, 5)
+        assert not responses.requests
+        binding = NativeA2ABinding(principal="alice", task_id="task-a", context_id="context-a")
+        assert binding not in executor._live
+    finally:
+        release.set()
+        for task in (running, canceling):
+            if task is not None and not task.done():
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (running, canceling) if task is not None), return_exceptions=True
+        )
+        await queue.close(immediate=True)
 
 
 async def test_foreign_stale_and_repeated_answers_never_acquire_authority(tmp_path, responses):

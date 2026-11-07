@@ -216,6 +216,7 @@ jobs:
             "$python" -I -B -m pytest -q -o "pythonpath=$stage/packages/codex" -o asyncio_mode=auto \
             packages/codex/tests/test_canonical_storage.py packages/codex/tests/test_canonical_storage_example.py \
             packages/codex/tests/test_custom_storage_durability.py \
+            packages/codex/tests/test_checkpoint_upgrades.py \
             packages/codex/tests/test_native_local_descendant_receipts.py::test_local_descendant_admission_checks_receipts_without_resuming_work \
             packages/codex/tests/test_native_local_descendant_receipts.py::test_local_reopen_refuses_cold_active_child_without_tool_receipt
           if [[ "$RUNNER_OS" == "Linux" ]]; then
@@ -288,9 +289,10 @@ jobs:
           """.split())
           env = {key: value for key, value in os.environ.items() if key.upper() in keep}
           subprocess.run(
-              [stage / "venv/Scripts/python.exe", "-I", "-B", "-c",
-               "import os, sys, pytest; sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
-               "sys.exit(pytest.main(['-q', 'packages/codex/tests/qualification/unix_peer_approval.py']))"],
+              [stage / "venv/Scripts/python.exe", "-I", "-B", "-u", "-c",
+               "import faulthandler, os, sys; faulthandler.dump_traceback_later(45); "
+               "import pytest; sys.path.insert(0, os.path.join(os.getcwd(), 'packages/codex')); "
+               "sys.exit(pytest.main(['-vv', '-s', 'packages/codex/tests/qualification/unix_peer_approval.py']))"],
               cwd=stage, env=env, check=True, timeout=90,
           )
           subprocess.run(

@@ -841,7 +841,9 @@ async def test_idle_saved_subset_restores_without_native_agents(tmp_path, monkey
         )
         model.replies.append(message("selected result"))
         async with source.session(
-            context=Application("source-record"), environment=declaration(executor)
+            context=Application("source-record"),
+            # The destination drops its Environment along with NativeAgents.
+            environment=declaration(executor, write_policy="legacy"),
         ) as session:
             await (await session.submit("Select first.", tools=[first, *fixed])).get_result()
             # Capture a legacy selected generation without republishing save defaults.

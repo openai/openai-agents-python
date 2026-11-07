@@ -24,9 +24,12 @@ from google.protobuf.json_format import MessageToDict, ParseDict
 from google.protobuf.struct_pb2 import Value
 from pydantic import TypeAdapter
 
+from .._compat import cancel_once
 from .._function_tools import FunctionTool
+from .._lifecycle import _close_after_error, _error_contexts, _join
 from .._trace_context import TraceContext, _trace_context
 from ..agent import Agent
+from ..executor import EnvironmentSource
 from ..manual import (
     ActionRequested,
     _CapturedManual,
@@ -126,11 +129,19 @@ class NativeA2AStore(VersionedTaskStore):
 
 @dataclass(frozen=True, kw_only=True, repr=False)
 class NativeA2AAgent:
-    """Current host configuration; never reconstructed from peer or saved metadata."""
+    """Current host configuration, re-evaluated on every execution and resume.
+
+    Peer and saved metadata never supply authority. Session owns Environment
+    acquisition, policy matching and cleanup, including current Environment
+    callbacks. Portable checkpoints with active RunBudget or root prepare_request
+    and before_step callbacks are unsupported; use Agent/Session directly for
+    those profiles. Return a fresh managed context manager on each factory call.
+    """
 
     agent: Agent[Any, Any]
     context: object = None
     parent_trace: TraceContext | Mapping[str, str | None] | None = None
+    environment: EnvironmentSource[Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "parent_trace", _trace_context(self.parent_trace))
@@ -140,6 +151,7 @@ class NativeA2AAgent:
 class _Live:
     done: asyncio.Event = field(default_factory=asyncio.Event)
     session: Any = None
+    opening: asyncio.Task[Any] | None = None
     canceled: bool = False
 
 
@@ -419,18 +431,28 @@ class NativeA2AExecutor(AgentExecutor):
                         event_queue,
                         status="running",
                     )
-                    record = await self._run(
-                        configured,
-                        binding,
-                        state,
-                        reply,
-                        prompt,
-                        live,
-                        lease,
-                        record,
-                        projection,
-                        event_queue,
+                    # Keep Session entry, body and exit in one owned task. Caller
+                    # cancellation joins it without consuming the caller's error.
+                    work = asyncio.create_task(
+                        self._run(
+                            configured,
+                            binding,
+                            state,
+                            reply,
+                            prompt,
+                            live,
+                            lease,
+                            record,
+                            projection,
+                            event_queue,
+                        )
                     )
+                    try:
+                        record = await asyncio.shield(work)
+                    except BaseException as error:
+                        cancel_once(work)
+                        await _close_after_error(error, lambda: _join(work))
+                        raise
                 except Exception:
                     # Never erase a committed waiting/completed publication on enqueue failure.
                     latest = await self._load(lease, binding)
@@ -483,101 +505,124 @@ class NativeA2AExecutor(AgentExecutor):
         output_type = configured.agent.output_type
         result, captured = None, None
         if not live.canceled:
-            options: dict[str, Any] = {"context": configured.context, "state": state}
+            options: dict[str, Any] = {
+                "context": configured.context,
+                "state": state,
+                "environment": configured.environment,
+            }
             if configured.parent_trace is not None:
                 options["parent_trace"] = configured.parent_trace
-            async with configured.agent.session(**options) as session:
-                live.session = session
-                try:
-                    if not live.canceled:
-                        turn = (
-                            session.restored_turn
-                            if state is not None
-                            else await session.submit(prompt)
-                        )
-                        if turn is None:
-                            raise ValueError("Expected pending native root turn")
-                        if state is not None:
-                            requests = await session.pending_interactions()
-                            request = next(
-                                (
-                                    request
-                                    for request in requests
-                                    if isinstance(request, ActionRequested)
-                                    and request.subagent_id is None
-                                    and reply is not None
-                                    and request.name == reply.declaration.name
-                                    and request.call_id == reply.call_id
-                                ),
-                                None,
-                            )
-                            if request is None or reply is None:
-                                raise ValueError(
-                                    "Checkpoint does not match the current manual declaration"
-                                )
-                            if not live.canceled:
-                                await session._respond(request, prepared=reply)
+            live.opening = asyncio.current_task()
+            try:
+                async with configured.agent.session(**options) as session:
+                    live.opening = None
+                    live.session = session
+                    try:
                         if not live.canceled:
-                            progress = asyncio.create_task(
-                                self._progress(turn, binding, projection, queue)
+                            turn = (
+                                session.restored_turn
+                                if state is not None
+                                else await session.submit(prompt)
                             )
-                            try:
-                                outcome = await turn.wait_for_request_or_result()
-                                if isinstance(outcome, PendingRequests):
-                                    if (
-                                        len(outcome.requests) != 1
-                                        or not isinstance(outcome.requests[0], ActionRequested)
-                                        or outcome.requests[0].subagent_id is not None
-                                    ):
-                                        raise ValueError(
-                                            "Only one settled root manual request is supported"
-                                        )
-                                    request = outcome.requests[0]
-                                    arguments = (
-                                        request.arguments.model_dump(mode="json")
-                                        if hasattr(request.arguments, "model_dump")
-                                        else request.arguments
+                            if turn is None:
+                                raise ValueError("Expected pending native root turn")
+                            if state is not None:
+                                requests = await session.pending_interactions()
+                                request = next(
+                                    (
+                                        request
+                                        for request in requests
+                                        if isinstance(request, ActionRequested)
+                                        and request.subagent_id is None
+                                        and reply is not None
+                                        and request.name == reply.declaration.name
+                                        and request.call_id == reply.call_id
+                                    ),
+                                    None,
+                                )
+                                if request is None or reply is None:
+                                    raise ValueError(
+                                        "Checkpoint does not match the current manual declaration"
                                     )
-                                    _json(arguments, self.limits.message_bytes)
-                                    if not live.canceled:
-
-                                        def before_seal() -> None:
-                                            live.session = None
-
-                                        suspended_state = await session._suspend(
-                                            before_seal=before_seal
-                                        )
-                                        continuation = suspended_state.native_continuation
+                                if not live.canceled:
+                                    await session._respond(request, prepared=reply)
+                            if not live.canceled:
+                                progress = asyncio.create_task(
+                                    self._progress(turn, binding, projection, queue)
+                                )
+                                try:
+                                    outcome = await turn.wait_for_request_or_result()
+                                    if isinstance(outcome, PendingRequests):
                                         if (
-                                            continuation is None
-                                            or len(continuation.pending_manual) != 1
-                                            or continuation.pending_manual[0].call_id
-                                            != request.call_id
-                                            or continuation.pending_manual[0].tool != request.name
+                                            len(outcome.requests) != 1
+                                            or not isinstance(outcome.requests[0], ActionRequested)
+                                            or outcome.requests[0].subagent_id is not None
                                         ):
                                             raise ValueError(
                                                 "Only one settled root manual request is supported"
                                             )
-                                        checkpoint = suspended_state.to_json()
-                                        if len(checkpoint.encode()) > self.limits.checkpoint_bytes:
-                                            raise ValueError(
-                                                "Native checkpoint exceeds configured byte limit"
-                                            )
-                                        captured = (
-                                            checkpoint,
-                                            request.name,
-                                            arguments,
+                                        request = outcome.requests[0]
+                                        arguments = (
+                                            request.arguments.model_dump(mode="json")
+                                            if hasattr(request.arguments, "model_dump")
+                                            else request.arguments
                                         )
-                                else:
-                                    result = await turn.get_result()
-                            except (TurnStoppedError, _ManualBoundaryLost):
-                                if not live.canceled:
-                                    raise
-                            finally:
-                                progress.cancel()
-                                await asyncio.gather(progress, return_exceptions=True)
-                finally:
-                    live.session = None
+                                        _json(arguments, self.limits.message_bytes)
+                                        if not live.canceled:
+
+                                            def before_seal() -> None:
+                                                live.session = None
+
+                                            suspended_state = await session._suspend(
+                                                before_seal=before_seal
+                                            )
+                                            continuation = suspended_state.native_continuation
+                                            if (
+                                                continuation is None
+                                                or len(continuation.pending_manual) != 1
+                                                or continuation.pending_manual[0].call_id
+                                                != request.call_id
+                                                or continuation.pending_manual[0].tool
+                                                != request.name
+                                            ):
+                                                raise ValueError(
+                                                    "Only one settled root manual "
+                                                    "request is supported"
+                                                )
+                                            checkpoint = suspended_state.to_json()
+                                            if (
+                                                len(checkpoint.encode())
+                                                > self.limits.checkpoint_bytes
+                                            ):
+                                                raise ValueError(
+                                                    "Native checkpoint exceeds "
+                                                    "configured byte limit"
+                                                )
+                                            captured = (
+                                                checkpoint,
+                                                request.name,
+                                                arguments,
+                                            )
+                                    else:
+                                        result = await turn.get_result()
+                                except (TurnStoppedError, _ManualBoundaryLost):
+                                    if not live.canceled:
+                                        raise
+                                finally:
+                                    progress.cancel()
+                                    await asyncio.gather(progress, return_exceptions=True)
+                    finally:
+                        live.session = None
+            except asyncio.CancelledError as error:
+                if not live.canceled:
+                    raise
+                # Entry rollback retains cleanup failures under cancellation.
+                # An explicit CancelTask cannot turn those failures into success.
+                for cleanup_error in _error_contexts(error.__context__):
+                    if not isinstance(cleanup_error, asyncio.CancelledError):
+                        raise cleanup_error from None
+            finally:
+                live.opening = None
         if live.canceled:
             return await self._commit(
                 lease,
@@ -685,6 +730,9 @@ class NativeA2AExecutor(AgentExecutor):
         if live is not None:
             live.canceled = True
             try:
+                opening = live.opening
+                if opening is not None:
+                    cancel_once(opening)
                 session = live.session
                 # Checkpoint ownership joins sealing; its preceding drain remains interruptible.
                 if session is not None and session._checkpoint_task is None:

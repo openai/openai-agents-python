@@ -542,6 +542,7 @@ async def test_restore_uses_current_root_and_current_search_grants(
         (second / "second.txt").write_text("needle second\n")
         # The implicit remote workspace may move on restore; strict local policies may not.
         selected = Environment(
+            write_policy="legacy",
             url=peer.url,
             cwd=str(first),
             tools=["project_grep"],

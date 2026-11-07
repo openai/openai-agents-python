@@ -289,10 +289,16 @@ async def test_one_agent_uses_two_concurrent_environments_and_closes_only_its_ow
             ],
         )
         left_env = Environment(
-            url=left.url, cwd=str(left.root), headers={"Authorization": "Bearer " + left.token}
+            url=left.url,
+            cwd=str(left.root),
+            headers={"Authorization": "Bearer " + left.token},
+            **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
         )
         right_env = Environment(
-            url=right.url, cwd=str(right.root), headers={"Authorization": "Bearer " + right.token}
+            url=right.url,
+            cwd=str(right.root),
+            headers={"Authorization": "Bearer " + right.token},
+            **({"write_policy": "legacy"} if sys.platform == "win32" else {}),
         )
         left_session, right_session = await asyncio.gather(
             left_owner.enter_async_context(agent.session(environment=left_env)),

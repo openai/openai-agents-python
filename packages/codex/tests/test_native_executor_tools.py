@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Literal
@@ -90,6 +91,8 @@ async def test_selected_remote_process_uses_wss_and_current_directory(
 
 
 def declaration(peer: ExecutorPeer, **kwargs: Any) -> Environment:
+    if sys.platform == "win32" and "writable_roots" not in kwargs:
+        kwargs.setdefault("write_policy", "legacy")
     return Environment(
         url=peer.url,
         cwd=str(peer.root),
@@ -300,7 +303,10 @@ async def test_current_credentials_roots_and_restored_authority(
         roots.write_bytes(one.ca.read_bytes() + two.ca.read_bytes())
         monkeypatch.setenv("SSL_CERT_FILE", str(roots))
         monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
-        first, second = declaration(one), declaration(two)
+        first, second = (
+            declaration(one, write_policy="legacy"),
+            declaration(two, write_policy="legacy"),
+        )
         agent = Agent(instructions="Use current tools.", provider=provider(responses))
         async with agent.session(environment=first) as a, agent.session(environment=second) as b:
             for session, peer, call_id in ((a, one, "one"), (b, two, "two")):

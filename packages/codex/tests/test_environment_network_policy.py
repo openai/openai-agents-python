@@ -258,7 +258,8 @@ async def test_manual_checkpoint_binds_admitted_executor_tools(
             cwd=str(executor.root),
             tools=["exec_command"],
             headers={"Authorization": "Bearer " + executor.token},
-            writable_roots=[] if mode == "strict" else None,
+            writable_roots=[] if mode in ("strict", "default") else None,
+            write_policy="strict" if mode in ("strict", "default") else "legacy",
             network=NetworkPolicy(allow_all_unix_sockets=True) if mode == "network" else None,
         )
         model.respond(function_call("lookup", {"key": "A"}, "call-A"))
@@ -333,7 +334,8 @@ async def test_checkpoint_requires_explicit_strict_writes_even_without_extra_roo
             saved = await session.save_state()
         with pytest.raises(ValueError, match="agree on the applied executor policy"):
             async with agent.session(
-                state=saved, environment=replace(selected, writable_roots=None)
+                state=saved,
+                environment=replace(selected, write_policy="legacy", writable_roots=None),
             ):
                 pytest.fail("Opened a checkpoint with legacy write permissions")
         extra = executor.root / "replacement"
@@ -350,6 +352,10 @@ async def test_checkpoint_requires_explicit_strict_writes_even_without_extra_roo
                 pytest.fail("Opened a strict checkpoint without its policy identity")
         assert len(executor.requests) == before
         async with agent.session(state=saved, environment=selected) as restored:
+            assert restored.id == saved.source_session_id
+        async with agent.session(
+            state=saved, environment=replace(selected, writable_roots=None)
+        ) as restored:
             assert restored.id == saved.source_session_id
 
 
@@ -369,12 +375,19 @@ async def test_local_resume_matches_recorded_write_mode(
         # Host storage and remote executor paths are separate namespaces.
         storage = LocalStorage(executor.root / "profile")
         implicit = Environment(
+            write_policy="legacy",
             url=executor.url,
             cwd=str(executor.root),
             tools=["exec_command"],
             headers={"Authorization": "Bearer " + executor.token},
         )
-        strict = replace(implicit, writable_roots=[])
+        strict = replace(implicit, write_policy="strict", writable_roots=[])
+        default_strict = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+        )
         source, changed = (strict, implicit) if recorded_mode == "strict" else (implicit, strict)
         model.respond(assistant_output("original"))
         async with agent.session(storage=storage, environment=source) as session:
@@ -385,6 +398,12 @@ async def test_local_resume_matches_recorded_write_mode(
             storage=storage, resume=session_id, environment=source
         ) as reopened:
             assert reopened.id == session_id
+
+        if recorded_mode == "strict":
+            async with agent.session(
+                storage=storage, resume=session_id, environment=default_strict
+            ) as reopened:
+                assert reopened.id == session_id
 
         [rollout] = (storage.path / "sessions").rglob(f"*{session_id}.jsonl")
         rows = [json.loads(line) for line in rollout.read_text().splitlines()]
@@ -400,9 +419,14 @@ async def test_local_resume_matches_recorded_write_mode(
             del receipt["strict_executor_writes"]
             rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
             async with agent.session(
-                storage=storage, resume=session_id, environment=changed
+                storage=storage, resume=session_id, environment=implicit
             ) as reopened:
                 assert reopened.id == session_id
+            with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
+                async with agent.session(
+                    storage=storage, resume=session_id, environment=default_strict
+                ):
+                    pytest.fail("Upgraded a legacy receipt to strict writes")
         else:
             with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
                 async with agent.session(storage=storage, resume=session_id, environment=changed):
@@ -465,7 +489,7 @@ async def test_local_resume_requires_explicit_strict_writes_even_without_extra_r
             async with agent.session(
                 storage=storage,
                 resume=session_id,
-                environment=replace(selected, writable_roots=None),
+                environment=replace(selected, write_policy="legacy", writable_roots=None),
             ):
                 pytest.fail("Reopened a Session with legacy write permissions")
         assert len(model.requests) == 2
@@ -545,7 +569,11 @@ async def test_local_resume_rejects_incomplete_strict_executor_receipt(
             rows = [row for row in rows if row["payload"].get("sdk_receipt") is not first]
         rollout.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-        for environment in (None, selected, replace(selected, writable_roots=None)):
+        for environment in (
+            None,
+            selected,
+            replace(selected, write_policy="legacy", writable_roots=None),
+        ):
             with pytest.raises(RuntimeError, match="recorded executor write and network policy"):
                 async with agent.session(
                     storage=storage, resume=session_id, environment=environment
@@ -571,6 +599,7 @@ async def test_local_resume_without_executor_receipts(
         agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
         storage = LocalStorage(tmp_path / "profile")
         implicit = Environment(
+            write_policy="legacy",
             url=executor.url,
             cwd=str(executor.root),
             tools=["exec_command"],
@@ -578,7 +607,11 @@ async def test_local_resume_without_executor_receipts(
         )
         extra = tmp_path / "extra"
         extra.mkdir()
-        strict = replace(implicit, writable_roots=[str(extra)] if history == "strict_extra" else [])
+        strict = replace(
+            implicit,
+            write_policy="strict",
+            writable_roots=[str(extra)] if history == "strict_extra" else [],
+        )
         source: Environment[Any] | None = implicit
         if history == "model_only":
             source = None
@@ -658,6 +691,7 @@ async def test_local_resume_allows_implicit_remote_workspace_to_move(
         storage = LocalStorage(tmp_path / "profile")
         network = NetworkPolicy(allow_all_unix_sockets=True) if explicit_network else None
         original = Environment(
+            write_policy="legacy",
             url=executor.url,
             cwd=str(executor.root),
             tools=["exec_command"],
@@ -746,6 +780,7 @@ async def test_local_resume_can_drop_an_implicit_remote_executor(
         agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
         storage = LocalStorage(tmp_path / "profile")
         selected = Environment(
+            write_policy="legacy",
             url=executor.url,
             cwd=str(executor.root),
             tools=["exec_command"],
@@ -772,7 +807,7 @@ async def test_local_resume_can_drop_an_implicit_remote_executor(
             async with agent.session(
                 storage=storage,
                 resume=session_id,
-                environment=replace(selected, writable_roots=[]),
+                environment=replace(selected, write_policy="strict", writable_roots=[]),
             ):
                 pytest.fail("Reopened a model-only Session with strict write grants")
         changed_network = None if explicit_network else NetworkPolicy(allow_all_unix_sockets=True)
@@ -1101,3 +1136,132 @@ async def test_linux_network_policy_enforces_proxy_and_blocks_direct_access(
         await agent.run("Run the probe.", environment=environment)
         assert "Process exited with code 0" in tool_output(responses.requests[-1], "probe")
         assert received == [allowed]
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+async def test_default_strict_rejects_unsupported_remote_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote", advertised_platform="windows").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        with pytest.raises(
+            RuntimeError, match="strict executor write policy requires a Linux or macOS executor"
+        ):
+            async with agent.session(
+                environment=Environment(
+                    url=executor.url,
+                    cwd=str(executor.root),
+                    headers={"Authorization": "Bearer " + executor.token},
+                )
+            ):
+                pytest.fail("Opened a strict Environment on an unsupported executor")
+        assert not model.requests
+        assert not any(request.get("method") == "process/start" for request in executor.requests)
+
+
+# Strict file effects launch the real platform filesystem sandbox.
+@(
+    pytest.mark.requires_native_linux_sandbox
+    if sys.platform == "linux"
+    else pytest.mark.requires_native_macos_sandbox
+)
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+async def test_default_strict_allows_workspace_patch_but_denies_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        inside, outside = executor.root / "allowed.txt", tmp_path / "denied.txt"
+        for path, call_id in ((Path("allowed.txt"), "inside"), (outside, "outside")):
+            model.respond(
+                {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "custom_tool_call",
+                        "name": "apply_patch",
+                        "call_id": call_id,
+                        "input": (
+                            f"*** Begin Patch\n*** Add File: {path}\n"
+                            "+synthetic-policy-effect\n*** End Patch"
+                        ),
+                    },
+                }
+            )
+        model.respond(assistant_output("done"))
+        agent = Agent(
+            instructions="Apply patches.",
+            model="gpt-5.5",
+            provider=model.provider(websocket=False),
+        )
+        async with agent.session(
+            environment=Environment(
+                url=executor.url,
+                cwd=str(executor.root),
+                tools=["apply_patch"],
+                headers={"Authorization": "Bearer " + executor.token},
+            )
+        ) as session:
+            assert (
+                await (await session.submit("Apply patches.")).get_result()
+            ).final_output == "done"
+        assert any(
+            tool.get("type") == "custom" and tool.get("name") == "apply_patch"
+            for tool in model.requests[0].get("tools", [])
+        )
+        assert inside.exists(), tool_output(model.requests[1], "inside", "custom_tool_call_output")
+        assert inside.read_text() == "synthetic-policy-effect\n"
+        assert (
+            "patch rejected"
+            in tool_output(model.requests[2], "outside", "custom_tool_call_output").lower()
+        )
+        assert not outside.exists()
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="requires a POSIX executor")
+async def test_saved_legacy_checkpoint_requires_explicit_legacy_before_executor_acquisition(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with (
+        timeout(30),
+        ExecutorPeer(tmp_path / "remote").serve() as executor,
+        model_peer() as model,
+    ):
+        monkeypatch.setenv("SSL_CERT_FILE", str(executor.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        agent = Agent(instructions="Answer.", provider=model.provider(websocket=False))
+        selected = Environment(
+            url=executor.url,
+            cwd=str(executor.root),
+            tools=["exec_command"],
+            headers={"Authorization": "Bearer " + executor.token},
+            write_policy="legacy",
+        )
+        async with agent.session(environment=selected) as session:
+            saved = SessionState.from_json((await session.save_state()).to_json())
+        attempts = executor.attempts
+        with pytest.raises(ValueError, match="agree on the applied executor policy"):
+            async with agent.session(
+                state=saved,
+                environment=Environment(
+                    url=executor.url,
+                    cwd=str(executor.root),
+                    tools=["exec_command"],
+                    headers={"Authorization": "Bearer " + executor.token},
+                ),
+            ):
+                pytest.fail("Opened legacy state with the strict default")
+        assert executor.attempts == attempts
+        async with agent.session(state=saved, environment=selected) as reopened:
+            assert reopened.id == saved.source_session_id
+        assert not model.requests
