@@ -547,6 +547,14 @@ After closing the Session, [reopen the local conversation](state.md#reopen-a-con
 
 ## Retry incomplete cleanup
 
-Use `async with agent.session()` as the normal Session lifetime. If cleanup fails before all resources retire, the original error exposes its remaining owner as `error.cleanup`. Call `await error.cleanup.aclose()` to retry complete cleanup. For an admitted Session, this retries native retirement and then joins the same Environment task that entered the original manager. For failed opening, the owner is the existing NativeProvider. The error's original type and object stay primary; linked cleanup errors remain available through its exception context.
+Use `async with agent.session()` as the normal Session lifetime. If cleanup fails before all resources retire, the original error can retain its remaining cleanup owner. The SDK preserves arbitrary primary exception types, so inspect the optional capability with `getattr`:
 
-A retained Session also exposes idempotent `await session.aclose()`. Successful repeated calls do nothing. An interrupted waiter still joins owned cleanup before cancellation propagates. After a failed `run_sync()`, host code outside an event loop can call `asyncio.run(error.cleanup.aclose())`; the cleanup owner keeps and drives the original run loop until its remaining resources retire. Do not discard a failed cleanup owner or retry the business operation before checking its effects.
+```python
+cleanup = getattr(error, "cleanup", None)
+if cleanup is not None:
+    await cleanup.aclose()
+```
+
+Retain that owner until cleanup succeeds. If another attempt fails, retain both the primary error and the owner for a later retry. The public `aclose()` method retries complete cleanup. For an admitted Session, this retries native retirement and then joins the same Environment task that entered the original manager. For failed opening, the owner is the existing NativeProvider. The error's original type and object stay primary; linked cleanup errors remain available through its exception context.
+
+A retained Session also exposes idempotent `await session.aclose()`. Successful repeated calls do nothing. An interrupted waiter still joins owned cleanup before cancellation propagates. After a failed `run_sync()`, host code outside an event loop can capture `cleanup = getattr(error, "cleanup", None)` and call `asyncio.run(cleanup.aclose())` only when `cleanup is not None`; the cleanup owner keeps and drives the original run loop until its remaining resources retire. Do not discard a failed cleanup owner or retry the business operation before checking its effects.
