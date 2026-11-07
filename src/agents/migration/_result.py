@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Coroutine, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
+from functools import partial
 from typing import Any, Generic, TypeVar, cast
 
 from openai.types.responses import (
@@ -184,6 +185,7 @@ class SDKRunHandle(Generic[ContextT]):
 
     def __init__(self, run: Coroutine[Any, Any, SDKRunResult[ContextT]]) -> None:
         self._cancel_requested = False
+        self._cancelled_error: asyncio.CancelledError | None = None
         self._task = asyncio.create_task(run)
         # A run can settle without an event reader. Retain the exception on the
         # task for get_result()/replay_events() without logging an orphan failure.
@@ -211,14 +213,34 @@ class SDKRunHandle(Generic[ContextT]):
             self._task.cancel()
 
     def _result(self) -> SDKRunResult[ContextT]:
+        if self._task.cancelled():
+            if self._cancelled_error is None:
+                try:
+                    self._task.result()
+                except asyncio.CancelledError as error:
+                    # Later task reads can manufacture a new cancellation and
+                    # lose the original error's public cleanup capability.
+                    self._cancelled_error = error
+            assert self._cancelled_error is not None
+            raise self._cancelled_error
         result = self._task.result()
         # The execution owner may finish an awaited operation that suppressed cancellation.
         if self._cancel_requested:
             raise asyncio.CancelledError
         return result
 
-    async def _settle(self) -> None:
-        await self._task
+    async def _settle(self, primary: BaseException) -> None:
+        try:
+            await self._task
+        except BaseException as error:
+            if isinstance(error, asyncio.CancelledError):
+                error = self._cancelled_error or error
+                self._cancelled_error = error
+            for attribute in ("cleanup", "provider"):
+                owner = getattr(error, attribute, None)
+                if owner is not None:
+                    setattr(primary, attribute, owner)
+            raise
 
     async def get_result(self) -> SDKRunResult[ContextT]:
         """Await settlement. Cancelling this wait stops and joins the run."""
@@ -228,7 +250,7 @@ class SDKRunHandle(Generic[ContextT]):
             if self._task.cancelled():
                 return self._result()
             self.cancel()
-            await _close_after_error(error, self._settle)
+            await _close_after_error(error, partial(self._settle, error))
             raise
         return self._result()
 

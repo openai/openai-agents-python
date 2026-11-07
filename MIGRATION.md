@@ -287,6 +287,8 @@ Classic Runner traces are not preserved. The adapter calls the selected Model wi
 
 To cancel, cancel the task awaiting `SDKRunner.run` and await that task's completion. The runner closes its response endpoint and native Session. During cancellation or failure, it waits for every started tool invocation to finish, including asynchronous tools. Runner cancellation does not cancel those tool invocations. A tool that never finishes can prevent cleanup from completing. A Model that suppresses cancellation can also delay cleanup.
 
+If native cleanup fails, the original error can carry a retry owner. In your error handler, retain `cleanup = getattr(error, "cleanup", None)`. If `cleanup is not None`, await `cleanup.aclose()` and retain that owner if the retry fails. After admission, this Session also closes the migration-owned native provider. The adapter still leaves your application Model and its provider open.
+
 Your application remains responsible for background work that its callbacks start independently. Cancellation and failure do not undo tool effects. Reconcile those effects before restarting a failed workflow.
 
 ## Move a workflow fully to the native API
