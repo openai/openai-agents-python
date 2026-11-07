@@ -6,8 +6,25 @@ from contextvars import ContextVar
 from typing import TypeVar
 
 _MODEL_RUN_OWNER: ContextVar[object | None] = ContextVar("model_run_owner", default=None)
+_JOIN_MODEL_STREAM_CLEANUP: ContextVar[bool] = ContextVar(
+    "join_model_stream_cleanup", default=False
+)
 
 T = TypeVar("T")
+
+
+@contextmanager
+def joined_model_stream_cleanup() -> Iterator[None]:
+    """Join built-in stream cleanup for this invocation instead of detaching it."""
+    token = _JOIN_MODEL_STREAM_CLEANUP.set(True)
+    try:
+        yield
+    finally:
+        _JOIN_MODEL_STREAM_CLEANUP.reset(token)
+
+
+def should_join_model_stream_cleanup() -> bool:
+    return _JOIN_MODEL_STREAM_CLEANUP.get()
 
 
 @contextmanager

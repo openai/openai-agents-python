@@ -47,7 +47,7 @@ print(result.final_output)
 
 These fragments assume you already created `agent` and `app_context`. Do not pass a Classic Agent directly to the native `agents.Agent` API or mix native tools into the Classic Agent.
 
-Set `agent.model` explicitly. If it is a model name rather than a Model object, pass its Classic ModelProvider through `model_provider=provider`. You can reuse the provider from your Classic `RunConfig`. For example, with your existing OpenAI credentials:
+Select a Model explicitly, either on `agent.model` or with the per-run `model` argument. A non-`None` run argument takes precedence over the Agent. If the selected value is a name rather than a Model object, pass its Classic ModelProvider through `model_provider=provider`. You can reuse the provider from your Classic `RunConfig`. An explicit Model object does not use a provider; omit `model_provider` in that case. For example, with your existing OpenAI credentials:
 
 ```python
 from agents.classic import OpenAIProvider
@@ -58,6 +58,8 @@ try:
 finally:
     await provider.aclose()
 ```
+
+Pass a `ModelSettings` object or dictionary as `model_settings` to override the Agent settings through Classic `ModelSettings.resolve`. If the Agent still uses implicit settings, defaults follow the selected model. Explicit settings and application edits are preserved before applying the run override. The adapter validates supplied settings before provider lookup and effective settings before model execution.
 
 The adapter does not choose a provider or change your model credentials. It borrows the Model and ModelProvider. Your application remains responsible for their resources, including any client you supply.
 
@@ -89,7 +91,9 @@ It needs no model credentials and makes no external model requests. Its scripted
 | Handoffs and agents used as tools | Unsupported |
 | Custom tool-use behavior | Unsupported; keep `tool_use_behavior="run_llm_again"` and `reset_tool_choice=True` |
 | MCP, hosted tools, sandbox tools, voice, or realtime | Unsupported |
-| Buffered semantic events | Use `SDKRunner.run_streamed()` inside async code |
+| Model streaming | Pass `model_invocation="stream"` to call `Model.stream_response`; the default `"response"` calls `Model.get_response` |
+| Live raw Model events | In stream mode, pass a synchronous `on_model_event` observer; these events are provisional |
+| Buffered semantic events | Use `SDKRunner.run_streamed()` inside async code; these events remain buffered in either Model invocation mode |
 | Synchronous execution to completion | Unsupported |
 | Native persistence | Idle portable state, `LocalStorage`, and root-only `CustomStorage` |
 | Classic Session stores | Pass `session` to read and append settled, uncompacted history. `OpenAIResponsesCompactionSession` works as a store. Use `agents.classic.Runner` for automatic compaction or opaque compacted history. |
@@ -107,7 +111,7 @@ Response items with `provider_data` are unsupported. Providers can use this fiel
 
 Keep `OpenAIChatCompletionsModel` workflows on Classic, including plain text runs: that adapter adds `provider_data` to its responses for provider provenance. Standard Responses reasoning fields, including `encrypted_content`, remain supported.
 
-The private transport allows at most 4 MiB for each native request body and each encoded response event sequence. This is a transport limit, not a model token allowance. Keep larger workflows on Classic or port them to the native API.
+The private transport allows at most 4 MiB for each native request body and each encoded response event sequence. Stream invocation also limits the cumulative encoded Model events to 4 MiB. This is a transport limit, not a model token allowance. Keep larger workflows on Classic or port them to the native API.
 
 ## Save and reopen a native conversation
 
@@ -250,11 +254,30 @@ result = await stream.get_result()
 print(result.final_output)
 ```
 
-The iterator waits for the run to close its native Session and finish any Classic Session append. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `stream_events()` on a settled `SDKRunResult`. Use `agents.classic.Runner` for live Model events, raw provider frames, or token deltas.
+The iterator waits for the run to close its native Session and finish any Classic Session append. It first yields an `agent_updated_stream_event` for the starting agent. Completed reasoning, message, tool call, and confirmed tool output events follow in `result.new_items` order. The iterator then ends. You can also call `stream_events()` on a settled `SDKRunResult`. To observe live raw Model events and token deltas, use the explicit stream invocation and observer described below.
 
 The iterator yields no events while `on_approval` waits for a decision. If the Model completes the turn after a denial, the iterator includes the recorded denial as a `tool_output` event.
 
 If the run fails or is cancelled, `stream_events()` raises before yielding any events. `get_result()` also raises. Call `stream.cancel()` and await `stream.get_result()` to join cleanup. Cancelling a task waiting for either method also cancels the run and joins cleanup.
+
+### Select streaming on your Model
+
+Pass `model_invocation="stream"` to `SDKRunner.run()` or `SDKRunner.run_streamed()`. The adapter calls the selected Model's `stream_response` method. It does not switch providers or fall back to `get_response` if streaming fails. The default remains `model_invocation="response"`, including for `run_streamed()`.
+
+An optional synchronous `on_model_event` callback receives detached raw Model events as they arrive, including failure events. Keep this callback short. An exception from the callback fails the run. These events are provisional: a text delta or completed Model event does not prove that the native turn, tool execution, storage, or cleanup succeeded. Await the run result for that guarantee. The callback does not change the buffered semantic events returned by `stream_events()`.
+
+The first successful `response.completed` event ends consumption. Its response can omit `status` or set it to `completed`; explicit failure states or error details are rejected. The adapter also rejects a stream that ends without a completed response. It awaits the iterator's `aclose`, when available, before delivering the validated response to native execution. No tool from that response runs unless validation and iterator cleanup succeed. The adapter does not read trailing events or wait for transport EOF.
+
+Cancellation joins iterator cleanup, including response transport closure for the built-in `OpenAIResponsesModel`. A custom Model must await its cleanup before its iterator closes. Put resource cleanup in `finally` or `aclose`; ordinary code after the terminal yield may not run. A Model that suppresses cancellation or whose cleanup does not finish can delay the run's cancellation. The application still owns the Model and provider.
+
+The [application Model example](examples/codex/migration_models.py) uses a named ModelProvider, a per-run model selection, and a real native tool loop without external model requests:
+
+```sh
+python examples/codex/migration_models.py
+python examples/codex/migration_models.py --stream
+```
+
+This integration differs from `NativeProvider(base_url=...)`. A NativeProvider configures the endpoint and credentials used by the native transport. `SDKRunner` instead calls your application Model object, which owns its provider interaction. Neither route replaces native execution permissions or tool approval policies. Python SDKRunner still rejects handoffs and agents used as tools; use Classic Runner for those workflows. JavaScript SDKRunner has its own documented child and handoff subset. Each adapter retains its language's Classic precedence: Python run model/settings override the Agent, while JavaScript run model/settings supply defaults that explicit Agent values override.
 
 ### Handle failures and cancellation
 
