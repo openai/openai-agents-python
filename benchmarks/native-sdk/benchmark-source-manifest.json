@@ -1,10 +1,10 @@
 {
-  "compare.py": "69faa65cd95e352d00858eb74de31b182b018fb05e6eed09452eb43d07eabf0d",
+  "compare.py": "dd853b968679dd5b5e1d833516abf52ea9e139169dfbd74b375a59ef033b470f",
   "owned_process.py": "9be3bd2a11154dec666a943172fd7645e040ef7279f0f53633d5c3f22d168e4e",
   "protocol_peer.py": "912165f4e3d2abc8d45a0690e08e7b564fcc0562d1ea1a7725de92ba0f841bee",
   "v0_adapter.py": "36d8e51ce6743c82bc73385c79241a2dddcd2b259ef7f3207f53d0721fccf6d2",
   "v1_adapter.py": "63e6a993a82c83ec6bfe3f76cb1fab601e25dd92f73e68c5f77423fe274f784b",
   "validate_peer.py": "5d0829b7cc68310cbfc861bff8927b2e51051757a7d74e0a1b8faa48ab87b527",
-  "worker.py": "7ff1b76eb65ff46767318b5b4316503b2297026b2a60f588c3f02f83acda2dcb",
+  "worker.py": "7fcc4b120ccbb5f3e1c8da49b792a7e323b634454618f4abdc6d8c4b5e132167",
   "workloads.py": "a86d44a82b16c6fcb4097ce8a4487093ddc676029836020eebff46c6cf013546"
 }

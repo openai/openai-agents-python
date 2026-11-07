@@ -397,6 +397,7 @@ def main():
                 child = subprocess.Popen(
                     [
                         server_python,
+                        "-B",
                         str(Path(__file__).with_name("protocol_peer.py")),
                         "--tools-per-round",
                         str(workload.tools_per_round),
@@ -456,6 +457,8 @@ def main():
             "cache_tag": sys.implementation.cache_tag,
             "pointer_bits": sys.maxsize.bit_length() + 1,
             "abiflags": getattr(sys, "abiflags", ""),
+            "dont_write_bytecode": sys.dont_write_bytecode,
+            "pycache_prefix": sys.pycache_prefix,
         }
         result["module_file"] = str(Path(importlib.import_module("agents").__file__).resolve())
     except BaseException as error:

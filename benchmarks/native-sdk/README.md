@@ -29,16 +29,18 @@ uv venv --python "$BASE_PY" "$LAB/peer"
 STABLE_PY="$LAB/stable/bin/python"
 NATIVE_PY="$LAB/native/bin/python"
 PEER_PY="$LAB/peer/bin/python"
-uv pip install --python "$STABLE_PY" 'openai-agents==0.24.0' \
+uv pip install --compile-bytecode --python "$STABLE_PY" 'openai-agents==0.24.0' \
   'openai==3.29.0' 'pydantic==2.12.3' 'typing-extensions==4.16.0'
-uv pip install --python "$NATIVE_PY" "$WHEEL" \
+uv pip install --compile-bytecode --python "$NATIVE_PY" "$WHEEL" \
   'pydantic==2.12.3' 'typing-extensions==4.16.0' \
   'jsonschema==4.26.0' 'referencing==0.37.0'
-uv pip install --python "$PEER_PY" \
+uv pip install --compile-bytecode --python "$PEER_PY" \
   'aiohttp==3.14.3' 'openai==3.41.0' 'pydantic==2.12.3'
 ```
 
 The wheel hook builds the native extension and matching execution helpers. Install that exact wheel into the fresh environment; do not substitute an editable checkout or an unrelated native binary. The dependency versions above come from existing compatible environment records. They are not complete dependency locks. Keep the wheel hash, source commit, Python build and complete installed package inventories with results. Use `uv pip freeze --python <interpreter>` to record each environment. If registry access is unavailable, supply the exact stable release wheel locally.
+
+Compile bytecode for every environment before measurement, as shown above. Workers and peers run with `-B` to prevent cache writes; they still read existing caches. Unequal cache coverage can change first-call CPU even when package versions match. Keep before/after inventories of installed Python sources and valid, non-optimized bytecode caches, including their interpreter cache tag and source validation. Worker rows record the effective cache settings, but those settings alone do not prove complete or equal cache coverage.
 
 ## Verify and run a small correctness check
 
@@ -102,7 +104,7 @@ conversation beyond the observation buffer's retention and rejection of a genuin
 SDK gap. It reports correctness only:
 
 ```sh
-uv pip install --python "$NATIVE_PY" 'aiohttp==3.14.3'
+uv pip install --compile-bytecode --python "$NATIVE_PY" 'aiohttp==3.14.3'
 "$NATIVE_PY" "$BENCH/tests/native_stream_cursor.py" -v
 ```
 

@@ -115,17 +115,22 @@ def validate_sample(
         "cache_tag": str,
         "pointer_bits": int,
         "abiflags": str,
+        "dont_write_bytecode": bool,
+        "pycache_prefix": type(None),
     }
     if (
         not isinstance(build, dict)
-        or any(type(build.get(name)) is not kind for name, kind in build_types.items())
+        or any(
+            name not in build or type(build[name]) is not kind for name, kind in build_types.items()
+        )
         or build["implementation"] != "cpython"
         or not build["cache_tag"]
+        or not build["dont_write_bytecode"]
         or type(row.get("python")) is not str
         or not row["python"]
         or build["version"] != row["python"]
     ):
-        raise ValueError("Missing or inconsistent CPython build/ABI identity")
+        raise ValueError("Missing or inconsistent CPython runtime identity")
     module = row.get("module_file")
     if not isinstance(module, str) or not Path(module).is_absolute():
         raise ValueError("Worker module path is missing or not absolute")
@@ -401,6 +406,7 @@ def main():
                     executable = args.v0_python if side == "v0" else args.v1_python
                     command = [
                         str(executable.absolute()),
+                        "-B",
                         str(directory / "worker.py"),
                         "--engine",
                         side,

@@ -46,6 +46,8 @@ def row(side, sample, case="oneshot_text"):
             "cache_tag": "cpython-test",
             "pointer_bits": 64,
             "abiflags": "",
+            "dont_write_bytecode": True,
+            "pycache_prefix": None,
         },
         "module_file": f"/opt/{side}/site-packages/agents/__init__.py",
         "workload": workload.dictionary(),
@@ -207,18 +209,32 @@ class SummaryQualificationTests(unittest.TestCase):
                 with self.subTest(mutate=mutate, index=index), self.assertRaises(ValueError):
                     self.summarize(value)
 
-    def test_python_build_abi_fields_cannot_be_omitted_or_mistyped(self):
-        for field in ("cache_tag", "pointer_bits", "abiflags"):
+    def test_python_runtime_fields_cannot_be_omitted_or_mistyped(self):
+        for field in (
+            "cache_tag",
+            "pointer_bits",
+            "abiflags",
+            "dont_write_bytecode",
+            "pycache_prefix",
+        ):
             for malformed in (False, True):
                 value = records()
                 for side in ("v0", "v1"):
                     build = value["oneshot_text"][side][0]["python_build"]
                     if malformed:
-                        build[field] = None
+                        build[field] = "/unexpected-cache" if field == "pycache_prefix" else None
                     else:
                         del build[field]
                 with self.subTest(field=field, malformed=malformed), self.assertRaises(ValueError):
                     self.summarize(value)
+
+    def test_bytecode_writes_are_rejected_even_when_both_arms_agree(self):
+        value = records()
+        for side in ("v0", "v1"):
+            for item in value["oneshot_text"][side]:
+                item["python_build"]["dont_write_bytecode"] = False
+        with self.assertRaises(ValueError):
+            self.summarize(value)
 
     def test_parity_failure_keeps_successful_collection_complete(self):
         previous = signal.getsignal(signal.SIGTERM)
