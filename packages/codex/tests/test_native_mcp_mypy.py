@@ -76,4 +76,4 @@ async def use_policy() -> None:
 approved = HttpMCP(
     name="records", url="https://example.invalid/mcp", tools=["write"], approval_mode="preapproved"
 )
-assert_type(approved.approval_mode, Literal["auto", "approve"])
+assert_type(approved.approval_mode, Literal["native", "preapproved"])

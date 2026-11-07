@@ -123,7 +123,7 @@ async def test_owned_child_approvals_use_equal_call_ids_without_sibling_authorit
 @pytest.mark.parametrize(
     "method", ["elicitation/create", "openai/form", "openai/elicitation/create"]
 )
-@pytest.mark.parametrize("approval_mode", ["approve", "auto"])
+@pytest.mark.parametrize("approval_mode", ["preapproved", "native"])
 async def test_owned_child_http_form_reaches_original_turn_and_continues(
     tmp_path, monkeypatch, method, approval_mode
 ):
