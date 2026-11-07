@@ -50,6 +50,7 @@ async def test_metadata_pages_are_bounded_and_never_fetch():
         (b"\xff", "unavailable"),
         (b"x" * (MAX_FILE_BYTES + 1), "unavailable"),
     ],
+    ids=["permission-denied", "missing-source", "backend-error", "invalid-utf8", "oversized-body"],
 )
 async def test_fetch_failures_are_sanitized_and_retryable(failure, expected):
     calls = 0
