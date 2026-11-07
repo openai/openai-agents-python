@@ -187,6 +187,8 @@ These restrictions do not automatically apply to prompted output or Python funct
 
 Invalid final output raises `OutputValidationError`, including after prompted corrections exhaust their retries. Catch it around `agent.run()` or `turn.get_result()`. Its message omits the rejected text. Its `raw_output` contains that text and may contain private data, so keep it out of routine logs.
 
+Access `error.issues` deliberately when diagnosing a failure. Each `OutputValidationIssue` contains a validator `code` and a tuple `path` into the application output. For example, `("items", 0, "count")` identifies the first item's count. Native non-object roots omit the SDK's `response` prefix. Failures in that wrapper use the root path `()`. Invalid JSON also uses the root path. The SDK captures these diagnostics during the original validation. It does not run application validators again. It retains no validator exception or message as a cause. Codes and field names can themselves contain private data, so treat `issues` with the same care as `raw_output`.
+
 This fragment reuses the typed `agent` above:
 
 ```python
@@ -219,11 +221,53 @@ Live manual replies and idle restore support structured output. An explicit Sess
 
 Automatic one-shot checkpoints support native strict output but exclude `PromptedOutput`. See [saving a settled manual request](state.md#save-a-settled-manual-request) for output matching, active repair and `before_step` limits, and [automatic checkpoint limits](state.md#automatic-checkpoint-limits) for one-shot restrictions.
 
+## Choose a model-context hook
+
+Use `Agent(transform_context=callback)` to change the input items sent to the model. The callback receives a `ModelRequestContext` from `agents` before each sampling request. It runs for root turns, native children, model-based compaction, and output repair. This is the starting point for filtering or replacing model context.
+
+`request.items` contains detached Responses-shaped input in native context order. Return replacement items, or `None` to keep the original input. Mutating items and returning `None` discards the edits. Keep tool-call identities and their matching results together. Request-only changes leave canonical history and other logs intact; they do not redact stored data.
+
+This example replaces a synthetic private value in ordinary function results before the model receives them:
+
+```python
+from typing import Any
+
+from agents import Agent, ModelRequestContext
+
+
+def project_context(request: ModelRequestContext[None]) -> list[dict[str, Any]]:
+    items = list(request.items)
+    for item in items:
+        if item.get("type") == "function_call_output" and isinstance(item.get("output"), str):
+            item["output"] = item["output"].replace("synthetic-private-value", "[redacted]")
+    return items
+
+
+agent = Agent(instructions="Answer using the available context.", transform_context=project_context)
+```
+
+Use `purpose` (`"turn"`, `"compaction"`, or `"output_repair"`) and `subagent_id` to select which requests to change. The request also supplies application `context`, `session_id`, `turn_id`, `request_id`, and `model`. Native children use the parent Python Session's `session_id` with their own `turn_id` and `subagent_id`. Output repair reports its separate internal Session's identifiers.
+
+Transport retries reuse the captured replacement. A new sampling request calls the callback again. Async callbacks run on the Session event loop; sync callbacks run in a worker. Cancellation joins admitted callback work and discards late results. Keep callbacks free of business effects.
+
+Context items may already contain truncated tool results. Use [tool hooks](tools.md#inspect-or-change-tool-values), such as `function_tool(before=..., after=...)` and MCP `transform_result`, to change execution arguments or full results before native history records them.
+
+Choose the hook by what it owns:
+
+| Desired change | Supported hook |
+| --- | --- |
+| Replace model input for roots, children, compaction, or repair | `transform_context` with `ModelRequestContext`. |
+| Select or narrow admitted tools before a step | [`before_step`](sessions.md#update-tools-instructions-and-model-settings). Tool authority remains bounded by the Session's opening selection. |
+| Edit advanced HTTP request presentation in a restricted profile | [`prepare_request`](#edit-the-next-sampling-request). |
+| Transform execution arguments or results | [Tool hooks](tools.md#inspect-or-change-tool-values). |
+
+These hooks have separate owners. A context projection does not change admitted tools or execution policy.
+
 ## Edit the next sampling request
 
 `prepare_request` requires a development build newer than `0.24.0-alpha.6`. Follow the [matching-source setup](installation.md#examples-and-upgrades) before using it.
 
-Pass `prepare_request=callback` to `agent.run()`, `agent.run_sync()`, or `session.submit()` to edit a detached copy of the next model request. Use this callback to change sampling instructions, input, or selected tool descriptions and parameter schemas after inspecting a tool result. Use [`before_step`](sessions.md#update-tools-instructions-and-model-settings) to select tools, and [tool policies](tools.md#inspect-or-change-tool-values) to change execution arguments or results.
+Pass `prepare_request=callback` to `agent.run()`, `agent.run_sync()`, or `session.submit()` for advanced edits to a detached copy of the next HTTP model request. Use it to change sampling instructions or selected tool descriptions and parameter schemas within the profile below. Prefer [`transform_context`](#choose-a-model-context-hook) for model input, [`before_step`](sessions.md#update-tools-instructions-and-model-settings) for tool selection, and [tool policies](tools.md#inspect-or-change-tool-values) for execution arguments or results.
 
 The synchronous or asynchronous callback receives `callback(turn, request, *, preparation_index, recovery_attempt)`. `request` is a `PreparedRequest` imported from `agents`, with `instructions`, `input`, and `tools`. Return the complete edited value, or `None` to use the original request. Mutating the copy and returning `None` discards the edits. The SDK captures returned JSON when the callback settles.
 
