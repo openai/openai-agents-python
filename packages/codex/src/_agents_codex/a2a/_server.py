@@ -779,9 +779,21 @@ class NativeA2AExecutor(AgentExecutor):
             if record is None:
                 return None
             if record.status == "running":
-                record = replace(record, generation=record.generation + 1, status="unknown")
+                task = record.task()
+                task.status.CopyFrom(p.TaskStatus(state=p.TASK_STATE_FAILED))
+                task.metadata.update({"agents.a2a.outcome": "unknown"})
+                snapshot = _bytes(task)
+                if len(snapshot) > self.limits.checkpoint_bytes:
+                    raise ValueError("A2A snapshot exceeds configured byte limit")
+                record = replace(
+                    record,
+                    generation=record.generation + 1,
+                    status="unknown",
+                    snapshot=snapshot,
+                    checkpoint=None,
+                    challenge=None,
+                )
                 await lease.commit(record, expected_generation=record.generation - 1)
-                return record
             current = await self.store.get(binding.task_id, context)
             from a2a.server.cluster.version import TaskVersion
 

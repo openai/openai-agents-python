@@ -4,6 +4,7 @@ import asyncio
 import json
 import sqlite3
 import traceback
+from contextlib import asynccontextmanager
 from dataclasses import replace
 
 import pytest
@@ -16,6 +17,7 @@ from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
 from starlette.responses import JSONResponse, Response
 
+from _agents_codex.a2a import _provider
 from _agents_codex.a2a._client import _BoundedTransport
 from agents import FunctionTool
 from agents.a2a import A2AInputReply, A2AJobProvider, A2ALimits
@@ -90,6 +92,37 @@ async def observe_until(provider, previous, status):
             return update
         await asyncio.sleep(0.01)
     raise AssertionError(f"Remote task never reached {status}")
+
+
+@pytest.mark.parametrize("state", [p.TASK_STATE_FAILED, p.TASK_STATE_COMPLETED])
+async def test_observation_preserves_unknown_wire_outcome(tmp_path, monkeypatch, state):
+    task = p.Task(id="task-a", context_id="context-a", status=p.TaskStatus(state=state))
+    task.metadata.update({"agents.a2a.outcome": "unknown"})
+    observed = []
+    projections = []
+
+    class SyntheticClient:
+        async def get_task(self, request):
+            observed.append(request.id)
+            return task
+
+    @asynccontextmanager
+    async def connection(*args, **kwargs):
+        yield SyntheticClient()
+
+    def forbidden(task):
+        projections.append(task.id)
+        return {"answer": "must remain private"}
+
+    monkeypatch.setattr(_provider, "connect_a2a", connection)
+    provider = make_provider(
+        endpoint("https://example.org"), tmp_path / "jobs.db", project=forbidden
+    )
+    receipt = json.dumps({"task_id": "task-a", "context_id": "context-a"}, separators=(",", ":"))
+    update = await provider.observe(claim(provider, JobUpdate("pending", receipt), "observe"))
+    assert observed == ["task-a"]
+    assert not projections
+    assert update == JobUpdate("unknown", receipt)
 
 
 @pytest.mark.parametrize("stage", ["reserve", "project"])

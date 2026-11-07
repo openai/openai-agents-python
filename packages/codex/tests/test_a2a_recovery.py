@@ -19,7 +19,7 @@ from pydantic import AfterValidator
 
 from agents import FunctionTool
 from agents.a2a import NativeA2ABinding, NativeA2AExecutor, NativeA2ATask
-from tests.a2a_helpers import call_context, invoke, request_context
+from tests.a2a_helpers import HostStore, call_context, invoke, request_context
 from tests.native_fixtures import (
     assistant_output,
     function_call,
@@ -131,8 +131,11 @@ async def test_stale_snapshot_cannot_replace_newer_public_task(tmp_path, respons
     assert executor.store.acknowledged(binding()) == record.generation
 
 
-async def test_running_claim_stays_unknown_and_never_runs_again(tmp_path, responses):
-    executor = make_executor(tmp_path, responses)
+@pytest.mark.parametrize("publication_failure", [None, "before_save", "lost_ack"])
+async def test_running_claim_publishes_unknown_without_replay(
+    tmp_path, monkeypatch, publication_failure
+):
+    store = HostStore(tmp_path)
     record = NativeA2ATask(
         binding=binding(),
         generation=1,
@@ -141,13 +144,50 @@ async def test_running_claim_stays_unknown_and_never_runs_again(tmp_path, respon
             id="task-a", context_id="context-a", status=p.TaskStatus(state=p.TASK_STATE_WORKING)
         ).SerializeToString(deterministic=True),
     )
-    async with executor.store.own(binding()) as lease:
+    async with store.own(binding()) as lease:
         await lease.commit(record, expected_generation=None)
+    await store.save(
+        record.task(),
+        event=record.task(),
+        prev=None,
+        prev_version=TaskVersion.MISSING,
+        context=call_context(),
+    )
+
+    save = store.save
+    attempts = 0
+
+    async def publication(task, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        assert store.read(binding()).status == "unknown"
+        assert store.read(binding()).acknowledges(task)
+        if attempts == 1 and publication_failure == "before_save":
+            raise OSError("Synthetic publication failure")
+        result = await save(task, **kwargs)
+        if attempts == 1 and publication_failure == "lost_ack":
+            raise OSError("Synthetic lost publication acknowledgment")
+        return result
+
+    monkeypatch.setattr(store, "save", publication)
 
     def forbidden(binding, context):
         raise AssertionError("Recovery must not construct native configuration")
 
-    fresh = NativeA2AExecutor(agent_factory=forbidden, store=executor.store)
+    fresh = NativeA2AExecutor(agent_factory=forbidden, store=store)
+    if publication_failure is not None:
+        with pytest.raises(OSError, match="Synthetic"):
+            await fresh.recover(binding(), call_context())
+        retained = store.read(binding())
+        assert retained.status == "unknown" and retained.generation == 2
     recovered = await fresh.recover(binding(), call_context())
     assert recovered.status == "unknown"
-    assert not responses.requests
+    assert recovered.generation == 2
+    assert recovered.checkpoint is recovered.challenge is None
+    published = await store.get("task-a", call_context())
+    assert published.task.status.state == p.TASK_STATE_FAILED
+    assert published.task.metadata["agents.a2a.outcome"] == "unknown"
+    assert recovered.acknowledges(published.task)
+    assert store.acknowledged(binding()) == recovered.generation
+    # Repeated recovery publishes the retained boundary without claiming a new generation.
+    assert await fresh.recover(binding(), call_context()) == recovered

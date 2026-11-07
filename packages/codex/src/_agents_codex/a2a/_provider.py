@@ -153,6 +153,11 @@ class A2AJobProvider(Generic[_Input]):
         receipt = _json(
             {"task_id": task.id, "context_id": task.context_id}, self.limits.message_bytes
         )
+        if (
+            "agents.a2a.outcome" in task.metadata
+            and task.metadata["agents.a2a.outcome"] == "unknown"
+        ):
+            return JobUpdate("unknown", receipt)
         try:
             if task.status.state == p.TASK_STATE_COMPLETED:
                 # A host projector may persist its input, including fields it
