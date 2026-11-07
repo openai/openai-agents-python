@@ -43,6 +43,7 @@ from tests.test_sdk_session_transport import HTTPPeer, disconnected
 @dataclass
 class JSONPeer(HTTPPeer):
     json_replies: deque[dict[str, Any] | bytes] = field(default_factory=deque)
+    response_headers: dict[str, str] = field(default_factory=dict)
     body_gate: asyncio.Event | None = None
     body_entered: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -59,7 +60,9 @@ class JSONPeer(HTTPPeer):
         assert self.json_replies, "Unexpected buffered model request"
         value = self.json_replies.popleft()
         data = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode()
-        response = web.StreamResponse(headers={"Content-Type": "application/json"})
+        response = web.StreamResponse(
+            headers={"Content-Type": "application/json", **self.response_headers}
+        )
         await response.prepare(request)
         gate = self.body_gate
         try:
@@ -243,6 +246,59 @@ async def test_buffered_runs_keep_fresh_histories_and_provider_cleanup() -> None
             assert len(set(sessions)) == 2
             assert len(peer.requests) == 2
             assert all(request["stream"] is False for request in peer.requests)
+        await disconnected(peer.transports)
+
+
+async def test_buffered_custom_tool_input_executes_once() -> None:
+    seen: list[str] = []
+
+    @function_tool
+    async def capture(value: str) -> str:
+        seen.append(value)
+        return value
+
+    code = 'text(await tools.capture({value: "exact-once"}));'
+    response = json_response("", "code-response", "unused-item")
+    response["output"] = [
+        {"type": "custom_tool_call", "name": "exec", "call_id": "code-once", "input": code}
+    ]
+    async with timeout(30), json_peer() as peer:
+        peer.json_replies.extend([response, json_response("done", "done-response", "done-item")])
+        async with provider(peer) as owner:
+            agent = Agent(
+                model="gpt-5.2",
+                instructions="Use capture through code.",
+                tools=[capture],
+                provider=owner,
+                programmatic_tool_calling=True,
+            )
+            result = await agent.run("Capture the value once.")
+            assert result.final_output == "done"
+            assert seen == ["exact-once"]
+            assert len(peer.requests) == 2
+            calls = [
+                item for item in peer.requests[1]["input"] if item["type"] == "custom_tool_call"
+            ]
+            assert [(call["call_id"], call["input"]) for call in calls] == [("code-once", code)]
+            output = tool_output(peer.requests[1], "code-once", "custom_tool_call_output")
+            assert output.count("exact-once") == 1
+        await disconnected(peer.transports)
+
+
+@pytest.mark.parametrize("content_length", [False, True], ids=["chunked", "declared"])
+async def test_buffered_body_limit_rejects_oversize_without_retry(content_length: bool) -> None:
+    limit = 64 * 1024 * 1024
+    body = json.dumps(json_response("oversized", "large-response", "large-item")).encode()
+    body += b" " * limit
+    async with timeout(30), json_peer() as peer:
+        peer.json_replies.append(body)
+        if content_length:
+            peer.response_headers["Content-Length"] = str(len(body))
+        async with provider(peer) as owner:
+            agent = Agent(model="gpt-5.2", instructions="Answer.", provider=owner)
+            with pytest.raises(NativeError, match=f"response body exceeds the {limit} byte limit"):
+                await agent.run("Reject the oversized response.")
+            assert len(peer.requests) == 1
         await disconnected(peer.transports)
 
 

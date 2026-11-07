@@ -35,10 +35,19 @@ index 77b3054aeeca459f33b679e3165f12652eaeaf53..e846ffec067f08a72319286f2e2ac5c6
  pub(crate) mod search;
  mod session;
 diff --git a/codex-rs/codex-api/src/endpoint/responses.rs b/codex-rs/codex-api/src/endpoint/responses.rs
-index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d854c6b2bd 100644
+index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..40ff37082281faf6356163819a10b87259f57609 100644
 --- a/codex-rs/codex-api/src/endpoint/responses.rs
 +++ b/codex-rs/codex-api/src/endpoint/responses.rs
-@@ -72,28 +72,75 @@ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -23,6 +23,8 @@ use std::sync::Arc;
+ use std::sync::OnceLock;
+ use tracing::instrument;
+ 
++const MAX_JSON_RESPONSE_BODY_BYTES: usize = 64 * 1024 * 1024;
++
+ pub struct ResponsesClient<T: HttpTransport> {
+     session: EndpointSession<T>,
+     sse_telemetry: Option<Arc<dyn SseTelemetry>>,
+@@ -72,28 +74,76 @@ impl<T: HttpTransport> ResponsesClient<T> {
          request: ResponsesApiRequest,
          options: ResponsesOptions,
      ) -> Result<ResponseStream, ApiError> {
@@ -90,6 +99,7 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d8
 +                options.extra_headers,
 +                options.compression,
 +                "application/json",
++                Some(MAX_JSON_RESPONSE_BODY_BYTES),
 +            )
 +            .await?;
 +        Ok(super::responses_json::response_stream(
@@ -130,12 +140,12 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d8
      }
  
      #[instrument(
-@@ -127,33 +174,41 @@ impl<T: HttpTransport> ResponsesClient<T> {
+@@ -127,33 +177,43 @@ impl<T: HttpTransport> ResponsesClient<T> {
          compression: Compression,
          turn_state: Option<Arc<OnceLock<String>>>,
      ) -> Result<ResponseStream, ApiError> {
 +        let stream_response = self
-+            .send_encoded(body, extra_headers, compression, "text/event-stream")
++            .send_encoded(body, extra_headers, compression, "text/event-stream", None)
 +            .await?;
 +
 +        Ok(spawn_response_stream(
@@ -151,6 +161,7 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d8
 +        extra_headers: HeaderMap,
 +        compression: Compression,
 +        accept: &'static str,
++        response_body_limit_bytes: Option<usize>,
 +    ) -> Result<codex_client::StreamResponse, ApiError> {
          let request_compression = match compression {
              Compression::None => RequestCompression::None,
@@ -173,6 +184,7 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d8
 +                    req.headers
 +                        .insert(http::header::ACCEPT, HeaderValue::from_static(accept));
                      req.compression = request_compression;
++                    req.response_body_limit_bytes = response_body_limit_bytes;
                  },
              )
 -            .await?;
@@ -188,10 +200,10 @@ index 9c41a802eadd57cf20ffc733121921d8d3ba9d08..138935533403f2ae8f37a1be689139d8
  }
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json.rs b/codex-rs/codex-api/src/endpoint/responses_json.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5d544f8c6ceb711d7d635583e82194782711dd1b
+index 0000000000000000000000000000000000000000..ddc82fd350c2ce6644c87bbbe463263bb1b9af73
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/responses_json.rs
-@@ -0,0 +1,209 @@
+@@ -0,0 +1,210 @@
 +//! Lazy buffered Responses ingress. The caller's mapper owns and polls the body.
 +use crate::api_rate_limits::parse_api_rate_limits;
 +use crate::common::ResponseEvent;
@@ -258,7 +270,8 @@ index 0000000000000000000000000000000000000000..5d544f8c6ceb711d7d635583e8219478
 +                break;
 +            };
 +            let chunk = next.map_err(|error| match error {
-+                error @ codex_client::TransportError::Policy(_) => ApiError::Transport(error),
++                error @ (codex_client::TransportError::Policy(_)
++                | codex_client::TransportError::ResponseTooLarge { .. }) => ApiError::Transport(error),
 +                error => ApiError::Stream(error.to_string()),
 +            })?;
 +            body.extend_from_slice(&chunk);
@@ -403,10 +416,10 @@ index 0000000000000000000000000000000000000000..5d544f8c6ceb711d7d635583e8219478
 +mod tests;
 diff --git a/codex-rs/codex-api/src/endpoint/responses_json_tests.rs b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..18c7ee66b62939ab32f3a2070e34d566d920da2f
+index 0000000000000000000000000000000000000000..4540f42840de808bd4a29c3e7b1834cb33743def
 --- /dev/null
 +++ b/codex-rs/codex-api/src/endpoint/responses_json_tests.rs
-@@ -0,0 +1,522 @@
+@@ -0,0 +1,547 @@
 +use super::*;
 +use bytes::Bytes;
 +use codex_client::TransportError;
@@ -741,6 +754,31 @@ index 0000000000000000000000000000000000000000..18c7ee66b62939ab32f3a2070e34d566
 +    }
 +}
 +
++#[tokio::test]
++async fn body_size_error_retains_its_nonretryable_transport_classification() {
++    let (_, events) = response_stream(
++        StreamResponse {
++            status: StatusCode::OK,
++            headers: HeaderMap::new(),
++            bytes: Box::pin(futures::stream::iter([Err(
++                TransportError::ResponseTooLarge {
++                    max_bytes: 64 * 1024 * 1024,
++                },
++            )])),
++        },
++        Duration::from_secs(5),
++        None,
++    );
++    let events: Events = events.collect().await;
++    assert!(default_header_reset(events.first()));
++    assert!(matches!(
++        &events[1..],
++        [Err(ApiError::Transport(
++            TransportError::ResponseTooLarge { .. }
++        ))]
++    ));
++}
++
 +#[derive(Default)]
 +struct SyntheticAuth;
 +impl crate::AuthProvider for SyntheticAuth {
@@ -967,6 +1005,52 @@ index 30bc97b1157daf506f6962f0cddf5fb66bb32532..5b862aa2b6a85c69cf7945b1ee497cfa
      /// Read only safe typed facts; malformed or missing counters stay unknown.
      pub(crate) fn response_observation(
          &self,
+diff --git a/codex-rs/codex-api/tests/clients.rs b/codex-rs/codex-api/tests/clients.rs
+index b17da453440ad49cb8e495ea72f21081b99a4ea2..7c529fd838218fae4c404d10d631e40748c25cf7 100644
+--- a/codex-rs/codex-api/tests/clients.rs
++++ b/codex-rs/codex-api/tests/clients.rs
+@@ -303,6 +303,41 @@ async fn responses_client_uses_responses_path() -> Result<()> {
+ 
+     let requests = state.take_stream_requests();
+     assert_path_ends_with(&requests, "/responses");
++    assert_eq!(requests[0].response_body_limit_bytes, None);
++    Ok(())
++}
++
++#[tokio::test]
++async fn responses_client_bounds_json_response_bodies() -> Result<()> {
++    let state = RecordingState::default();
++    let transport = RecordingTransport::new(state.clone());
++    let client = ResponsesClient::new(transport, provider("openai"), Arc::new(NoAuth));
++    let request = ResponsesApiRequest {
++        model: "gpt-test".into(),
++        input: Vec::new(),
++        tools: None,
++        tool_choice: "auto".into(),
++        parallel_tool_calls: false,
++        reasoning: None,
++        store: false,
++        stream: true,
++        stream_options: None,
++        include: Vec::new(),
++        service_tier: None,
++        prompt_cache_key: None,
++        text: None,
++        client_metadata: None,
++        access_programs: None,
++    };
++    let _stream = client
++        .json_request(request, ResponsesOptions::default())
++        .await?;
++    let requests = state.take_stream_requests();
++    assert_eq!(requests.len(), 1);
++    assert_eq!(
++        requests[0].response_body_limit_bytes,
++        Some(64 * 1024 * 1024)
++    );
+     Ok(())
+ }
+ 
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
 index 0c5537ebaa01a0286d574cf9f4b720a18232a611..81391ca070ff4ec0574028c86d0a1e05744007dd 100644
 --- a/codex-rs/core/src/client.rs
