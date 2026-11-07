@@ -17,6 +17,7 @@ from tests._asyncio import timeout
 from tests.native_fixtures import responses as responses
 from tests.test_native_agent_observation import text_response
 
+
 class ReadProbe:
     """Observe the actual native API while retaining its real futures/owners."""
 
@@ -36,7 +37,6 @@ class ReadProbe:
             raise
         self.native_events.append(json.loads(raw))
         return raw
-
 
 
 def instrument_reader(monkeypatch: pytest.MonkeyPatch) -> list[ReadProbe]:
@@ -95,6 +95,7 @@ async def test_agent_run_preserves_full_retained_stream_for_subclass_and_canonic
     retained = [event async for event in completed.turn.events()]
     assert completed.final_output == "".join(chunks)
     assert [event.delta for event in retained if isinstance(event, OutputTextDelta)] == list(chunks)
+
     class OrdinaryControl(Agent):
         pass
 
@@ -186,7 +187,6 @@ async def test_agent_run_preserves_full_retained_stream_for_subclass_and_canonic
 async def test_delegating_or_spoofed_factory_keeps_live_cursor_semantics(
     responses, monkeypatch, spoof
 ):
-    probes = instrument_reader(monkeypatch)
     original = Agent.session
     live: list[Any] = []
 
