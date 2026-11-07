@@ -179,6 +179,7 @@ async def test_exact_get_cleanup_retained_owner_branch(monkeypatch, delayed_nati
 
 async def test_exact_timeout_script_takes_timeout_branch(responses, monkeypatch):
     import asyncio
+    from types import SimpleNamespace
 
     from agents import Agent
     from tests.test_native_agent import provider
@@ -203,8 +204,22 @@ async def test_exact_timeout_script_takes_timeout_branch(responses, monkeypatch)
     monkeypatch.setattr(Agent, "__init__", configure)
     ns = {"__name__": "snippet_test"}
     exec(_code("timeout"), ns)
+
+    async def short_wait_for(awaitable, timeout):
+        assert timeout == 30
+        task = asyncio.ensure_future(awaitable)
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=10)
+            return await asyncio.wait_for(task, timeout=0.01)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    # Shorten this snippet's clock after real model work starts.
+    ns["asyncio"] = SimpleNamespace(wait_for=short_wait_for)
     try:
-        with pytest.raises(TimeoutError):
+        with pytest.raises(asyncio.TimeoutError):
             await ns["main"]()
         assert entered.is_set() and len(responses.requests) == 1
     finally:
