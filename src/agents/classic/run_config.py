@@ -48,6 +48,12 @@ DEFAULT_MAX_LOCAL_DIR_FILE_CONCURRENCY = 4
 DEFAULT_MAX_ARCHIVE_INPUT_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES = 4 * 1024 * 1024 * 1024
 DEFAULT_MAX_ARCHIVE_MEMBERS = 100_000
+DEFAULT_MAX_ARCHIVE_TAR_METADATA_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_TAR_STREAM_BYTES = (
+    DEFAULT_MAX_ARCHIVE_INPUT_BYTES + DEFAULT_MAX_ARCHIVE_EXTRACTED_BYTES
+)
+DEFAULT_MAX_ARCHIVE_ZIP_DIRECTORY_BYTES = 64 * 1024 * 1024
+DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES = 128 * 1024 * 1024
 
 
 def _default_trace_include_sensitive_data() -> bool:
@@ -205,9 +211,39 @@ class SandboxArchiveLimits:
     """
 
     max_members: int | None = DEFAULT_MAX_ARCHIVE_MEMBERS
-    """Maximum number of extractable archive members.
+    """Maximum number of archive members.
 
     Set to `None` to disable this member-count limit.
+    """
+
+    max_tar_metadata_bytes: int | None = DEFAULT_MAX_ARCHIVE_TAR_METADATA_BYTES
+    """Maximum decoded TAR metadata bytes, including PAX and GNU headers.
+
+    Set to `None` to disable this metadata limit.
+    """
+
+    max_tar_stream_bytes: int | None = DEFAULT_MAX_ARCHIVE_TAR_STREAM_BYTES
+    """Maximum decoded TAR bytes read by the parser, including file payloads.
+
+    Set to `None` to disable this decoded-stream limit.
+    """
+
+    max_zip_directory_bytes: int | None = DEFAULT_MAX_ARCHIVE_ZIP_DIRECTORY_BYTES
+    """Maximum ZIP central-directory bytes parsed on the host.
+
+    Set to `None` to disable this directory-size limit.
+    """
+
+    max_tar_lzma_memory_bytes: int | None = DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES
+    """Maximum memory requested by a TAR LZMA decoder.
+
+    Set to `None` to disable this decoder-memory limit.
+    """
+
+    max_zip_lzma_dictionary_bytes: int | None = DEFAULT_MAX_ARCHIVE_LZMA_MEMORY_BYTES
+    """Maximum dictionary size requested by a ZIP LZMA decoder.
+
+    Set to `None` to disable this dictionary-size limit.
     """
 
     def __post_init__(self) -> None:
@@ -220,6 +256,19 @@ class SandboxArchiveLimits:
             raise ValueError("archive_limits.max_extracted_bytes must be at least 1")
         if self.max_members is not None and self.max_members < 1:
             raise ValueError("archive_limits.max_members must be at least 1")
+        if self.max_tar_metadata_bytes is not None and self.max_tar_metadata_bytes < 1:
+            raise ValueError("archive_limits.max_tar_metadata_bytes must be at least 1")
+        if self.max_tar_stream_bytes is not None and self.max_tar_stream_bytes < 1:
+            raise ValueError("archive_limits.max_tar_stream_bytes must be at least 1")
+        if self.max_zip_directory_bytes is not None and self.max_zip_directory_bytes < 1:
+            raise ValueError("archive_limits.max_zip_directory_bytes must be at least 1")
+        if self.max_tar_lzma_memory_bytes is not None and self.max_tar_lzma_memory_bytes < 1:
+            raise ValueError("archive_limits.max_tar_lzma_memory_bytes must be at least 1")
+        if (
+            self.max_zip_lzma_dictionary_bytes is not None
+            and self.max_zip_lzma_dictionary_bytes < 1
+        ):
+            raise ValueError("archive_limits.max_zip_lzma_dictionary_bytes must be at least 1")
 
 
 @dataclass
@@ -254,8 +303,8 @@ class SandboxRunConfig:
     archive_limits: SandboxArchiveLimits | None = None
     """Resource limits for sandbox archive extraction.
 
-    Set to `None` to preserve the default behavior with no SDK archive resource limits.
-    Use `SandboxArchiveLimits()` to enable SDK defaults.
+    When `None`, the SDK defaults in `SandboxArchiveLimits` apply. Pass a
+    `SandboxArchiveLimits` instance to override or disable individual limits.
     """
 
     cwd: str | PurePath | None = None
