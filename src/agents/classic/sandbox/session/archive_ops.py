@@ -21,8 +21,9 @@ async def extract_archive(
     compression_scheme: Literal["tar", "zip"] | None = None,
     archive_limits: SandboxArchiveLimits | None = None,
 ) -> None:
-    if archive_limits is not None:
-        archive_limits.validate()
+    if archive_limits is None:
+        archive_limits = SandboxArchiveLimits()
+    archive_limits.validate()
 
     if isinstance(path, str):
         path = Path(path)
