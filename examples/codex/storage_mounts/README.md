@@ -26,6 +26,21 @@ the working directory, writable roots, or private SDK state. Native validation
 checks filesystem aliases as well as path spelling. Keep SDK storage profiles,
 runtime homes, and saved logins outside mounted data.
 
+At preflight, mount entries may only be regular files, directories, or symlinks.
+Named pipes (FIFOs), Unix sockets, devices, and other special nodes are rejected
+without opening them. The check never follows symlinks.
+
+Preflight also rejects an existing regular file shared by hard links between a
+mount and the working directory or an additional writable root. Links wholly
+inside read-only mounts or outside writable grants are allowed.
+
+Each validation traverses the mounted directory trees.
+The SDK must be able to list every source directory and inspect its entries.
+If any source file has multiple links, validation also traverses the writable
+grants once. Otherwise it skips that writable scan. Required inspection failures
+stop startup. The traversal cost grows with the entries in those directory trees;
+there is no silent scan limit.
+
 Remote executors, macOS, Windows, relocated destinations, writable mounts, and
 other strategies or providers are unsupported. Use `writable_roots` when tools
 need write access to an additional directory. The SDK rejects replacement of
@@ -42,6 +57,11 @@ The caller owns the source directory, its contents, and its ancestors. Keep the
 host and source ancestors trusted while sessions run. Read-only access applies
 to the sandbox view; external writers can still change the source. The mount is
 not a snapshot.
+
+The entry-type and hardlink checks cover only the tree seen during validation.
+They do not monitor later nodes, links, replacements, or host writes. Keep the
+source stable during validation. The application must trust host processes and
+source changes throughout the session.
 
 Native command namespaces own the bind mounts. Existing session cancellation
 and cleanup retire those namespaces. The SDK never unmounts the host directory,

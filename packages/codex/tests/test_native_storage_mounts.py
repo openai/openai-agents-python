@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shlex
+import socket
 import sys
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
@@ -157,6 +159,149 @@ async def test_native_preflight_rejects_mounts_before_helpers_or_model(
         assert preserved.read_text() == "caller data"
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux storage entry preflight")
+@pytest.mark.parametrize("kind", ["fifo", "socket"])
+async def test_mount_special_nodes_rejected_before_effects(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str
+) -> None:
+    work, source = tmp_path / "work", tmp_path / "source"
+    work.mkdir()
+    source.mkdir()
+    nested = source / "nested"
+    nested.mkdir()
+    data = source / "data"
+    data.write_bytes(b"caller data\n")
+    data.chmod(0o640)
+    endpoint = nested / "endpoint"
+    endpoint_socket = None
+    if kind == "fifo":
+        os.mkfifo(endpoint, 0o600)
+    else:
+        endpoint_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        endpoint_socket.bind(str(endpoint))
+    original = {
+        path: (path.lstat().st_mode, path.lstat().st_dev, path.lstat().st_ino)
+        for path in (source, nested, data, endpoint)
+    }
+    package = tmp_path / "sdk" / "agents"
+    helpers = package / "bin"
+    helpers.mkdir(parents=True)
+    marker = tmp_path / "helper-ran"
+    for name in ("codex-sdk-runtime", "codex-linux-sandbox"):
+        helper = helpers / name
+        helper.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 1\n")
+        helper.chmod(0o755)
+    monkeypatch.setattr("_agents_codex.session._package_files", lambda _: package)
+    selected = Environment.local(cwd=work, mounts=[mount_at(source)])
+    try:
+        async with timeout(30):
+            with pytest.raises(
+                RuntimeError,
+                match="storage mounts must contain only regular files, directories, or symlinks",
+            ):
+                async with Agent(
+                    instructions="Answer.",
+                    provider=NativeProvider(base_url=responses.url, api_key="synthetic-key"),
+                ).session(environment=selected):
+                    pytest.fail("A mounted special endpoint opened a session")
+    finally:
+        if endpoint_socket is not None:
+            endpoint_socket.close()
+    assert not marker.exists()
+    assert responses.requests == []
+    assert data.read_bytes() == b"caller data\n"
+    assert sorted(path.name for path in source.iterdir()) == ["data", "nested"]
+    assert list(nested.iterdir()) == [endpoint]
+    for path, identity in original.items():
+        metadata = path.lstat()
+        assert (metadata.st_mode, metadata.st_dev, metadata.st_ino) == identity
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux hardlink preflight")
+@pytest.mark.parametrize("location", ["cwd", "additional"])
+async def test_mount_hardlink_alias_rejected_before_effects(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    work, source, extra = (tmp_path / name for name in ("work", "source", "extra"))
+    for directory in (work, source, extra):
+        directory.mkdir()
+    data = source / "data"
+    data.write_bytes(b"caller data\n")
+    data.chmod(0o640)
+    alias = (work if location == "cwd" else extra) / "alias"
+    alias.hardlink_to(data)
+    original = {path: (path.read_bytes(), path.stat().st_mode) for path in (data, alias)}
+    source_mode = source.stat().st_mode
+    helpers = tmp_path / "bin"
+    helpers.mkdir()
+    marker = tmp_path / "helper-ran"
+    for name in ("codex-sdk-runtime", "codex-linux-sandbox"):
+        helper = helpers / name
+        helper.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 1\n")
+        helper.chmod(0o755)
+    monkeypatch.setattr("_agents_codex.session._package_files", lambda _: tmp_path)
+    selected = Environment.local(
+        cwd=work,
+        writable_roots=[extra] if location == "additional" else [],
+        mounts=[mount_at(source)],
+    )
+    with pytest.raises(
+        RuntimeError, match="storage mounts share a hard-linked file with cwd or writable roots"
+    ):
+        async with Agent(
+            instructions="Answer.",
+            provider=NativeProvider(base_url=responses.url, api_key="synthetic-key"),
+        ).session(environment=selected):
+            pytest.fail("A writable alias to mounted data opened a session")
+    assert not marker.exists()
+    assert responses.requests == []
+    assert source.stat().st_mode == source_mode
+    for path, (contents, mode) in original.items():
+        assert path.read_bytes() == contents
+        assert path.stat().st_mode == mode
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux hardlink preflight")
+@pytest.mark.parametrize("location", ["source", "writable"])
+async def test_mount_hardlink_inspection_failure_is_closed(
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, location: str
+) -> None:
+    work, source, outside = (tmp_path / name for name in ("work", "source", "outside"))
+    for directory in (work, source, outside):
+        directory.mkdir()
+    data = source / "data"
+    data.write_text("caller data")
+    (outside / "alias").hardlink_to(data)
+    mode = data.stat().st_mode
+    blocked = (source if location == "source" else work) / "blocked"
+    blocked.mkdir()
+    helpers = tmp_path / "bin"
+    helpers.mkdir()
+    marker = tmp_path / "helper-ran"
+    for name in ("codex-sdk-runtime", "codex-linux-sandbox"):
+        helper = helpers / name
+        helper.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexit 1\n")
+        helper.chmod(0o755)
+    monkeypatch.setattr("_agents_codex.session._package_files", lambda _: tmp_path)
+    selected = Environment.local(cwd=work, mounts=[mount_at(source)])
+    blocked.chmod(0)
+    try:
+        with pytest.raises(
+            RuntimeError, match="could not inspect storage mounts and writable roots for hard links"
+        ):
+            async with Agent(
+                instructions="Answer.",
+                provider=NativeProvider(base_url=responses.url, api_key="synthetic-key"),
+            ).session(environment=selected):
+                pytest.fail("An incomplete hardlink inspection opened a session")
+    finally:
+        blocked.chmod(0o700)
+    assert not marker.exists()
+    assert responses.requests == []
+    assert data.read_text() == "caller data"
+    assert data.stat().st_mode == mode
+
+
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux native bind mounts")
 @pytest.mark.requires_native_linux_sandbox
 async def test_real_mount_read_mutation_denial_updates_and_restore(
@@ -284,8 +429,11 @@ async def test_cancellation_preserves_caller_source(
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux native startup")
+@pytest.mark.parametrize(
+    "links", ["none", "readonly", "outside", "single_link_unreadable_writable", "ordinary_tree"]
+)
 async def test_helper_startup_failure_preserves_source(
-    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    responses: ResponsesFixture, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, links: str
 ) -> None:
     work, source = tmp_path / "work", tmp_path / "source"
     work.mkdir()
@@ -293,25 +441,65 @@ async def test_helper_startup_failure_preserves_source(
     data = source / "data"
     data.write_text("caller data")
     mode = source.stat().st_mode
-    helpers = tmp_path / "bin"
-    helpers.mkdir()
+    blocked = None
+    if links == "ordinary_tree":
+        nested = source / "nested"
+        nested.mkdir()
+        (nested / "data").write_text("nested caller data")
+        (source / "file-link").symlink_to(data)
+        (source / "directory-link").symlink_to(nested, target_is_directory=True)
+        (source / "dangling-link").symlink_to(source / "absent")
+    elif links == "readonly":
+        (source / "alias").hardlink_to(data)
+    elif links == "outside":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "alias").hardlink_to(data)
+        (source / "unfollowed").symlink_to(outside, target_is_directory=True)
+        (work / "unfollowed").symlink_to(outside, target_is_directory=True)
+        blocked = outside
+    elif links == "single_link_unreadable_writable":
+        blocked = work / "blocked"
+        blocked.mkdir()
+    expected_entries = sorted(path.name for path in source.iterdir())
+    package = tmp_path / "sdk" / "agents"
+    helpers = package / "bin"
+    helpers.mkdir(parents=True)
+    marker = tmp_path / "helper-ran"
     for name in ("codex-sdk-runtime", "codex-linux-sandbox"):
         executable = helpers / name
-        executable.write_text("#!/bin/sh\nexit 1\n")
+        executable.write_text(
+            f'#!/bin/sh\nprintf "%s\\n" "$0" > {shlex.quote(str(marker))}\nexit 1\n'
+        )
         executable.chmod(0o755)
-    monkeypatch.setattr("_agents_codex.session._package_files", lambda _: tmp_path)
+    monkeypatch.setattr("_agents_codex.session._package_files", lambda _: package)
     selected = Environment.local(cwd=work, mounts=[mount_at(source)])
-    async with timeout(30):
-        with pytest.raises(RuntimeError, match="local executor"):
-            async with Agent(
-                instructions="Use the selected tools.",
-                provider=NativeProvider(base_url=responses.url, api_key="synthetic-key"),
-            ).session(environment=selected):
-                pytest.fail("A failed helper opened a session")
+    if blocked is not None:
+        blocked.chmod(0)
+    try:
+        async with timeout(30):
+            with pytest.raises(RuntimeError, match="local executor") as startup_error:
+                async with Agent(
+                    instructions="Use the selected tools.",
+                    provider=NativeProvider(base_url=responses.url, api_key="synthetic-key"),
+                ).session(environment=selected):
+                    pytest.fail("A failed helper opened a session")
+    finally:
+        if blocked is not None:
+            blocked.chmod(0o700)
+    assert marker.exists(), str(startup_error.value)
+    assert Path(marker.read_text().strip()) in {
+        helpers / "codex-sdk-runtime",
+        helpers / "codex-linux-sandbox",
+    }
     assert responses.requests == []
     assert data.read_text() == "caller data"
     assert source.stat().st_mode == mode
-    assert list(source.iterdir()) == [data]
+    assert sorted(path.name for path in source.iterdir()) == expected_entries
+    if links == "ordinary_tree":
+        assert (source / "nested" / "data").read_text() == "nested caller data"
+        for name in ("file-link", "directory-link", "dangling-link"):
+            assert (source / name).is_symlink()
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux native validation")

@@ -269,6 +269,49 @@ impl StrictExecutorWrites {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn check_storage_mount_file_aliases(
+    mounted: &[AbsolutePathBuf],
+    writable: &[AbsolutePathBuf],
+) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+
+    const INSPECT_ERROR: &str = "could not inspect storage mounts and writable roots for hard links; required directories must be enumerable";
+    let mut directories = mounted
+        .iter()
+        .map(|path| path.as_path().to_path_buf())
+        .collect::<Vec<_>>();
+    let mut linked_files = Vec::new();
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).context(INSPECT_ERROR)? {
+            let entry = entry.context(INSPECT_ERROR)?;
+            // DirEntry::metadata does not follow symlinks.
+            let metadata = entry.metadata().context(INSPECT_ERROR)?;
+            // Special nodes can permit IPC through a read-only bind.
+            ensure!(
+                metadata.is_file() || metadata.is_dir() || metadata.is_symlink(),
+                "storage mounts must contain only regular files, directories, or symlinks"
+            );
+            if metadata.is_dir() {
+                directories.push(entry.path());
+            } else if metadata.is_file() && metadata.nlink() > 1 {
+                linked_files.push(entry.path());
+            }
+        }
+    }
+    if linked_files.is_empty() {
+        return Ok(());
+    }
+    let writable = LocalWriteRoots::new(writable).context(INSPECT_ERROR)?;
+    ensure!(
+        !writable
+            .contains_hard_link_to_any(&linked_files)
+            .context(INSPECT_ERROR)?,
+        "storage mounts share a hard-linked file with cwd or writable roots"
+    );
+    Ok(())
+}
+
 impl EnvironmentOptions {
     /// Check application-owned read grants before providers or helpers start.
     pub(crate) fn validate_storage_mounts(
@@ -330,17 +373,24 @@ impl EnvironmentOptions {
             }
         }
         let grants = LocalWriteRoots::new(&mounted)?;
+        let mut writable = Vec::new();
         for root in std::iter::once(&self.cwd).chain(self.writable_roots.iter().flatten()) {
             let path = root.to_abs_path()?;
-            check_local_write_root_overlap(
+            let resolved = check_local_write_root_overlap(
                 path.as_path(),
                 &grants,
                 "storage mounts must not overlap cwd or writable roots",
             )?;
+            let resolved = AbsolutePathBuf::from_absolute_path(resolved)?;
+            if !writable.contains(&resolved) {
+                writable.push(resolved);
+            }
         }
         // Apply the same alias and hard-link checks to reads: private state may
         // contain credentials even when the caller cannot mutate it.
         check_local_private_write_roots(&grants, config.codex_home.as_path(), private_paths)?;
+        #[cfg(target_os = "linux")]
+        check_storage_mount_file_aliases(&mounted, &writable)?;
         Ok(())
     }
 
