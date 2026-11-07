@@ -311,7 +311,7 @@ async def test_local_restore_preserves_policy_and_rechecks_search_grants(
             assert ("functions", "project_grep") in declarations(responses.requests[-1])
             saved = await session.save_state()
         with pytest.raises(ValueError, match="agree on the applied executor policy"):
-            async with agent.session(state=saved, environment=replace(selected, cwd=second)):
+            async with agent.session(state=saved, environment=replace(selected, cwd=str(second))):
                 pytest.fail("A local restore changed its executor policy")
         responses.respond(assistant_output("revoked"))
         async with agent.session(state=saved, environment=replace(selected, tools=[])) as restored:
