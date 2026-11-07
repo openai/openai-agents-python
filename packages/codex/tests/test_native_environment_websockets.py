@@ -45,11 +45,11 @@ def _expected_executor_script(argv, command):
         pytest.param(
             tool,
             decision,
-            # Admitted processes and strict filesystem writes launch native
-            # sandbox helpers; denied and stopped calls need no such helper.
+            # Preserve process coverage on Linux, including its asserted host
+            # error. Strict patch effects require the platform sandbox helper.
             marks=(
                 pytest.mark.requires_native_linux_sandbox
-                if sys.platform == "linux"
+                if tool == "apply_patch" and sys.platform == "linux"
                 else pytest.mark.requires_native_macos_sandbox
             )
             if decision in {"allow", "replace"}
