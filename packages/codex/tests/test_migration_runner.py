@@ -673,7 +673,7 @@ async def test_existing_openai_adapter_preserves_reasoning_and_native_tool_recei
         item["type"] == "function_call_output" and item["call_id"] == "call_1"
         for item in requests[1]["input"]
     )
-    assert result.native_result.usage is not None
+    assert result.native_result.thread_usage is not None
 
 
 async def test_max_turns_stops_before_another_model_call() -> None:

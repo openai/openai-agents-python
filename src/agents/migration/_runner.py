@@ -62,7 +62,7 @@ from ..classic.usage import (
     _response_usage_to_usage,
     model_usage_to_span_usage,
 )
-from ._result import SDKRunResult, SDKRunResultStreaming, _ResultProjection
+from ._result import SDKRunHandle, SDKRunResult, _ResultProjection
 from ._session_history import _append_completed_history, _load_completed_history
 from ._transport import _CARRIER_MODEL, _ResponseCarrier
 
@@ -789,7 +789,7 @@ class SDKRunner:
             return projected
 
     @staticmethod
-    def run_streamed(
+    def start(
         starting_agent: classic.Agent[ContextT],
         input: str,
         *,
@@ -808,12 +808,12 @@ class SDKRunner:
         model_settings: ModelSettings | dict[str, Any] | None = None,
         model_invocation: Literal["response", "stream"] = "response",
         on_model_event: Callable[[TResponseStreamEvent], None] | None = None,
-    ) -> SDKRunResultStreaming[ContextT]:
+    ) -> SDKRunHandle[ContextT]:
         """Start a run in the current event loop and buffer its semantic events.
 
         The ``session`` parameter follows the same storage and compaction rules as ``run``.
         """
-        return SDKRunResultStreaming(
+        return SDKRunHandle(
             SDKRunner.run(
                 starting_agent,
                 input,

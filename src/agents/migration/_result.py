@@ -74,7 +74,7 @@ class SDKRunResult(Generic[ContextT]):
             raise UserError("SDKRunResult.to_input_list requires preserve_all or normalized mode")
         return deepcopy(ItemHelpers.input_to_new_input_list(self.input)) + self._new_input_items()
 
-    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+    async def replay_events(self) -> AsyncIterator[StreamEvent]:
         """Replay accepted semantic events. Raw Model frames and deltas are unavailable."""
         yield AgentUpdatedStreamEvent(new_agent=self.last_agent)
         for item in self.new_items:
@@ -179,14 +179,14 @@ class _ResultProjection(Generic[ContextT]):
         )
 
 
-class SDKRunResultStreaming(Generic[ContextT]):
+class SDKRunHandle(Generic[ContextT]):
     """An in-flight SDKRunner run with buffered semantic events."""
 
     def __init__(self, run: Coroutine[Any, Any, SDKRunResult[ContextT]]) -> None:
         self._cancel_requested = False
         self._task = asyncio.create_task(run)
         # A run can settle without an event reader. Retain the exception on the
-        # task for get_result()/stream_events() without logging an orphan failure.
+        # task for get_result()/replay_events() without logging an orphan failure.
         self._task.add_done_callback(self._observe_failure)
 
     @staticmethod
@@ -232,8 +232,8 @@ class SDKRunResultStreaming(Generic[ContextT]):
             raise
         return self._result()
 
-    async def stream_events(self) -> AsyncIterator[StreamEvent]:
+    async def replay_events(self) -> AsyncIterator[StreamEvent]:
         """Yield buffered semantic events after success, or raise the run's error."""
         result = await self.get_result()
-        async for event in result.stream_events():
+        async for event in result.replay_events():
             yield event
