@@ -216,6 +216,60 @@ async def test_invalid_filename_preserves_valid_siblings_and_descendants(
 
 
 @local_search
+@pytest.mark.skipif(os.name != "posix", reason="Requires Unix control-character filenames")
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+@pytest.mark.parametrize("path", [".", "nested"])
+async def test_search_preserves_exact_filenames_within_the_selected_subtree(
+    responses: ResponsesFixture, tmp_path: Path, name: ExecutorToolName, path: str
+) -> None:
+    project = tmp_path / "project"
+    selected = project if path == "." else project / path
+    selected.mkdir(parents=True)
+    (selected.parent / "outside.txt").write_text("outside needle canary\n")
+    names = [
+        "secrets",
+        "sec\trets",
+        "sec\nrets",
+        "sec\rrets",
+        ".\n.",
+        "\n",
+        ".\n",
+        "%2e%2e",
+        "%0A",
+        "%2F",
+        "%5C",
+        "question?",
+        "hash#",
+        "with space",
+        "back\\slash",
+        "raw\vname",
+        "dir\nname/child.txt",
+    ]
+    expected = {}
+    for index, relative in enumerate(names):
+        file = selected / relative
+        file.parent.mkdir(parents=True, exist_ok=True)
+        content = f"needle file {index}"
+        file.write_text(content + "\n")
+        expected[file.relative_to(project).as_posix()] = content
+
+    result = await run_search(
+        responses,
+        Environment.local(cwd=project, tools=[name]),
+        name,
+        {"pattern": "**/*" if name == "project_glob" else "needle", "path": path},
+    )
+    assert len(result["matches"]) == len(expected)
+    if name == "project_glob":
+        assert set(result["matches"]) == set(expected)
+    else:
+        assert {match["path"]: match["line"] for match in result["matches"]} == expected
+    assert result["errors"] == []
+    assert result["truncated"] is False
+    assert "outside needle canary" not in json.dumps(responses.requests)
+
+
+@local_search
 async def test_result_limit_is_explicit(responses: ResponsesFixture, tmp_path: Path) -> None:
     (tmp_path / "many.txt").write_text("needle\n" * 2000)
     result = await run_search(
@@ -289,6 +343,59 @@ async def test_remote_search_reads_the_selected_executor(
         assert denied["truncated"] is True
         assert denied["truncation_reasons"] == ["read_errors"]
         assert denied["errors"] == [{"path": "unreadable.txt", "code": "path_unavailable"}]
+
+
+@pytest.mark.requires_native_linux_sandbox
+@pytest.mark.parametrize("name", ["project_glob", "project_grep"])
+@pytest.mark.parametrize("control", ["\t", "\n", "\r"])
+async def test_search_rejects_control_paths_before_filesystem_access(
+    responses: ResponsesFixture,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: ExecutorToolName,
+    control: str,
+) -> None:
+    async with ExecutorPeer(tmp_path / "remote").serve() as peer:
+        monkeypatch.setenv("SSL_CERT_FILE", str(peer.ca))
+        monkeypatch.setenv("SSL_CERT_DIR", str(tmp_path / "empty-cert-directory"))
+        project = peer.root / "project"
+        secrets = project / "secrets"
+        secrets.mkdir(parents=True)
+        private = "private control-path needle 927a"
+        (secrets / "secret.txt").write_text(private + "\n")
+        path = f"sec{control}rets"
+        approved_paths: list[str] = []
+        request_index = 0
+
+        async def approve(context: ExecutorContext[object], arguments: Any) -> bool:
+            nonlocal request_index
+            assert context.tool_name == name
+            approved_paths.append(arguments["path"])
+            request_index = len(peer.requests)
+            return arguments["path"].split("/")[0] != "secrets"
+
+        result = await run_search(
+            responses,
+            Environment(
+                url=peer.url,
+                cwd=str(project),
+                headers={"Authorization": "Bearer " + peer.token},
+                tools=[name],
+                approval=approve,
+            ),
+            name,
+            {"pattern": "*" if name == "project_glob" else "needle", "path": path},
+        )
+        assert approved_paths == [path]
+        assert result["matches"] == []
+        assert result["errors"] == [{"path": path, "code": "invalid_path"}]
+        assert result["truncated"] is False
+        assert not [
+            request
+            for request in peer.requests[request_index:]
+            if request.get("method") in {"fs/walk", "fs/readFile"}
+        ]
+        assert private not in json.dumps(responses.requests)
 
 
 @pytest.mark.parametrize(

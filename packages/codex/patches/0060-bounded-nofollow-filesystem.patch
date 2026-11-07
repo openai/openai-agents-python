@@ -334,10 +334,10 @@ index d30766370c5962861ea2ae538a82d310cef63890..0a865812a441af89ead939bc120f8779
                  .walk(&params.path, params.options, /*sandbox*/ None)
                  .await
 diff --git a/codex-rs/exec-server/src/local_file_system.rs b/codex-rs/exec-server/src/local_file_system.rs
-index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087d893111a 100644
+index ec8b81c52a3a4a96d47e413af388a1873f49c676..5a32c30752cc9848d92357345e29eef7ab24392d 100644
 --- a/codex-rs/exec-server/src/local_file_system.rs
 +++ b/codex-rs/exec-server/src/local_file_system.rs
-@@ -703,6 +703,120 @@ impl DirectFileSystem {
+@@ -703,6 +703,133 @@ impl DirectFileSystem {
          Ok(entries)
      }
  
@@ -399,9 +399,22 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087
 +                        continue;
 +                    }
 +                };
-+                let path = directory.join(&name).map_err(io::Error::other)?;
-+                let native = path.to_abs_path()?;
-+                let metadata = match no_follow::walk_metadata_sync(native.as_path()) {
++                let child_native = native.as_path().join(&name);
++                let path = match PathUri::from_host_native_path(&child_native) {
++                    Ok(path) => path,
++                    Err(error) => {
++                        if !push_walk_error(
++                            &mut outcome,
++                            &mut response_bytes,
++                            directory.clone(),
++                            error.to_string(),
++                        ) {
++                            return Ok(outcome);
++                        }
++                        continue;
++                    }
++                };
++                let metadata = match no_follow::walk_metadata_sync(&child_native) {
 +                    Ok(metadata) => metadata,
 +                    Err(error) => {
 +                        if !push_walk_error(
@@ -458,7 +471,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087
      fn sync_walk(
          root: &PathUri,
          options: WalkOptions,
-@@ -727,6 +841,9 @@ impl DirectFileSystem {
+@@ -727,6 +854,9 @@ impl DirectFileSystem {
          }
  
          check_walk_cancelled(cancelled)?;
@@ -468,7 +481,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087
          let (root_metadata, root_is_symlink) = walk_metadata(root)?;
          if !root_metadata.is_dir() || (root_is_symlink && !options.follow_directory_symlinks) {
              return Ok(WalkOutcome::default());
-@@ -1341,6 +1458,7 @@ mod walk_tests {
+@@ -1341,6 +1471,7 @@ mod walk_tests {
              root.clone(),
          );
          let options = WalkOptions {
@@ -476,7 +489,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087
              max_depth: 1,
              max_directories: 1,
              max_entries: 1,
-@@ -1365,6 +1483,7 @@ mod walk_tests {
+@@ -1365,6 +1496,7 @@ mod walk_tests {
          let temp = tempfile::tempdir()?;
          let missing = PathUri::from_host_native_path(temp.path().join("missing"))?;
          let options = WalkOptions {
@@ -484,7 +497,7 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087
              max_depth: 1,
              max_directories: 1,
              max_entries: 1,
-@@ -1421,3 +1540,172 @@ mod walk_tests {
+@@ -1421,3 +1553,299 @@ mod walk_tests {
          Ok(())
      }
  }
@@ -502,6 +515,133 @@ index ec8b81c52a3a4a96d47e413af388a1873f49c676..e019be54400dacdb62f19b3a38c79087
 +            prune_hidden_directories: false,
 +        }
 +    }
++    #[cfg(unix)]
++    #[tokio::test]
++    async fn control_names_preserve_identity_and_contents() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        let names = [
++            "secrets",
++            "sec\trets",
++            "sec\nrets",
++            "sec\rrets",
++            "%2e%2e",
++            "%0A",
++            "%2F",
++            "%5C",
++            "?",
++            "#",
++            "with spaces",
++            "literal\\backslash",
++            "vertical\u{000b}tab",
++        ];
++        let mut expected = std::collections::HashMap::new();
++        for (index, name) in names.into_iter().enumerate() {
++            let content = format!("distinct content {index}");
++            std::fs::write(base.join(name), &content)?;
++            expected.insert(base.join(name), content);
++        }
++        let root = PathUri::from_host_native_path(&base)?;
++        let result = DirectFileSystem.walk(&root, options(), None).await?;
++        assert!(result.errors.is_empty());
++        assert!(!result.truncated);
++        assert_eq!(result.entries.len(), expected.len());
++        for entry in result.entries {
++            assert_eq!(entry.kind, WalkEntryKind::File);
++            let native = entry.path.to_abs_path()?;
++            let content = expected.remove(native.as_path()).unwrap_or_else(|| {
++                panic!("unexpected or repeated native path: {:?}", native.as_path())
++            });
++            let bytes = DirectFileSystem
++                .read_file(
++                    &entry.path,
++                    crate::ReadFileOptions {
++                        follow_symlinks: false,
++                        max_bytes: Some(128),
++                    },
++                    None,
++                )
++                .await?;
++            assert_eq!(bytes, content.as_bytes());
++        }
++        assert!(expected.is_empty());
++        Ok(())
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn control_names_cannot_escape_a_narrowed_subtree() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        let selected = base.join("project/selected");
++        std::fs::create_dir_all(selected.join("nested"))?;
++        std::fs::write(selected.join(".\n."), "a regular file, not a parent")?;
++        std::fs::write(selected.join("inside.txt"), "inside")?;
++        std::fs::write(selected.join("nested/child.txt"), "child")?;
++        std::fs::write(base.join("project/outside.txt"), "outside selected subtree")?;
++        let root = PathUri::from_host_native_path(&selected)?;
++        let mut limits = options();
++        limits.max_depth = 3;
++        limits.max_directories = 4;
++        limits.max_entries = 16;
++        let result = DirectFileSystem::sync_walk(&root, limits, &CancellationToken::new())?;
++        for entry in &result.entries {
++            let native = entry.path.to_abs_path()?;
++            assert!(
++                native.as_path().starts_with(&selected),
++                "escaped: {entry:?}"
++            );
++            assert_ne!(native.as_path(), selected);
++            if native.as_path() == selected.join(".\n.") {
++                assert_eq!(entry.kind, WalkEntryKind::File);
++            }
++        }
++        assert!(result.errors.is_empty());
++        assert!(!result.truncated);
++        assert_eq!(result.entries.len(), 4);
++        assert!(
++            result.entries.iter().any(|entry| {
++                entry.path.to_abs_path().unwrap().as_path() == selected.join(".\n.")
++            })
++        );
++        Ok(())
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn control_names_cannot_requeue_the_same_directory() -> io::Result<()> {
++        let temp = tempfile::tempdir()?;
++        let base = temp.path().canonicalize()?;
++        for name in ["\t", "\n", "\r", ".\n", "plain.txt"] {
++            std::fs::write(base.join(name), "a regular file, not this directory")?;
++        }
++        std::fs::create_dir(base.join("nested"))?;
++        std::fs::write(base.join("nested/child.txt"), "child")?;
++        let root = PathUri::from_host_native_path(&base)?;
++        let mut limits = options();
++        limits.max_depth = 1;
++        limits.max_directories = 2;
++        limits.max_entries = 10;
++        let result = DirectFileSystem::sync_walk(&root, limits, &CancellationToken::new())?;
++        assert!(result.errors.is_empty());
++        assert!(
++            !result.truncated,
++            "self aliases must not consume directory limits"
++        );
++        assert_eq!(result.entries.len(), 7);
++        let mut found = std::collections::HashSet::new();
++        for entry in result.entries {
++            let native = entry.path.to_abs_path()?;
++            assert_ne!(native.as_path(), base);
++            assert!(found.insert(native.as_path().to_path_buf()));
++            assert_eq!(
++                entry.kind == WalkEntryKind::Directory,
++                native.as_path() == base.join("nested")
++            );
++        }
++        Ok(())
++    }
++
 +    fn invalid_filename(index: usize) -> std::ffi::OsString {
 +        let name = format!("invalid-{index}-");
 +        #[cfg(unix)]

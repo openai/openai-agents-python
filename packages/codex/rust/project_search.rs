@@ -141,9 +141,11 @@ fn encoded_size(value: &Value) -> usize {
         .len()
 }
 fn relative_path(value: &str) -> bool {
+    // URL normalization must not change the path approved by application policy.
     !value.is_empty()
         && !value.starts_with('/')
-        && !value.contains(['\\', ':', '\0'])
+        && !value.contains(['\\', ':'])
+        && !value.chars().any(char::is_control)
         && value
             .split('/')
             .all(|part| part != ".." && !part.is_empty())
@@ -180,7 +182,7 @@ impl<'call> ToolExecutor<ToolCall<'call>> for Search {
     fn spec(&self) -> ToolSpec {
         let mut properties = json!({
             "pattern": {"type":"string", "description": if self.tool.grep() { "Case-sensitive Rust regular expression (no backtracking)." } else { "Case-sensitive glob, relative to the selected subtree." }},
-            "path": {"type":"string", "default":".", "description":"Relative subtree under the fixed project root; no absolute paths, parent components, URIs or backslashes."},
+            "path": {"type":"string", "default":".", "description":"Relative subtree under the fixed project root; no absolute paths, parent components, URIs, backslashes or control characters."},
             "max_results": {"type":"integer", "minimum":1, "maximum":1000, "default":100}
         });
         if self.tool.grep() {
@@ -516,6 +518,36 @@ mod tests {
         assert!(result.truncated);
         assert_eq!(result.truncation_reasons, vec!["max_results"]);
     }
+    #[tokio::test]
+    async fn control_paths_cannot_select_a_different_subtree() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        std::fs::create_dir(base.join("secrets")).unwrap();
+        std::fs::write(base.join("secrets/secret.txt"), "private needle\n").unwrap();
+        let root = PathUri::from_host_native_path(&base).unwrap();
+        let fs = FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS);
+        for control in ['\t', '\n', '\r'] {
+            for tool in [SearchTool::ProjectGlob, SearchTool::ProjectGrep] {
+                let path = format!("sec{control}rets");
+                let result = search(
+                    &fs,
+                    &root,
+                    tool,
+                    Arguments {
+                        path: path.clone(),
+                        ..args(if tool.grep() { "needle" } else { "*" })
+                    },
+                )
+                .await;
+                assert!(result.matches.is_empty());
+                assert!(!result.truncated);
+                assert_eq!(result.errors.len(), 1);
+                assert_eq!(result.errors[0].path, path);
+                assert_eq!(result.errors[0].code, "invalid_path");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn skipped_and_oversized_files_are_explicit_partial_results() {
         let temp = tempfile::tempdir().unwrap();
